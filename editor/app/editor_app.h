@@ -280,6 +280,9 @@ public:
     /// @brief Boxes drawn last frame around a selected ProceduralGraph's baked output. 0 when
     ///        nothing baked is selected -- the signal that the highlight reached the geometry.
     int baked_outlines_drawn() const { return baked_outlines_drawn_; }
+    /// @brief The viewport's Overlays button and Properties' Gizmos switch, for tests.
+    void set_show_overlays(bool on) { show_overlays_ = on; }
+    void set_show_gizmo(bool on) { show_gizmo_ = on; }
     /// @brief The Pen tool, for the viewport mode and its tests.
     CurvePenPanel& curve_pen() { return *curve_pen_panel_; }
     /// @brief Applies a component edit the way the inspector does (through apply_(), so the

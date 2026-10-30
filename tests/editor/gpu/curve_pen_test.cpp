@@ -16,6 +16,7 @@
 
 #include <toyengine/curve/curve.h>
 #include <toyengine/instance/instance_painter.h>
+#include <toyengine/procgraph/procedural_graph_system.h>
 
 #include "editor/app/ui/curve_pen.h"
 #include "editor/support/editor_session.h"
@@ -711,6 +712,132 @@ COOPA_TEST(editing_the_curve_rebakes_the_graph_that_follows_it) {
            "curve_pen: the posts followed the moved anchor (spread " + std::to_string(flat) +
                " -> " + std::to_string(bent) + "). Equal spreads mean the graph never noticed "
                "the curve changed");
+}
+
+
+/**
+ * @brief The Overlays and Gizmos toggles hide the selection OUTLINE, not just the handles.
+ *
+ * The outline is what says "this is what you are about to move", so it belongs to the same
+ * layer as the grid and the origin dots -- Blender hides selection outlines with Overlays for
+ * the same reason. It had no guard at all: turning either toggle off to look at a model left
+ * every edge of it still drawn.
+ */
+COOPA_TEST(the_overlay_toggles_hide_the_selection_outline) {
+    EditorSession s({.prepare = [](Project& project) {
+        write_text(project.assets() / "scenes" / "outline" / "scene.yaml",
+            "scene:\n"
+            "  scene_name: outline\n"
+            "  root_objects:\n"
+            "    - name: Box\n"
+            "      active: true\n"
+            "      components:\n"
+            "        - {type: Transform, position: {x: 0.0, y: 0.0, z: 0.0}}\n"
+            "        - {type: MeshRenderer, mesh_path: primitives/cube}\n");
+    }});
+    expect(s.app.open_scene(s.project.assets() / "scenes" / "outline" / "scene.yaml"),
+           "curve_pen: the scene opens");
+    const ObjectId box = s.named("Box");
+    expect(box != 0, "curve_pen: the object is there");
+    s.app.document().select(box);
+    tick(s.engine, 6);
+
+    expect(s.app.selection_outlines_drawn() == 1,
+           "curve_pen: a selected object is outlined to begin with");
+
+    s.app.set_show_overlays(false);
+    tick(s.engine, 4);
+    expect(s.app.selection_outlines_drawn() == 0,
+           "curve_pen: Overlays off hides it -- the toggle in the viewport header");
+
+    s.app.set_show_overlays(true);
+    tick(s.engine, 4);
+    expect(s.app.selection_outlines_drawn() == 1, "curve_pen: and back on restores it");
+
+    s.app.set_show_gizmo(false);
+    tick(s.engine, 4);
+    expect(s.app.selection_outlines_drawn() == 0,
+           "curve_pen: Gizmos off hides it too -- the switch in Properties / Workspace");
+}
+
+
+/**
+ * @brief Changing the SEED in a live session re-bakes the graph.
+ *
+ * The seed was always handed to the bake (`request.context.seed`), so a fresh run already made
+ * a different tree per seed -- which is exactly why this looked fine from a screenshot. What was
+ * broken is the comparison: `on_change` re-bakes when the input HASH moves, and that hash is
+ * built by `resolve_inputs()`, which only ever sees the `inputs:` bindings. The seed never
+ * entered it, so editing the seed in the inspector changed nothing on screen.
+ *
+ * Rendering two seeds in two processes cannot catch that. Only changing it in one session can.
+ */
+COOPA_TEST(changing_the_seed_rebakes_in_a_live_session) {
+    EditorSession s({.prepare = [](Project& project) {
+        const fs::path engine = fs::path(ROOT_DIR) / "assets";
+        fs::create_directories(project.assets() / "graphs");
+        fs::create_directories(project.assets() / "meshes" / "props");
+        fs::copy_file(engine / "graphs" / "curve_railing.yaml",
+                      project.assets() / "graphs" / "curve_railing.yaml",
+                      fs::copy_options::overwrite_existing);
+        fs::copy_file(engine / "meshes" / "props" / "procgraph_post.yaml",
+                      project.assets() / "meshes" / "props" / "procgraph_post.yaml",
+                      fs::copy_options::overwrite_existing);
+        write_text(project.assets() / "scenes" / "seeded" / "scene.yaml",
+            "scene:\n"
+            "  scene_name: seeded\n"
+            "  root_objects:\n"
+            "    - name: Path\n"
+            "      active: true\n"
+            "      components:\n"
+            "        - {type: Transform, position: {x: 0.0, y: 0.0, z: 0.0}}\n"
+            "        - type: Curve\n"
+            "          resolution: 10\n"
+            "          points:\n"
+            "            - {p: [-4, 0, 0], mode: auto}\n"
+            "            - {p: [0, 1, 0], mode: auto}\n"
+            "            - {p: [4, 0, 0], mode: auto}\n"
+            "    - name: Railing\n"
+            "      active: true\n"
+            "      components:\n"
+            "        - {type: Transform, position: {x: 0.0, y: 0.0, z: 0.0}}\n"
+            "        - type: ProceduralGraph\n"
+            "          graph: graphs/curve_railing\n"
+            "          seed: 3\n"
+            "          bake: on_change\n"
+            "          inputs:\n"
+            "            path: {curve: Path}\n"
+            "            posts: 8\n"
+            "            height: 1.0\n");
+    }});
+
+    expect(s.app.open_scene(s.project.assets() / "scenes" / "seeded" / "scene.yaml"),
+           "curve_pen: the scene opens");
+    const ObjectId railing = s.named("Railing");
+    expect(railing != 0, "curve_pen: the railing is there");
+    tick(s.engine, 24);
+
+    auto* system = toy::procgraph::find_procgraph(s.engine.scene());
+    expect(system != nullptr, "curve_pen: the procgraph system is installed");
+    const uint64_t baked_before = system->bake_count();
+    expect(baked_before > 0, "curve_pen: it baked once to begin with");
+
+    // Change ONLY the seed, through the path the inspector uses.
+    const Node* obj = s.app.document().find(railing);
+    int index = 0;
+    for (const auto& c : obj->at("components").as_seq()) {
+        if (c.contains("type") && c.at("type").get_value<std::string>() == "ProceduralGraph") break;
+        ++index;
+    }
+    Node edited = obj->at("components").as_seq()[static_cast<std::size_t>(index)];
+    edited["seed"] = Node(77);
+    s.app.apply_scene_change_for_test(railing, index, std::move(edited));
+    tick(s.engine, 30);
+
+    expect(system->bake_count() > baked_before,
+           "curve_pen: a new seed re-baked (" + std::to_string(baked_before) + " -> " +
+               std::to_string(system->bake_count()) + "). Equal counts mean the seed is still "
+               "outside the hash `on_change` compares");
 }
 
 }  // namespace toy::editor::testing

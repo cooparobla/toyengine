@@ -94,16 +94,14 @@ def card(planes: int = 3):
         a = math.pi * k / planes
         # The quad's width axis, swept around +X.
         wx, wy, wz = 0.0, math.cos(a), math.sin(a)
-        # Normals on +Z, not perpendicular to the quad and not along the card.
+        # Each quad's TRUE normal, perpendicular to its own plane.
         #
-        # Two reasons, and the second is the subtle one. A card is a two-sided sheet
-        # (`cull_backfaces: false`), so a FACE normal leaves the back of every quad pointing away
-        # from the light, shading black -- half a canopy of dark shards. And Instance on Points
-        # spins each card about its local +Z (`random_rotation`), so a normal anywhere else gets
-        # swung by that spin and ends up facing the ground on roughly half the cards. +Z is the
-        # spin AXIS: it is the one direction the shuffle cannot touch, so every card shades the
-        # same however it is turned.
-        n = (0.0, 0.0, 1.0)
+        # Not a shared direction. The back of a two-sided card is handled by the shader, which
+        # flips the normal on a back face (gfx/surface/gbuffer_fs.glsl). Forcing every quad to
+        # share one normal to "fix" that instead leaves two of the three crossed quads with a
+        # normal nearly IN their own plane -- lighting computed against a direction the surface
+        # does not face, which comes out near black at most angles.
+        n = (0.0, -math.sin(a), math.cos(a))
         quad = [(0.0, -0.5 * wy, -0.5 * wz), (1.0, -0.5 * wy, -0.5 * wz),
                 (1.0, 0.5 * wy, 0.5 * wz),   (0.0, 0.5 * wy, 0.5 * wz)]
         quad_uv = [(0.0, 1.0), (0.0, 0.0), (1.0, 0.0), (1.0, 1.0)]

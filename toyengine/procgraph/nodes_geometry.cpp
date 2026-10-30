@@ -464,8 +464,10 @@ void register_geometry_nodes() {
             b.input_default("droop", types().float_t, 0.0f);
             b.input_default("spread", types().float_t, 0.0f);
             b.input_default("length_jitter", types().float_t, 0.0f);
+            b.input_default("surface_points", types().int_t, int32_t(0));
             b.output("geometry", types().geometry_t);
             b.output("tips", types().geometry_t);
+            b.output("surface", types().geometry_t);
             b.output("count", types().int_t);
         },
         [](EvalContext& ctx) {
@@ -489,10 +491,12 @@ void register_geometry_nodes() {
             const float droop = ctx.get<float>("droop", 0.0f);
             const float spread = std::max(0.0f, ctx.get<float>("spread", 0.0f));
             const float jitter = std::max(0.0f, ctx.get<float>("length_jitter", 0.0f));
+            const int per_tube = std::max(0, ctx.get<int32_t>("surface_points", 0));
             const uint32_t seed = bake_context(ctx).seed;
 
             MeshGeometry mesh;
             PointCloud tips;
+            PointCloud surface;
             tips.positions.reserve(src->size());
             tips.rotations.reserve(src->size());
 
@@ -543,11 +547,41 @@ void register_geometry_nodes() {
 
                 tips.positions.push_back(spine.back());
                 tips.rotations.push_back(frames.back());
+
+                // Attachment points spread evenly ALONG this tube, on its surface.
+                //
+                // Not area-weighted sampling of the triangles: a tapered tube carries most of
+                // its area at the fat end, so an area-weighted scatter crowds the base and
+                // leaves the tip bare -- which on a tree reads as branches with nothing growing
+                // near their ends. Walking the spine spends points by LENGTH instead, so the
+                // thin outer half gets as many as the thick inner half.
+                for (int k = 0; k < per_tube; ++k) {
+                    // Offset by half a step: neither on the base ring nor exactly on the tip,
+                    // both of which are already occupied by the parent joint and the tip child.
+                    const float t = (static_cast<float>(k) + 0.5f) / static_cast<float>(per_tube);
+                    const float fs = t * static_cast<float>(sections - 1);
+                    const auto lo = static_cast<std::size_t>(fs);
+                    const std::size_t hi = std::min(lo + 1, spine.size() - 1);
+                    const float f = fs - static_cast<float>(lo);
+                    const glm::vec3 at = glm::mix(spine[lo], spine[hi], f);
+                    const glm::quat frame = glm::slerp(frames[lo], frames[hi], f);
+                    const glm::mat3 basis = glm::mat3_cast(frame);
+
+                    // Golden angle around the tube AND along it, so attachments spiral instead
+                    // of lining up in a row down one side.
+                    const float az = glm::radians(137.5f) *
+                                     static_cast<float>(i * static_cast<std::size_t>(per_tube) + k);
+                    const glm::vec3 radial = basis[1] * std::cos(az) + basis[2] * std::sin(az);
+                    const float r = glm::mix(r0 * thick, r1 * thick, t);
+                    surface.positions.push_back(at + radial * r);
+                    surface.rotations.push_back(toy::curve::frame_from_tangent(radial, 0.0f));
+                }
             }
 
             const auto count = static_cast<int32_t>(tips.positions.size());
             ctx.set_output("geometry", make_geometry(GeometrySet::from_mesh(std::move(mesh))));
             ctx.set_output("tips", make_geometry(GeometrySet::from_points(std::move(tips))));
+            ctx.set_output("surface", make_geometry(GeometrySet::from_points(std::move(surface))));
             ctx.set_output("count", make_int(count));
         }});
 

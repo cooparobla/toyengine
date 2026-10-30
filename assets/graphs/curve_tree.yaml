@@ -1,57 +1,95 @@
+# A tree grown along an authored Curve, in three levels of wood plus foliage.
+#
+# The curve IS the trunk: Pen Mode draws where it leans and bends, and this graph dresses it.
+# That is the point of the demo -- a tree is a path plus some rules, and the path is exactly the
+# part a node graph is bad at describing and a pen is good at.
+#
+#   trunk    ONE swept mesh along the curve. Not chained instances: those merely abut, so every
+#            joint is a seam and a bend opens a notch on its outside. A sweep shares the ring
+#            between sections, so the surface is continuous by construction.
+#   branches points off the upper trunk, leaning away from it on a PROFILE -- long and near
+#            horizontal low down, short and upright at the top, which is a pine's silhouette --
+#            and spiralled around the trunk by the golden angle so they never leave in one plane.
+#   twigs    swept tubes rooted on their branch's `surface` points: spaced evenly ALONG the
+#            branch and spiralled around it, each leaving along the outward normal. Sampling the
+#            branch TRIANGLES instead is area-weighted, and a tapered tube carries most of its
+#            area at the fat end -- so twigs crowded the base and the outer half came out bare.
+#   foliage  cards on the twigs' own surface points, the same way: evenly along each twig rather
+#            than bunched at its root.
+#
+# Meshes: tools/gen_curve_tree_assets.py, leaf texture: tools/gen_foliage_texture.py.
 name: curve_tree
 inputs:
-  - { type: Curve, id: path, label: Trunk path }
-  - { type: Int, id: trunk_segments, default: 16, label: Trunk segments, max: 80, min: 2 }
-  - type: Float
-    id: trunk_radius
-    default: 0.30000001192092896
-    label: Trunk radius
-    max: 2.0
-    min: 0.019999999552965164
-  - type: Float
-    id: tip_taper
-    default: 0.3499999940395355
-    label: Tip taper
-    max: 1.0
-    min: 0.05000000074505806
-  - { type: Int, id: branch_count, default: 14, label: Branches, max: 60, min: 0 }
-  - type: Float
-    id: branch_length
-    default: 1.2999999523162842
-    label: Branch length
-    max: 6.0
-    min: 0.10000000149011612
-  - { type: Float, id: branch_spread, default: 0.5, label: Branch spread, max: 3.200000047683716, min: 0.0 }
-  - { type: Float, id: lean_low, default: 72.0, label: Lean at base (deg), max: 9.0e+01, min: 0.0 }
-  - { type: Float, id: lean_high, default: 28.0, label: Lean at top (deg), max: 9.0e+01, min: 0.0 }
-  - { type: Float, id: length_low, default: 1.5, label: Length at base, max: 4.0, min: 0.10000000149011612 }
-  - type: Float
-    id: length_high
-    default: 0.44999998807907104
-    label: Length at top
-    max: 4.0
-    min: 0.10000000149011612
-  - { type: Int, id: twigs_per_branch, default: 3, label: Twigs per branch, max: 12, min: 0 }
-  - type: Float
-    id: twig_length
-    default: 0.6000000238418579
-    label: Twig length
-    max: 3.0
-    min: 0.05000000074505806
-  - { type: Int, id: leaves_per_twig, default: 4, label: Leaves per twig, max: 20, min: 0 }
-  - type: Float
-    id: leaf_size
-    default: 0.6000000238418579
-    label: Leaf size
-    max: 3.0
-    min: 0.05000000074505806
+  - { id: path, type: Curve, label: Trunk path }
+  - { id: trunk_segments, type: Int, label: Trunk segments, default: 16, min: 2, max: 80 }
+  - { id: trunk_radius, type: Float, label: Trunk radius, default: 0.3, min: 0.02, max: 2.0 }
+  - { id: tip_taper, type: Float, label: Tip taper, default: 0.18, min: 0.02, max: 1.0 }
+  - { id: branch_count, type: Int, label: Branches, default: 14, min: 0, max: 60 }
+  - { id: branch_length, type: Float, label: Branch length, default: 1.3, min: 0.1, max: 6.0 }
+  - { id: branch_spread, type: Float, label: Branch droop, default: 0.55, min: 0.0, max: 3.2 }
+  - { id: lean_low, type: Float, label: Lean at base (deg), default: 72.0, min: 0.0, max: 90.0 }
+  - { id: lean_high, type: Float, label: Lean at top (deg), default: 28.0, min: 0.0, max: 90.0 }
+  - { id: length_low, type: Float, label: Length at base, default: 1.5, min: 0.1, max: 4.0 }
+  - { id: length_high, type: Float, label: Length at top, default: 0.45, min: 0.1, max: 4.0 }
+  - { id: twigs_per_branch, type: Int, label: Twigs per branch, default: 7, min: 0, max: 40 }
+  - { id: twig_length, type: Float, label: Twig length, default: 0.3, min: 0.05, max: 3.0 }
+  - { id: leaves_per_twig, type: Int, label: Leaves per twig, default: 8, min: 0, max: 40 }
+  - { id: leaf_size, type: Float, label: Leaf size, default: 0.28, min: 0.05, max: 3.0 }
+outputs:
+  - { id: object, type: ObjectSpec }
+nodes:
+  - { type: GroupInput, id: 1, pos: [-1000, 0] }
+  - { type: String, id: 3, pos: [-1000, 520], props: { value: objects/props/tree_foliage } }
+
+  # --- trunk: one swept tube along the curve --------------------------------------------------
+  - { type: SweepCurve, id: 10, pos: [-740, -260] }
+  # `tip_taper` is a RATIO of the base radius, so it has to be multiplied by it. Wired straight
+  # into radius_end it was an ABSOLUTE radius -- equal to the base on one tree and wider on
+  # another, which is why the trunk never narrowed.
+  - { type: Math, id: 11, pos: [-900, -200], props: { operation: multiply } }
+
+  # --- branches: points up the trunk, lean and length profile ---------------------------------
+  - { type: CurveToPoints, id: 20, pos: [-740, -40] }
+  - { type: Float, id: 21, pos: [-940, 60], props: { value: 0.32 } }
+  - { type: Float, id: 22, pos: [-940, 120], props: { value: 1.0 } }
+  - { type: TubesOnPoints, id: 23, pos: [-500, -40] }
+  - { type: Float, id: 24, pos: [-740, 110], props: { value: 0.09 } }
+  - { type: Float, id: 25, pos: [-740, 170], props: { value: 0.025 } }
+  # Branches start at the trunk's CENTRE, so they are buried already; sinking pushes their base
+  # out the far side as a nub on the bark.
+  - { type: Float, id: 12, pos: [-740, 230], props: { value: 0.0 } }
+
+  # --- twigs: on the branches' evenly-spaced surface points -----------------------------------
+  - { type: TubesOnPoints, id: 33, pos: [-60, 120] }
+  - { type: Float, id: 34, pos: [-260, 260], props: { value: 0.03 } }
+  - { type: Float, id: 35, pos: [-260, 320], props: { value: 0.006 } }
+  - { type: Float, id: 36, pos: [-260, 380], props: { value: 0.35 } }
+  - { type: Float, id: 32, pos: [-260, 450], props: { value: 0.025 } }
+  - { type: Float, id: 13, pos: [-500, 400], props: { value: 0.45 } }
+  - { type: Float, id: 14, pos: [-500, 470], props: { value: 1.3 } }
+
+  # --- foliage: cards on the twigs' surface points --------------------------------------------
+  - { type: InstanceOnPoints, id: 42, pos: [380, 320], props: { kind: object } }
+  - { type: Float, id: 44, pos: [0, 530], props: { value: 3.1 } }
+  - { type: CombineXYZ, id: 45, pos: [180, 460] }
+
+  # --- assembly -------------------------------------------------------------------------------
+  - { type: JoinGeometry, id: 50, pos: [600, 60] }
+  - { type: MakeInstancer, id: 51, pos: [780, 200] }
+  - { type: SetMaterial, id: 52, pos: [600, -180] }
+  - { type: String, id: 53, pos: [420, -180], props: { value: materials/natural/bark } }
+  - { type: ObjectOutput, id: 60, pos: [960, 60], props: { name: CurveTree } }
+  - { type: GroupOutput, id: 99, pos: [1140, 60] }
 links:
+  # trunk
   - [1, path, 10, curve]
   - [1, trunk_segments, 10, sections]
   - [1, trunk_radius, 10, radius_start]
   - [1, trunk_radius, 11, a]
   - [1, tip_taper, 11, b]
   - [11, result, 10, radius_end]
+
+  # branches, with a lean and length profile up the trunk
   - [1, path, 20, curve]
   - [1, branch_count, 20, count]
   - [21, value, 20, trim_start]
@@ -66,30 +104,35 @@ links:
   - [25, value, 23, radius_end]
   - [1, branch_spread, 23, droop]
   - [12, value, 23, sink]
-  - [23, geometry, 30, geometry]
-  - [1, branch_count, 31, a]
-  - [1, twigs_per_branch, 31, b]
-  - [31, result, 30, count]
-  - [30, points, 33, points]
-  - [32, value, 33, sink]
+  # Attachment points spread evenly ALONG each branch, which is what puts twigs near the tips.
+  - [1, twigs_per_branch, 23, surface_points]
+
+  # twigs on those points
+  - [23, surface, 33, points]
   - [1, twig_length, 33, length]
   - [34, value, 33, radius_start]
   - [35, value, 33, radius_end]
   - [36, value, 33, length_jitter]
   - [13, value, 33, spread]
   - [14, value, 33, droop]
-  - [33, geometry, 40, geometry]
-  - [31, result, 46, a]
-  - [1, leaves_per_twig, 46, b]
-  - [46, result, 40, count]
-  - [40, points, 42, points]
+  - [32, value, 33, sink]
+  - [1, leaves_per_twig, 33, surface_points]
+
+  # foliage on the twigs' own surface points
+  - [33, surface, 42, points]
   - [3, value, 42, prototype]
   - [1, leaf_size, 45, x]
   - [1, leaf_size, 45, y]
   - [1, leaf_size, 45, z]
   - [45, vector, 42, scale]
   - [44, value, 42, random_rotation]
-  - [10, geometry, 50, geometry]
+
+  # Assembly. All the wood is ONE mesh, materialled once; the cards stay instanced.
+  #
+  # The card instances go into the OBJECT OUTPUT's geometry, not only into Make Instancer:
+  # publish builds the InstancePainter from the output object's own instances, so instances that
+  # reach only the component are never painted and the foliage silently disappears.
+  - [10, geometry, 50, geometry, 0]
   - [23, geometry, 50, geometry, 1]
   - [33, geometry, 50, geometry, 2]
   - [42, instances, 50, geometry, 3]
@@ -97,124 +140,5 @@ links:
   - [53, value, 52, material]
   - [52, geometry, 60, geometry]
   - [52, geometry, 51, instances]
-  - [51, component, 60, components]
+  - [51, component, 60, components, 0]
   - [60, object, 99, object]
-nodes:
-  - type: GroupInput
-    id: 1
-    pos: [-1171.8243408203125, -14.083969116210938]
-  - type: String
-    id: 3
-    pos: [-1.0e+03, 5.2e+02]
-    props: { value: objects/props/tree_foliage }
-  - type: SweepCurve
-    id: 10
-    pos: [-7.4e+02, -2.6e+02]
-  - type: Math
-    id: 11
-    pos: [-9.0e+02, -2.0e+02]
-    props: { operation: multiply }
-  - type: Float
-    id: 12
-    pos: [-7.4e+02, 2.3e+02]
-    props: { value: 0.0 }
-  - type: Float
-    id: 13
-    pos: [-5.0e+02, 4.0e+02]
-    props: { value: 1.1 }
-  - type: Float
-    id: 14
-    pos: [-5.0e+02, 4.7e+02]
-    props: { value: 1.3 }
-  - type: CurveToPoints
-    id: 20
-    pos: [-743.7557373046875, -126.38163757324219]
-  - type: Float
-    id: 21
-    pos: [-9.4e+02, 6.0e+01]
-    props: { value: 0.32 }
-  - type: Float
-    id: 22
-    pos: [-9.4e+02, 1.2e+02]
-    props: { value: 1.0 }
-  - type: TubesOnPoints
-    id: 23
-    pos: [-5.0e+02, -4.0e+01]
-  - type: Float
-    id: 24
-    pos: [-7.4e+02, 1.1e+02]
-    props: { value: 0.09 }
-  - type: Float
-    id: 25
-    pos: [-7.4e+02, 1.7e+02]
-    props: { value: 0.025 }
-  - type: PointsOnFaces
-    id: 30
-    pos: [-2.6e+02, 1.2e+02]
-  - type: Math
-    id: 31
-    pos: [-4.2e+02, 2.0e+02]
-    props: { operation: multiply }
-  - type: Float
-    id: 32
-    pos: [-2.6e+02, 4.5e+02]
-    props: { value: 0.025 }
-  - type: TubesOnPoints
-    id: 33
-    pos: [-6.0e+01, 1.2e+02]
-  - type: Float
-    id: 34
-    pos: [-2.6e+02, 2.6e+02]
-    props: { value: 0.03 }
-  - type: Float
-    id: 35
-    pos: [-2.6e+02, 3.2e+02]
-    props: { value: 0.006 }
-  - type: Float
-    id: 36
-    pos: [-2.6e+02, 3.8e+02]
-    props: { value: 0.35 }
-  - type: PointsOnFaces
-    id: 40
-    pos: [1.8e+02, 3.2e+02]
-  - type: Math
-    id: 46
-    pos: [2.0e+01, 2.5e+02]
-    props: { operation: multiply }
-  - type: InstanceOnPoints
-    id: 42
-    pos: [3.8e+02, 3.2e+02]
-    props: { kind: object }
-  - type: Float
-    id: 43
-    pos: [0.0, 4.7e+02]
-    props: { value: 0.45 }
-  - type: Float
-    id: 44
-    pos: [0.0, 5.3e+02]
-    props: { value: 3.1 }
-  - type: CombineXYZ
-    id: 45
-    pos: [1.8e+02, 4.6e+02]
-  - type: JoinGeometry
-    id: 50
-    pos: [405.725830078125, 36.14176940917969]
-  - type: MakeInstancer
-    id: 51
-    pos: [7.8e+02, 2.0e+02]
-  - type: SetMaterial
-    id: 52
-    pos: [659.0775146484375, -173.183349609375]
-  - type: String
-    id: 53
-    pos: [4.2e+02, -1.8e+02]
-    props: { value: materials/natural/bark }
-  - type: ObjectOutput
-    id: 60
-    pos: [969.0888671875, -5.894157409667969]
-    props: { name: CurveTree }
-  - type: GroupOutput
-    id: 99
-    pos: [1.14e+03, 6.0e+01]
-outputs:
-  - { type: ObjectSpec, id: object }

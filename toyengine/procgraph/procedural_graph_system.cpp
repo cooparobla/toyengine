@@ -202,6 +202,12 @@ void ProceduralGraphSystem::process_(coopa::scene::Scene& scene,
 
     uint64_t hash = 0;
     std::vector<Value> inputs = resolve_inputs(component.inputs, *entry.compiled, resolve, hash);
+    // The SEED is an input to the bake in every sense that matters -- it decides every random
+    // draw -- so it has to be part of what `on_change` compares. resolve_inputs() only sees the
+    // `inputs:` bindings, so folding it in is the caller's job; without this, changing the seed
+    // in the inspector leaves the hash identical and the graph never re-bakes.
+    hash ^= static_cast<uint64_t>(static_cast<uint32_t>(component.seed)) + 0x9e3779b97f4a7c15ull +
+            (hash << 6) + (hash >> 2);
     for (const auto& e : resolve_diag.entries()) {
         if (e.severity == coopa::nodegraph::Severity::Error) pending.errors.push_back(e.message);
         else pending.warnings.push_back(e.message);

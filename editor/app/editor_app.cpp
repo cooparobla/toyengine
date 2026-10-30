@@ -3932,19 +3932,28 @@ void EditorApp::draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, c
                 if (!doc_.is_instance(id) || !n.contains("children")) return;
                 for (const auto& c : n.at("children").as_seq()) if (c.contains(kInheritedKey)) outline(SceneDocument::id_of(c), c);
             };
-            outline(id, *node);
-            // Geometry a ProceduralGraph baked is a RUNTIME subtree with no document node, so
-            // the recursion above never reaches it and a selected graph used to highlight
-            // nothing at all. Selecting the component means selecting everything it made.
-            if (live->get_component<toy::procgraph::ProceduralGraph>() != nullptr) {
-                std::size_t budget = 4000;
-                for (const auto& child : live->children()) {
-                    const auto* marker = child->get_component<toy::scene::RuntimeObject>();
-                    if (marker == nullptr || marker->owner_system != "ProceduralGraph") continue;
-                    draw_baked_outline_(ctx, *vp, *child, col, budget);
+            // Both the viewport's Overlays button and Properties' Gizmos switch hide the
+            // selection HIGHLIGHT, not just the transform handles. An outline is what says
+            // "this is what you are about to move", so it belongs to the same layer as the
+            // grid and the origin dots -- Blender hides selection outlines with Overlays for
+            // the same reason. Turning either off to see the model unobstructed, and still
+            // having every edge of it drawn, is the toggle not doing what it says.
+            if (show_gizmo_ && show_overlays_) {
+                outline(id, *node);
+                // Geometry a ProceduralGraph baked is a RUNTIME subtree with no document node,
+                // so the recursion above never reaches it and a selected graph used to
+                // highlight nothing at all. Selecting the component means selecting everything
+                // it made.
+                if (live->get_component<toy::procgraph::ProceduralGraph>() != nullptr) {
+                    std::size_t budget = 4000;
+                    for (const auto& child : live->children()) {
+                        const auto* marker = child->get_component<toy::scene::RuntimeObject>();
+                        if (marker == nullptr || marker->owner_system != "ProceduralGraph") continue;
+                        draw_baked_outline_(ctx, *vp, *child, col, budget);
+                    }
                 }
+                ++selection_outlines_drawn_;
             }
-            ++selection_outlines_drawn_;
             // Origin dot.
             if (show_overlays_ && show_origins_) {
                 if (auto o = vp->project(glm::vec3(live->get_transform()->transform().get_world_matrix()[3]))) {

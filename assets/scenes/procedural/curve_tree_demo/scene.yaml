@@ -26,12 +26,12 @@ scene:
       active: true
       components:
         - type: Transform
-          position: { x: 0.0, y: -4.5, z: 4.6 }
-          rotation: { x: 80.0, y: 0.0, z: 0.0 }
+          position: { x: 0.0, y: -14.0, z: 7.0 }
+          rotation: { x: 68.0, y: 0.0, z: 0.0 }
         - type: Camera
           main: true
           projection: Perspective
-          fov: 45.0
+          fov: 60.0
       children: []
 
     - name: sun

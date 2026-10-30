@@ -39,6 +39,11 @@ public:
     /** @brief The instances of one (prototype, mesh part) inside one chunk: one instanced draw. */
     struct PartBatch {
         std::vector<glm::mat4> matrices;   ///< World space, shuffled.
+        /// Per-instance foliage parent sway, shuffled in lockstep with `matrices` so entry `i`
+        /// still describes instance `i`. Empty unless the prototype named a parent.
+        std::vector<glm::vec4> foliage;
+        /// The second half, shuffled with the other two. Empty whenever `foliage` is.
+        std::vector<glm::vec4> foliage1;
         std::uint16_t prototype = 0;
         std::uint32_t part = 0;            ///< The prototype's part index, not the mesh's slot.
         glm::vec3 bounds_min{0.0f}, bounds_max{0.0f};

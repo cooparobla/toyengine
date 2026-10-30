@@ -1021,6 +1021,8 @@ const coopa::gfx::memory::Buffer* ToyRenderPipeline::static_instances_for_(const
         data[k].model = pb.matrices[k];
         data[k].prev_model = pb.matrices[k];   // static: no motion
         data[k].snow_anchor = pb.matrices[k];
+        data[k].foliage = pb.foliage != nullptr ? pb.foliage[k] : glm::vec4(0.0f);
+        data[k].foliage1 = pb.foliage1 != nullptr ? pb.foliage1[k] : glm::vec4(0.0f);
     }
     e.buffer = std::make_unique<coopa::gfx::memory::Buffer>(device_, allocator_, sizeof(InstanceData) * total,
                                                              coopa::gfx::BufferUsage::Vertex, coopa::gfx::MemoryResidency::CpuToGpu);

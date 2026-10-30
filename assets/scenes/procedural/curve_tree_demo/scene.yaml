@@ -21,6 +21,28 @@ scene:
   settings:
     render:
       ambient_intensity: 0.85
+    # A steady breeze, because the foliage shader returns early in dead air: no wind, no sway.
+    # The bark and the leaf cards both ride it, with very different flexibilities.
+    weather:
+      enabled: true
+      time_of_day: 15.0
+      day_length_minutes: 0
+      drive_sun: false          # the scene's own sun keeps aiming the shadows
+      condition: breeze
+      schedule: fixed
+      conditions:
+        # One condition, so nothing schedules away from it. Clear and dry: the demo is about the
+        # geometry, and a cloud deck or fog would only sit between the camera and it.
+        - name: breeze
+          weight: 1.0
+          duration: [9999, 9999]
+          cloud_cover: 0.0
+          fog_density: 0.0
+          sun: 1.0
+          ambient: 1.0
+          wind_strength: 5.0
+          wind_heading: 35
+          wind_gust: 0.4
   root_objects:
     - name: camera
       active: true
@@ -141,6 +163,37 @@ scene:
                 - { p: [-0.35, 0.15, 1.8], mode: auto }
                 - { p: [0.25, -0.1, 3.4], mode: auto }
                 - { p: [0.6, 0.2, 5.0], mode: auto }
+
+        # A gust sitting on B's canopy and nowhere else, so the three trees read side by side:
+        # A and C in the scene's 5 m/s breeze, B in a near-gale. This is what toyengine/env is
+        # for -- the foliage shader never learns a local source exists, it just asks the field
+        # (gfx_world_wind_at), and the same answer drives B's SHADOW, so the shadow sways too.
+        #
+        # A COLUMN, not a sphere, and this is load-bearing rather than taste. The foliage shader
+        # samples the wind once per object, at `model[3]` -- the object's ORIGIN. Each leaf card
+        # is its own instance, so each samples up in the canopy where it sits; but trunk,
+        # branches and twigs are a single mesh whose origin is the tree's ROOT at z = 0. A
+        # sphere hung over the canopy therefore blows the leaves at full strength and leaves the
+        # wood becalmed at its rim, which looks exactly like the sway being broken.
+        #
+        # A cylinder about +Z reaches the ground, so the root samples full strength, and it stays
+        # narrow: radius 2.8 m clears A's outermost branch tips at x = -3.5 and C's at x = 4.0
+        # completely, which a sphere wide enough to reach the root could not.
+        - name: GustB
+          active: true
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 2.5 }
+            - type: EnvInfluence
+              shape: disc
+              radius: 2.8
+              height: 6.0
+              falloff: 0.35
+              mode: directional
+              wind: { x: 11.0, y: 8.0, z: -1.5 }   # ~13.7 m/s, ADDED to the scene's breeze
+              turbulence: 0.85                     # the extra flutter a gust front carries
+              blend: add
+              strength: 1.0
 
     # --- C: B's path again, but coarse and heavy: the INPUTS doing the work ------------------
     - name: Tree_C

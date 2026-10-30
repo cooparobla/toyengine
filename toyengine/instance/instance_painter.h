@@ -109,6 +109,22 @@ struct InstancePrototype {
     /** @brief The material for a `mesh` prototype (an `object` one brings its own). */
     coopa::gfx::engine::components::PBRMaterial material;
 
+    /**
+     * @brief Foliage parent sway: the plant whose BENDING mesh these instances are pinned to.
+     *
+     * An instanced leaf card holds a world matrix baked once, so it cannot follow a trunk that
+     * the `foliage` surface shader bends in the wind -- the card's stem stays where its twig
+     * WAS, and whole branches sweep clear of their leaves. These let the cache hand each
+     * instance the displacement of the twig it sits on (data::InstanceData::foliage).
+     *
+     * `foliage_parent_flex` 0 (the default) means "no parent", which is every painter in the
+     * engine except one a procedural graph publishes for a tree's foliage.
+     */
+    float foliage_parent_flex = 0.0f;    ///< The parent material's shader_params.x.
+    float foliage_parent_height = 0.0f;  ///< The parent material's shader_params.z, metres.
+    float foliage_parent_freq = 0.0f;    ///< The parent material's shader_params.y, rad/s.
+    glm::vec3 foliage_root{0.0f};        ///< The parent plant's root, world space.
+
     InstanceCollision collision = InstanceCollision::None;
     /** @brief Explicit collider extents; 0 fits them to the prototype's bounds. */
     glm::vec3 collision_size{0.0f};

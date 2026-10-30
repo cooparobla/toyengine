@@ -335,6 +335,10 @@ void InstancePainterSystem::collect_render(coopa::scene::Scene& scene, const glm
                 render::MeshInstanceBatch mb;
                 mb.proxy = proxy;
                 mb.matrices = b.matrices.data();
+                // Null unless this prototype named a parent plant, which switches the shader's
+                // parent-sway term off for every ordinary painted instance.
+                mb.foliage = b.foliage.empty() ? nullptr : b.foliage.data();
+                mb.foliage1 = b.foliage1.empty() ? nullptr : b.foliage1.data();
                 mb.count = drawn;
                 mb.bounds_min = b.bounds_min;
                 mb.bounds_max = b.bounds_max;

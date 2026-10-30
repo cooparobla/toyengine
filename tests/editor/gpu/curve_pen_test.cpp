@@ -762,6 +762,56 @@ COOPA_TEST(the_overlay_toggles_hide_the_selection_outline) {
 
 
 /**
+ * @brief The same two toggles hide a scene's Curves.
+ *
+ * A curve is drawn with the grid and the origin dots -- it is an overlay, not geometry -- so
+ * looking at a model with Overlays off should not leave a path floating through it. Uses
+ * `always_show`, so the test is about the toggles rather than about the selection.
+ *
+ * Pen Mode is the one exception and is deliberately not covered here: the curve being edited is
+ * drawn by draw_pen_overlay_, which IS the tool, and hiding it would make the mode unusable.
+ */
+COOPA_TEST(the_overlay_toggles_hide_scene_curves) {
+    EditorSession s({.prepare = [](Project& project) {
+        write_text(project.assets() / "scenes" / "shown" / "scene.yaml",
+            "scene:\n"
+            "  scene_name: shown\n"
+            "  root_objects:\n"
+            "    - name: Path\n"
+            "      active: true\n"
+            "      components:\n"
+            "        - {type: Transform, position: {x: 0.0, y: 0.0, z: 0.0}}\n"
+            "        - type: Curve\n"
+            "          resolution: 10\n"
+            "          always_show: true\n"
+            "          points:\n"
+            "            - {p: [-4, 0, 0], mode: auto}\n"
+            "            - {p: [0, 3, 0], mode: auto}\n"
+            "            - {p: [4, 0, 0], mode: auto}\n");
+    }});
+    expect(s.app.open_scene(s.project.assets() / "scenes" / "shown" / "scene.yaml"),
+           "curve_pen: the scene opens");
+    tick(s.engine, 6);
+
+    expect(s.app.scene_curves_drawn() == 1,
+           "curve_pen: an always_show curve is drawn to begin with (drew " +
+               std::to_string(s.app.scene_curves_drawn()) + ")");
+
+    s.app.set_show_overlays(false);
+    tick(s.engine, 4);
+    expect(s.app.scene_curves_drawn() == 0, "curve_pen: Overlays off hides the curve");
+
+    s.app.set_show_overlays(true);
+    tick(s.engine, 4);
+    expect(s.app.scene_curves_drawn() == 1, "curve_pen: and back on restores it");
+
+    s.app.set_show_gizmo(false);
+    tick(s.engine, 4);
+    expect(s.app.scene_curves_drawn() == 0, "curve_pen: Gizmos off hides it too");
+}
+
+
+/**
  * @brief Changing the SEED in a live session re-bakes the graph.
  *
  * The seed was always handed to the bake (`request.context.seed`), so a fresh run already made

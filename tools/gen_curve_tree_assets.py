@@ -88,27 +88,41 @@ def card(planes: int = 3):
 
     UVs put the texture's stem end (bottom centre of the image) at x=0, so the cluster appears
     to sprout from the branch rather than float beside it.
+
+    Normals are SPHERICAL -- blown outward from the cluster's centre -- not each quad's true
+    geometric normal. This is the standard foliage-card trick and it is here for a concrete
+    reason: a quad's true normal is perpendicular to +X, so all three of a card's normals lie in
+    one plane, and a card whose axis happens to point at the sun has every quad lit at grazing
+    incidence at once and comes out BLACK. Scattered black clusters among lit ones is exactly
+    what that looks like. Radiating the normals gives them a component along +X as well, so no
+    light direction can darken the whole card, and the gradient across the quads reads as a soft
+    leafy blob rather than three flat planes -- which is the look wanted anyway.
+
+    `X_WEIGHT` sets how far they are blown out: 0 reproduces the flat-plane normals and their
+    black cards, 1 is a full sphere (so along-axis that the card stops reading as a surface).
+    0.55 leaves the normals about 29 degrees off the card's plane -- a worst-case N.L of ~0.48
+    for a light straight down the axis, which is lit, not black.
+
+    Authored normals like these only survive because the leaf material is on the `foliage`
+    shader, whose fragment stage defines GFX_SURFACE_KEEP_BACKFACE_NORMAL: the stock backbone
+    NEGATES the normal on a back face, which would turn every outward normal inward.
     """
+    X_WEIGHT = 0.55
+    center = (0.5, 0.0, 0.0)     # the blob's middle, on the card's axis
     verts, norms, uvs, faces = [], [], [], []
     for k in range(planes):
         a = math.pi * k / planes
         # The quad's width axis, swept around +X.
         wx, wy, wz = 0.0, math.cos(a), math.sin(a)
-        # Each quad's TRUE normal, perpendicular to its own plane.
-        #
-        # Not a shared direction. The back of a two-sided card is handled by the shader, which
-        # flips the normal on a back face (gfx/surface/gbuffer_fs.glsl). Forcing every quad to
-        # share one normal to "fix" that instead leaves two of the three crossed quads with a
-        # normal nearly IN their own plane -- lighting computed against a direction the surface
-        # does not face, which comes out near black at most angles.
-        n = (0.0, -math.sin(a), math.cos(a))
         quad = [(0.0, -0.5 * wy, -0.5 * wz), (1.0, -0.5 * wy, -0.5 * wz),
                 (1.0, 0.5 * wy, 0.5 * wz),   (0.0, 0.5 * wy, 0.5 * wz)]
         quad_uv = [(0.0, 1.0), (0.0, 0.0), (1.0, 0.0), (1.0, 1.0)]
         base = len(verts)
         for v, uv in zip(quad, quad_uv):
+            d = (X_WEIGHT * (v[0] - center[0]), v[1] - center[1], v[2] - center[2])
+            m = math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) or 1.0
             verts.append(v)
-            norms.append(n)
+            norms.append((d[0] / m, d[1] / m, d[2] / m))
             uvs.append(list(uv))
         faces.append([base, base + 1, base + 2, base + 3])
     return verts, norms, uvs, faces

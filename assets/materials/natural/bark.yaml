@@ -1,6 +1,26 @@
 # Bark, for the wood a curve_tree sweeps. One material for trunk, branches and twigs -- which is
 # the point of joining them into a single mesh before naming a slot.
+#
+# It sways on the `foliage` shader (shaders/foliage_surface.glsl), but only barely, and the
+# ceiling is ARCHITECTURAL rather than a matter of taste:
+#
+#   Trunk, branches and twigs are one mesh that the vertex shader BENDS. The leaf cards are
+#   instance::InstanceRecords holding absolute world matrices, baked once at publish. A card's
+#   stem therefore stays where its twig WAS, so the visible gap between a leaf and its twig is
+#   the wood's FULL displacement -- not a fraction of it.
+#
+# Measured on a ~5 m tree: flexibility 0.10 peaks near 0.76 m of canopy displacement, which is
+# 2.7 leaf-card lengths and strips whole branches bare. Keeping the gap under ~5 cm needs about
+# 0.007. There is no value that is both clearly visible and attached; 0.012 errs toward attached,
+# because a correct still tree beats a moving broken one.
+#
+# Raising this is NOT the way to get visible branch sway. That needs the leaf cards to follow
+# their twigs -- either the shader learning the parent's sway (it needs a leaf's height above its
+# own tree's root, which the vertex stage cannot currently reach), or the cards being realized
+# into this mesh instead of instanced.
 albedo: { r: 0.33, g: 0.25, b: 0.18 }
 metallic: 0.0
 roughness: 0.95
 ao: 1.0
+shader: foliage
+shader_params: [0.10, 0.7, 4.5, 0]   # flexibility, frequency, height (m), +Z up

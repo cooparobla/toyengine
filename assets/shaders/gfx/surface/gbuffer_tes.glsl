@@ -48,6 +48,11 @@ layout(push_constant) uniform PushConstants {
 
 vec4 gfx_time   = material.gfx_time;
 vec4 gfx_params = material.gfx_params;
+// No instance stream in a tessellation evaluation stage. Foliage cards are flat and never
+// tessellated, so their parent sway is simply off here rather than threaded through the
+// patch -- see assets/shaders/foliage_surface.glsl.
+vec4 gfx_instance_foliage = vec4(0.0);
+vec4 gfx_instance_foliage1 = vec4(0.0);
 
 // Set 1, binding 4: the material's displacement (height) map -- black when it has none.
 layout(set = 1, binding = 4) uniform sampler2D u_displacement;

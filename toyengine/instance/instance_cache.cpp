@@ -83,9 +83,33 @@ InstanceRenderCache::Chunk InstanceRenderCache::build_chunk(const InstanceSetDat
         const float scale = std::max({r.scale.x, r.scale.y, r.scale.z});
         const float radius = 0.5f * glm::length(p.bounds_max - p.bounds_min) * scale;
         const glm::vec3 centre = r.position + glm::vec3(0.0f, 0.0f, 0.5f * (p.bounds_min.z + p.bounds_max.z) * scale);
+        // The displacement of the twig this instance is pinned to, which the card's own baked
+        // world matrix cannot follow. Mirrors the parent's own bend (t-squared up its height) so
+        // the two agree exactly; `root - position` rather than the root itself, because the
+        // shader only has the instance's own world position to add it back to.
+        glm::vec4 foliage(0.0f);
+        glm::vec4 foliage1(0.0f);
+        if (p.foliage_parent_flex > 0.0f && p.foliage_parent_height > 0.0f) {
+            const float t = std::clamp((r.position.z - p.foliage_root.z) / p.foliage_parent_height,
+                                       0.0f, 1.0f);
+            const float reach = p.foliage_parent_height * (t * t);
+            foliage = glm::vec4(p.foliage_parent_flex * reach,
+                                p.foliage_parent_freq,
+                                p.foliage_root.x - r.position.x,
+                                p.foliage_root.y - r.position.y);
+            // Reach and height on their own: the parent's DOWNWARD press scales with its reach
+            // but not with its flexibility, so it cannot be recovered from the product above.
+            foliage1 = glm::vec4(reach, p.foliage_parent_height, 0.0f, 0.0f);
+        }
         for (std::uint32_t part = 0; part < p.parts.size(); ++part) {
             PartBatch& b = batch_for(r.prototype, part);
             b.matrices.push_back(world * p.parts[part].local);
+            if (foliage.x > 0.0f) {
+                b.foliage.resize(b.matrices.size() - 1, glm::vec4(0.0f));
+                b.foliage.push_back(foliage);
+                b.foliage1.resize(b.matrices.size() - 1, glm::vec4(0.0f));
+                b.foliage1.push_back(foliage1);
+            }
             b.bounds_min = glm::min(b.bounds_min, centre - glm::vec3(radius));
             b.bounds_max = glm::max(b.bounds_max, centre + glm::vec3(radius));
         }
@@ -97,8 +121,21 @@ InstanceRenderCache::Chunk InstanceRenderCache::build_chunk(const InstanceSetDat
         // Shuffled, so drawing the first `n` of them is an even subset of the whole chunk --
         // which is what makes distance thinning a prefix draw rather than a rebuild.
         Rng rng(chunk_seed(coord, b.prototype, b.part));
+        // A batch with any parent data carries it for EVERY instance, so index i of the two
+        // vectors keeps describing the same instance through the shuffle below.
+        if (!b.foliage.empty()) {
+            b.foliage.resize(b.matrices.size(), glm::vec4(0.0f));
+            b.foliage1.resize(b.matrices.size(), glm::vec4(0.0f));
+        }
         for (std::size_t i = b.matrices.size(); i > 1; --i) {
-            std::swap(b.matrices[i - 1], b.matrices[rng.below(static_cast<std::uint32_t>(i))]);
+            // Drawn once per iteration, exactly as before: the shuffle must stay identical for
+            // every existing painter, or their draw order changes for nothing.
+            const std::uint32_t j = rng.below(static_cast<std::uint32_t>(i));
+            std::swap(b.matrices[i - 1], b.matrices[j]);
+            if (!b.foliage.empty()) {
+                std::swap(b.foliage[i - 1], b.foliage[j]);
+                std::swap(b.foliage1[i - 1], b.foliage1[j]);
+            }
         }
         b.build_id = g_next_build_id.fetch_add(1);
         out.bounds_min = glm::min(out.bounds_min, b.bounds_min);

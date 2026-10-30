@@ -277,6 +277,9 @@ public:
     bool playing() const { return play_scene_ != nullptr; }
     /** @brief Selection outlines the viewport overlay drew last frame (tests / diagnostics). */
     int selection_outlines_drawn() const { return selection_outlines_drawn_; }
+    /// @brief Scene Curves the overlay drew last frame. A curve is an overlay, so the Overlays
+    ///        and Gizmos toggles take it down with the rest of them.
+    int scene_curves_drawn() const { return scene_curves_drawn_; }
     /// @brief Boxes drawn last frame around a selected ProceduralGraph's baked output. 0 when
     ///        nothing baked is selected -- the signal that the highlight reached the geometry.
     int baked_outlines_drawn() const { return baked_outlines_drawn_; }
@@ -1501,6 +1504,7 @@ private:
     bool open_add_menu_ = false;
     float outliner_h_ = 260;
     int selection_outlines_drawn_ = 0;
+    int scene_curves_drawn_ = 0;
     mutable int baked_outlines_drawn_ = 0;
     std::string outliner_filter_, add_component_filter_, browser_dir_;
     std::vector<std::string> asset_dirs_cache_;

@@ -3857,6 +3857,7 @@ void EditorApp::draw_viewport_overlay_(imm::Context& ctx, bool mesh_edit) {
 void EditorApp::draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, const ViewProj& vp_ref) {
     const ViewProj* vp = &vp_ref;
     selection_outlines_drawn_ = 0;
+    scene_curves_drawn_ = 0;
     baked_outlines_drawn_ = 0;
     grid_wanted_ = show_overlays_ && show_grid_ && !(playing() && !mesh_edit) &&
                    active_type_ != AssetType::Material && active_type_ != AssetType::Texture;
@@ -3872,7 +3873,9 @@ void EditorApp::draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, c
         }
     };
     if (curve_pen_panel_->in_pen_mode_()) {
-        curve_pen_panel_->draw_scene_curves_(ctx, *vp);
+        // The overlay toggles hide every other object's curve; the one being edited stays, since
+        // draw_pen_overlay_ is the tool itself.
+        if (show_gizmo_ && show_overlays_) scene_curves_drawn_ += curve_pen_panel_->draw_scene_curves_(ctx, *vp);
         curve_pen_panel_->draw_pen_overlay_(ctx, *vp);
     } else if (paint_panel_->in_brush_mode_()) {
         // No selection outline or wire while sculpting or painting, as in Blender.
@@ -3916,8 +3919,9 @@ void EditorApp::draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, c
             }
         }
         // Any Curve that is selected or asks to always show, so a path is visible without
-        // entering the Pen tool to see it.
-        curve_pen_panel_->draw_scene_curves_(ctx, *vp);
+        // entering the Pen tool to see it. A curve is an overlay, so the gizmo and overlay
+        // toggles hide it with the rest of them.
+        if (show_gizmo_ && show_overlays_) scene_curves_drawn_ += curve_pen_panel_->draw_scene_curves_(ctx, *vp);
         // Selection outlines (the active object brighter, as in Blender). A selected instance
         // is one thing: its inherited parts are outlined with it.
         for (ObjectId id : doc_.selection()) {

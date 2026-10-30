@@ -6,6 +6,21 @@
 #
 # `cull_backfaces: false` because a card is a sheet -- culling its back makes half the canopy
 # vanish depending on where you stand.
+#
+# It sways on the `foliage` shader, far faster and looser than the bark it hangs off (0.3 at
+# 2.6 rad/s against the bark's 0.012 at 0.7). Nearly all of this tree's visible movement is
+# the leaves: the wood is held almost still on purpose -- see bark.yaml for why.
+#
+# Up axis 2 is +X: the card is authored along +X (gen_curve_tree_assets.py's `card`, since a
+# curve's point frame puts +X on the tangent), so x = 0 is the stem that stays pinned to its
+# twig and x = 1 the tip that moves. Height 1 is the card's own length in mesh units; the
+# instance's X scale turns that into metres, so a bigger leaf swings further.
+#
+# Keep the flexibility near 0.3. The stem never moves whatever it is set to (bend is t-squared
+# and t = 0 there), so it cannot pull a card off its twig -- but at 0.7 a card's tip swings
+# about 70% of its own length, which swings the blade clear of the twig it is meant to clothe
+# and leaves bare wood showing through the canopy. Liveliness comes from the per-plant phase
+# scatter in foliage_surface.glsl, not from amplitude.
 object:
   name: TreeFoliage
   active: true
@@ -23,4 +38,6 @@ object:
         cull_backfaces: false
         roughness: 0.85
         metallic: 0.0
+        shader: foliage
+        shader_params: [0.3, 2.6, 1.0, 2]   # flexibility, frequency, height (card lengths), +X up
   children: []

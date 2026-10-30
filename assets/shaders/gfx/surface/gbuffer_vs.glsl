@@ -26,6 +26,15 @@ layout(location = 3) in vec4 in_tangent; // xyz = tangent, w = handedness
 layout(location = 4) in mat4 in_model;       // per-instance (locations 4-7)
 layout(location = 8) in mat4 in_prev_model;  // per-instance (locations 8-11): last frame's model
 layout(location = 12) in mat4 in_snow_anchor; // per-instance (locations 12-15): the snow pattern's pose
+// Per-instance foliage sway (data::InstanceData::foliage). Zero for every instance that is
+// not a procedural graph's leaf card; see assets/shaders/foliage_surface.glsl.
+layout(location = 16) in vec4 in_foliage;
+// Plain-named alias, like gfx_time/gfx_params below: a surface hook reads it without knowing
+// which backbone it was compiled against.
+vec4 gfx_instance_foliage = in_foliage;
+// The second half of it (data::InstanceData::foliage1).
+layout(location = 17) in vec4 in_foliage1;
+vec4 gfx_instance_foliage1 = in_foliage1;
 
 // Set 0: Camera UBO. The trailing reprojection members (data::CameraData) are declared here
 // and in gbuffer_fs.glsl only; every other shader keeps the three-member block.

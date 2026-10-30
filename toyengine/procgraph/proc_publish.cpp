@@ -139,6 +139,13 @@ void attach_payloads_(const BakedObject& baked, SceneObject& obj, const PublishC
             auto* painter = obj.get_component<instance::InstancePainter>();
             if (painter == nullptr) painter = obj.add_component<instance::InstancePainter>();
 
+            // This object's own geometry, if it has any: the thing the cards are pinned to.
+            const auto* wood = obj.get_component<MeshRenderer>();
+            // The same world matrix the records below are built with, not the local one:
+            // get_world_matrix() on the component walks the parent chain, transform()'s does not.
+            glm::vec3 root_ws(0.0f);
+            if (auto* tc = obj.get_transform()) root_ws = glm::vec3(tc->get_world_matrix()[3]);
+
             // Settings an emitted Make Instancer component carried, applied to every prototype
             // this rebuild creates. Read before the list is replaced.
             instance::InstanceCollision collision = instance::InstanceCollision::None;
@@ -178,6 +185,17 @@ void attach_payloads_(const BakedObject& baked, SceneObject& obj, const PublishC
                 }
                 prototype.collision     = collision;
                 prototype.draw_distance = draw_distance;
+                // If this object's own mesh sways (a trunk on the `foliage` shader), hand the
+                // prototype that mesh's sway so the cache can move each card with the twig it
+                // sits on. The wood and the cards hang off the SAME published object, so its
+                // MeshRenderer is the parent and its origin is the plant's root -- the very
+                // point the shader bends the trunk away from.
+                if (wood != nullptr && wood->material.shader == "foliage") {
+                    prototype.foliage_parent_flex   = wood->material.shader_params[0];
+                    prototype.foliage_parent_freq   = wood->material.shader_params[1];
+                    prototype.foliage_parent_height = wood->material.shader_params[2];
+                    prototype.foliage_root          = root_ws;
+                }
                 // The graph has already baked the final transforms, so the painter must not
                 // re-randomise them: a non-zero yaw_range would spin every instance a second time.
                 prototype.scale_range = glm::vec2(1.0f, 1.0f);

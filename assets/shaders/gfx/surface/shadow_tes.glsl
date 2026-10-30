@@ -47,6 +47,11 @@ layout(location = 0) out vec2 frag_uv;
 
 vec4 gfx_time   = pc.gfx_time;
 vec4 gfx_params = pc.gfx_params;
+// No instance stream in a tessellation evaluation stage. Foliage cards are flat and never
+// tessellated, so their parent sway is simply off here rather than threaded through the
+// patch -- see assets/shaders/foliage_surface.glsl.
+vec4 gfx_instance_foliage = vec4(0.0);
+vec4 gfx_instance_foliage1 = vec4(0.0);
 
 layout(set = 0, binding = 4) uniform sampler2D u_displacement;   // the material set's height map
 

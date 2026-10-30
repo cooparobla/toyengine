@@ -134,6 +134,13 @@ struct ParticleMeshBatch {
     coopa::gfx::engine::components::MeshRenderer* proxy = nullptr;
     const glm::mat4* matrices = nullptr;
     uint32_t  count = 0;
+    /// Optional per-instance foliage sway (data::InstanceData::foliage), `static_total` entries
+    /// parallel to `matrices`. Only a procedural graph's leaf cards set this -- they are pinned
+    /// to a trunk mesh that BENDS, which a baked world matrix cannot follow on its own. Null
+    /// everywhere else, which streams zeros and leaves the shader's parent term switched off.
+    const glm::vec4* foliage = nullptr;
+    /// The second half of that data (data::InstanceData::foliage1), same length and lifetime.
+    const glm::vec4* foliage1 = nullptr;
     /// Non-zero: the matrices are STATIC (a terrain scatter chunk) and identified by this key.
     /// The renderer then keeps them in a persistent GPU instance buffer, uploaded only when
     /// `static_version` changes, instead of copying them into the frame's instance stream for

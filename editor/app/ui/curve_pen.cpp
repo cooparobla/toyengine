@@ -494,7 +494,8 @@ void CurvePenPanel::draw_band_(imm::Context& ctx) const {
     ctx.outline(r, app_.et_.viewport.box_select_outline);
 }
 
-void CurvePenPanel::draw_scene_curves_(imm::Context& ctx, const ViewProj& vp) {
+int CurvePenPanel::draw_scene_curves_(imm::Context& ctx, const ViewProj& vp) {
+    int drawn = 0;
     // Curves that are selected, or that asked to always show. The Pen tool draws its own target
     // with handles, so it is skipped here to avoid drawing the line twice.
     for (const auto& [id, live] : app_.sync_.live_objects()) {
@@ -512,7 +513,9 @@ void CurvePenPanel::draw_scene_curves_(imm::Context& ctx, const ViewProj& vp) {
             if (prev && now) ctx.line(*prev, *now, col, 1.5f);
             prev = now;
         }
+        ++drawn;
     }
+    return drawn;
 }
 
 void CurvePenPanel::draw_pen_toolbar_(imm::Context& ctx, const imm::Box& r) {

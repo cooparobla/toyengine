@@ -67,7 +67,9 @@ public:
     void draw_pen_props_(imm::Context& ctx);
 
     /** @brief Draws any Curve in the scene that asks to always be visible, or is selected. */
-    void draw_scene_curves_(imm::Context& ctx, const ViewProj& vp);
+    /// @brief Draws every other object's Curve that is selected or asks to always show.
+    /// @return How many it drew, which is what lets a test see the overlay toggles gate it.
+    int draw_scene_curves_(imm::Context& ctx, const ViewProj& vp);
 
     /// @brief The active (last-picked) control point, or -1.
     int selected_point() const { return active_; }

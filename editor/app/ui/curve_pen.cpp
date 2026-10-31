@@ -17,9 +17,12 @@
 #include "editor/app/ui/curve_pen.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <functional>
 
 #include <toyengine/curve/curve.h>
+#include <toyengine/scene/runtime_object.h>
+#include <toyengine/world/terrain_component.h>
 
 #include "editor/app/editor_app.h"
 #include "editor/app/ui/instances.h"
@@ -31,6 +34,70 @@ namespace cv = toy::curve;
 namespace ct = curve_tool;
 
 namespace {
+
+/// The id of `parent`'s direct child called `name`, or 0.
+ObjectId child_named_(SceneDocument& doc, ObjectId parent, const std::string& name) {
+    const Node* obj = doc.find(parent);
+    if (obj == nullptr || !obj->contains("children")) return 0;
+    for (const Node& child : obj->at("children")) {
+        if (child.contains("name") && child.at("name").get_value<std::string>() == name) {
+            return SceneDocument::id_of(child);
+        }
+    }
+    return 0;
+}
+
+/// The first component of `type` on `obj`, or null.
+const Node* component_node_(const Node& obj, const char* type) {
+    if (!obj.contains("components")) return nullptr;
+    for (const Node& c : obj.at("components")) {
+        if (c.contains("type") && c.at("type").get_value<std::string>() == type) return &c;
+    }
+    return nullptr;
+}
+
+/// The first object carrying a Curve anywhere under `root`, or 0.
+ObjectId first_curve_under_(SceneDocument& doc, ObjectId root) {
+    const Node* obj = doc.find(root);
+    if (obj == nullptr) return 0;
+    if (component_node_(*obj, "Curve") != nullptr) return root;
+    if (!obj->contains("children")) return 0;
+    for (const Node& child : obj->at("children")) {
+        if (const ObjectId found = first_curve_under_(doc, SceneDocument::id_of(child))) return found;
+    }
+    return 0;
+}
+
+/// Every object carrying a Curve anywhere under `root`, depth first -- what the hair system
+/// itself counts as this groom's guides.
+void collect_curves_(SceneDocument& doc, ObjectId root, std::vector<ObjectId>& out) {
+    const Node* obj = doc.find(root);
+    if (obj == nullptr) return;
+    if (component_node_(*obj, "Curve") != nullptr) out.push_back(root);
+    if (!obj->contains("children")) return;
+    for (const Node& child : obj->at("children")) {
+        collect_curves_(doc, SceneDocument::id_of(child), out);
+    }
+}
+
+/// Curve components anywhere under `root`, which is what the hair system counts as guides.
+int count_curves_(SceneDocument& doc, ObjectId root) {
+    const Node* obj = doc.find(root);
+    if (obj == nullptr) return 0;
+    int found = 0;
+    if (obj->contains("components")) {
+        for (const Node& c : obj->at("components")) {
+            if (c.contains("type") && c.at("type").get_value<std::string>() == "Curve") ++found;
+        }
+    }
+    if (obj->contains("children")) {
+        for (const Node& child : obj->at("children")) {
+            found += count_curves_(doc, SceneDocument::id_of(child));
+        }
+    }
+    return found;
+}
+
 
 /// @brief The component node of type `Curve` on `obj`, or null.
 const Node* curve_node_(const Node& obj) {
@@ -74,6 +141,34 @@ bool CurvePenPanel::in_pen_mode_() const {
     return app_.mode_ == InteractionMode::Pen && target_ != 0;
 }
 
+ObjectId CurvePenPanel::curve_under_(const ViewProj& vp, glm::vec2 mouse) const {
+    ObjectId best = 0;
+    float best_px = 1e9f;
+    for (const auto& [id, live] : app_.sync_.live_objects()) {
+        if (live == nullptr || id == target_) continue;
+        const auto* component = live->get_component<cv::Curve>();
+        if (component == nullptr || component->data.empty()) continue;
+        const auto* tc = live->get_transform();
+        const glm::mat4 to_world = tc ? tc->transform().get_world_matrix() : glm::mat4(1.0f);
+        // Handles off: a curve that is not the target draws none, so hit-testing them would pick
+        // a curve by something that is not on the screen.
+        const ct::CurveHit hit =
+            ct::hit_test(component->data, vp, to_world, mouse, 10.0f, /*show_handles=*/false);
+        if (hit.kind == ct::HitKind::None || hit.distance_px >= best_px) continue;
+        best_px = hit.distance_px;
+        best = id;
+    }
+    return best;
+}
+
+void CurvePenPanel::focus_curve_(ObjectId id) {
+    if (modal_.active()) { modal_.cancel(); app_.doc_.end_merge(); }
+    if (drag_.active) app_.doc_.end_merge();
+    drag_ = {};
+    target_ = id;
+    select(-1);
+}
+
 const cv::CurveData* CurvePenPanel::curve() const {
     if (target_ == 0) return nullptr;
     auto* live = app_.sync_.live(target_);
@@ -95,6 +190,18 @@ glm::mat4 CurvePenPanel::to_world_() const {
 
 bool CurvePenPanel::begin_pen_(ObjectId id) {
     const Node* obj = app_.doc_.find(id);
+    if (obj == nullptr) return false;
+
+    // Pen on a HAIR object means "edit this groom's guides", not "give the scalp a path of its
+    // own". A Hair component holds no curve -- its guides are Curve components on child objects
+    // -- so without this, entering the mode on the thing you actually selected would add a stray
+    // Curve to the scalp and silently edit nothing.
+    if (curve_node_(*obj) == nullptr && component_node_(*obj, "Hair") != nullptr) {
+        const ObjectId guide = first_or_new_hair_guide_(id);
+        if (guide != 0) id = guide;
+    }
+
+    obj = app_.doc_.find(id);
     if (obj == nullptr) return false;
     if (curve_node_(*obj) == nullptr) {
         // Entering the Pen tool on an object with no path means "draw one here", so the
@@ -137,12 +244,86 @@ void CurvePenPanel::commit_(const cv::CurveData& data, const std::string& label,
                                            active ? "curve:" + std::to_string(target_) : std::string());
 }
 
-glm::vec3 CurvePenPanel::place_at_(const ViewProj& vp, glm::vec2 mouse,
-                                   const glm::vec3& anchor) const {
+void CurvePenPanel::refresh_surfaces_() {
+    // Mirrors InstancePaintPanel::refresh_surfaces_() (editor/app/ui/instance_paint.cpp): a scene
+    // walk plus a BVH build per distinct mesh shape, so it has to happen once a frame and not
+    // once a click.
+    const std::uint64_t frame = app_.engine_.frame_count() + 1;
+    if (surfaces_frame_ == frame) return;
+    surfaces_frame_ = frame;
+    surfaces_.clear();
+
+    if (mesh_rays_revision_ != app_.mesh_cache_epoch()) {
+        mesh_rays_.clear();
+        mesh_rays_revision_ = app_.mesh_cache_epoch();
+    }
+
+    for (const auto& [id, live] : app_.sync_.live_objects()) {
+        if (live == nullptr || live->get_transform() == nullptr) continue;
+        bool shown = true;
+        for (const auto* a = live; a != nullptr && shown; a = a->parent()) shown = a->active();
+        if (!shown) continue;
+        // Runtime objects are generated output -- a terrain chunk, a groom's own strand mesh.
+        // Drawing a guide onto the groom it belongs to would be circular.
+        if (toy::scene::is_runtime_object(*live)) continue;
+
+        if (auto* terrain = live->get_component<toy::world::TerrainComponent>()) {
+            terrain->sync_field();
+            if (!terrain->field.empty()) {
+                Surface s;
+                s.id = id;
+                s.terrain = terrain->field_view();
+                surfaces_.push_back(s);
+            }
+            continue;
+        }
+
+        const Node* node = app_.doc_.find(id);
+        if (node == nullptr) continue;
+        const EditorApp::CachedMesh* cm = app_.mesh_for_object_(*node);
+        if (cm == nullptr) continue;
+        char key[96];
+        std::snprintf(key, sizeof(key), "%zu/%.4f,%.4f,%.4f/%.4f,%.4f,%.4f", cm->mesh.positions.size(),
+                      cm->lo.x, cm->lo.y, cm->lo.z, cm->hi.x, cm->hi.y, cm->hi.z);
+        auto it = mesh_rays_.find(key);
+        if (it == mesh_rays_.end()) {
+            auto mr = std::make_unique<MeshRay>();
+            mr->mesh = cm->mesh;
+            mr->bvh.build(mr->mesh);
+            it = mesh_rays_.emplace(key, std::move(mr)).first;
+        }
+        Surface s;
+        s.id = id;
+        s.mesh = &it->second->mesh;
+        s.bvh = &it->second->bvh;
+        s.world = live->get_transform()->transform().get_world_matrix();
+        surfaces_.push_back(s);
+    }
+}
+
+std::optional<SurfaceHit> CurvePenPanel::surface_hit_(const ViewProj& vp, glm::vec2 px) {
+    refresh_surfaces_();
+    glm::vec3 o, d;
+    vp.ray(px, o, d);
+    SurfaceRaycaster rc(o, d);
+    for (const Surface& s : surfaces_) {
+        if (s.bvh != nullptr && s.mesh != nullptr) rc.consider_mesh(s.id, *s.mesh, *s.bvh, s.world);
+        else if (s.terrain) rc.consider_terrain(s.id, s.terrain);
+    }
+    const SurfaceHit* best = rc.best();
+    return best != nullptr ? std::optional<SurfaceHit>(*best) : std::nullopt;
+}
+
+glm::vec3 CurvePenPanel::place_at_(const ViewProj& vp, glm::vec2 mouse, const glm::vec3& anchor) {
     const glm::mat4 inv = glm::inverse(to_world_());
     glm::vec3 world;
-    if (on_ground_) {
-        if (const auto hit = ct::point_on_ground(vp, mouse, ground_height_)) world = *hit;
+    // Whatever mesh or terrain the cursor is actually over wins -- without this, a scalp that
+    // stands clear of the ground (a sphere on a stand, a wall-mounted bust) ray-traces PAST it
+    // and a guide's root lands on the floor behind it instead of on the surface it grows from.
+    if (const auto hit = surface_hit_(vp, mouse)) {
+        world = hit->point;
+    } else if (on_ground_) {
+        if (const auto ground = ct::point_on_ground(vp, mouse, ground_height_)) world = *ground;
         else world = ct::point_on_camera_plane(vp, mouse, glm::vec3(to_world_() * glm::vec4(anchor, 1.0f)));
     } else {
         world = ct::point_on_camera_plane(vp, mouse, glm::vec3(to_world_() * glm::vec4(anchor, 1.0f)));
@@ -166,6 +347,28 @@ void CurvePenPanel::select_add(std::size_t i) {
     }
     selection_.push_back(i);
     active_ = static_cast<int>(i);
+}
+
+void CurvePenPanel::set_selection_handle_mode_(cv::HandleMode mode) {
+    if (selection_.empty()) return;
+    const cv::CurveData* live = live_curve_();
+    if (live == nullptr) return;
+    cv::CurveData next = *live;
+    for (std::size_t i : selection_) cv::set_handle_mode(next, i, mode);
+    const char* label = mode == cv::HandleMode::Free ? "Set Anchor Corner"
+                       : mode == cv::HandleMode::Aligned ? "Set Anchor Smooth"
+                       : mode == cv::HandleMode::Vector ? "Set Anchor Vector"
+                                                         : "Set Anchor Auto";
+    commit_(next, label, false);
+}
+
+bool CurvePenPanel::selection_handle_mode_is_(cv::HandleMode mode) const {
+    const cv::CurveData* c = curve();
+    if (c == nullptr || selection_.empty()) return false;
+    for (std::size_t i : selection_) {
+        if (i >= c->points.size() || c->points[i].mode != mode) return false;
+    }
+    return true;
 }
 
 glm::vec3 CurvePenPanel::selection_pivot_() const {
@@ -429,6 +632,18 @@ void CurvePenPanel::handle_pen_input_(imm::Context& ctx, const ViewProj& vp, boo
     }
 
     if (tool_ != PenTool::Draw) {
+        // Select on ANOTHER curve's line: switch to it. The Pen edits one curve at a time, and
+        // this is how you choose which -- a groom's guides included, since they are ordinary
+        // Curve objects and need no case of their own.
+        //
+        // Only under Select. With the Draw tool a click on a line means "insert a point", and
+        // losing a stroke to an accidental switch is worse than having to change tool first.
+        if (const ObjectId other = curve_under_(vp, m)) {
+            focus_curve_(other);
+            app_.doc_.select(other);   // so the outliner and inspector follow what is being edited
+            return;
+        }
+
         // Select tool on empty space: a rubber band, exactly as Box Select does on objects. It
         // only becomes a band once the mouse moves -- a press that does not travel is a click,
         // and a click on the void clears.
@@ -472,7 +687,9 @@ void CurvePenPanel::draw_pen_overlay_(imm::Context& ctx, const ViewProj& vp) {
         const auto p = vp.project(glm::vec3(to_world * glm::vec4(c->points[i].position, 1.0f)));
         if (!p) continue;
         // Handles only on the selection, as in Blender: every handle at once is unreadable.
-        if (is_active) {
+        // The "show handles" toggle widens that from just the active point to the whole
+        // selection -- handy for judging several anchors' shapes after a Corner/Smooth click.
+        if (is_active || (show_selected_handles_ && is_sel)) {
             for (bool out : {false, true}) {
                 const glm::vec3& h = out ? c->points[i].out_handle : c->points[i].in_handle;
                 const auto hp = vp.project(glm::vec3(to_world * glm::vec4(h, 1.0f)));
@@ -502,7 +719,10 @@ int CurvePenPanel::draw_scene_curves_(imm::Context& ctx, const ViewProj& vp) {
         if (live == nullptr || id == target_) continue;
         const auto* component = live->get_component<cv::Curve>();
         if (component == nullptr) continue;
-        if (!component->always_show && !app_.doc_.is_selected(id)) continue;
+        // In Pen Mode EVERY curve is drawn, not only the selected and always-show ones: the
+        // Select tool switches to whichever one you click, so they all have to be visible to be
+        // worth clicking. Outside the mode a curve is an ordinary overlay and keeps its own rule.
+        if (!in_pen_mode_() && !component->always_show && !app_.doc_.is_selected(id)) continue;
         const auto* tc = live->get_transform();
         const glm::mat4 to_world = tc ? tc->transform().get_world_matrix() : glm::mat4(1.0f);
         const glm::vec4 col = app_.doc_.is_selected(id) ? ctx.style.object_selected
@@ -524,6 +744,7 @@ void CurvePenPanel::draw_pen_toolbar_(imm::Context& ctx, const imm::Box& r) {
     auto btn = [&](const char* id, I ic, const char* tip, bool on) {
         const imm::Box b{r.x + 3, y, 32.0f, 32.0f};
         y += 34.0f;
+        app_.test_rects_[id] = b;
         return ctx.icon_button(id, ic, tip, on, 32.0f, imm::Context::kAll, b);
     };
     if (btn("pen_select", I::SelectBox,
@@ -537,6 +758,34 @@ void CurvePenPanel::draw_pen_toolbar_(imm::Context& ctx, const imm::Box& r) {
             "moving the shape.",
             tool_ == PenTool::Draw)) {
         tool_ = PenTool::Draw;
+    }
+    y += 6.0f;
+
+    // Anchor modes: set the SELECTION's handle mode directly, the way Photoshop's pen options
+    // bar does, rather than only reachable by demoting a mode through dragging a handle.
+    auto mode_btn = [&](const char* id, I ic, const char* tip, cv::HandleMode mode) {
+        if (btn(id, ic, tip, selection_handle_mode_is_(mode))) set_selection_handle_mode_(mode);
+    };
+    mode_btn("anchor_corner", I::AnchorCorner,
+             "Corner\nMakes the selected anchor's handles independent -- a hard bend.",
+             cv::HandleMode::Free);
+    mode_btn("anchor_smooth", I::AnchorSmooth,
+             "Smooth\nMirrors the selected anchor's handles opposite each other, keeping their "
+             "own lengths, so the curve passes through smoothly.",
+             cv::HandleMode::Aligned);
+    mode_btn("anchor_vector", I::AnchorVector,
+             "Vector\nPoints the selected anchor's handles straight at its neighbours -- a "
+             "straight segment on either side.",
+             cv::HandleMode::Vector);
+    mode_btn("anchor_auto", I::AnchorAuto,
+             "Auto\nDerives the selected anchor's handles from its neighbours (Catmull-Rom); "
+             "dragging one by hand switches it back to Corner.",
+             cv::HandleMode::Auto);
+
+    if (btn("anchor_show_handles", show_selected_handles_ ? I::Eye : I::EyeClosed,
+            "Show Handles\nDraws every selected anchor's handles, not only the last one picked.",
+            show_selected_handles_)) {
+        show_selected_handles_ = !show_selected_handles_;
     }
     y += 6.0f;
     if (btn("pen_done", I::ObjectMode, "Object Mode\nLeave Pen Mode (Tab)", false)) end_pen_();
@@ -553,8 +802,9 @@ void CurvePenPanel::draw_pen_props_(imm::Context& ctx) {
         tool_ = which == 0 ? PenTool::Select : PenTool::Draw;
     }
     ctx.checkbox("Place on ground", &on_ground_);
-    ctx.tooltip("Place on ground\nNew points land on a level plane at the height below, rather "
-                "than on a plane facing the camera. What you want for laying a path over terrain.");
+    ctx.tooltip("Place on ground\nA new point first tries to land on whatever mesh or terrain is "
+                "under the cursor. Only when there is nothing there does this decide: a level "
+                "plane at the height below, rather than one facing the camera.");
     ctx.drag_float("Height", &ground_height_, 0.01f);
 
     const cv::CurveData* c = curve();
@@ -565,6 +815,164 @@ void CurvePenPanel::draw_pen_props_(imm::Context& ctx) {
     ctx.label(std::to_string(selection_.size()) + " selected");
     ctx.label("G moves, R rotates, S scales, E extrudes from one anchor.");
     ctx.label("X deletes the selection, C closes the loop.");
+    ctx.label("Corner/Smooth/Vector/Auto set the selected anchors' handle mode; Show Handles "
+              "reveals handles on the whole selection, not only the last one picked.");
+    if (tool_ == PenTool::Select) ctx.label_dim("Click another curve's line to switch to it.");
+}
+
+
+// --- The Hair component's "Guides" section ------------------------------------------------------
+
+
+EditResult CurvePenPanel::draw_hair_guides_(imm::Context& ctx, SectionContext& sc) {
+    EditResult out;
+    const ComponentSchema* schema = find_schema("Hair");
+
+    for (const char* key : {"guides", "guide_influence", "guide_count"}) {
+        if (schema != nullptr) {
+            if (const FieldDesc* f = schema->field(key)) out.absorb(draw_field(ctx, *f, sc.comp, sc.env));
+        }
+        sc.handled(key);   // drawn here, so the generic pass must not draw it again
+    }
+
+    const std::string group = sc.comp.contains("guides") && sc.comp.at("guides").is_string()
+                                  ? sc.comp.at("guides").get_value<std::string>()
+                                  : std::string();
+
+    // What the groom is ACTUALLY following, counted the same way the hair system counts it: every
+    // Curve under the named object. Reading it off the document means the inspector says the same
+    // thing whether or not the scene has been rebuilt yet this frame.
+    const ObjectId group_id = group.empty() ? 0 : child_named_(app_.doc_, sc.object_id, group);
+    std::vector<ObjectId> list;
+    if (group_id != 0) collect_curves_(app_.doc_, group_id, list);
+
+    if (list.empty()) {
+        ctx.label_dim("No guides: the groom is purely procedural.");
+    }
+
+    // The guides themselves, so the set can be managed from the one place that knows it IS a set.
+    // Each row's point count is there because an empty guide looks identical to a drawn one in a
+    // list, and an empty one is the usual reason a groom is not following anything.
+    for (const ObjectId id : list) {
+        const Node* obj = app_.doc_.find(id);
+        if (obj == nullptr) continue;
+        const std::string name = obj->contains("name") ? obj->at("name").get_value<std::string>()
+                                                       : std::string("guide");
+        std::size_t points = 0;
+        if (auto* live = app_.sync_.live(id)) {
+            if (const auto* curve = live->get_component<cv::Curve>()) points = curve->data.points.size();
+        }
+        ctx.push_id(static_cast<int>(id));
+        if (ctx.selectable(name + "  (" + std::to_string(points) + ")", id == target_)) {
+            begin_pen_(id);   // picking a guide is asking to draw it
+        }
+        ctx.pop_id();
+    }
+
+    // One button for the whole flow -- make the group if it is missing, make a guide under it,
+    // and drop into Pen Mode on it. Drawing a guide is the point; the object plumbing is not.
+    const bool add = ctx.button("Add Guide");
+    ctx.tooltip("Add Guide\nCreates a curve under this object and starts drawing it");
+    // add_hair_guide_() writes `guides:` when it is not set yet, so this does not -- two writers
+    // of one invariant is how they drift apart.
+    if (add) add_hair_guide_(sc.object_id, group.empty() ? std::string("Guides") : group);
+
+    // Duplicate and Delete act on whichever guide the Pen is on, which is the one highlighted
+    // above -- so the buttons and the list cannot disagree about what they mean.
+    const bool on_guide =
+        target_ != 0 && std::find(list.begin(), list.end(), target_) != list.end();
+    if (ctx.button("Duplicate Guide", -1, on_guide)) duplicate_hair_guide_(target_);
+    ctx.tooltip("Duplicate Guide\nCopies the active guide with its shape, so a second can be nudged off the first");
+    if (ctx.button("Delete Guide", -1, on_guide)) delete_hair_guide_(target_);
+    ctx.tooltip("Delete Guide\nRemoves the active guide. The groom re-grows without it");
+    return out;
+}
+
+ObjectId CurvePenPanel::duplicate_hair_guide_(ObjectId guide) {
+    if (guide == 0) return 0;
+    const std::vector<ObjectId> copies = app_.doc_.duplicate_objects({guide});
+    if (copies.empty()) return 0;
+    app_.after_structure_change_(copies.front());
+    begin_pen_(copies.front());
+    return copies.front();
+}
+
+void CurvePenPanel::delete_hair_guide_(ObjectId guide) {
+    if (guide == 0) return;
+
+    // Work out the survivor BEFORE deleting, so the Pen lands on a neighbour rather than on
+    // nothing: the one after it, or the one before when it was last.
+    ObjectId next = 0;
+    if (const std::optional<ObjectId> group = app_.doc_.parent_of(guide)) {
+        std::vector<ObjectId> siblings;
+        collect_curves_(app_.doc_, *group, siblings);
+        for (std::size_t i = 0; i < siblings.size(); ++i) {
+            if (siblings[i] != guide) continue;
+            if (i + 1 < siblings.size()) next = siblings[i + 1];
+            else if (i > 0) next = siblings[i - 1];
+            break;
+        }
+    }
+
+    // Let go of it first: the Pen holds this id as its target and would otherwise keep editing
+    // an object that no longer exists.
+    if (target_ == guide) focus_curve_(0);
+    app_.apply_(app_.doc_.delete_objects({guide}));
+    if (next != 0) focus_curve_(next);
+}
+
+ObjectId CurvePenPanel::add_hair_guide_(ObjectId hair_id, const std::string& group_name) {
+    ObjectId parent = child_named_(app_.doc_, hair_id, group_name);
+    if (parent == 0) {
+        parent = app_.doc_.add_object(app_.doc_.make_object(group_name), hair_id, -1,
+                                      "Add Guide Group");
+    }
+
+    // Point the component at the group, here and nowhere else. A guide the component does not
+    // name is a guide the hair system never looks at -- the groom stays procedural however many
+    // curves are drawn into it, with nothing on screen to say why.
+    if (const Node* obj = app_.doc_.find(hair_id)) {
+        if (const Node* hair = component_node_(*obj, "Hair")) {
+            const bool already = hair->contains("guides") && hair->at("guides").is_string() &&
+                                 !hair->at("guides").get_value<std::string>().empty();
+            if (!already) {
+                Node edited = *hair;
+                edited["guides"] = group_name;
+                app_.instances_panel_->edit_component_(hair_id, edited, "Set Hair Guides");
+            }
+        }
+    }
+    Node guide = app_.doc_.make_object(app_.doc_.unique_name("guide", parent));
+    Node curve = default_component("Curve");
+    // A guide is useless unseen: unlike a general-purpose path, it exists only to be looked at
+    // and edited, so it draws even outside Pen Mode and while something else is selected --
+    // the same as every hand-authored guide in the demo scenes already does.
+    curve["always_show"] = Node(true);
+    guide["components"].as_seq().push_back(std::move(curve));
+    const ObjectId id = app_.doc_.add_object(guide, parent, -1, "Add Guide");
+    app_.after_structure_change_(id);
+    begin_pen_(id);
+    return id;
+}
+
+ObjectId CurvePenPanel::first_or_new_hair_guide_(ObjectId hair_id) {
+    const Node* obj = app_.doc_.find(hair_id);
+    if (obj == nullptr) return 0;
+
+    // Whatever the component names, falling back to the conventional child so a groom authored
+    // without `guides:` still gets its curves somewhere predictable.
+    std::string group = "Guides";
+    if (const Node* hair = component_node_(*obj, "Hair")) {
+        if (hair->contains("guides") && hair->at("guides").is_string()) {
+            const std::string named = hair->at("guides").get_value<std::string>();
+            if (!named.empty()) group = named;
+        }
+    }
+
+    if (const ObjectId group_id = child_named_(app_.doc_, hair_id, group)) {
+        if (const ObjectId existing = first_curve_under_(app_.doc_, group_id)) return existing;
+    }
+    return add_hair_guide_(hair_id, group);   // none yet: make the first one
 }
 
 } // namespace editor

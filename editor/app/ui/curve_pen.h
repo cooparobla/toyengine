@@ -14,14 +14,22 @@
  */
 
 #include <cstddef>
+#include <map>
+#include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include <toyengine/curve/curve_data.h>
+#include <toyengine/world/terrain_field.h>
 
 #include "editor/app/editor_panel.h"
+#include "editor/mesh/mesh_bvh.h"
+#include "editor/schema/inspector.h"
+#include "editor/schema/inspector_sections.h"
 #include "editor/viewport/curve_edit.h"
 #include "editor/viewport/modal_transform.h"
+#include "editor/viewport/surface_raycast.h"
 
 namespace toy {
 namespace editor {
@@ -54,10 +62,55 @@ public:
     /** @brief The object being drawn on, or 0. */
     ObjectId target() const { return target_; }
 
-    /** @brief Enters the mode on `id`, adding a Curve component when it has none. */
+    /**
+     * @brief The Hair component's "Guides" inspector section.
+     *
+     * Lives here rather than with the Hair component's other rows because it is about CURVES:
+     * it reports what the groom is currently following, and its button creates a guide and drops
+     * straight into Pen Mode on it -- which only this panel can do.
+     *
+     * Registered as `"Hair.guides"` by EditorApp, which is also what tears it down.
+     */
+    EditResult draw_hair_guides_(imm::Context& ctx, SectionContext& sc);
+
+    /**
+     * @brief Enters the mode on `id`, adding a Curve component when it has none.
+     *
+     * On an object carrying a **Hair** component the target is redirected to that groom's guides:
+     * a Hair holds no curve of its own, so editing the thing you selected would otherwise add a
+     * stray Curve to the scalp and edit nothing. The first existing guide is picked, or one is
+     * created (with its `Guides` group, and the component pointed at it) if there is none yet.
+     */
     bool begin_pen_(ObjectId id);
+
+    /// @brief Creates a guide curve under `hair_id`'s `group_name` child (making the group if
+    ///        needed) and enters Pen Mode on it. @return The new guide's id.
+    ObjectId add_hair_guide_(ObjectId hair_id, const std::string& group_name);
+
+    /// @brief Copies `guide` beside itself, with its shape, and draws the copy.
+    ObjectId duplicate_hair_guide_(ObjectId guide);
+
+    /// @brief Deletes `guide` and moves the Pen to a neighbour -- the one after it, or the one
+    ///        before when it was last. Deleting the only guide leaves the Pen detached rather
+    ///        than pointed at an object that no longer exists.
+    void delete_hair_guide_(ObjectId guide);
+
+    /// @brief The first guide curve under the Hair object `hair_id`, creating one if it has none.
+    ///        @return The guide object's id, or 0 if it could not be made.
+    ObjectId first_or_new_hair_guide_(ObjectId hair_id);
     /** @brief Leaves the mode, closing any open undo merge. */
     void end_pen_();
+
+    /**
+     * @brief Points the Pen at another curve WITHOUT re-entering the mode (0 detaches it).
+     *
+     * What switching curves inside Pen Mode uses -- begin_pen_() would also add a Curve component
+     * to whatever it was handed, which is wrong for something that already has one.
+     */
+    void focus_curve_(ObjectId id);
+
+    /** @brief The curve whose line is under `mouse`, other than the target, or 0. */
+    ObjectId curve_under_(const ViewProj& vp, glm::vec2 mouse) const;
 
     /** @brief Clicks, drags and keys while the tool is active. */
     void handle_pen_input_(imm::Context& ctx, const ViewProj& vp, bool hovered);
@@ -81,6 +134,15 @@ public:
     void select(int i);
     /// @brief Adds `i` to the selection, as Shift+click would.
     void select_add(std::size_t i);
+
+    /// @brief Sets every selected anchor's handle mode (Corner/Smooth/Vector/Auto), as one
+    ///        undo step. A no-op with nothing selected.
+    void set_selection_handle_mode_(toy::curve::HandleMode mode);
+    /// @brief True while `mode` is `on` for every selected anchor and the selection is non-empty
+    ///        -- what lights up the matching toolbar button.
+    bool selection_handle_mode_is_(toy::curve::HandleMode mode) const;
+    /// @brief Shows handles on every selected anchor, not only the last-picked (active) one.
+    bool show_selected_handles_ = false;
 
     /**
      * @brief E: a new anchor continuing from the selected one, then straight into a grab.
@@ -106,8 +168,36 @@ private:
     toy::curve::CurveData* live_curve_();
     /// @brief The target's object-to-world matrix.
     glm::mat4 to_world_() const;
-    /// @brief Where a click lands, by the current depth rule, in the curve's own space.
-    glm::vec3 place_at_(const ViewProj& vp, glm::vec2 mouse, const glm::vec3& anchor) const;
+    /**
+     * @brief Where a click lands, in the curve's own space.
+     *
+     * Tries the real scene first -- whatever mesh or terrain is actually under the cursor --
+     * so a guide's root lands ON the scalp it is meant to grow from rather than on the ground
+     * plane behind it. Only when nothing is there does it fall back to the ground/camera-plane
+     * rule `on_ground_` picks.
+     */
+    glm::vec3 place_at_(const ViewProj& vp, glm::vec2 mouse, const glm::vec3& anchor);
+
+    /** @brief The BVH for one mesh shape, built once and reused across clicks; see refresh_surfaces_(). */
+    struct MeshRay {
+        EditMesh mesh;
+        TriangleBVH bvh;
+    };
+
+    /** @brief One raycastable surface in the scene: either a mesh (with its BVH) or terrain. */
+    struct Surface {
+        ObjectId id = 0;
+        const EditMesh* mesh = nullptr;
+        const TriangleBVH* bvh = nullptr;
+        glm::mat4 world{1.0f};
+        toy::world::TerrainFieldView terrain{};
+    };
+
+    /** @brief Rebuilds `surfaces_` from the scene, at most once a frame. Mirrors
+     *         InstancePaintPanel's cache of the same shape (editor/app/ui/instance_paint.h). */
+    void refresh_surfaces_();
+    /** @brief Where the ray through `px` meets the nearest mesh or terrain, or nullopt. */
+    std::optional<SurfaceHit> surface_hit_(const ViewProj& vp, glm::vec2 px);
 
     /**
      * @brief Starts a modal G / R on the selected anchor, mouse-driven with axis locking.
@@ -165,10 +255,19 @@ private:
     };
     Band band_;
 
-    /// @brief Place new points on the world Z plane rather than a camera-facing one.
+    /// @brief Fallback for when the cursor is over nothing: place on the world Z plane rather
+    ///        than a camera-facing one. place_at_() tries a real surface hit first.
     bool  on_ground_ = true;
     /// @brief The Z the ground rule uses.
     float ground_height_ = 0.0f;
+
+    /// @brief Keyed by mesh shape; cleared when the editor's mesh cache is emptied. See
+    ///        refresh_surfaces_().
+    std::map<std::string, std::unique_ptr<MeshRay>> mesh_rays_;
+    std::uint64_t mesh_rays_revision_ = 0;
+    /// @brief This frame's raycastable surfaces.
+    std::vector<Surface> surfaces_;
+    std::uint64_t surfaces_frame_ = 0;
 };
 
 } // namespace editor

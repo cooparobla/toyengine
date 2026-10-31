@@ -211,6 +211,15 @@ public:
     bool gpu_skinned() const { return gpu_ != nullptr; }
     /** @brief The dynamic GPU mesh (null until ready). */
     const std::shared_ptr<Mesh>& mesh() const { return mesh_; }
+    /**
+     * @brief The bind-pose source, or null before it loads.
+     *
+     * Anything that has to grow something ON this skin needs the same triangles the skinning
+     * uses -- toy::hair::HairSystem roots hair in them. The mesh FILE is not interchangeable with
+     * this: Mesh::build_cpu() welds and reorders its vertices, so its triangle indices do not
+     * correspond to these at all.
+     */
+    const SkinnedMeshSource* source() const { return source_.get(); }
     /** @brief This frame's skin matrices (palette order). */
     const std::vector<glm::mat4>& skin_matrices() const { return skin_matrices_; }
     /**

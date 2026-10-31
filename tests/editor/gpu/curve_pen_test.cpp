@@ -107,6 +107,83 @@ COOPA_TEST(clicking_in_the_viewport_draws_the_curve) {
     s.app.curve_pen().end_pen_();
 }
 
+/** @brief The toolbar's anchor-mode buttons set the selected anchor's handle mode directly,
+ *         without needing to drag a handle first. */
+COOPA_TEST(anchor_mode_buttons_set_the_selected_anchors_handle_mode) {
+    EditorSession s({.prepare = [](Project& project) {
+        write_text(project.assets() / "scenes" / "pen" / "scene.yaml", k_scene);
+    }});
+    expect(s.app.open_scene(s.project.assets() / "scenes" / "pen" / "scene.yaml"),
+           "curve_pen: the scene opens");
+    const ObjectId path = s.named("Path");
+    s.app.document().select(path);
+    expect(s.app.curve_pen().begin_pen_(path), "curve_pen: the mode opened");
+    tick(s.engine, 4);
+
+    for (glm::vec2 at : {glm::vec2(480.0f, 260.0f), glm::vec2(600.0f, 300.0f),
+                         glm::vec2(700.0f, 240.0f)}) {
+        s.in.click(at);
+        tick(s.engine, 3);
+    }
+    s.app.curve_pen().select(1);   // the middle anchor
+    tick(s.engine, 2);
+
+    auto click_mode_btn = [&](const char* id) {
+        const auto b = s.app.test_rect(id);
+        expect(b.has_value(), std::string("curve_pen: the toolbar drew ") + id);
+        if (!b) return;
+        s.in.click(b->center());
+        tick(s.engine, 2);
+    };
+
+    click_mode_btn("anchor_smooth");
+    expect(s.app.curve_pen().curve()->points[1].mode == cv::HandleMode::Aligned,
+           "curve_pen: Smooth set the selected anchor to Aligned");
+    expect(s.app.curve_pen().selection_handle_mode_is_(cv::HandleMode::Aligned),
+           "curve_pen: and the helper used to light the button agrees");
+
+    click_mode_btn("anchor_corner");
+    expect(s.app.curve_pen().curve()->points[1].mode == cv::HandleMode::Free,
+           "curve_pen: Corner set it back to Free");
+
+    click_mode_btn("anchor_vector");
+    expect(s.app.curve_pen().curve()->points[1].mode == cv::HandleMode::Vector,
+           "curve_pen: Vector set it to Vector");
+
+    click_mode_btn("anchor_auto");
+    expect(s.app.curve_pen().curve()->points[1].mode == cv::HandleMode::Auto,
+           "curve_pen: Auto set it to Auto");
+
+    s.app.curve_pen().end_pen_();
+}
+
+/** @brief The show-handles toggle widens handle drawing from the active anchor to the whole
+ *         selection -- the "show/hide anchors" control. */
+COOPA_TEST(show_handles_toggle_flips_show_selected_handles) {
+    EditorSession s({.prepare = [](Project& project) {
+        write_text(project.assets() / "scenes" / "pen" / "scene.yaml", k_scene);
+    }});
+    expect(s.app.open_scene(s.project.assets() / "scenes" / "pen" / "scene.yaml"),
+           "curve_pen: the scene opens");
+    const ObjectId path = s.named("Path");
+    s.app.document().select(path);
+    expect(s.app.curve_pen().begin_pen_(path), "curve_pen: the mode opened");
+    tick(s.engine, 4);
+    expect(!s.app.curve_pen().show_selected_handles_, "curve_pen: off by default");
+
+    const auto b = s.app.test_rect("anchor_show_handles");
+    expect(b.has_value(), "curve_pen: the toolbar drew the show-handles toggle");
+    if (b) {
+        s.in.click(b->center());
+        tick(s.engine, 2);
+        expect(s.app.curve_pen().show_selected_handles_, "curve_pen: clicking it turns handles on");
+        s.in.click(b->center());
+        tick(s.engine, 2);
+        expect(!s.app.curve_pen().show_selected_handles_, "curve_pen: clicking again turns them off");
+    }
+    s.app.curve_pen().end_pen_();
+}
+
 /** @brief A graph bound to a curve instances along the drawn path. */
 COOPA_TEST(a_graph_bound_to_a_curve_follows_the_drawn_path) {
     EditorSession s({.prepare = [](Project& project) {

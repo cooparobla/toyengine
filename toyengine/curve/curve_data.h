@@ -157,6 +157,18 @@ bool remove_point(CurveData& c, std::size_t index);
 /// @brief Moves point `index` and its handles by `delta`, refreshing derived neighbours.
 void move_point(CurveData& c, std::size_t index, const glm::vec3& delta);
 
+/**
+ * @brief Sets point `index`'s handle mode directly, as the Pen tool's anchor-mode buttons do.
+ *
+ * `Free` leaves the handles exactly where they are -- converting to a corner unlinks them
+ * without moving anything. `Vector`/`Auto` recompute immediately via `refresh_handles()`, the
+ * same as a move does, so the new mode is visible without a further edit. `Aligned` mirrors
+ * one handle's direction onto the other, keeping each its own length; when both already sit on
+ * the point (an endpoint never dragged), the direction instead comes from the neighbours, the
+ * same tangent `Auto` would compute.
+ */
+void set_handle_mode(CurveData& c, std::size_t index, HandleMode mode);
+
 } // namespace curve
 } // namespace toy
 

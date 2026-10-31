@@ -57,6 +57,7 @@
 #include <toyengine/curve/curve.h>
 #include <toyengine/procgraph/procedural_graph.h>
 #include <toyengine/procgraph/procedural_graph_system.h>
+#include <toyengine/hair/hair_system.h>
 #include <toyengine/procgraph/nodes.h>
 #include <toyengine/instance/instance_painter.h>
 #include <toyengine/instance/instance_painter_system.h>
@@ -568,6 +569,12 @@ void Engine::prepare_scene_(coopa::scene::Scene& scene, bool drain_assets) {
             pgs->set_scene_path(scene_path(scene));
         }
     }
+    // Order 64: hair -- grows every Hair component's groom from the mesh beside it and publishes
+    // the object that draws it. After procgraph (63) so a graph could emit a Hair component and
+    // have it grown the same frame, and before Physics (100) so a simulated groom's guides are
+    // registered before the solver steps. Its `regenerate: on_load` grooms hold the loading
+    // screen via warm_up_state(), as terrain and water do.
+    hair::install_hair_system(scene, ctx_.device(), ctx_.allocator(), assets_, ctx_.frames_in_flight());
     // Order 70: destruction -- fractures breakable meshes on the job engine and spawns a
     // chunk body per cell. Before Physics (100), so a chunk born this frame falls this frame.
     scene::install_destruction_system(scene, ctx_.device(), ctx_.allocator(), assets_, &jobs_);
@@ -1508,6 +1515,12 @@ void Engine::upload_dynamic_meshes_(coopa::scene::Scene& scene) {
     for (scene::SkinnedMeshRenderer* smr : scene.get_components<scene::SkinnedMeshRenderer>()) {
         smr->upload(ctx_.current_frame(), gpu_skin);
     }
+    // Simulated grooms, same contract again: their render strands follow the solver's guides, and
+    // this is the only window where the in-flight slot is known. A groom that is not simulated is
+    // a static mesh and is skipped entirely -- that is what makes the default cost nothing.
+    if (auto* hair_system = dynamic_cast<hair::HairSystem*>(scene.find_system("Hair"))) {
+        hair_system->upload(scene, ctx_.current_frame());
+    }
 }
 
 void Engine::gather_digger_hover_(coopa::scene::Scene& scene) {
@@ -1813,6 +1826,27 @@ render::ToyRenderConfig Engine::make_render_config_(const AppConfig& config,
         /* tese */ "foliage.tese",
         /* shadow_tese */ "foliage_shadow.tese",
         /* shadow_cube_tese */ "foliage_shadow_cube.tese",
+    });
+
+    // Hair and fur: strands bending in the same world wind foliage reads, plus the lengthways
+    // highlight a strand has (hair_surface.glsl / hair_surface_frag.glsl, and
+    // toyengine/hair/README.md for why that highlight is geometric rather than a real anisotropic
+    // BSDF). Two-sided, because a ribbon strand is seen from both of its faces.
+    //
+    // No tessellation entry points: a groom is already fine geometry, and HairSystem never turns
+    // tessellation on for the mesh it publishes. The fragment stage is a real file here, unlike
+    // foliage's, because the strand highlight needs the camera -- so the vertex hook (shared with
+    // both shadow entry points) and the fragment hook are deliberately separate files.
+    rc.surface_shaders.add({
+        /* name  */ "hair",
+        /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Opaque,
+        /* vert  */ "hair.vert",
+        /* frag  */ "hair.frag",
+        /* shadow_vert */ "hair_shadow.vert",
+        /* shadow_frag */ "", // reuses stock shadow_depth.frag
+        /* shadow_cube_vert */ "hair_shadow_cube.vert",
+        /* shadow_cube_frag */ "", // reuses stock shadow_cube.frag
+        /* cull */ coopa::gfx::CullMode::None, // a strand ribbon is two-sided
     });
     rc.surface_shaders.add({
         /* name  */ "terrain_styled",

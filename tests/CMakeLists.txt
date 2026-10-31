@@ -58,6 +58,10 @@ if(TARGET toyengine_editor_tests)
     target_link_libraries(toyengine_editor_tests PRIVATE toyengine::editor)
     # The packaging/build suites run the game binary relocated.
     add_dependencies(toyengine_editor_tests toyengine)
+    # curve_pen alone holds 19 GPU cases (~17 s each for the Vulkan device + JobEngine spin-up),
+    # ~320 s total -- over the 300 s every other GPU suite fits inside. One suite earning its own
+    # timeout here beats raising it for everyone else to cover a single outlier.
+    set_tests_properties(toyengine_editor_curve_pen PROPERTIES TIMEOUT 450)
 endif()
 
 # toyengine_editor_docs: the editor user manual's screenshot generator (see the editor-user-docs

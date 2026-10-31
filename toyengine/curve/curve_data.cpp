@@ -276,5 +276,41 @@ void move_point(CurveData& c, std::size_t index, const glm::vec3& delta) {
     refresh_handles(c);
 }
 
+void set_handle_mode(CurveData& c, std::size_t index, HandleMode mode) {
+    if (index >= c.points.size()) return;
+    CurvePoint& p = c.points[index];
+    p.mode = mode;
+
+    if (mode == HandleMode::Vector || mode == HandleMode::Auto) {
+        refresh_handles(c);
+        return;
+    }
+    if (mode != HandleMode::Aligned) return;   // Free: handles freeze where they are.
+
+    // Aligned: mirror one handle's direction onto the other. Whichever handle already has a
+    // length is the reference and keeps it; the other takes the opposite direction. When BOTH
+    // are degenerate (an endpoint never dragged), the direction instead comes from the
+    // neighbours -- the same tangent Auto would compute -- and both handles take that length,
+    // so the point reads as smooth immediately rather than hiding a zero-length handle.
+    const float in_len  = glm::length(p.in_handle - p.position);
+    const float out_len = glm::length(p.out_handle - p.position);
+    if (out_len > 1e-6f) {
+        const glm::vec3 fwd = (p.out_handle - p.position) / out_len;
+        p.in_handle = p.position - fwd * (in_len > 1e-6f ? in_len : out_len);
+    } else if (in_len > 1e-6f) {
+        const glm::vec3 fwd = (p.position - p.in_handle) / in_len;
+        p.out_handle = p.position + fwd * in_len;
+    } else {
+        glm::vec3 before, after;
+        neighbours_(c, index, before, after);
+        const glm::vec3 span = after - before;
+        const glm::vec3 fwd = glm::dot(span, span) > 1e-12f ? glm::normalize(span)
+                                                              : glm::vec3(1.0f, 0.0f, 0.0f);
+        const float reach = std::min(glm::distance(p.position, before), glm::distance(p.position, after)) / 3.0f;
+        p.in_handle  = p.position - fwd * reach;
+        p.out_handle = p.position + fwd * reach;
+    }
+}
+
 } // namespace curve
 } // namespace toy

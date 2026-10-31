@@ -44,7 +44,8 @@ glm::vec3 parse_rgb(const fkyaml::node& n, const glm::vec3& fallback);
 void register_scene_components();
 
 /**
- * @brief Registers the argument-free parsers above, plus "ClothRenderer", which needs GPU handles.
+ * @brief Registers the argument-free parsers above, plus "ClothRenderer" and "Hair", which need
+ *        GPU handles and an asset manager respectively.
  *
  * Call this overload instead of the argument-free one from any app that has a device -- it is a
  * strict superset. Split rather than made the only form so headless tests (and libcoopa-only
@@ -56,7 +57,8 @@ void register_scene_components();
  *
  * @param device            Vulkan logical device, for the cloth's dynamic vertex buffers.
  * @param allocator         VMA allocator.
- * @param assets            Asset manager the runtime cloth mesh is published into.
+ * @param assets            Asset manager the runtime cloth and hair meshes are published into,
+ *                          and that resolves a Hair component's material and textures.
  * @param frames_in_flight  Number of vertex buffers each cloth mesh rings through; pass
  *                          Context::frames_in_flight(). See Mesh::from_arrays().
  */

@@ -648,6 +648,92 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             f_float("density", 1000.0f, 1.0f, 1.0f, 20000.0f),
             f_float("max_depth", 60.0f, 0.5f, 0.1f, 10000.0f),
         }});
+        // Hair/fur grown from the faces of the mesh beside it -- see toyengine/hair/README.md.
+        // `thickness_over_length` is the first user of FieldKind::Curve in the tree: a width
+        // profile is exactly the drag-a-point box that widget was written for.
+        add({"Hair", "Rendering", {
+            f_enum("shape", {"ribbon", "tube"}, true),
+            with_tip(f_int("cross_section", 2, 1, 3, true),
+                     "Ribbon: crossed planes per strand. 1 is cheapest but a strand vanishes when "
+                     "seen edge-on; 2 is the usual choice for hair and fur"),
+            with_tip(f_int("sides", 5, 3, 16),
+                     "Tube: sides of the extruded strand. Opaque, so no alpha test -- what a few "
+                     "deliberately thick stylised strands want"),
+            with_tip(f_int("segments", 8, 1, 64, true),
+                     "Points along one strand. Also the particle count per simulated guide"),
+
+            with_tip(f_float("density", 20000.0f, 50.0f, 0.0f, 2e6f, true),
+                     "Strands per SQUARE METRE of scalp, so a bigger head grows proportionally more"),
+            with_tip(f_int("max_strands", 8000, 0, 1 << 20, true),
+                     "Ceiling whatever density x area implies. A groom over it is thinned evenly, "
+                     "never truncated"),
+            with_unit(with_tip(f_float("length", 0.12f, 0.002f, 1e-4f, 100.0f, true),
+                               "Before the mask's green channel and the guides"), "m"),
+            as_slider(f_float("length_jitter", 0.25f, 0.005f, 0.0f, 0.95f)),
+            with_unit(with_tip(f_float("thickness", 0.0012f, 0.0002f, 1e-5f, 1.0f, true),
+                               "Across, at the root. 0.001 is a human hair; 0.03 a thick poly strand"), "m"),
+            with_tip(f_curve("thickness_over_length", {{0.0f, 1.0f}, {1.0f, 0.25f}}),
+                     "Multiplies thickness from root (left) to tip (right)"),
+
+            with_tip(f_float("droop", 0.4f, 0.01f, 0.0f, 10.0f),
+                     "How far a strand falls over its length, in multiples of its own length. 0 "
+                     "stands straight off the scalp"),
+            as_slider(with_tip(f_float("clump", 0.3f, 0.01f, 0.0f, 1.0f),
+                               "Gathers nearby strands into locks, tips more than roots")),
+            as_slider(f_float("clump_density", 0.02f, 0.002f, 1e-4f, 1.0f)),
+            with_tip(f_float("curl", 0.0f, 0.05f, 0.0f, 20.0f), "Turns of a helix over the strand"),
+            with_unit(f_float("curl_radius", 0.01f, 0.001f, 0.0f, 10.0f), "m"),
+            with_unit(with_tip(f_float("frizz_degrees", 6.0f, 0.1f, 0.0f, 89.0f),
+                               "Randomises each strand away from the scalp normal"), "deg"),
+
+            with_tip(f_texture("root_mask", "Root Mask"),
+                     "Sampled by the scalp's UV: red scales density, green scales length"),
+            with_tip(f_child("guides"),
+                     "An object whose descendants' Curve components shape the groom. Draw them "
+                     "with Pen Mode"),
+            as_slider(f_float("guide_influence", 1.0f, 0.01f, 0.0f, 1.0f)),
+            f_int("guide_count", 3, 1, 8),
+
+            with_tip(f_float("wind_flexibility", 0.25f, 0.005f, 0.0f, 4.0f),
+                     "Tip sway in a 10 m/s wind, as a fraction of the strand's length. This is "
+                     "what moves a groom that is not simulated, and it costs nothing per frame"),
+            f_float("wind_frequency", 3.0f, 0.02f, 0.0f, 40.0f),
+
+            with_tip(f_bool("simulate", false, true),
+                     "Off: a static mesh swaying in the vertex shader. On: guide strands are "
+                     "solved by the physics engine and collide with the body"),
+            with_tip(f_int("sim_guides", 64, 1, 4096),
+                     "Guides actually solved. Render strands follow these, so THIS is what the "
+                     "solver costs scale with -- not density"),
+            as_slider(with_tip(f_float("sim_stiffness", 0.12f, 0.005f, 0.0f, 1.0f),
+                               "How hard hair is pulled back to the shape it was combed into, per "
+                               "1/60 s. 0 is limp and forgets its groom; 1 is a wig that barely "
+                               "reacts. Takes effect live -- no re-scatter")),
+            with_tip(f_float("sim_stiffness_falloff", 1.6f, 0.02f, 0.0f, 16.0f),
+                     "How fast that fades toward the tip. Higher frees the tips sooner, which is "
+                     "what makes hair swing from its ends rather than as one board"),
+            as_slider(with_tip(f_float("sim_curl_hold", 0.25f, 0.005f, 0.0f, 1.0f),
+                               "How hard each segment's rest ANGLE is restored. What holds a curl")),
+            f_float("sim_damping", 0.06f, 0.005f, 0.0f, 10.0f),
+            with_tip(f_float("sim_drag", 0.6f, 0.01f, 0.0f, 20.0f),
+                     "Drag against the air -- what makes hair trail behind a moving head"),
+            with_unit(with_tip(f_float("sim_collision_thickness", 0.01f, 0.001f, 0.0f, 1.0f),
+                               "How far off a collider a strand is held. Hair has no volume of "
+                               "its own, so 0 would z-fight the skin"), "m"),
+            as_slider(with_tip(f_float("sim_friction", 0.4f, 0.01f, 0.0f, 1.0f),
+                               "1 grips, so hair resting on a shoulder stays there")),
+            f_float("sim_gravity", 1.0f, 0.01f, -10.0f, 10.0f),
+
+            with_tip(f_vec2("lod_screen_sizes", glm::vec2(0.09f, 0.035f), 0.002f),
+                     "Projected height (a fraction of the screen's) below which each level is "
+                     "drawn; each halves the strand count. Must descend"),
+            with_tip(f_float("cull_screen_size", 0.012f, 0.001f, 0.0f, 1.0f),
+                     "Below this projected height the groom is not drawn at all. 0 never culls"),
+
+            f_enum("regenerate", {"on_change", "on_load", "manual"}),
+            f_int("seed", 7, 0, 1000000),
+            f_material(),
+        }});
         add({"Buoyancy", "Water", {
             f_int("subdivisions", 2, 1, 4, true),
             f_float("volume", -1.0f, 0.01f, -1.0f, 1e6f),

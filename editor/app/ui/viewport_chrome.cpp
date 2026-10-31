@@ -34,8 +34,9 @@ imm::Box ViewportChromePanel::nav_gizmo_rect_() const {
 imm::Box ViewportChromePanel::toolbar_rect_(bool mesh_edit) const {
     // `n` SIZES the panel, so it has to match what draw_toolbar_() actually puts in it. A button
     // added without bumping this draws below the rect and is clipped away -- present, wired, and
-    // invisible. Object mode: select, cursor, pen, move, rotate, scale.
-    const int n = app_.curve_pen_panel_->in_pen_mode_() ? 3
+    // invisible. Object mode: select, cursor, pen, move, rotate, scale. Pen mode: select, draw,
+    // the four anchor modes, show-handles, and the Object Mode exit -- 8 buttons.
+    const int n = app_.curve_pen_panel_->in_pen_mode_() ? 8
                 : app_.in_sculpt_mode_() ? 5 : app_.paint_panel_->in_paint_mode_() ? 3 : mesh_edit ? 9 : 6;
     return {app_.viewport_box_.x + 6, app_.viewport_box_.y + 6, kToolSize + 6, n * (kToolSize + 2) + 14};
 }
@@ -978,7 +979,10 @@ void ViewportChromePanel::draw_mode_menu_items_(imm::Context& ctx) {
         else app_.curve_pen_panel_->begin_pen_(app_.doc_.primary());
     }
     ctx.tooltip("Pen Mode\nDraw and reshape a curve on this object. Click to add a point, click "
-                "the line to insert one, drag a point or its handles, X deletes, C closes the loop.");
+                "the line to insert one, drag a point or its handles, X deletes, C closes the loop.\n"
+                "With the Select tool, click any other curve's line to switch to it -- which is "
+                "how a hair groom's guides are moved between. On a Hair object the mode opens on "
+                "a guide rather than on the scalp.");
     // A rig (an Animator at or above the selection): pose its joints by hand.
     bool pm = cur == InteractionMode::Pose;
     const ObjectId pose_id = app_.pose_rig_ ? app_.pose_rig_ : app_.timeline_panel_->rig_of_(app_.doc_.primary());

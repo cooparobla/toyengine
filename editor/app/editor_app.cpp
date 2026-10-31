@@ -100,6 +100,11 @@ EditorApp::EditorApp(core::Engine& engine, Project project, const fs::path& scen
     register_inspector_section("InstancePainter.edit", [this](imm::Context& ctx, SectionContext& sc) {
         return instance_paint_panel_->draw_instance_inspector_header_(ctx, sc.object_id);
     });
+    // Hair's guides are curves, so the pen owns that section: its button makes one and starts
+    // drawing it, which nothing else in the inspector can do.
+    register_inspector_section("Hair.guides", [this](imm::Context& ctx, SectionContext& sc) {
+        return curve_pen_panel_->draw_hair_guides_(ctx, sc);
+    });
     for (const char* tile_terrain : {"TileTerrain", "Terrain"}) {   // Terrain is TileTerrain's old name
         register_inspector_section(tile_terrain, [this](imm::Context& ctx, SectionContext& sc) {
             return tile_terrain_panel_->draw_tile_terrain_panel_(ctx, sc.object_id, sc.comp, sc.env);
@@ -201,7 +206,7 @@ EditorApp::~EditorApp() {
     // The drawers below close over this app; the registry outlives it (one editor is built
     // and torn down per test), so they go with it.
     for (const char* id : {"ParticleSystem", "TileTerrain", "Terrain", "HeightmapTerrain.edit",
-                           "InstancePainter.edit"}) {
+                           "InstancePainter.edit", "Hair.guides"}) {
         unregister_inspector_section(id);
     }
     engine_.wait_idle();

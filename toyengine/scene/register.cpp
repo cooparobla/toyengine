@@ -30,6 +30,7 @@
 #include <toyengine/scene/rider.h>
 #include <toyengine/scene/scene_link.h>
 #include <toyengine/scene/destructible.h>
+#include <toyengine/hair/hair.h>
 #include <toyengine/scene/skinned_mesh_renderer.h>
 #include <toyengine/scene/terrain_digger.h>
 #include <toyengine/scene/turntable.h>
@@ -627,6 +628,12 @@ void register_scene_components(coopa::gfx::core::Device& device,
     using coopa::scene::SceneObject;
 
     register_scene_components();
+
+    // Hair grows from the mesh of the renderer beside it. Registered here, in the overload that
+    // has an asset manager, because its `material:` may name a shared material asset and its
+    // textures -- resolved exactly as any other renderer's are. The device and allocator the
+    // strand mesh needs are held by toy::hair::HairSystem, which toy::core::Engine installs.
+    hair::register_hair_components(assets);
 
     // No fields of its own: everything it draws comes from the sibling Cloth and MeshRenderer.
     SceneLoader::register_component_parser("ClothRenderer",

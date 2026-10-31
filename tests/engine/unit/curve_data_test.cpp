@@ -188,6 +188,71 @@ COOPA_TEST(a_derived_points_handles_are_recomputed_not_dragged) {
            "curve: it still points straight at the next control point");
 }
 
+/** @brief Converting to Corner (Free) is a pure relabel -- the handles stay exactly put. */
+COOPA_TEST(set_handle_mode_to_corner_leaves_handles_in_place) {
+    CurveData c = straight(3);
+    const glm::vec3 in_before = c.points[1].in_handle;
+    const glm::vec3 out_before = c.points[1].out_handle;
+    set_handle_mode(c, 1, HandleMode::Free);
+    expect(c.points[1].mode == HandleMode::Free, "curve: the mode changed");
+    expect(glm::distance(c.points[1].in_handle, in_before) < 1e-5f, "curve: in-handle untouched");
+    expect(glm::distance(c.points[1].out_handle, out_before) < 1e-5f, "curve: out-handle untouched");
+}
+
+/** @brief Converting to Smooth (Aligned) mirrors an existing handle's direction, keeping its length. */
+COOPA_TEST(set_handle_mode_to_smooth_mirrors_an_existing_handle) {
+    CurveData c;
+    append_point(c, glm::vec3(0.0f));
+    append_point(c, glm::vec3(2.0f, 0.0f, 0.0f));
+    CurvePoint& p = c.points[1];
+    p.mode = HandleMode::Free;
+    p.out_handle = p.position + glm::vec3(1.0f, 2.0f, 0.0f);   // a lopsided corner
+    p.in_handle  = p.position + glm::vec3(0.5f, 0.0f, 0.0f);   // own, short length -- must survive
+
+    set_handle_mode(c, 1, HandleMode::Aligned);
+    expect(c.points[1].mode == HandleMode::Aligned, "curve: the mode changed");
+
+    const glm::vec3 out_dir = glm::normalize(p.out_handle - p.position);
+    const glm::vec3 in_dir  = glm::normalize(p.in_handle - p.position);
+    expect(glm::dot(out_dir, in_dir) < -0.999f, "curve: the handles now point opposite ways");
+    expect_near(glm::length(p.in_handle - p.position), 0.5f, 1e-4f,
+                "curve: the mirrored handle kept its OWN length rather than copying the other's");
+}
+
+/** @brief Smooth on a point whose handles both sit on it falls back to the neighbour tangent. */
+COOPA_TEST(set_handle_mode_to_smooth_falls_back_to_neighbour_tangent_when_degenerate) {
+    CurveData c;
+    append_point(c, glm::vec3(0.0f));
+    const std::size_t mid = append_point(c, glm::vec3(2.0f, 0.0f, 0.0f));
+    append_point(c, glm::vec3(5.0f, 0.0f, 0.0f));
+    c.points[mid].mode = HandleMode::Free;
+    c.points[mid].in_handle = c.points[mid].out_handle = c.points[mid].position;   // degenerate
+
+    set_handle_mode(c, mid, HandleMode::Aligned);
+    const CurvePoint& p = c.points[mid];
+    expect(glm::distance(p.in_handle, p.position) > 1e-3f,
+           "curve: the in-handle is no longer sitting on the point");
+    expect(glm::distance(p.out_handle, p.position) > 1e-3f,
+           "curve: neither is the out-handle");
+    const glm::vec3 out_dir = glm::normalize(p.out_handle - p.position);
+    expect(out_dir.x > 0.99f, "curve: it points along the straight run through its neighbours");
+}
+
+/** @brief Vector/Auto recompute the instant the mode changes, not only on a later move. */
+COOPA_TEST(set_handle_mode_to_vector_or_auto_snaps_immediately) {
+    CurveData c;
+    append_point(c, glm::vec3(0.0f));
+    const std::size_t mid = append_point(c, glm::vec3(2.0f, 3.0f, 0.0f));   // off the straight line
+    append_point(c, glm::vec3(4.0f, 0.0f, 0.0f));
+    c.points[mid].mode = HandleMode::Free;
+    c.points[mid].out_handle = c.points[mid].position;   // a handle nothing like Vector's answer
+
+    set_handle_mode(c, mid, HandleMode::Vector);
+    const glm::vec3 toward_next = (c.points[2].position - c.points[mid].position) / 3.0f;
+    expect(glm::distance(c.points[mid].out_handle, c.points[mid].position + toward_next) < 1e-4f,
+           "curve: the Vector handle already points a third of the way to its neighbour");
+}
+
 /** @brief A tangent frame is orthonormal, and survives a curve running straight up. */
 COOPA_TEST(the_tangent_frame_stays_sane_even_pointing_at_the_up_axis) {
     for (const glm::vec3& dir : {glm::vec3(1, 0, 0), glm::vec3(0, 1, 0), glm::vec3(0, 0, 1),

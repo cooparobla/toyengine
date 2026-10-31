@@ -173,6 +173,54 @@ void apply_component_sections(std::map<std::string, ComponentSchema>& table) {
             .keys({"density", "max_depth"}).closed().done(),
     });
 
+    layout("Hair", {
+        sec("Strands", "Mesh")
+            .says("What one hair is made of. Ribbons are flat strips for dense fine hair; tubes "
+                  "are solid, for a few deliberately thick strands.")
+            .keys({"shape", "cross_section", "sides", "segments"}).done(),
+        sec("Growth", "Proportional")
+            .says("How much hair there is and how long it grows. Density is per square metre of "
+                  "the mesh it grows from, so it means the same thing on a head and on a bear.")
+            .keys({"density", "max_strands", "length", "length_jitter"})
+            .sub("Thickness").keys({"thickness", "thickness_over_length"})
+            .done(),
+        sec("Style", "Rotate")
+            .says("The shape of the groom: how far it falls, whether it gathers into locks, and "
+                  "how much it curls.")
+            .keys({"droop", "clump", "clump_density"})
+            .sub("Curl").keys({"curl", "curl_radius", "frizz_degrees"})
+            .done(),
+        sec("Guides", "Pen")
+            .says("Draw a few curves with Pen Mode and the whole groom follows them. Without any, "
+                  "the hair is purely procedural.")
+            .custom("Hair.guides")
+            .keys({"guides", "guide_influence", "guide_count"}).done(),
+        sec("Where It Grows", "WeightPaint")
+            .says("Red thins the hair, green shortens it. Painted in the mesh's UV space.")
+            .keys({"root_mask"}).closed().done(),
+        sec("Look", "Palette")
+            .says("Strands are drawn by the `hair` shader, which gives each one a lengthways "
+                  "highlight and its own slight colour.")
+            .keys({"material"}).done(),
+        sec("Wind", "World")
+            .says("How the hair answers the weather, with no simulation and no per-frame cost. "
+                  "There is no motion at all in dead air.")
+            .keys({"wind_flexibility", "wind_frequency"}).done(),
+        sec("Physics", "Physics").toggle("simulate")
+            .says("Solves guide strands so the hair swings and rests on the body. Only the guides "
+                  "are simulated -- every other strand follows them. Every row here takes effect "
+                  "live, without re-growing the groom.")
+            .keys({"sim_guides"})
+            .sub("Stiffness").keys({"sim_stiffness", "sim_stiffness_falloff", "sim_curl_hold"})
+            .sub("Motion").keys({"sim_damping", "sim_drag", "sim_gravity"})
+            .sub("Contact").keys({"sim_collision_thickness", "sim_friction"})
+            .closed().done(),
+        sec("Detail & Rebuilds", "Gear")
+            .says("Distant grooms drop strands rather than disappear. Rebuilds re-scatter "
+                  "everything, so a heavy groom can be pinned while a scene is laid out.")
+            .keys({"lod_screen_sizes", "cull_screen_size", "regenerate", "seed"}).closed().done(),
+    });
+
     layout("Buoyancy", {
         sec("Flotation", "Physics")
             .says("How much of this object is under water, and how hard the water pushes back.")

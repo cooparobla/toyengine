@@ -14,6 +14,7 @@
 #include <physxcoopa/world.h>
 #include <toyengine/weather/weather_system.h>
 #include <toyengine/weather/wind.h>
+#include <toyengine/hair/hair.h>
 
 namespace toy {
 namespace weather {
@@ -59,6 +60,19 @@ void WindSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameCo
             wind += env::wind_at(env_, at) * cc->weather_wind;
         }
         cloth->params.wind = wind;
+    }
+
+    // Hair: the same field, written onto the component (pushed in, never pulled) for HairSystem
+    // to hand the solver. A groom that is not simulated ignores it -- its motion is in the
+    // shader, which reads the world wind itself.
+    for (hair::Hair* h : scene.get_components<hair::Hair>()) {
+        glm::vec3 wind(0.0f);
+        if (live && h->weather_wind != 0.0f && h->owner != nullptr) {
+            const auto* tc = h->owner->get_transform();
+            const glm::vec3 at = tc ? glm::vec3(tc->transform().get_world_matrix()[3]) : glm::vec3(0.0f);
+            wind = env::wind_at(env_, at) * h->weather_wind;
+        }
+        h->wind = wind;
     }
 
     if (!live) return;

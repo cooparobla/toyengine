@@ -153,6 +153,26 @@ wind itself.
 
 Set `wind_flexibility: 0` on a simulated groom, or the shader sway will fight the solver.
 
+### What it collides with
+
+By default a simulated groom collides with every `Collider` the broadphase reports near it —
+the same query cloth uses, and the same reason a `Collider` with no `Rigidbody` (a Static body) is
+already enough to stop hair, with no further setup.
+
+`collide_with: [name, ...]` names the objects it should collide against instead. When set, the
+broadphase is not queried at all: the groom's candidate colliders come straight from the named
+objects' bodies (walking each one's descendants, so a compound rig's colliders on child objects
+still count), which makes the cost proportional to what was named rather than to whatever happens
+to be nearby — and the behaviour predictable, since the groom stops reacting the moment something
+unrelated grows a collider in the scene. A name that resolves to no object, or to an object with no
+`Collider`, is warned about once and skipped — it never synthesizes a collider.
+
+The groom's own `Collider`, if it has one, is always included, named or not: naming other objects
+must not silently cost a groom the self-collision it already had.
+
+A static groom (`simulate: false`) has no solver and does not collide at all, with anything,
+named or not.
+
 ### Tuning it
 
 Every `sim_*` key is pushed into the live solver each frame rather than copied at bind time, so

@@ -103,6 +103,11 @@ void register_hair_components(coopa::asset::AssetManager& assets) {
             read(node, "sim_collision_thickness", p.sim_collision_thickness);
             read(node, "sim_friction", p.sim_friction);
             read(node, "sim_gravity", p.sim_gravity);
+            if (node.contains("collide_with") && node.at("collide_with").is_sequence()) {
+                for (const fkyaml::node& n : node.at("collide_with")) {
+                    if (n.is_string()) p.collide_with.push_back(n.get_value<std::string>());
+                }
+            }
 
             read(node, "lod_screen_sizes", p.lod_screen_sizes);
             read(node, "cull_screen_size", p.cull_screen_size);

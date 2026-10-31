@@ -112,7 +112,7 @@ void ParticleSimulationSystem::gather_(coopa::scene::Scene& scene) {
 }
 
 void ParticleSimulationSystem::collect_terrain_scatter_(coopa::scene::Scene& scene, ParticleSystem& ps, const ParticleView& view,
-                                                        const std::function<bool(const glm::vec3&, const glm::vec3&)>& cull,
+                                                        const std::function<bool(const glm::vec3&, const glm::vec3&, bool)>& cull,
                                                         render::ParticleFrameState& out) {
     const ParticleSettings& s = ps.settings;
     if (s.look.mode != render::ParticleRenderMode::Mesh) return;   // a scatter places meshes
@@ -182,7 +182,7 @@ void ParticleSimulationSystem::collect_terrain_scatter_(coopa::scene::Scene& sce
         const uint32_t drawn = TerrainScatterCache::thinned_count(static_cast<uint32_t>(c.matrices.size()), glm::length(d),
                                                                   draw_distance, s.shape.terrain.fade_start);
         if (drawn == 0) continue;
-        if (!cull(c.bounds_min, c.bounds_max)) continue;
+        if (!cull(c.bounds_min, c.bounds_max, s.cast_shadows)) continue;
         render::ParticleMeshBatch mb;
         mb.proxy = &ps.mesh_proxy();
         mb.matrices = c.matrices.data();

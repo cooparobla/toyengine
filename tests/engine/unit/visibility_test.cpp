@@ -75,6 +75,40 @@ COOPA_TEST(world_aabb_matches_transformed_corners) {
     }
 }
 
+COOPA_TEST(sweep_bounds_covers_the_original_box_and_its_projection) {
+    using namespace toy::render;
+    const WorldBounds b{{0, 0, 0}, {1, 1, 1}};
+
+    // Zero or negative distance: unchanged.
+    {
+        const WorldBounds s = sweep_bounds(b, {1, 0, 0}, 0.0f);
+        expect(s.center == b.center && s.extent == b.extent, "sweep_bounds: distance <= 0 is a no-op");
+    }
+    // Near-zero direction: unchanged, never NaN from normalizing a zero vector.
+    {
+        const WorldBounds s = sweep_bounds(b, {0, 0, 0}, 10.0f);
+        expect(s.center == b.center && s.extent == b.extent, "sweep_bounds: zero direction is a no-op");
+    }
+    // Swept along +X by 10: covers both the original box and its translation by (10, 0, 0),
+    // and nothing further (axis-aligned, so the Y/Z extent is untouched).
+    {
+        const WorldBounds s = sweep_bounds(b, {1, 0, 0}, 10.0f);
+        expect_near(s.center.x, 5.0f, 1e-5f, "sweep_bounds: centre moves halfway to the swept end");
+        expect_near(s.extent.x, 6.0f, 1e-5f, "sweep_bounds: X extent grows by half the sweep");
+        expect_near(s.extent.y, 1.0f, 1e-5f, "sweep_bounds: Y extent untouched");
+        expect_near(s.extent.z, 1.0f, 1e-5f, "sweep_bounds: Z extent untouched");
+        expect(s.center.x - s.extent.x <= b.center.x - b.extent.x + 1e-5f,
+               "sweep_bounds: still covers the box's original near face");
+        expect(s.center.x + s.extent.x >= 10.0f - 1.0f - 1e-5f,
+               "sweep_bounds: covers the box translated by the full sweep");
+    }
+    // An unnormalized direction scales by `distance`, not by the vector's own length.
+    {
+        const WorldBounds s = sweep_bounds(b, {2, 0, 0}, 10.0f);
+        expect_near(s.extent.x, 6.0f, 1e-5f, "sweep_bounds: direction is normalized before scaling");
+    }
+}
+
 COOPA_TEST(screen_size_estimates_match_the_projection) {
     {
         using namespace toy::render;

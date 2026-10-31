@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include <glm/glm.hpp>
 
@@ -154,6 +155,12 @@ struct HairParams {
     float sim_friction = 0.4f;
     /// @brief Multiplies world gravity on the strands.
     float sim_gravity = 1.0f;
+    /// @brief Objects this groom collides with, by name. Empty -- the default -- collides with
+    ///        every collider the broadphase reports near the groom, which is every nearby shape
+    ///        in the scene. Naming them instead skips the broadphase entirely and is both
+    ///        cheaper and predictable: a groom stops piling onto the ground the moment something
+    ///        else grows a collider. The scalp's OWN collider is always included, named or not.
+    std::vector<std::string> collide_with;
 
     // --- Level of detail -----------------------------------------------------------------------
 

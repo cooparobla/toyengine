@@ -308,7 +308,7 @@ void InstancePainterSystem::drop_collision_(InstancePainter& painter, Painted& p
 // --- render ---
 
 void InstancePainterSystem::collect_render(coopa::scene::Scene& scene, const glm::vec3& camera,
-                                           const std::function<bool(const glm::vec3&, const glm::vec3&)>& cull,
+                                           const std::function<bool(const glm::vec3&, const glm::vec3&, bool)>& cull,
                                            render::ParticleFrameState& out) {
     // The scene is re-queried here rather than reusing anything remembered from execute():
     // see the declaration for why a painter pointer does not survive that gap in the editor.
@@ -330,7 +330,7 @@ void InstancePainterSystem::collect_render(coopa::scene::Scene& scene, const glm
                 const std::uint32_t drawn = particles::TerrainScatterCache::thinned_count(
                     static_cast<std::uint32_t>(b.matrices.size()), glm::length(d), b.draw_distance, b.fade_start);
                 if (drawn == 0) continue;
-                if (cull && !cull(b.bounds_min, b.bounds_max)) continue;
+                if (cull && !cull(b.bounds_min, b.bounds_max, proxy->cast_shadows)) continue;
 
                 render::MeshInstanceBatch mb;
                 mb.proxy = proxy;

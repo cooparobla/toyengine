@@ -76,9 +76,12 @@ public:
      *
      * @param camera Where thinning and culling are measured from.
      * @param cull   Returns whether a world-space AABB is worth drawing (the frustum test).
+     *               The third argument is whether this batch casts shadows, so the caller can
+     *               widen the test for a caster that may be off screen but still shadowing
+     *               into frame (see Engine::sync_particle_render_state_()).
      */
     void collect_render(coopa::scene::Scene& scene, const glm::vec3& camera,
-                        const std::function<bool(const glm::vec3&, const glm::vec3&)>& cull,
+                        const std::function<bool(const glm::vec3&, const glm::vec3&, bool)>& cull,
                         render::ParticleFrameState& out);
 
     /** @brief Total instances in built chunks across every painter -- for the debug overlay. */

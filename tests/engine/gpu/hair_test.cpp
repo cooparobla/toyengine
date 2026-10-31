@@ -240,11 +240,12 @@ COOPA_TEST(the_simulated_groom_registers_guides_and_they_move) {
  * @brief A groom's hair settles against a SEPARATE static collider rather than passing through it.
  *
  * `swinging_tail` only ever collides against its own root sphere -- the collider its hair grows
- * from. `head_on_neck` is the other case this cannot cover: a static obstacle (the `neck`
- * capsule) the groom knows nothing about by name. The physics world's broadphase is supposed to
- * find ANY nearby collider automatically, the same as it does for cloth -- if that wiring broke,
- * every particle would simply fall through the capsule under gravity, and no other hair test
- * would notice, because they only ever look at a groom's own root.
+ * from, found through the generic broadphase like any other shape. `head_on_neck` is the other
+ * case this cannot cover: a static obstacle (the `neck` capsule) that is not the groom's own
+ * root, reached here via `collide_with: [neck]` rather than the broadphase. If the allowlist
+ * resolution broke -- names never resolved, or resolved to nothing -- every particle would simply
+ * fall through the capsule under gravity, and no other hair test would notice, because they only
+ * ever look at a groom's own root.
  */
 COOPA_TEST(a_grooms_hair_settles_against_a_separate_static_collider) {
     ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
@@ -301,6 +302,67 @@ COOPA_TEST(a_grooms_hair_settles_against_a_separate_static_collider) {
     expect(deepest > -kSlack,
            "hair collision: no particle sank more than " + std::to_string(kSlack) +
                " m inside the neck capsule (deepest penetration " + std::to_string(-deepest) +
-               " m) -- head_on_neck's hair actually collided with a collider it shares no name "
-               "with, rather than passing through it");
+               " m) -- head_on_neck's hair actually collided with the collider its collide_with "
+               "names, rather than passing through it");
+}
+
+/**
+ * @brief The allowlist is exclusive: a named groom ignores a collider close enough that the
+ *        default broadphase would have caught it, but which `collide_with` does not name.
+ *
+ * `unrelated_prop` sits in `hair_demo` directly between `head_on_neck` and `neck`, exactly where
+ * every strand must pass on its way down. Under the generic broadphase this would stop the hair
+ * before it ever reached the neck capsule the test above checks. Because `head_on_neck`'s
+ * `collide_with` names only `neck`, the groom skips the broadphase entirely and `unrelated_prop`
+ * is never even a candidate -- its strands should pass straight through the prop's sphere with
+ * no resistance at all. If the allowlist ever leaked into querying the broadphase too, this is
+ * the one test that would catch it; the test above cannot, because `neck` is both the one named
+ * collider and the only nearby one.
+ */
+COOPA_TEST(a_named_grooms_hair_ignores_an_unnamed_nearby_collider) {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    toy::core::AppConfig config =
+        make_test_config("assets/scenes/effects/hair_demo/scene.yaml", 320, 180, 320, 180);
+    toy::core::Engine engine(std::move(config));
+
+    auto* prop = engine.scene().find_object("unrelated_prop");
+    expect(prop != nullptr, "hair collision: the unrelated_prop object resolves by name");
+    if (prop == nullptr) return;
+    const auto* prop_tc = prop->get_transform();
+    expect(prop_tc != nullptr, "hair collision: and has a transform");
+    if (prop_tc == nullptr) return;
+    const glm::vec3 prop_center(prop_tc->transform().get_world_matrix()[3]);
+    // The authored radius on `unrelated_prop` in hair_demo.yaml. Measured closest approach of
+    // any particle to this point, with the prop correctly ignored, is ~0.30 m -- comfortably
+    // inside this radius but outside a much smaller one, which is why the prop is sized 0.35.
+    constexpr float kPropRadius = 0.35f;
+
+    auto* physics = dynamic_cast<coopa::physx::system::PhysicsSystem*>(
+        engine.scene().find_system("Physics"));
+    expect(physics != nullptr, "hair collision: the scene has physics to solve it");
+    if (physics == nullptr) return;
+
+    // `head_on_neck` shakes back and forth continuously (Animator `auto_play: shake`), so
+    // sample every frame rather than only the end -- the sweep carries strands near the prop's
+    // position repeatedly, but there is no guarantee the FINAL frame happens to be one of them.
+    std::size_t checked = 0;
+    bool any_inside = false;
+    for (int frame = 0; frame < 160 && !any_inside; ++frame) {
+        tick_frames(engine, 1);
+        physics->world().for_each_strands([&](coopa::physx::hair::StrandSetId,
+                                              const coopa::physx::hair::StrandSet& set) {
+            for (const auto& p : set.particles) {
+                ++checked;
+                if (glm::distance(p.position, prop_center) < kPropRadius) any_inside = true;
+            }
+        });
+    }
+
+    expect(checked > 0, "hair collision: at least one simulated strand particle exists to check");
+    expect(any_inside,
+           "hair collision: head_on_neck's hair should pass straight through unrelated_prop -- "
+           "none of its particles ever lay inside the prop's radius, which means the groom "
+           "collided with a collider its collide_with does not name");
 }

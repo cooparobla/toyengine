@@ -14,6 +14,7 @@
 #include <vector>
 
 #include <glm/gtc/matrix_transform.hpp>
+#include <toyengine/render/toy_render_config.h>
 #include <toyengine/render/toy_render_math.h>
 
 #include "engine/support/checks.h"
@@ -420,4 +421,53 @@ COOPA_TEST(snap_step_one_matches_the_historical_texel_snap) {
     }
     expect(identical, "snap step 1 is the historical texel snap, bit for bit");
     expect_near(legacy.texel_world, explicit_one.texel_world, 0.0f, "snap step 1 keeps texel_world");
+}
+
+// --- dir_shadow_caster_reach (toy_render_config.h) ------------------------------------------
+//
+// A caster's own height needs shadow_distance / sin(elevation) of reach to land its shadow on
+// the ground, which is why an off-screen caster drops out of the cascade below the elevation a
+// flat shadow_distance was tuned for -- see shadow_offscreen_test.cpp for the end-to-end repro.
+
+COOPA_TEST(caster_reach_matches_shadow_distance_at_a_high_sun) {
+    // Straight down (sin(elevation) == 1): no scaling, reach is exactly the base distance.
+    toy::render::ToyRenderConfig rc;
+    rc.shadow_distance = 60.0f;
+    const glm::vec3 straight_down(0.0f, 0.0f, -1.0f);
+    expect_near(toy::render::dir_shadow_caster_reach(rc, straight_down), 60.0f, 1e-4f,
+                "caster_reach: a straight-down sun needs no elevation scaling");
+}
+
+COOPA_TEST(caster_reach_grows_as_the_sun_lowers) {
+    // sin(30 deg) = 0.5, so a 30-degree sun needs exactly double the base reach.
+    toy::render::ToyRenderConfig rc;
+    rc.shadow_distance = 60.0f;
+    const glm::vec3 low_sun(std::cos(glm::radians(30.0f)), 0.0f, -std::sin(glm::radians(30.0f)));
+    expect_near(toy::render::dir_shadow_caster_reach(rc, low_sun), 120.0f, 1e-2f,
+                "caster_reach: a 30-degree sun doubles the base reach (1 / sin(30) == 2)");
+}
+
+COOPA_TEST(caster_reach_is_capped_at_the_horizon) {
+    // A sun arbitrarily close to the horizon must not ask for an unbounded box: the elevation
+    // floor (sin_elevation_floor) stops the division from blowing up, and shadow_caster_reach_max
+    // caps the result outright.
+    toy::render::ToyRenderConfig rc;
+    rc.shadow_distance = 60.0f;
+    rc.shadow_caster_reach_max = 500.0f;
+    const glm::vec3 grazing(1.0f, 0.0f, -0.001f);
+    const float reach = toy::render::dir_shadow_caster_reach(rc, grazing);
+    expect(std::isfinite(reach), "caster_reach: a grazing sun still returns a finite reach");
+    expect(reach <= rc.shadow_caster_reach_max,
+           "caster_reach: a grazing sun is capped at shadow_caster_reach_max");
+}
+
+COOPA_TEST(caster_reach_cap_never_undercuts_the_base_distance) {
+    // A reach cap configured below shadow_distance itself would make a high sun's own
+    // (unscaled) reach exceed the cap -- the cap must widen to at least shadow_distance.
+    toy::render::ToyRenderConfig rc;
+    rc.shadow_distance = 60.0f;
+    rc.shadow_caster_reach_max = 10.0f; // misconfigured below shadow_distance
+    const glm::vec3 straight_down(0.0f, 0.0f, -1.0f);
+    expect_near(toy::render::dir_shadow_caster_reach(rc, straight_down), 60.0f, 1e-4f,
+                "caster_reach: the cap never cuts a high sun's reach below shadow_distance");
 }

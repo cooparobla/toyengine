@@ -1,0 +1,81 @@
+# scene_mesh -- fixture for shadow_offscreen_test.cpp.
+#
+# The camera is fixed looking along +Y over a floor that fills its lower half. The sun sits at
+# a 30 degree elevation travelling along +X, so a tall caster parked far outside the LEFT edge of
+# the camera's frustum still throws a shadow that lands on the visible floor near the camera's
+# centreline. The caster itself is a plain MeshRenderer, so this scene isolates the cascade-reach
+# fix (a low sun's near-side margin must grow past the flat shadow_distance) from the
+# instanced-batch cull fix exercised by scene_particle.yaml.
+#
+# 30 degrees, not a more dramatic low angle, is a deliberate floor: below roughly 15 degrees this
+# scene's direct-light term goes to exactly 0 (not just dim) in the "direct" debug channel this
+# fixture is read through, which reads as "nothing is rendering at all" rather than "the shadow
+# is too subtle to measure" -- an earlier draft at 8-12 degrees hit exactly that trap. The test
+# instead shrinks shadow_distance to 12 (see shadow_offscreen_test.cpp's render_scene()), short
+# of what this caster needs even at 30 degrees, so the elevation-scaled reach is still what
+# makes the caster reach the cascade, not the shipped default of 60 happening to be enough.
+#
+# caster top = (x: -17.32, y: -5, z: 10); light dir = (0.866025, 0, -0.5); travelling that
+# direction from the top hits z=0 at t = 10 / 0.5 = 20, landing at x = -17.32 + 20 * 0.866025 =
+# ~0.0, y = -5 -- on the visible floor, well within the camera's lateral frustum at that depth
+# (~8 m half-width), while the caster itself (x=-17.32) is nowhere near it.
+scene:
+  scene_name: scene_mesh
+  settings:
+    physics:
+      gravity: { x: 0, y: 0, z: 0 }
+  root_objects:
+    - name: floor
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: -0.1 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 300.0, y: 300.0, z: 0.2 }
+        - type: MeshRenderer
+          mesh_path: primitives/cube
+          material: { albedo: { r: 0.75, g: 0.75, b: 0.75 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+    - name: caster
+      active: true
+      components:
+        - type: Transform
+          position: { x: -17.32, y: -5.0, z: 5.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.5, y: 1.5, z: 10.0 }
+        - type: MeshRenderer
+          mesh_path: primitives/cube
+          material: { albedo: { r: 0.6, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.6, ao: 1.0 }
+          cast_shadows: true
+      children: []
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -15.0, z: 2.0 }
+          rotation: { x: 90.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 50.0
+          near_clip_plane: 0.1
+          far_clip_plane: 200.0
+      children: []
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 10.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: DirectionalLight
+          direction: { x: 0.866025, y: 0.0, z: -0.5 }
+          color: { r: 1.0, g: 0.96, b: 0.90 }
+          intensity: 5.0
+          cast_shadows: true
+        - type: EnvironmentLight
+          sky_color: { r: 0.45, g: 0.58, b: 0.86 }
+          ground_color: { r: 0.20, g: 0.18, b: 0.16 }
+          sky_intensity: 1.0
+      children: []

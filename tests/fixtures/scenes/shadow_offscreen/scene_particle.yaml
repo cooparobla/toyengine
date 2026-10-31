@@ -1,0 +1,83 @@
+# scene_particle -- fixture for shadow_offscreen_test.cpp.
+#
+# Identical to scene_mesh.yaml (same camera, floor, sun and caster centreline) except the caster
+# is a single mesh-mode ParticleSystem instance instead of a MeshRenderer. A scatter-mode
+# ParticleSystem with count: 1 places one permanent instance at the object's own transform --
+# see ParticleSystem::push() setting its life to infinity in scatter mode. This is the
+# instanced-batch path (ParticleSystemRunner::collect_render), which is pre-culled against the
+# camera frustum in Engine::sync_particle_render_state_() before the renderer's own per-view
+# shadow cull ever runs -- the bug scene_mesh.yaml cannot exercise.
+#
+# start_size: 10 scales the default unit cube mesh (bounds -0.5..0.5) up to a 10 m cube
+# UNIFORMLY on all three axes (ParticleSystem::prepare_render() applies `size` to the whole
+# instance matrix, with no per-axis equivalent of scene_mesh.yaml's MeshRenderer scale) -- so
+# unlike that caster's narrow 1.5 x 1.5 m footprint, this one is 10 m wide too, and its shadow is
+# correspondingly wide (see shadow_offscreen_test.cpp's doc for how the test accounts for that).
+# With the object's Transform at z=5 its base sits on the floor and its top is at z=10 -- the
+# same caster height scene_mesh.yaml uses, which is what the light-direction-to-landing-point
+# math in that file's header comment assumes.
+scene:
+  scene_name: scene_particle
+  settings:
+    physics:
+      gravity: { x: 0, y: 0, z: 0 }
+  root_objects:
+    - name: floor
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: -0.1 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 300.0, y: 300.0, z: 0.2 }
+        - type: MeshRenderer
+          mesh_path: primitives/cube
+          material: { albedo: { r: 0.75, g: 0.75, b: 0.75 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+    - name: caster
+      active: true
+      components:
+        - type: Transform
+          position: { x: -17.32, y: -5.0, z: 5.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: ParticleSystem
+          mode: scatter
+          shape: point
+          count: 1
+          start_size: 10.0
+          render_mode: mesh
+          render_mesh: primitives/cube
+          material: { albedo: { r: 0.6, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.6, ao: 1.0 }
+          cast_shadows: true
+      children: []
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -15.0, z: 2.0 }
+          rotation: { x: 90.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 50.0
+          near_clip_plane: 0.1
+          far_clip_plane: 200.0
+      children: []
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 10.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: DirectionalLight
+          direction: { x: 0.866025, y: 0.0, z: -0.5 }
+          color: { r: 1.0, g: 0.96, b: 0.90 }
+          intensity: 5.0
+          cast_shadows: true
+        - type: EnvironmentLight
+          sky_color: { r: 0.45, g: 0.58, b: 0.86 }
+          ground_color: { r: 0.20, g: 0.18, b: 0.16 }
+          sky_intensity: 1.0
+      children: []

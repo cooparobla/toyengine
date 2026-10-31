@@ -277,6 +277,9 @@ void ToyRenderPipeline::update_dir_shadow_matrix_(const glm::vec3& direction,
     const bool caching = dir_cache_active_();
     const uint32_t fresh_levels = std::min(config_.shadow_clip_fresh_levels, cascades);
     uint32_t static_budget = config_.shadow_clip_static_budget;
+    // The slice/focus fits' near-side margin, scaled by how low the sun sits -- see
+    // dir_shadow_caster_reach()'s doc, shared with the instanced-batch cull sweep.
+    const float slice_reach = dir_shadow_caster_reach(config_, direction);
     for (uint32_t c = 0; c < coopa::gfx::engine::data::MAX_DIR_SHADOW_LEVELS; ++c) {
         // Slots past the live count repeat the last cascade rather than holding an
         // identity matrix: the shader's containment loop stops at the count, but a stale
@@ -284,22 +287,23 @@ void ToyRenderPipeline::update_dir_shadow_matrix_(const glm::vec3& direction,
         // if that bound were ever read wrong.
         const uint32_t i = std::min(c, cascades - 1u);
         const float slice_near = (i == 0) ? near_clip : splits.distance[i - 1];
-        // For the slice and focus fits, caster_reach is the whole shadowed range: those
-        // ranges are tens of metres, so the long box costs little. A clipmap's outermost ring
-        // is kilometres, and sizing every level off THAT would have the finest 9 m ring
-        // gather every caster in a kilometre-long column toward the sun. Each clipmap level
-        // instead reaches past itself by its own size, floored by shadow_clip_caster_reach.
+        // For the slice and focus fits, caster_reach is the whole shadowed range (scaled for a
+        // low sun above): those ranges are tens to a few hundred metres, so the long box costs
+        // little. A clipmap's outermost ring is kilometres, and sizing every level off THAT
+        // would have the finest 9 m ring gather every caster in a kilometre-long column toward
+        // the sun. Each clipmap level instead reaches past itself by its own size, floored by
+        // shadow_clip_caster_reach.
         const float level_reach = clipmap_fit
             ? std::max(2.0f * clip_radii[i], std::max(config_.shadow_clip_caster_reach, 0.0f))
-            : config_.shadow_distance;
+            : slice_reach;
         const DirShadowFit fit = clipmap_fit
             ? compute_dir_shadow_fit_sphere(clip_direction, clip_centre, clip_radii[i],
                                             level_reach, tile_res, clip_snap)
             : focus_fit
             ? compute_dir_shadow_fit_sphere(direction, focus_point, focus_radii[i],
-                                            config_.shadow_distance, tile_res)
+                                            level_reach, tile_res)
             : compute_dir_shadow_fit_slice(direction, fit_cam_ptr, slice_near,
-                                           splits.distance[i], config_.shadow_distance, tile_res);
+                                           splits.distance[i], level_reach, tile_res);
 
         // The PCF radius in ATLAS texels (a tile texel and an atlas texel are the same
         // physical texel, so no per-tile correction), converted from the world-space

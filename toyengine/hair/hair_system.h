@@ -174,6 +174,18 @@ private:
 
         bool built = false;
         bool pending = false;                ///< Could not read its scalp yet; holds warm-up open.
+
+        // --- Collision allowlist, simulated grooms only ----------------------------------------
+        /// Bodies resolved from `params.collide_with` (plus the groom's own, if bound). Pushed
+        /// onto the live solver each frame; re-resolved only when the name list or a cached id
+        /// goes stale, not every frame.
+        std::vector<coopa::physx::dynamics::BodyId> collide_bodies;
+        std::vector<std::string> collide_names;  ///< `params.collide_with` as of the last resolve.
+        bool          collide_warned = false; ///< One warning per groom for an unresolved name.
+        /// Consecutive failed resolve attempts since the name list last changed. A name is given
+        /// a few frames' grace -- the named object's Rigidbody binds one phase after this system
+        /// runs, so the very first attempt missing is normal, not a misconfiguration.
+        int           collide_retry = 0;
     };
 
     /// One parsed scalp mesh, shared by every groom grown from the same file.
@@ -223,6 +235,15 @@ private:
     void release_strands_(Groom& groom, coopa::scene::Scene& scene);
     /// Pushes this frame's root transforms into the solver, before Physics steps.
     void drive_strand_roots_(Groom& groom, Hair& hair, coopa::scene::Scene& scene);
+    /**
+     * Resolves `hair.params.collide_with` into bodies, re-resolving only when the name list
+     * changed or a cached id went stale (the named object's Rigidbody not yet bound, or the
+     * editor having destroyed and recreated it) -- never in the parser, which cannot know the
+     * physics world's state. The groom's own bound body, if any, is always included: naming
+     * other objects must not cost a groom the self-collision it already had.
+     */
+    void resolve_collide_bodies_(Groom& groom, Hair& hair, coopa::scene::Scene& scene,
+                                 coopa::physx::PhysicsWorld& world);
     /// The groom's runtime child, found by walking the owner's children -- never a cached pointer.
     coopa::scene::SceneObject* find_child_(coopa::scene::SceneObject& owner) const;
     void prune_(coopa::scene::Scene& scene, const std::unordered_set<std::string>& live);

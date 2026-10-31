@@ -366,6 +366,8 @@ scene:
         - type: Hair
           clump: 0.3
           clump_density: 0.04
+          collide_with:
+            - neck
           cross_section: 2
           density: 4.0e+02
           droop: 2.2
@@ -395,7 +397,9 @@ scene:
       children: []
     # The collision demo this groom's hair drapes over: a static capsule standing in for a neck,
     # positioned directly below head_on_neck so its long, droopy strands settle against it rather
-    # than passing through -- the scenario hair_collision_test.cpp proves numerically.
+    # than passing through -- the scenario tests/engine/gpu/hair_test.cpp proves numerically.
+    # head_on_neck's `collide_with: [neck]` names it explicitly, which also means the groom's
+    # broadphase is skipped entirely -- see unrelated_prop below for why that matters.
     - name: neck
       active: true
       components:
@@ -412,6 +416,21 @@ scene:
           mesh_path: barrel
         - { type: CapsuleCollider, radius: 0.3, height: 0.9 }
         - { type: Rigidbody, is_kinematic: true, use_gravity: false }
+      children: []
+    # Sits in the gap between head_on_neck and neck, where the central strands of the groom's
+    # droop pass on their way down -- with no mesh, purely a probe. Radius 0.35 because roots
+    # scatter across the whole head, not just straight down its axis: the measured closest any
+    # particle gets to this point is ~0.30 m, so a smaller probe could sit untouched by chance.
+    # Under the default broadphase this would stop that central hair cold; because
+    # head_on_neck's `collide_with` names only `neck`, the groom never queries the broadphase at
+    # all and the strands pass straight through it to settle on the neck capsule instead.
+    # tests/engine/gpu/hair_test.cpp checks the hair actually penetrates it.
+    - name: unrelated_prop
+      active: true
+      components:
+        - type: Transform
+          position: { x: -2.2, y: -2.6, z: 1.5 }
+        - { type: SphereCollider, radius: 0.35 }
       children: []
     - name: camera
       active: true

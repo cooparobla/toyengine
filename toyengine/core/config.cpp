@@ -236,6 +236,7 @@ AppConfig AppConfig::from_node(const fkyaml::node& root) {
             read(r, "shadow_fade_fraction", config.render.shadow_fade_fraction);
             read(r, "shadow_normal_bias", config.render.shadow_normal_bias);
             read(r, "shadow_distance", config.render.shadow_distance);
+            read(r, "shadow_caster_reach_max", config.render.shadow_caster_reach_max);
             read(r, "soft_shadows", config.render.soft_shadows);
             read(r, "shadow_softness", config.render.shadow_softness);
             read(r, "point_shadow_softness", config.render.point_shadow_softness);

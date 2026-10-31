@@ -167,6 +167,7 @@ COOPA_TEST(render_tab_lists_every_engine_key_once_with_its_default) {
         {"shadow_fade_fraction", [](const PR& r) { return EngineDefault(r.shadow_fade_fraction); }},
         {"shadow_normal_bias", [](const PR& r) { return EngineDefault(r.shadow_normal_bias); }},
         {"shadow_distance", [](const PR& r) { return EngineDefault(r.shadow_distance); }},
+        {"shadow_caster_reach_max", [](const PR& r) { return EngineDefault(r.shadow_caster_reach_max); }},
         {"soft_shadows", [](const PR& r) { return EngineDefault(r.soft_shadows); }},
         {"shadow_softness", [](const PR& r) { return EngineDefault(r.shadow_softness); }},
         {"point_shadow_softness", [](const PR& r) { return EngineDefault(r.point_shadow_softness); }},

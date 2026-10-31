@@ -73,8 +73,9 @@ public:
 
     /**
      * @brief Fills `out` with this frame's draw batches for every system visible from the view
-     *        (`cull` tests a world AABB; null draws everything), preparing instances for those
-     *        only -- in parallel across systems, and within a large one.
+     *        (`cull` tests a world AABB plus whether the batch casts shadows; null draws
+     *        everything), preparing instances for those only -- in parallel across systems,
+     *        and within a large one.
      */
     template <typename CullFn>
     void collect_render(coopa::scene::Scene& scene, const ParticleView& view, const CullFn& cull,
@@ -90,7 +91,7 @@ public:
                 // Streamed per terrain chunk (terrain_scatter.h): one mesh batch per built chunk
                 // in range and in view.
                 collect_terrain_scatter_(scene, *ps, view,
-                                         [&](const glm::vec3& lo, const glm::vec3& hi) { return cull(lo, hi); }, out);
+                                         [&](const glm::vec3& lo, const glm::vec3& hi, bool casts) { return cull(lo, hi, casts); }, out);
                 continue;
             }
             if (ps->gpu_active()) {
@@ -101,7 +102,9 @@ public:
                 if (s.look.mode == render::ParticleRenderMode::None) continue;
                 if (s.max_draw_distance > 0.0f &&
                     glm::distance(view.camera_pos, ps->emitter_position()) > s.max_draw_distance) continue;
-                if (!cull(ps->bounds_min(), ps->bounds_max())) continue;
+                // Quad/sprite particles never cast a shadow (the shadow passes only draw mesh
+                // batches), so this is always the tight camera test.
+                if (!cull(ps->bounds_min(), ps->bounds_max(), false)) continue;
                 render::ParticleDrawBatch b;
                 b.gpu_id = ps->gpu_id();
                 b.count = std::max(1u, ps->particle_count());
@@ -117,7 +120,8 @@ public:
             if (ps->particle_count() == 0 || s.look.mode == render::ParticleRenderMode::None) continue;
             if (s.max_draw_distance > 0.0f &&
                 glm::distance(view.camera_pos, ps->emitter_position()) > s.max_draw_distance) continue;
-            if (!cull(ps->bounds_min(), ps->bounds_max())) continue;
+            const bool casts = s.look.mode == render::ParticleRenderMode::Mesh && s.cast_shadows;
+            if (!cull(ps->bounds_min(), ps->bounds_max(), casts)) continue;
             if (s.look.mode == render::ParticleRenderMode::Mesh &&
                 (!ps->has_mesh_proxy() || !ps->mesh_proxy().is_ready())) continue;
             visible_.push_back(ps);
@@ -174,7 +178,7 @@ private:
     /** @brief A `shape: terrain` scatter: updates its chunk cache around the camera and emits a
      *         mesh batch per visible chunk. */
     void collect_terrain_scatter_(coopa::scene::Scene& scene, ParticleSystem& ps, const ParticleView& view,
-                                  const std::function<bool(const glm::vec3&, const glm::vec3&)>& cull,
+                                  const std::function<bool(const glm::vec3&, const glm::vec3&, bool)>& cull,
                                   render::ParticleFrameState& out);
 
     static bool active_in_hierarchy_(const coopa::scene::SceneObject& obj);

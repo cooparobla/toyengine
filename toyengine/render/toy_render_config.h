@@ -6,6 +6,8 @@
 #ifndef TOYENGINE_RENDER_TOY_RENDER_CONFIG_H
 #define TOYENGINE_RENDER_TOY_RENDER_CONFIG_H
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <string>
@@ -674,6 +676,20 @@ struct ToyRenderConfig {
      *        far off, however it got there) can perturb or blow out the shadow frustum.
      */
     float    shadow_distance        = 60.0f;
+    /**
+     * @brief Upper bound, in world units, on how far toward the light the "frustum"/"focus"
+     *        fits' near-side margin is allowed to grow at a low sun (see
+     *        update_dir_shadow_matrix_()'s `level_reach`).
+     *
+     * `shadow_distance` alone sizes that margin independent of the sun's angle, but the reach
+     * a caster actually needs to still shadow into the visible frustum is roughly its height
+     * over sin(elevation) -- unbounded as the sun nears the horizon. update_dir_shadow_matrix_()
+     * scales the margin by 1 / sin(elevation) (floored at a few degrees so a sun exactly on the
+     * horizon cannot ask for an unbounded box) and clamps the result here, so a very low sun
+     * still gathers more casters without the near plane reaching to infinity. Never allowed
+     * below `shadow_distance` itself. RUNTIME.
+     */
+    float    shadow_caster_reach_max = 500.0f;
     bool     soft_shadows           = true;  /**< false = single hard depth compare (the pre-existing look). */
     /**
      * @brief Directional PCF penumbra radius in WORLD units, not texels. Converted to a
@@ -1409,6 +1425,23 @@ struct ToyRenderConfig {
     // ToyRenderPipeline's ctor), the same search every stock entry point goes through.
     coopa::gfx::pipeline::SurfaceShaderRegistry surface_shaders;
 };
+
+/**
+ * @brief The "frustum"/"focus" directional-shadow fits' near-side margin, scaled for how low
+ *        the sun sits (see `shadow_caster_reach_max`'s doc for why a flat `shadow_distance`
+ *        under-reaches at a low sun).
+ *
+ * `light_direction` is the direction rays travel, FROM the light (DirectionalLightComponent's
+ * convention) -- normalized and Z-up, so `|light_direction.z|` IS sin(elevation). Shared by
+ * update_dir_shadow_matrix_()'s cascade fit and Engine::sync_particle_render_state_()'s
+ * instanced-batch cull sweep, so a painted/particle caster off camera gets the same low-sun
+ * reach as a plain MeshRenderer one.
+ */
+inline float dir_shadow_caster_reach(const ToyRenderConfig& rc, const glm::vec3& light_direction) {
+    constexpr float sin_elevation_floor = 0.1f;   // ~5.7 degrees
+    const float cap = std::max(rc.shadow_caster_reach_max, rc.shadow_distance);
+    return std::min(rc.shadow_distance / std::max(std::abs(light_direction.z), sin_elevation_floor), cap);
+}
 
 } // namespace render
 } // namespace toy

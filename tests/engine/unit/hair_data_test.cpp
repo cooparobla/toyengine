@@ -643,6 +643,7 @@ COOPA_TEST(sanitize_clamps_every_field_it_claims_to) {
     p.length_jitter = 5.0f;
     p.clump = -1.0f;
     p.lod_screen_sizes = glm::vec2(0.01f, 0.5f);   // ascending: the wrong way round
+    p.collide_with = {"neck", "", "shoulder", ""};
     p.sanitize();
 
     expect(p.cross_section == 3, "hair: three crossed planes is the most a ribbon gets");
@@ -654,6 +655,8 @@ COOPA_TEST(sanitize_clamps_every_field_it_claims_to) {
     expect(p.clump >= 0.0f, "hair: clumping is a fraction");
     expect(p.lod_screen_sizes.y <= p.lod_screen_sizes.x,
            "hair: LOD thresholds are forced to descend, so a level cannot shadow the one before");
+    expect(p.collide_with.size() == 2 && p.collide_with[0] == "neck" && p.collide_with[1] == "shoulder",
+           "hair: empty names in collide_with are dropped, not resolved against the scene");
 }
 
 /** @brief The hash moves on anything that changes geometry, and only on that. */
@@ -679,7 +682,8 @@ COOPA_TEST(the_params_hash_tracks_geometry_and_nothing_else) {
     e.cull_screen_size = 0.5f;
     e.wind_flexibility = 2.0f;
     e.wind_frequency = 10.0f;
+    e.collide_with = {"neck"};
     expect(e.hash() == base,
-           "hair: LOD, culling and the wind response are re-applied per frame, so tuning them "
-           "must NOT trigger a rebuild");
+           "hair: LOD, culling, the wind response and the collision allowlist are re-applied per "
+           "frame, so tuning them must NOT trigger a rebuild");
 }

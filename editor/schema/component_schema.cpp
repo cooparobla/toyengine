@@ -723,6 +723,10 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             as_slider(with_tip(f_float("sim_friction", 0.4f, 0.01f, 0.0f, 1.0f),
                                "1 grips, so hair resting on a shoulder stays there")),
             f_float("sim_gravity", 1.0f, 0.01f, -10.0f, 10.0f),
+            with_tip(f_strings("collide_with"),
+                     "Objects this groom collides with, by name. Empty: every nearby collider in "
+                     "the scene, via the broadphase. Named: only these (plus the groom's own "
+                     "collider, if it has one) -- cheaper, and predictable"),
 
             with_tip(f_vec2("lod_screen_sizes", glm::vec2(0.09f, 0.035f), 0.002f),
                      "Projected height (a fraction of the screen's) below which each level is "

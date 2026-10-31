@@ -88,6 +88,9 @@ void HairParams::sanitize() {
     sim_collision_thickness = std::clamp(sim_collision_thickness, 0.0f, 1.0f);
     sim_friction            = std::clamp(sim_friction, 0.0f, 1.0f);
     sim_gravity             = std::clamp(sim_gravity, -10.0f, 10.0f);
+    collide_with.erase(std::remove_if(collide_with.begin(), collide_with.end(),
+                                       [](const std::string& s) { return s.empty(); }),
+                        collide_with.end());
 
     // Thresholds must descend: level 1 is drawn before level 2 as the groom shrinks on screen.
     lod_screen_sizes.x = std::max(lod_screen_sizes.x, 0.0f);

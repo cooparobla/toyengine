@@ -91,8 +91,35 @@ void Engine::sync_live_profile_() {
 }
 
 void Engine::sync_particle_render_state_(coopa::scene::Scene& scene) {
+    using coopa::gfx::engine::components::DirectionalLightComponent;
+
     particle_frame_.quads.clear();
     particle_frame_.meshes.clear();
+
+    // A camera-frustum test alone drops a shadow caster the instant its OWN bounds leave the
+    // frustum -- which a low sun throws tens of metres past them. Sweeping the test volume
+    // along the sun's travel direction before testing (render::sweep_bounds) keeps a caster
+    // whose shadow still reaches the visible floor, while a non-casting batch (`casts` below)
+    // keeps the tight test: there is nothing of it left to see once it is off screen.
+    //
+    // The reach matches what the directional cascades themselves gather past their camera-slice
+    // box (see render::dir_shadow_caster_reach(), shared with pipeline_shadows.cpp's cascade
+    // fit): elevation-scaled for every fit except "clipmap", whose outer levels reach
+    // kilometres and are floored by shadow_clip_caster_reach instead -- a chunk whose shadow
+    // would arrive from further than that is already past its own draw distance regardless.
+    const render::ToyRenderConfig& rc = pipeline_->render_config();
+    DirectionalLightComponent* sun = nullptr;
+    for (DirectionalLightComponent* l : scene.get_components<DirectionalLightComponent>()) {
+        if (l->owner && l->owner->active()) { sun = l; break; }
+    }
+    glm::vec3 sun_dir(0.0f);
+    float shadow_reach = 0.0f;
+    if (rc.shadows_enabled && sun != nullptr) {
+        sun_dir = sun->direction;
+        shadow_reach = rc.shadow_fit == "clipmap" ? std::max(rc.shadow_distance, rc.shadow_clip_caster_reach)
+                                                  : render::dir_shadow_caster_reach(rc, sun_dir);
+    }
+
     if (auto* sys = dynamic_cast<particles::ParticleSimulationSystem*>(scene.find_system("Particles"))) {
         using coopa::gfx::engine::components::CameraComponent;
         const CameraComponent* cam = CameraComponent::main();
@@ -104,17 +131,18 @@ void Engine::sync_particle_render_state_(coopa::scene::Scene& scene) {
                                  static_cast<float>(std::max(1u, pipeline_->render_height()));
             frustum = render::Frustum::from_matrix(cam->get_projection_matrix(aspect) * cam->get_view_matrix());
         }
-        sys->collect_render(scene, view, [&](const glm::vec3& lo, const glm::vec3& hi) {
+        sys->collect_render(scene, view, [&](const glm::vec3& lo, const glm::vec3& hi, bool casts) {
             if (!cam) return true;
             render::WorldBounds b;
             b.center = 0.5f * (lo + hi);
             b.extent = 0.5f * (hi - lo);
+            if (casts) b = render::sweep_bounds(b, sun_dir, shadow_reach);
             return frustum.intersects(b);
         }, particle_frame_);
     }
     // Painted instances join the same mesh-batch list: one instanced, persistently-buffered
-    // draw per (chunk, prototype, part). Same frustum test, so a chunk off screen is never
-    // handed over -- see toyengine/instance/instance_painter_system.h.
+    // draw per (chunk, prototype, part). Same frustum test (widened along the sun for casters)
+    // -- see toyengine/instance/instance_painter_system.h.
     if (auto* painter = instance::find_instance_painter_system(scene)) {
         using coopa::gfx::engine::components::CameraComponent;
         const CameraComponent* cam = CameraComponent::main();
@@ -126,11 +154,12 @@ void Engine::sync_particle_render_state_(coopa::scene::Scene& scene) {
                                  static_cast<float>(std::max(1u, pipeline_->render_height()));
             frustum = render::Frustum::from_matrix(cam->get_projection_matrix(aspect) * cam->get_view_matrix());
         }
-        painter->collect_render(scene, camera_pos, [&](const glm::vec3& lo, const glm::vec3& hi) {
+        painter->collect_render(scene, camera_pos, [&](const glm::vec3& lo, const glm::vec3& hi, bool casts) {
             if (cam == nullptr) return true;
             render::WorldBounds b;
             b.center = 0.5f * (lo + hi);
             b.extent = 0.5f * (hi - lo);
+            if (casts) b = render::sweep_bounds(b, sun_dir, shadow_reach);
             return frustum.intersects(b);
         }, particle_frame_);
     }

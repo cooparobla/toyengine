@@ -38,6 +38,26 @@ struct WorldBounds {
 };
 
 /**
+ * @brief The AABB enclosing `b` swept `distance` units along `dir` -- the volume a caster's
+ *        own shadow can occupy, for a cull that must not drop a visible shadow of an object
+ *        that is itself off screen.
+ *
+ * Conservative: the result always contains `b`, so a test against it never excludes what a
+ * test against `b` alone would have included. `distance <= 0` or a near-zero `dir` returns
+ * `b` unchanged.
+ */
+inline WorldBounds sweep_bounds(const WorldBounds& b, const glm::vec3& dir, float distance) {
+    if (!(distance > 0.0f)) return b;
+    const float len = glm::length(dir);
+    if (!(len > 1e-6f)) return b;
+    const glm::vec3 d = (dir / len) * distance;
+    WorldBounds out;
+    out.center = b.center + 0.5f * d;
+    out.extent = b.extent + 0.5f * glm::abs(d);
+    return out;
+}
+
+/**
  * @brief Object-space AABB [lo, hi] under an affine `model`, as the tightest world AABB
  *        enclosing the transformed box (Arvo's method: |M| applied to the half-extent).
  *

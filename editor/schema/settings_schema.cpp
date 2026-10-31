@@ -219,6 +219,8 @@ const std::vector<SettingsGroup>& render_settings_groups() {
             .add(quality("shadow_quality", "map resolutions, filter taps, PCSS taps, contact-shadow steps and how many "
                                           "point / spot lights cast shadows"))
             .add(F(f_float("shadow_distance", 60.0f, 0.2f, 1.0f, 10000.0f), "Distance", "How far from the camera the sun's shadows reach"))
+            .add(F(f_float("shadow_caster_reach_max", 500.0f, 10.0f, 0.0f, 100000.0f), "Max Caster Reach",
+                   "Frustum/focus fits: cap on how far toward the sun a caster is still gathered at a low sun angle, where that reach grows past Distance"))
             .add(F(f_float("shadow_fade_fraction", 0.1f, 0.005f, 0.0f, 1.0f), "Fade Out",
                    "Fraction of the shadow distance over which the sun's shadows fade out at the far end"))
             .sub("Sun Cascades")

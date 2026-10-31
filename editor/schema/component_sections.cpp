@@ -213,7 +213,7 @@ void apply_component_sections(std::map<std::string, ComponentSchema>& table) {
             .keys({"sim_guides"})
             .sub("Stiffness").keys({"sim_stiffness", "sim_stiffness_falloff", "sim_curl_hold"})
             .sub("Motion").keys({"sim_damping", "sim_drag", "sim_gravity"})
-            .sub("Contact").keys({"sim_collision_thickness", "sim_friction"})
+            .sub("Contact").keys({"sim_collision_thickness", "sim_friction", "collide_with"})
             .closed().done(),
         sec("Detail & Rebuilds", "Gear")
             .says("Distant grooms drop strands rather than disappear. Rebuilds re-scatter "

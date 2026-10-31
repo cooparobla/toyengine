@@ -1,12 +1,15 @@
 #include "toyengine/hair/hair_system.h"
 
+#include <algorithm>
 #include <cstring>
+#include <iostream>
 #include <iterator>
 #include <vector>
 
 #include <coopa/asset/asset_manager.h>
 #include <coopa/yaml/document.h>
 
+#include <physxcoopa/components/collider.h>
 #include <physxcoopa/hair/strand_builder.h>
 #include <physxcoopa/system/physics_system.h>
 
@@ -640,6 +643,86 @@ void HairSystem::drive_strand_roots_(Groom& groom, Hair& hair, Scene& scene) {
     // The weather's wind, the same value WindSystem writes onto a cloth -- so hair and a cape in
     // one gust agree instead of each inventing their own.
     set->params.wind = hair.wind * hair.weather_wind;
+
+    resolve_collide_bodies_(groom, hair, scene, *world);
+    set->collide_bodies = groom.collide_bodies;
+}
+
+void HairSystem::resolve_collide_bodies_(Groom& groom, Hair& hair, Scene& scene,
+                                         coopa::physx::PhysicsWorld& world) {
+    using coopa::physx::components::Collider;
+    using coopa::physx::dynamics::BodyId;
+
+    // Re-resolve when the name list changed, a cached id went stale, or nothing has resolved
+    // yet at all -- the named object's Rigidbody may not have been bound yet the frame this
+    // groom was built (the same reason bind_strands_() above is retried), and the editor
+    // destroys and recreates objects. The empty-and-still-wanting-names case keeps retrying
+    // every frame until the body shows up; `collide_warned` is left alone across those retries
+    // so the groom still only ever prints one warning, not one per frame.
+    bool stale = groom.collide_names != hair.params.collide_with;
+    if (stale) {
+        groom.collide_warned = false;
+        groom.collide_retry = 0;
+    }
+    if (!stale) {
+        for (const BodyId id : groom.collide_bodies) {
+            if (!world.is_valid(id)) { stale = true; break; }
+        }
+    }
+    if (!stale && groom.collide_bodies.empty() && !hair.params.collide_with.empty()) stale = true;
+    if (!stale) return;
+
+    groom.collide_names = hair.params.collide_with;
+    groom.collide_bodies.clear();
+
+    // The groom's own collider, if it has one, always counts -- naming OTHER objects must not
+    // silently cost a groom the self-collision it already had (the swinging_tail behaviour).
+    if (hair.owner != nullptr) {
+        if (auto* own = hair.owner->get_component<Collider>()) {
+            const BodyId id = own->body_id();
+            if (world.is_valid(id)) groom.collide_bodies.push_back(id);
+        }
+    }
+
+    // A named object's own Rigidbody binds one phase AFTER this system runs (Physics is 100,
+    // HairSystem is k_hair_system_order), so the very first attempt after a name is authored
+    // always misses -- that is normal, not a misconfiguration, and must not warn. Only a name
+    // that is still unresolved after several frames' grace is treated as genuinely missing.
+    constexpr int kRetryGrace = 5;
+    const bool past_grace = groom.collide_retry >= kRetryGrace;
+    bool any_missing = false;
+    for (const std::string& name : hair.params.collide_with) {
+        coopa::scene::SceneObject* obj = scene.find_object_by_path(name);
+        if (obj == nullptr) {
+            any_missing = true;
+            if (past_grace && !groom.collide_warned) {
+                std::cout << "[hair] '" << hair.state_key() << "': collide_with names '" << name
+                          << "', which is not in the scene.\n";
+            }
+            continue;
+        }
+        bool found_any = false;
+        for (auto* col : obj->get_components_in_children<Collider>()) {
+            const BodyId id = col->body_id();
+            if (!world.is_valid(id)) continue;
+            if (std::find(groom.collide_bodies.begin(), groom.collide_bodies.end(), id) ==
+                groom.collide_bodies.end()) {
+                groom.collide_bodies.push_back(id);
+            }
+            found_any = true;
+        }
+        if (!found_any) {
+            any_missing = true;
+            if (past_grace && !groom.collide_warned) {
+                std::cout << "[hair] '" << hair.state_key() << "': collide_with names '" << name
+                          << "', which has no Collider.\n";
+            }
+        }
+    }
+    if (any_missing) {
+        if (past_grace) groom.collide_warned = true;
+        else ++groom.collide_retry;
+    }
 }
 
 std::size_t HairSystem::simulated_guide_count(const std::string& key) const {

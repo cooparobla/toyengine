@@ -342,6 +342,77 @@ scene:
           weather_wind: 1.0
           wind_flexibility: 0.0
       children: []
+    - name: head_on_neck
+      active: true
+      components:
+        - type: Transform
+          position: { x: -2.2, y: -2.6, z: 1.95 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.5, y: 0.5, z: 0.5 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.72, g: 0.64, r: 0.58 }
+            ao: 1.0
+            metallic: 0.0
+            roughness: 0.55
+          mesh_path: sphere
+        # Yaws +-28 deg, pingpong -- the neck stays put underneath (its collider is coaxial
+        # with this rotation, so the capsule the hair drapes over never moves), while the head
+        # and its hair swing like a "no" shake. object: "" animates this object itself.
+        - type: Animator
+          auto_play: shake
+          states:
+            - { name: shake, clip: animations/head_on_neck/shake.yaml }
+        - type: Hair
+          clump: 0.3
+          clump_density: 0.04
+          cross_section: 2
+          density: 4.0e+02
+          droop: 2.2
+          frizz_degrees: 6.0
+          length: 1.1
+          length_jitter: 0.25
+          material:
+            albedo: { b: 0.22, g: 0.16, r: 0.11 }
+            ao: 1.0
+            metallic: 0.0
+            roughness: 0.35
+          max_strands: 1500
+          seed: 5
+          segments: 10
+          shape: ribbon
+          sim_damping: 0.04
+          sim_drag: 0.3
+          sim_guides: 20
+          sim_stiffness: 0.08
+          sim_stiffness_falloff: 2.0
+          simulate: true
+          thickness: 0.07
+          thickness_over_length:
+            - [0.0, 1.0]
+            - [1.0, 0.3]
+          wind_flexibility: 0.0
+      children: []
+    # The collision demo this groom's hair drapes over: a static capsule standing in for a neck,
+    # positioned directly below head_on_neck so its long, droopy strands settle against it rather
+    # than passing through -- the scenario hair_collision_test.cpp proves numerically.
+    - name: neck
+      active: true
+      components:
+        - type: Transform
+          position: { x: -2.2, y: -2.6, z: 1.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.85, y: 0.85, z: 0.69 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.62, g: 0.68, r: 0.74 }
+            ao: 1.0
+            metallic: 0.0
+            roughness: 0.6
+          mesh_path: barrel
+        - { type: CapsuleCollider, radius: 0.3, height: 0.9 }
+        - { type: Rigidbody, is_kinematic: true, use_gravity: false }
+      children: []
     - name: camera
       active: true
       components:

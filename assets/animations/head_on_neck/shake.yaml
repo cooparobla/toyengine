@@ -1,0 +1,10 @@
+clip:
+  name: shake
+  wrap: pingpong
+  length: 1.2
+  tracks:
+    - object: ""
+      property: rotation.z
+      keys:
+        - { time: 0.0, value: -28.0, easing: ease_in_out }
+        - { time: 1.2, value: 28.0, easing: ease_in_out }

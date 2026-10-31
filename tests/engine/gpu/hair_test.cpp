@@ -75,7 +75,7 @@ COOPA_TEST(every_groom_grows_and_publishes_a_locked_runtime_child) {
     expect(system != nullptr, "hair scene: HairSystem is installed");
 
     const std::vector<toy::hair::Hair*> grooms = engine.scene().get_components<toy::hair::Hair>();
-    expect(grooms.size() == 4u, "hair scene: four Hair components parsed from YAML");
+    expect(grooms.size() == 5u, "hair scene: five Hair components parsed from YAML");
 
     for (toy::hair::Hair* hair : grooms) {
         const std::string name = hair->owner != nullptr ? hair->owner->name() : std::string("?");
@@ -183,11 +183,18 @@ COOPA_TEST(the_simulated_groom_registers_guides_and_they_move) {
         engine.scene().find_system("Physics"));
     expect(physics != nullptr, "hair scene: the scene has physics to solve them");
     if (physics == nullptr) return;
-    expect(physics->world().strand_set_count() == 1u,
-           "hair scene: exactly one strand set is alive -- one simulated groom, one set");
+    expect(physics->world().strand_set_count() == 2u,
+           "hair scene: exactly two strand sets are alive -- two simulated grooms, one set each");
 
     auto* tail = engine.scene().find_object("swinging_tail");
     expect(tail != nullptr, "hair scene: the swinging tail resolves by name");
+
+    // Two simulated grooms now share the physics world (swinging_tail, head_on_neck), so
+    // `for_each_strands()` can no longer be assumed to visit only one set -- single out
+    // swinging_tail's by id rather than trusting iteration order or "whichever is first".
+    const auto tail_set = system->strand_set_id("swinging_tail");
+    expect(tail_set.is_valid(), "hair scene: the swinging tail has a strand set id");
+
     // The hair must move RELATIVE TO ITS OWN ROOT. Pixels changing, or world positions changing,
     // would both pass just as happily on hair welded rigidly to a moving ball, so this measures
     // an offset from the root and asks whether that offset itself varies.
@@ -197,9 +204,9 @@ COOPA_TEST(the_simulated_groom_registers_guides_and_they_move) {
     // rigid as the solver allows. The midpoint is where stiffness actually shows.
     const auto mid_offset = [&]() {
         glm::vec3 offset(0.0f);
-        physics->world().for_each_strands([&](coopa::physx::hair::StrandSetId,
+        physics->world().for_each_strands([&](coopa::physx::hair::StrandSetId id,
                                               const coopa::physx::hair::StrandSet& set) {
-            if (set.strands.empty()) return;
+            if (id != tail_set || set.strands.empty()) return;
             const auto& strand = set.strands[0];
             if (strand.count < 3) return;
             offset = set.particles[strand.first + strand.count / 2].position -
@@ -227,4 +234,73 @@ COOPA_TEST(the_simulated_groom_registers_guides_and_they_move) {
     const Frame b = engine.capture_image(true);
     expect(count_diff(a, b, 4) > 0,
            "hair scene: the simulated groom's drawn pixels keep changing as its body swings");
+}
+
+/**
+ * @brief A groom's hair settles against a SEPARATE static collider rather than passing through it.
+ *
+ * `swinging_tail` only ever collides against its own root sphere -- the collider its hair grows
+ * from. `head_on_neck` is the other case this cannot cover: a static obstacle (the `neck`
+ * capsule) the groom knows nothing about by name. The physics world's broadphase is supposed to
+ * find ANY nearby collider automatically, the same as it does for cloth -- if that wiring broke,
+ * every particle would simply fall through the capsule under gravity, and no other hair test
+ * would notice, because they only ever look at a groom's own root.
+ */
+COOPA_TEST(a_grooms_hair_settles_against_a_separate_static_collider) {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    toy::core::AppConfig config =
+        make_test_config("assets/scenes/effects/hair_demo/scene.yaml", 320, 180, 320, 180);
+    toy::core::Engine engine(std::move(config));
+
+    auto* neck = engine.scene().find_object("neck");
+    expect(neck != nullptr, "hair collision: the neck collider object resolves by name");
+    if (neck == nullptr) return;
+    const auto* neck_tc = neck->get_transform();
+    expect(neck_tc != nullptr, "hair collision: and has a transform");
+    if (neck_tc == nullptr) return;
+    const glm::vec3 neck_center(neck_tc->transform().get_world_matrix()[3]);
+
+    // The capsule authored on `neck` in hair_demo.yaml: radius 0.3 m, height 0.9 m, axis Z (the
+    // schema's default `direction`). The central segment's half-length is height/2 - radius.
+    constexpr float kRadius = 0.3f;
+    constexpr float kHalfLen = 0.9f / 2.0f - kRadius;
+    const glm::vec3 seg_a = neck_center - glm::vec3(0.0f, 0.0f, kHalfLen);
+    const glm::vec3 seg_b = neck_center + glm::vec3(0.0f, 0.0f, kHalfLen);
+
+    // Let head_on_neck's hair fall and settle under gravity -- the same scale of ticking the
+    // swinging tail's own flex test above uses.
+    tick_frames(engine, 20);
+    for (int i = 0; i < 12; ++i) tick_frames(engine, 10);
+
+    auto* physics = dynamic_cast<coopa::physx::system::PhysicsSystem*>(
+        engine.scene().find_system("Physics"));
+    expect(physics != nullptr, "hair collision: the scene has physics to solve it");
+    if (physics == nullptr) return;
+
+    // `sim_collision_thickness` (default 0.01 m) holds a particle slightly OFF the surface, not
+    // exactly on it, so the floor here is the radius minus a little slack rather than zero --
+    // the same reasoning physxcoopa's own `a_strand_stays_out_of_a_collider` test uses.
+    constexpr float kSlack = 0.05f;
+    std::size_t checked = 0;
+    float deepest = 0.0f;   // most negative (dist - radius) seen; stays 0 if nothing penetrates
+    physics->world().for_each_strands([&](coopa::physx::hair::StrandSetId,
+                                          const coopa::physx::hair::StrandSet& set) {
+        for (const auto& p : set.particles) {
+            const glm::vec3 ap = p.position - seg_a;
+            const glm::vec3 ab = seg_b - seg_a;
+            const float t = glm::clamp(glm::dot(ap, ab) / glm::dot(ab, ab), 0.0f, 1.0f);
+            const glm::vec3 closest = seg_a + ab * t;
+            deepest = std::min(deepest, glm::distance(p.position, closest) - kRadius);
+            ++checked;
+        }
+    });
+
+    expect(checked > 0, "hair collision: at least one simulated strand particle exists to check");
+    expect(deepest > -kSlack,
+           "hair collision: no particle sank more than " + std::to_string(kSlack) +
+               " m inside the neck capsule (deepest penetration " + std::to_string(-deepest) +
+               " m) -- head_on_neck's hair actually collided with a collider it shares no name "
+               "with, rather than passing through it");
 }

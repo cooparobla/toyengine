@@ -122,6 +122,11 @@ public:
     /// @brief Guide strands actually being solved for `key`, or 0 when it is not simulated.
     std::size_t simulated_guide_count(const std::string& key) const;
 
+    /// @brief The PhysicsWorld handle for `key`'s guide strands, or an invalid id when it is not
+    ///        simulated. What lets a test single out ONE groom's strand set among several --
+    ///        `PhysicsWorld::for_each_strands()` has no other way to say whose a set is.
+    coopa::physx::hair::StrandSetId strand_set_id(const std::string& key) const;
+
     /**
      * @brief Rewrites every simulated groom's vertex buffer from the solver's particles.
      *

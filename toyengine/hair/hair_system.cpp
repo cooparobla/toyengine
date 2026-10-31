@@ -647,6 +647,11 @@ std::size_t HairSystem::simulated_guide_count(const std::string& key) const {
     return it == grooms_.end() ? 0u : it->second.simulated_guides;
 }
 
+coopa::physx::hair::StrandSetId HairSystem::strand_set_id(const std::string& key) const {
+    const auto it = grooms_.find(key);
+    return it == grooms_.end() ? coopa::physx::hair::StrandSetId{} : it->second.strands;
+}
+
 void HairSystem::upload(Scene& scene, std::uint32_t frame_slot) {
     auto* world = physics_world_(scene);
     if (world == nullptr) return;

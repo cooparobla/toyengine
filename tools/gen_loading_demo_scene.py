@@ -3,7 +3,7 @@
 
 Outputs (under the scene folder):
   * scene.yaml -- the light "hub": a player, a camera and two doorways. Walking through the
-    north door loads heavy.yaml behind the loading screen (ui/loading_screen); the east door
+    north door loads heavy.yaml behind the engine's built-in loading screen; the east door
     loads it with a plain fade.
   * heavy.yaml -- the heavy level: a 34 x 34 grid of towers (over a thousand root objects,
     built a batch per frame), a ring of animated mannequins, and a door back to the hub.
@@ -166,9 +166,9 @@ def hub():
 #
 # Run: ./build/toyengine loading_demo
 # Walk (WASD) through the NORTH door (blue, y = 8): heavy.yaml loads in the background behind the
-# loading screen (ui/loading_screen: a progress bar and a status line). Through the EAST door
-# (orange, x = 8) it loads behind a plain fade. Either way this scene keeps running until the
-# heavy one is built and its assets are in; heavy.yaml's door brings you back here.
+# engine's built-in loading screen (the cycling block mark). Through the EAST door (orange,
+# x = 8) it loads behind a plain fade. Either way this scene keeps running until the heavy one is
+# built and its assets are in; heavy.yaml's door brings you back here.
 scene:
   scene_name: loading_demo
   root_objects:
@@ -179,7 +179,6 @@ scene:
     out += doorway("north_door", (0, 8), True, (0.3, 0.45, 0.85), {
         "target_scene": "heavy.yaml",
         "transition": "loading_screen",
-        "loading_screen": "ui/loading_screen",
         "fade_time": 0.3,
         "min_display_time": 1.0,
         "spawn_point": "arrive_from_hub",

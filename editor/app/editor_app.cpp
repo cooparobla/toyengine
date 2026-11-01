@@ -1,7 +1,9 @@
 #include <uicoopa/ui_resources.h>
 #include "editor/app/editor_app.h"
 #include "editor/app/thumbnail_cache.h"
+#include "editor/schema/inspector.h"
 #include "editor/schema/inspector_sections.h"
+#include "editor/app/ui/terrain_common.h"
 #include "editor/app/ui/console_panel.h"
 #include "editor/app/ui/weather.h"
 #include "editor/app/ui/viewport_chrome.h"
@@ -105,11 +107,21 @@ EditorApp::EditorApp(core::Engine& engine, Project project, const fs::path& scen
     register_inspector_section("Hair.guides", [this](imm::Context& ctx, SectionContext& sc) {
         return curve_pen_panel_->draw_hair_guides_(ctx, sc);
     });
-    for (const char* tile_terrain : {"TileTerrain", "Terrain"}) {   // Terrain is TileTerrain's old name
-        register_inspector_section(tile_terrain, [this](imm::Context& ctx, SectionContext& sc) {
-            return tile_terrain_panel_->draw_tile_terrain_panel_(ctx, sc.object_id, sc.comp, sc.env);
-        });
-    }
+    register_inspector_section("TileTerrain", [this](imm::Context& ctx, SectionContext& sc) {
+        return tile_terrain_panel_->draw_tile_terrain_panel_(ctx, sc.object_id, sc.comp, sc.env);
+    });
+    // "Terrain" is the one name a freshly authored terrain carries (terrain_component.h's
+    // type_name()), in either mode -- so unlike "TileTerrain"/"HeightmapTerrain" it cannot
+    // dedicate itself to one panel. Read the mode and hand off to whichever hand-written panel
+    // owns it; the heightmap half reuses the "HeightmapTerrain" schema+sections path (its
+    // "HeightmapTerrain.edit" custom section included) via draw_component_as, rather than
+    // duplicating it.
+    register_inspector_section("Terrain", [this](imm::Context& ctx, SectionContext& sc) {
+        if (terrain_mode_of(doc_, sc.object_id) == toy::world::TerrainMode::Heightmap) {
+            return draw_component_as(ctx, "HeightmapTerrain", sc.comp, sc.env);
+        }
+        return tile_terrain_panel_->draw_tile_terrain_panel_(ctx, sc.object_id, sc.comp, sc.env);
+    });
     ui_scene_ = std::make_unique<coopa::scene::Scene>("EditorUI");
     canvas_ = coopa::ui::build_immediate_canvas(*ui_scene_, "EditorUI", 100000);
     canvas_->on_draw = [this](coopa::ui::imm::Context& ctx) { draw_(ctx); };
@@ -151,7 +163,7 @@ EditorApp::EditorApp(core::Engine& engine, Project project, const fs::path& scen
         }
         preferences_panel_->prefs_load_(prefs);   // ui/preferences.h
     }
-    engine_.boot_progress("Starting the editor...", 0.96f);
+    engine_.boot_frame();
     camera_.create(*ui_scene_);
     camera_.focus = state.cam_focus;
     camera_.yaw_deg = state.cam_yaw;
@@ -179,7 +191,7 @@ EditorApp::EditorApp(core::Engine& engine, Project project, const fs::path& scen
     // layers them, on the edited config.yaml rather than the one it started with.
     engine_.set_config_source(config_.node, apply_editor_render_overrides);
 
-    engine_.boot_progress("Opening " + project_.name() + "...", 0.98f);
+    engine_.boot_frame();
     if (state.scene) {
         doc_ = std::move(*state.scene);
         active_type_ = doc_.is_object_asset() ? AssetType::Object : AssetType::Scene;
@@ -790,6 +802,12 @@ void EditorApp::play() {
             play_scene_ = &engine_.push_scene(std::move(scene), true, doc_.scene_settings());
             engine_.set_edit_mode(false);
             play_scene_->set_simulating(true);
+            // The editor builds the scene straight from the open document rather than loading it
+            // from a file, so load_scene_async()'s own cover never applies here -- begin_scene_
+            // warmup() is the entry point written for exactly this case (see its doc comment).
+            // The cover sits at overlay order 50, in_display_rect=true, so it covers the viewport
+            // and not the editor chrome.
+            engine_.begin_scene_warmup(engine_.loading_options(doc_.scene_settings()));
             // The editor viewport camera held main while the scene started, so hand it to the
             // scene's `main: true` camera (else its first camera), as a standalone run would.
             coopa::gfx::engine::components::CameraComponent* game_cam = nullptr;

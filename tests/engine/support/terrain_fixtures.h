@@ -153,7 +153,7 @@ inline std::string voxel_terrain_demo() {
     // neither a stored grid in the store nor the demo's own .tiles file (copied with its folder).
     toy::world::TileMapStore::instance().clear();
     std::string path = scene_variant("assets/scenes/terrain/terrain_demo/scene.yaml", "voxel_terrain", [](fkyaml::node& doc) {
-        fkyaml::node* t = scene_component(doc, "terrain", "TileTerrain");
+        fkyaml::node* t = scene_component(doc, "terrain", "Terrain");
         if (t == nullptr) return;
         t->as_map().erase(fkyaml::node(std::string("kind_tile_sets")));
         (*t)["tile_set"] = fkyaml::node(std::string("objects/terrain/tileset_voxel"));

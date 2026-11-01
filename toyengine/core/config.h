@@ -26,6 +26,7 @@
 
 #include <coopa/scene/config.h>
 #include <physxcoopa/nav/nav_settings.h>
+#include <toyengine/core/loading_config.h>
 #include <toyengine/render/toy_render_config.h>
 
 namespace toy {
@@ -55,12 +56,6 @@ struct WindowConfig {
      * Never shown for an invisible window, whatever this says.
      */
     bool        splash = true;
-    /// Wordmark on the splash. Empty draws none; unset is "toyengine".
-    std::string splash_title = "toyengine";
-    /// A PNG to show in place of the toyengine logo -- relative to an asset root, or absolute.
-    std::string splash_image;
-    /// Splash backdrop, display-referred RGB; the gradient darkens it toward the bottom.
-    glm::vec3   splash_color{0.227f, 0.184f, 0.420f};
 };
 
 /**
@@ -170,6 +165,7 @@ struct AppConfig {
     DebugConfig                       debug;
     SaveConfig                        save;
     ParticlesConfig                   particles;
+    LoadingConfig                     loading;
     coopa::physx::util::PhysicsSettings physics;
     /// Navigation build + runtime settings (physxcoopa/nav/nav_settings.h). `navigation.enabled`
     /// false skips the system entirely; a scene with no colliders builds nothing either way.
@@ -214,7 +210,11 @@ struct AppConfig {
      */
     AppConfig with_scene_settings(const fkyaml::node& settings) const;
 
-    /// The config.yaml sections a scene's `settings:` may override.
+    /// The config.yaml sections a scene's `settings:` may override. Deliberately excludes
+    /// `loading`: a scene overrides that section through its own path (see
+    /// scene_load_options() / apply_scene_loading_block() in scene_loading.h), because merging
+    /// it through with_scene_settings() below would re-derive the renderer for a key that
+    /// never touches it.
     static constexpr const char* kSceneSettingsSections[] = {"render", "physics", "navigation"};
 
     /** @brief True if `settings` overrides at least one key of an overridable section. */

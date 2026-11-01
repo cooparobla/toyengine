@@ -83,6 +83,12 @@ public:
     /** @brief Total instances across every built chunk and part. */
     std::size_t instance_count() const;
 
+    /** @brief Chunks within range as of the last `update()` -- built or not. */
+    std::size_t wanted_chunks() const { return wanted_; }
+
+    /** @brief Of those, how many `update()`'s budget left unbuilt. */
+    std::size_t pending_chunks() const { return pending_; }
+
     void clear();
 
 private:
@@ -91,6 +97,8 @@ private:
     /// Which prototypes were ready last update: one becoming ready rebuilds everything, since
     /// its parts were skipped while it loaded.
     std::vector<std::uint8_t> proto_ready_;
+    std::size_t wanted_ = 0;
+    std::size_t pending_ = 0;
 };
 
 } // namespace instance

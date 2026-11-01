@@ -43,6 +43,7 @@
 #include <physxcoopa/system/nav_system.h>
 
 #include <toyengine/core/config.h>
+#include <toyengine/core/loading.h>
 #include <toyengine/core/runtime_paths.h>
 #include <toyengine/core/scene_loading.h>
 #include <toyengine/render/toy_render_config.h>
@@ -66,6 +67,9 @@ namespace audio { class AudioSystem; }
 /// Pointer-only here (warm_saved_upload_ms_); defined in toyengine/world/terrain_component.h,
 /// included by the .cpp files that dereference it.
 namespace world { class TerrainComponent; }
+/// Pointer-only here (warm_saved_chunk_budget_); defined in toyengine/instance/instance_painter.h,
+/// included by the .cpp files that dereference it.
+namespace instance { class InstancePainter; }
 
 namespace core {
 
@@ -190,6 +194,39 @@ public:
     SceneLoadHandle scene_load() const { return SceneLoadHandle(scene_load_); }
     /** @brief True while an async load has not yet activated its scene. */
     bool scene_loading() const { return scene_load_ && scene_load_->pending(); }
+
+    /**
+     * @brief The SceneLoadOptions `settings` would load with: config.yaml's `loading:` section
+     *        (AppConfig::loading) layered under the scene's own `settings.loading:` block --
+     *        scene_load_options() + apply_scene_loading_block() in scene_loading.h.
+     *
+     * Exposed for a host that builds an already-loaded scene outside load_scene_async() (the
+     * editor's Play) and wants to cover it with begin_scene_warmup() the same way a real load
+     * would.
+     */
+    SceneLoadOptions loading_options(const fkyaml::node& settings = fkyaml::node()) const;
+
+    /**
+     * @brief The manual loading-state trigger: `engine.loading().acquire("reason")` holds the
+     *        cover up (raising one itself if no scene load is in flight) until the returned
+     *        Hold is dropped. See toyengine/core/loading.h.
+     */
+    LoadingState& loading() { return loading_; }
+    const LoadingState& loading() const { return loading_; }
+
+    /**
+     * @brief True while the loading cover is up: a scene load is covering (pending, or
+     *        Warming/FadingIn with alpha > 0), or a LoadingState::Hold is open.
+     *
+     * Not a general game-state machine (menu/playing/paused) -- just this one gate. Gameplay
+     * input (Engine::input_blocked_()) stands down while this is true; a game's own systems
+     * that should not run during a cover read this (or is_playable()) themselves.
+     */
+    bool is_loading() const {
+        return (scene_load_ && (!scene_load_->finished() || scene_load_->alpha > 0.0f)) || loading_.held();
+    }
+    /** @brief !is_loading() -- the scene is fully revealed and nothing is holding the cover up. */
+    bool is_playable() const { return !is_loading(); }
 
     /**
      * @brief Replaces every managed scene with an already-built one (e.g. from
@@ -684,6 +721,14 @@ public:
     void update_scene_load_(float dt);
 
     /**
+     * @brief Drives a LoadingState::Hold acquired with no scene load in flight: raises a
+     *        warm-only cover (reusing begin_scene_warmup()'s shape) the first frame one is
+     *        open, and tears it down the frame the last one releases. A no-op whenever
+     *        scene_load_ already covers (that machinery already reads loading_.held()).
+     */
+    void update_loading_holds_();
+
+    /**
      * @brief Polls the warming scene's systems; true once every participating one is warm.
      *
      * Fills SceneLoadState::warm_progress and warm_status as a side effect. True when no system
@@ -703,6 +748,8 @@ public:
     bool warm_budgets_applied_ = false;
     /// Each warming terrain's authored upload_budget_ms, to put back at the reveal.
     std::vector<std::pair<toy::world::TerrainComponent*, float>> warm_saved_upload_ms_;
+    /// Each warming painter's authored chunk_build_budget, to put back at the reveal.
+    std::vector<std::pair<toy::instance::InstancePainter*, int>> warm_saved_chunk_budget_;
     /// The warming scene's authored water settings, likewise.
     water::WaterSettings warm_saved_water_;
     /// The warming scene's authored navmesh rebuild pacing, likewise.
@@ -720,6 +767,18 @@ public:
 
     /** @brief Drops an unactivated async load (its built objects too) and its transition. */
     void cancel_scene_load_(const std::string& why);
+
+    /**
+     * @brief Drops an async load's scene pointer before it dangles, whatever stage the load is
+     *        in -- including Warming, which cancel_scene_load_() does not touch because its
+     *        scene has already activated (pending() is false by then).
+     *
+     * Called from remove_scene() / clear_scenes_() right before the load's own scene is
+     * destroyed: restores any raised warm-up budgets while st.scene is still a live pointer
+     * (apply_warmup_budgets_() writes back through pointers -- TerrainComponent, WaterSystem,
+     * NavSystem -- it took from that scene), then fails the load and tears the transition down.
+     */
+    void abandon_scene_load_();
 
     /** @brief Takes the transition layer down (fade fully gone, loading screen destroyed). */
     void finish_transition_();
@@ -787,13 +846,16 @@ public:
     static fkyaml::node procgraph_node_(const fkyaml::node& settings);
 
     /**
-     * @brief A scene's `scene.settings.loading` block as SceneLoadOptions.
+     * @brief Whether the startup load_default_scene path may cover with the project's default
+     *        loading state: config_.loading.enabled, standing down for an invisible window
+     *        (headless) unless TOY_LOADING=1 forces it, and always off at TOY_LOADING=0.
      *
-     * No block means no cover and no warm-up, so the stage is opt-in per scene and every existing
-     * scene keeps loading exactly as it did. Naming a `ui:` implies a loading screen; `transition:`
-     * overrides that with none / fade / loading_screen.
+     * Only gates that one implicit call site (engine.cpp's constructor). An explicit
+     * load_scene_async()/begin_scene_warmup() call, or a scene's own settings.loading: block
+     * via apply_scene_loading_block(), is never subject to it -- a caller that asks for a cover
+     * gets one.
      */
-    static SceneLoadOptions scene_loading_options_(const fkyaml::node& settings);
+    bool loading_cover_allowed_() const;
 
     /** @brief The render-config values the weather overwrites (weather::controlled_render_keys()). */
     struct WeatherRenderBase {
@@ -935,19 +997,17 @@ public:
     }
 
     /**
-     * @brief Draws one boot-splash frame with this status, while the splash is still up.
+     * @brief Draws one boot-splash frame, while the splash is still up.
      *
      * A no-op once the splash is gone (it is dropped after the first rendered frame) or when
      * there is none, so a host can call it freely. Engine calls it at its own startup
      * milestones; the editor and the hub call it during their constructors, which run while
      * the splash is still the only thing on screen.
      *
-     * @param status       The line under the bar, e.g. "Loading scene...".
-     * @param progress     0..1 fills the bar; negative draws an indeterminate sweep.
      * @param min_interval Seconds this must be apart from the previous frame -- the throttle for
      *                     a call inside a tight loop, so presenting does not pace the loop.
      */
-    void boot_progress(const std::string& status, float progress = -1.0f, float min_interval = 0.0f);
+    void boot_frame(float min_interval = 0.0f);
 
     /** @brief True while the boot splash is still being shown. */
     bool booting() const { return boot_splash_ != nullptr; }
@@ -1018,8 +1078,12 @@ private:
      * without it, FIXED_DT alone can't make an interactive-camera capture
      * reproducible.
      */
-    /** @brief Gameplay drivers push zero input: NO_INPUT=1, or a host took focus away. */
-    bool input_blocked_() const { return no_input_ || !game_focused_; }
+    /**
+     * @brief Gameplay drivers push zero input: NO_INPUT=1, a host took focus away, or the
+     *        loading cover is up (is_loading()) -- the player cannot see what they would be
+     *        driving, whether that is a fresh load's Warming scene or a manual LoadingHold.
+     */
+    bool input_blocked_() const { return no_input_ || !game_focused_ || is_loading(); }
 
     void drive_camera_controller_(coopa::scene::Scene& scene);
 
@@ -1425,6 +1489,9 @@ private:
     save::SaveSystem saves_;
     /// This frame's particle batches (see sync_particle_render_state_()); kept to reuse capacity.
     render::ParticleFrameState particle_frame_;
+    /// Manual loading-state holds; see loading(). A hold acquired with no load in flight raises
+    /// its own cover -- see update_loading_holds_().
+    LoadingState loading_;
 };
 
 

@@ -334,9 +334,16 @@ COOPA_TEST(wetness_reaches_opaque_materials_but_only_opt_in_ones) {
     tick_frames(engine, 30);
     const Frame wet = engine.capture_image(false);
 
-    // The puddle sits at the clearing's centre, which the orbit camera frames mid-screen.
-    const glm::vec3 dry_mid = band_mean(dry, 0.45f, 0.75f, 0.30f, 0.70f);
-    const glm::vec3 wet_mid = band_mean(wet, 0.45f, 0.75f, 0.30f, 0.70f);
+    // The puddle sits at the clearing's centre, which the orbit camera frames mid-screen. x
+    // starts at 0.56 (not the clearing's actual left edge) to clear the preset panel, which
+    // reaches to ~0.544 of the frame at this resolution -- the previous 0.30 sampled mostly
+    // panel pixels, and the selected button's highlight border moving from "Calm" to "Puddle"
+    // between the two captures brightened that region enough to mask the ground darkening
+    // under it. x1 stays close by (0.64, not the original 0.70) because the 4.5 m source only
+    // wets ground near the panel edge -- widening the band dilutes the signal with unaffected
+    // grass further into the clearing.
+    const glm::vec3 dry_mid = band_mean(dry, 0.45f, 0.75f, 0.56f, 0.64f);
+    const glm::vec3 wet_mid = band_mean(wet, 0.45f, 0.75f, 0.56f, 0.64f);
     const float dry_l = dry_mid.x + dry_mid.y + dry_mid.z;
     const float wet_l = wet_mid.x + wet_mid.y + wet_mid.z;
     expect(wet_l < dry_l * 0.97f,

@@ -205,7 +205,10 @@ void TopbarPanel::draw_window_menu_(imm::Context& ctx) {
 }
 
 void TopbarPanel::toggle_pause_() {
-    if (!app_.play_scene_) return;
+    // Pausing a scene still covered by the loading screen would freeze the warm-up that is
+    // supposed to finish it -- gameplay already simulates under the cover (that is how
+    // streaming systems make progress), and pause must wait for the reveal like everything else.
+    if (!app_.play_scene_ || app_.loading()) return;
     app_.play_scene_->set_simulating(!app_.play_scene_->is_simulating());
     if (app_.play_scene_->is_simulating()) app_.engine_.audio().resume_all();
     else app_.engine_.audio().pause_all();
@@ -214,6 +217,7 @@ void TopbarPanel::toggle_pause_() {
 
 void TopbarPanel::step_simulation_() {
     if (!app_.play_scene_) { app_.play(); app_.pause_after_start_ = true; return; }
+    if (app_.loading()) return;
     app_.play_scene_->set_simulating(true);
     app_.step_countdown_ = 2;   // simulate the next tick, then pause again (see post_late_update_)
 }

@@ -7,6 +7,9 @@ Application lifetime and configuration.
 | [`engine.h`](engine.h) | `Engine` — owns a `coopa::job::JobEngine`, then a `gfx::app::Context` (Window → Instance → Surface → Device → Allocator → Swapchain → CommandPool → RenderPass → Renderer, plus frame timing and resize handling), then `ToyRenderPipeline`, `AssetManager` and `SceneManager` on top. `run()`/`tick()` drive the loop. |
 | [`config.h`](config.h) | `AppConfig::load(path)` — parses `assets/config.yaml` via fkYAML directly. Every field has an in-class default; missing or malformed keys fall back silently. Also layers a scene's `settings:` overrides (`with_scene_settings()`). |
 | [`scene_loading.h`](scene_loading.h) | Async scene loading: `SceneLoadOptions`, `SceneTransition`, `SceneLoadHandle` (what `Engine::load_scene_async()` takes and returns) and the transition layer it draws. |
+| [`loading_config.h`](loading_config.h) | `LoadingConfig` — the project-global `loading:` section of `config.yaml`: whether the engine covers at all, and how the built-in screen looks. |
+| [`loading_screen.h`](loading_screen.h) | `emit_loading_screen()` — the built-in mark's geometry and animation, a pure function of canvas size and time. |
+| [`loading.h`](loading.h) | `LoadingState` / `LoadingState::Hold` — the refcounted manual trigger, `engine.loading().acquire("reason")`. |
 | [`runtime_paths.h`](runtime_paths.h) | Where a running game finds its files — the source checkout or a relocated package — including the shader search roots (project → toyengine → gfxcoopa → uicoopa) and the per-user data directory. |
 | [`module.h`](module.h) | `TOY_MODULE()` — how a game project's `src/` code registers components with every `Engine`. |
 | [`caml_codec.h`](caml_codec.h) | Plugs caml's compressed + encrypted `.caml` documents into `coopa::yaml`. |
@@ -38,15 +41,35 @@ Off costs nothing: no layer is ticked or drawn, no profiler runs, and `watch()`/
 return at once. A `TOY_SHIPPING` build compiles the overlay out unless it is configured with
 `-DTOY_SHIPPING_DEBUG_OVERLAY=ON`.
 
-## Async scene loading and transitions
+## The loading state
+
+Launch, a level change and Editor Play all go through the same gate: a loading cover that stays
+up until every slow system has drained, so nothing is ever shown half-built. It is
+project-global — one `loading:` section in `config.yaml` (parsed into `LoadingConfig`,
+[`loading_config.h`](loading_config.h)) — layered under a scene's own `settings.loading:` block
+(`scene_load_options()` / `apply_scene_loading_block()`, [`scene_loading.h`](scene_loading.h)):
+
+```yaml
+loading:
+  enabled: true              # false restores the old opt-in-only behaviour
+  spinner: true               # the built-in mark; false leaves only the background (+ overlay_ui)
+  background: [0, 0, 0]       # pure black by default
+  spinner_color: [1, 1, 1]    # pure white
+  corner: bottom_right        # bottom_right / bottom_left / top_right / top_left
+  overlay_ui: ""               # an optional assets/ui/<name>.yaml drawn over the mark
+  min_display_time: 0.0
+  fade_in: 0.35
+  fade_out: 0.35
+  warm_up_timeout: 20.0        # reveal anyway after this long, so a stuck system can't hang it
+  warm_up_budget_ms: 8.0       # main-thread ms/frame for streaming while covered
+```
 
 `load_scene()` blocks: GPU wait, parse, start, drain every asset load. Tests and tools keep
 using it. A running game changes level with `load_scene_async()`, which keeps the current
 scene running and rendering while the next one loads:
 
 ```cpp
-toy::core::SceneLoadOptions opts;
-opts.transition = toy::core::SceneTransition::loading_screen_ui("ui/loading_screen");
+toy::core::SceneLoadOptions opts = engine.loading_options();   // project + scene defaults
 opts.min_display_time = 1.0f;     // seconds; a fast load doesn't flash the screen
 opts.spawn_point = "from_hub";    // move the player (first CharacterController) here
 toy::core::SceneLoadHandle load = engine.load_scene_async("scenes/level_2", opts);
@@ -65,16 +88,30 @@ load.on_complete([](coopa::scene::Scene& s) { /* restore state before its first 
    one `wait_idle()`, the old scenes are destroyed (unless `additive`, which adds the scene
    alongside and keeps the active one), the new scene is started, its systems installed, and it
    simulates. No asset drain. `on_complete` fires here, before its first update.
+5. **Warming** — the new scene keeps updating and rendering under full cover while its systems
+   stream in what a frame-zero scene can't have ready yet (terrain meshing, water baking, the
+   navmesh). Readiness is `coopa::scene::ISceneSystem::warm_up_state()`, folded across every
+   installed system; `warm_up_timeout` reveals anyway if one never reports warm.
 
 `progress()` weighs the document 5 %, the build 65 % and the assets 30 %. One load runs at a
 time (a second request returns the in-flight handle); `load_scene()`/`set_scene()` cancel an
 unfinished one, and a failed load fades back to the running scene and fires `on_failed`.
 
-**Transitions** (`SceneTransition`) draw on an engine overlay layer (order 50, inside the
-display rect): `fade(seconds, colour)`, `loading_screen_ui(ui_asset, fade, colour)` — the UI
-asset is shown over the fade colour once it covers the screen, with a `progress` StatBar /
-ProgressBar (0..1) and a `status` Text filled in by name (`assets/ui/menus/loading_screen.yaml`
-is the template) — or `none()`.
+**The screen itself** draws on an engine overlay layer (order 50, inside the display rect): a
+fill in `background`, then the built-in mark — the toyengine block's three faces cycling
+brightness in rotation (`loading_screen.h`'s `emit_loading_screen()`) — unless `spinner` is off.
+No text, no bar. `overlay_ui` names a UI panel asset (`toy::ui::UiPanel`, drawn with
+`draw_panel()`) shown over the mark; blank draws nothing extra. A ref that cannot be read still
+leaves the built-in screen up, because the one thing a loading screen must never do is fail to
+appear.
+
+**Holding the cover manually.** `engine.loading().acquire("reason")` returns a refcounted,
+move-only `LoadingState::Hold` that raises the cover (if nothing is already loading) and keeps
+it up until every outstanding hold is dropped — for a game's own slow one-off work (world
+generation, a big save-game decode) that isn't tied to a scene load. `Engine::is_loading()` /
+`is_playable()` read the gate (a scene load in flight or fading, or any hold open); gameplay
+input stands down while loading, and a game's own systems that should not run under the cover
+read these themselves.
 
 **`SceneLink`** ([`toyengine/scene/scene_link.h`](../scene/scene_link.h)) changes level with no
 code: a box (`size`) that loads `target_scene` with `transition` (`fade` / `loading_screen` /
@@ -82,6 +119,13 @@ code: a box (`size`) that loads `target_scene` with `transition` (`fade` / `load
 CharacterController enters it. Demo: `./build/toyengine loading_demo` (two linked scenes, one
 with over a thousand objects; generated by `tools/gen_loading_demo_scene.py`). An engine
 embedded in a tool (`EngineOptions::edit_mode`, the editor's play mode) ignores SceneLinks.
+
+**Editor Play** builds the scene from the open document rather than loading it from a file, so
+`load_scene_async()` doesn't apply; `EditorApp::play()` instead calls
+`engine.begin_scene_warmup(engine.loading_options(...))` right after starting the scene, which
+drops the same transition straight into the Warming stage over the already-live scene. The
+cover sits over the viewport only (it is an `in_display_rect` overlay), and `EditorApp::stop()`
+tears it down through the existing `remove_scene()` call.
 
 ## Usage
 
@@ -118,22 +162,22 @@ None of these are honoured in a `TOY_SHIPPING` build.
 
 `boot_splash.h` paints the window before the window system ever maps it, so a launch never
 shows what was on screen behind it. `Engine`'s constructor builds one straight after the
-`Context` (before the renderer's pipelines), presents it, maps the window, and then reports its
-own startup milestones through `Engine::boot_progress()` -- which a host like the editor or the
-hub calls too, since their constructors run while the splash is still the only thing up. The
-first `tick()` that draws the app's own frame drops it.
+`Context` (before the renderer's pipelines), presents it, maps the window, and then keeps it on
+screen through `Engine::boot_frame()` -- which a host like the editor or the hub calls too,
+since their constructors run while the splash is still the only thing up. The first `tick()`
+that draws the app's own frame drops it.
 
-Four `window:` keys control it, and only for a visible window:
+It draws exactly what a scene load's own cover draws -- a flat `loading.background` fill and the
+built-in cycling mark (`emit_loading_screen()`) -- so launch and the first scene load read as one
+continuous screen with no seam between them. Its look therefore follows the `loading:` section
+(see "**The screen itself**" above), not its own keys. The one `window:` key left is:
 
 | Key | Meaning |
 |---|---|
-| `splash` | `false` maps the window immediately and shows no startup screen. |
-| `splash_title` | The wordmark under the logo (`toyengine`); empty draws none. |
-| `splash_image` | A PNG shown instead of the toyengine logo -- a project's own branding. |
-| `splash_color` | `[r, g, b]` backdrop, display-referred; the gradient darkens it downward. |
+| `splash` | `false` maps the window immediately and shows no startup screen, only for a visible window. |
 
-The editor and the hub reset those to the engine's defaults whatever the opened project sets:
-that window is toyengine, not the game inside it.
+The editor and the hub reset `window.splash` and the whole `loading:` section to the engine's
+defaults whatever the opened project sets: that window is toyengine, not the game inside it.
 
 **A capture is only reproducible if `output.save_low_res` is `true`.** With it `false`,
 `save_screenshot()` writes the swapchain-sized image, and the window manager does not

@@ -64,6 +64,30 @@ public:
     void execute(coopa::scene::Scene& scene, const coopa::scene::FrameContext& ctx) override;
 
     /**
+     * @brief Not warm until every painter's chunks within draw distance are built.
+     *
+     * Aggregated across every live painter's cache rather than tracked separately here --
+     * `InstanceRenderCache::update()` (called from `execute()`, above) already counts how many
+     * chunks it wanted and how many its per-frame budget left unbuilt, so there is nothing left
+     * to compute here beyond summing what is already current.
+     */
+    coopa::scene::WarmupState warm_up_state() const override {
+        coopa::scene::WarmupState ws;
+        std::size_t wanted = 0, pending = 0;
+        for (const auto& [uid, p] : painted_) {
+            wanted += p.cache.wanted_chunks();
+            pending += p.cache.pending_chunks();
+        }
+        ws.participates = wanted > 0;
+        if (!ws.participates) return ws;
+        ws.what = "instances";
+        ws.remaining = static_cast<int>(pending);
+        ws.warm = pending == 0;
+        ws.progress = static_cast<float>(wanted - pending) / static_cast<float>(wanted);
+        return ws;
+    }
+
+    /**
      * @brief Appends this frame's visible chunk batches to `out`.
      *
      * Takes the scene rather than a list remembered from `execute()`, because the editor

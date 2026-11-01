@@ -12,6 +12,8 @@
 
 #include <toyengine/core/engine.h>
 
+#include <cstring>
+
 // Includes engine.h no longer carries: these are implementation needs of this file
 // (and of the other engine TUs that previously got them transitively).
 #include <gfxcoopa/engine/loaders/mesh_loader.h>
@@ -44,6 +46,7 @@
 #include <toyengine/render/visibility.h>
 #include <toyengine/save/register.h>
 #include <toyengine/world/terrain_component.h>
+#include <toyengine/instance/instance_painter.h>
 
 #include <toyengine/core/boot_splash.h>
 
@@ -90,8 +93,7 @@ SceneLoadHandle Engine::begin_scene_warmup(SceneLoadOptions options) {
     scene_load_ = st;
     transition_.set_fade(st->options.transition.color, 1.0f);
     add_overlay_layer(&transition_.scene(), 50, /*in_display_rect=*/true);
-    if (st->options.transition.kind == SceneTransition::Kind::LoadingScreen &&
-        !st->options.transition.loading_screen.empty()) {
+    if (st->options.transition.kind == SceneTransition::Kind::LoadingScreen) {
         st->loading_screen_shown = true;
         if (!transition_.show_loading_screen(st->options.transition.loading_screen)) {
             std::cerr << "[toyengine] Loading screen '" << st->options.transition.loading_screen
@@ -138,6 +140,15 @@ void Engine::apply_warmup_budgets_(detail::SceneLoadState& st, bool warming) {
             warm_saved_upload_ms_.emplace_back(terrain, terrain->upload_budget_ms);
             terrain->upload_budget_ms = budget;
         }
+        // Heightmap terrain's own chunk-spawn cap (HeightmapTerrainSystem::stream_chunks_(),
+        // budget=512/frame) is left alone: it is already far above what any view distance needs
+        // in one frame, unlike the painter's modest default below.
+        warm_saved_chunk_budget_.clear();
+        for (toy::instance::InstancePainter* painter :
+             st.scene->get_components<toy::instance::InstancePainter>()) {
+            warm_saved_chunk_budget_.emplace_back(painter, painter->chunk_build_budget);
+            painter->chunk_build_budget = std::max(painter->chunk_build_budget, 64);
+        }
         if (auto* water = dynamic_cast<water::WaterSystem*>(st.scene->find_system("Water"))) {
             warm_saved_water_ = water->settings();
             water::WaterSettings ws = warm_saved_water_;
@@ -173,6 +184,13 @@ void Engine::apply_warmup_budgets_(detail::SceneLoadState& st, bool warming) {
         }
     }
     warm_saved_upload_ms_.clear();
+    const auto live_painters = st.scene->get_components<toy::instance::InstancePainter>();
+    for (const auto& [painter, saved] : warm_saved_chunk_budget_) {
+        if (std::find(live_painters.begin(), live_painters.end(), painter) != live_painters.end()) {
+            painter->chunk_build_budget = saved;
+        }
+    }
+    warm_saved_chunk_budget_.clear();
     if (auto* water = dynamic_cast<water::WaterSystem*>(st.scene->find_system("Water"))) {
         water->set_settings(warm_saved_water_);
     }
@@ -184,6 +202,23 @@ void Engine::apply_warmup_budgets_(detail::SceneLoadState& st, bool warming) {
         warm_saved_nav_ = false;
     }
     warm_budgets_applied_ = false;
+}
+
+void Engine::update_loading_holds_() {
+    if (!loading_.held()) return;
+    // Already covered: that load's own Warming block already reads loading_.held() in its
+    // reveal gate (loading_reveal_ready()), so a hold open during a real load needs nothing
+    // more from here.
+    if (scene_load_ && !scene_load_->finished()) return;
+    if (!scene_mgr_.has_scene()) return;
+    SceneLoadOptions opts = loading_options(scene_settings_[&scene_mgr_.get_active_scene()]);
+    // A held cover must appear even if the project (or this scene) would otherwise skip one --
+    // the caller asked for it explicitly.
+    if (opts.transition.kind == SceneTransition::Kind::None) {
+        opts.transition = SceneTransition::fade(0.35f, config_.loading.background);
+    }
+    opts.warm_up = true;
+    begin_scene_warmup(std::move(opts));
 }
 
 bool Engine::poll_scene_warmup_(detail::SceneLoadState& st) {
@@ -233,10 +268,14 @@ void Engine::update_scene_load_(float dt) {
         default: st.raise_progress(st.stage == SceneLoadStage::Failed ? st.progress : 1.0f); break;
     }
 
-    // The cover: up over fade_out before activation, down over fade_in after (or after a failure).
+    // The cover: up over fade_out before activation, down over fade_in after (or after a
+    // failure). Warming is excluded from the ramp-up branch: begin_scene_warmup() starts it
+    // with alpha already at 1 (the scene was already built -- there is nothing left to cover
+    // up for) but st.elapsed at 0, and ramping from elapsed/fade_out would read that as "just
+    // starting to cover" and drag alpha back down from 1 to near 0 on the very next frame.
     if (st.stage == SceneLoadStage::FadingIn || st.stage == SceneLoadStage::Failed) {
         st.alpha = tr.fade_in > 0.0f ? std::max(0.0f, st.alpha - dt / tr.fade_in) : 0.0f;
-    } else if (covered_kind) {
+    } else if (covered_kind && st.stage != SceneLoadStage::Warming) {
         st.alpha = tr.fade_out > 0.0f ? std::min(1.0f, st.elapsed / tr.fade_out) : 1.0f;
     }
     const bool covered = !covered_kind || st.alpha >= 1.0f;
@@ -248,7 +287,7 @@ void Engine::update_scene_load_(float dt) {
     if (tr.kind == SceneTransition::Kind::LoadingScreen && (st.pending() || warming)) {
         if (covered && !st.loading_screen_shown) {
             st.loading_screen_shown = true;
-            if (!tr.loading_screen.empty() && !transition_.show_loading_screen(tr.loading_screen)) {
+            if (!transition_.show_loading_screen(tr.loading_screen)) {
                 std::cerr << "[toyengine] Loading screen '" << tr.loading_screen << "' could not be shown\n";
             }
         }
@@ -268,7 +307,8 @@ void Engine::update_scene_load_(float dt) {
         apply_warmup_budgets_(st, /*warming=*/true);
         const bool timed_out =
             st.options.warm_up_timeout > 0.0f && st.warm_elapsed >= st.options.warm_up_timeout;
-        if (poll_scene_warmup_(st) || timed_out) {
+        const bool min_display_met = st.elapsed >= st.options.min_display_time;
+        if (loading_reveal_ready(poll_scene_warmup_(st), timed_out, loading_.held(), min_display_met)) {
             if (timed_out) {
                 std::cerr << "[toyengine] '" << st.path << "' was still warming after "
                           << st.options.warm_up_timeout << " s (" << st.warm_status
@@ -360,6 +400,13 @@ void Engine::cancel_scene_load_(const std::string& why) {
     finish_transition_();
 }
 
+void Engine::abandon_scene_load_() {
+    if (!scene_load_ || scene_load_->finished()) return;
+    if (warm_budgets_applied_) apply_warmup_budgets_(*scene_load_, /*warming=*/false);
+    scene_load_->fail("scene removed");
+    finish_transition_();
+}
+
 void Engine::finish_transition_() {
     if (scene_load_ && !scene_load_->finished()) scene_load_->stage = SceneLoadStage::Done;
     if (transition_.has_scene()) {
@@ -395,44 +442,18 @@ void Engine::consume_scene_link_requests_() {
     }
 }
 
-SceneLoadOptions Engine::scene_loading_options_(const fkyaml::node& settings) {
-    SceneLoadOptions opts;
-    // No `loading:` block means no cover: a scene says for itself whether it is worth warming,
-    // so adding the stage changes nothing for the scenes (and the projects) that do not ask.
-    opts.warm_up = false;
-    opts.transition = SceneTransition::none();
-    if (!settings.is_mapping() || !settings.contains("loading")) return opts;
-    const fkyaml::node& node = settings.at("loading");
-    if (!node.is_mapping()) return opts;
-
-    std::string ui;
-    if (node.contains("ui")) ui = node.at("ui").get_value<std::string>();
-    SceneTransition::Kind kind =
-        ui.empty() ? SceneTransition::Kind::Fade : SceneTransition::Kind::LoadingScreen;
-    if (node.contains("transition")) {
-        if (auto parsed = SceneTransition::parse_kind(node.at("transition").get_value<std::string>())) {
-            kind = *parsed;
-        } else {
-            std::cerr << "[toyengine] scene settings: loading.transition must be none, fade or "
-                         "loading_screen\n";
-        }
-    }
-    opts.transition.kind = kind;
-    opts.transition.loading_screen = ui;
-    opts.warm_up = kind != SceneTransition::Kind::None;
-    if (node.contains("fade_in")) opts.transition.fade_in = node.at("fade_in").get_value<float>();
-    if (node.contains("fade_out")) opts.transition.fade_out = node.at("fade_out").get_value<float>();
-    if (node.contains("warm_up")) opts.warm_up = node.at("warm_up").get_value<bool>();
-    if (node.contains("warm_up_timeout")) {
-        opts.warm_up_timeout = node.at("warm_up_timeout").get_value<float>();
-    }
-    if (node.contains("warm_up_budget_ms")) {
-        opts.warm_up_budget_ms = node.at("warm_up_budget_ms").get_value<float>();
-    }
-    if (node.contains("min_display_time")) {
-        opts.min_display_time = node.at("min_display_time").get_value<float>();
-    }
+SceneLoadOptions Engine::loading_options(const fkyaml::node& settings) const {
+    SceneLoadOptions opts = scene_load_options(config_.loading);
+    apply_scene_loading_block(settings, opts);
     return opts;
+}
+
+bool Engine::loading_cover_allowed_() const {
+    if (const char* forced = debug_env("TOY_LOADING")) return std::strcmp(forced, "0") != 0;
+    // An invisible (headless) window never advances a camera-driven fade on its own, and most
+    // of them also run with FIXED_DT=0, which never advances this one either -- see
+    // tests/engine/support/render_fixture.cpp's comment on the same hazard.
+    return config_.loading.enabled && config_.window.visible;
 }
 } // namespace core
 } // namespace toy

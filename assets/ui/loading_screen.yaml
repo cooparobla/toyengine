@@ -1,0 +1,28 @@
+# loading_screen -- an optional overlay drawn over the engine's own black-background,
+# white-mark loading screen (see toyengine/core/loading_screen.h). The built-in screen never
+# shows text; this is the escape hatch for a project that wants some.
+#
+#   loading:
+#     overlay_ui: ui/loading_screen        # config.yaml, project-global
+#
+# or per scene / per SceneLink, overriding just this load:
+#
+#   - type: SceneLink
+#     loading_screen: ui/loading_screen
+#
+# No title (so draw_panel() skips the frame/background entirely) and anchored away from the
+# built-in mark's default bottom-right corner, so the two never overlap.
+#
+# A UI panel's rows (toy::ui::RowKind, toyengine/ui/ui_panel.h) have no image/icon kind -- just
+# Label/Slider/Toggle/Int/Combo/Button/Separator/Spacer -- so the mark itself is always the
+# built-in C++ one; this overlay can only add text and simple controls alongside it, never
+# replace it with a custom image.
+#
+# Not referenced by any shipped scene -- kept as a documented example of the overlay_ui escape
+# hatch for a project that wants one.
+anchor: BottomCenter
+offset: [0, 48]
+size: [420, 40]
+
+rows:
+  - { kind: label, label: "Entering the ruins..." }

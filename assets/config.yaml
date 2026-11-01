@@ -1,6 +1,7 @@
 scene: { default_scene: assets/scenes/gameplay/character_demo/scene.yaml }
 debug: { overlay: "off" }
 jobs: { parallel_threshold: 4, worker_threads: 0 }
+loading: { enabled: true, min_display_time: 0.5 }
 output: { filepath: ./output/frame.png, save_low_res: false, save_on_exit: true }
 particles: { gpu_enabled: true }
 physics:

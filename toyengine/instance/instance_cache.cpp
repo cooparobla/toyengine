@@ -206,6 +206,8 @@ void InstanceRenderCache::update(const InstanceSetData& data, const std::vector<
         chunks_.emplace(wanted[static_cast<std::size_t>(i)].second,
                         build_chunk(data, wanted[static_cast<std::size_t>(i)].second, prototypes));
     }
+    wanted_ = wanted.size();
+    pending_ = wanted.size() - static_cast<std::size_t>(n);
 }
 
 std::size_t InstanceRenderCache::instance_count() const {

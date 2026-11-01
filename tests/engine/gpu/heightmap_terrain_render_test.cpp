@@ -183,7 +183,7 @@ COOPA_TEST(view_distance_static_instances_and_shadow_control) {
     toy::world::HeightmapStore::instance().clear();
     {
         const std::string capped = scene_variant(k_demo, "heightmap_terrain_capped", [](fkyaml::node& doc) {
-            fkyaml::node* t = scene_component(doc, "terrain", "HeightmapTerrain");
+            fkyaml::node* t = scene_component(doc, "terrain", "Terrain");
             (*t)["view_distance"] = 200.0;
             (*t)["cast_shadows"] = false;
         });

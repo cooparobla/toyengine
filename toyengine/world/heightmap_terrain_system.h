@@ -112,6 +112,26 @@ public:
 
     void execute(coopa::scene::Scene& scene, const coopa::scene::FrameContext& ctx) override;
 
+    /**
+     * @brief Not warm until every chunk within view distance has streamed in -- a heightmap
+     *        world's ground, same gap TerrainSystem (the tile mode) closes for itself.
+     *
+     * Texture uploads (the grid, the splats) are not counted: upload_() finishes them
+     * synchronously within the frame that requests them, so by the time stream_chunks_() has
+     * run there is nothing left outstanding on that front.
+     */
+    coopa::scene::WarmupState warm_up_state() const override {
+        coopa::scene::WarmupState ws;
+        ws.participates = wanted_chunks_ > 0;
+        if (!ws.participates) return ws;
+        ws.what = "terrain";
+        ws.remaining = unfinished_chunks_;
+        ws.warm = unfinished_chunks_ == 0;
+        ws.progress = static_cast<float>(wanted_chunks_ - unfinished_chunks_) /
+                      static_cast<float>(wanted_chunks_);
+        return ws;
+    }
+
     /** @brief This frame's terrains for the renderer, in slot order. */
     const std::vector<render::TerrainFrameBinding>& frame_bindings() const { return bindings_; }
 
@@ -198,6 +218,12 @@ private:
     std::uint64_t next_id_ = 1;
     double time_ = 0.0;
     bool warned_slots_ = false;
+
+    /// Counted in stream_chunks_() -- that scan already visits exactly the wanted set once a
+    /// frame, and warm_up_state() needs nothing more than its size and how much of it is not
+    /// spawned yet. Accumulated, not assigned -- execute() zeroes the pair each frame.
+    std::int32_t wanted_chunks_ = 0;
+    std::int32_t unfinished_chunks_ = 0;
 };
 
 /** @brief Installs the system (once per scene, before the first update). */

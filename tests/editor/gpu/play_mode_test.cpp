@@ -7,6 +7,8 @@
 
 #include <coopa/testing/test.h>
 
+#include <gfxcoopa/util/image_readback.h>
+
 #include "editor/support/editor_session.h"
 
 COOPA_TEST_SUITE("play_mode");
@@ -124,8 +126,12 @@ COOPA_TEST(pause_step_nav_gizmo_property_tabs_and_outliner_eye) {
     app.sync().rebuild(engine, app.document());
     tick(engine, 2);
     app.play();
-    tick(engine, 5);
-    expect(app.playing(), "playing");
+    tick(engine, 1);   // flushes play()'s deferred build (editor_rebuild_splits_the_frame)
+    coopa::test::require(app.playing(), "playing");
+    // Pause/Step refuse while the Play loading cover is still up (editor_app.h:279's loading()),
+    // so run out the cover's warm-up + fade before exercising them.
+    for (int i = 0; i < 60 && engine.is_loading(); ++i) tick(engine, 1);
+    expect(!app.loading(), "the loading cover has cleared");
     app.pause();
     tick(engine, 1);
     expect(app.paused(), "Pause freezes the simulation");
@@ -145,6 +151,36 @@ COOPA_TEST(pause_step_nav_gizmo_property_tabs_and_outliner_eye) {
     app.open_asset(AssetType::Material, "materials/default.yaml");
     tick(engine, 4);
     dump(engine, "07_shading_workspace");
+}
+
+/**
+ * @brief Play's loading cover holds fully opaque through Warming. begin_scene_warmup() starts
+ *        the state with alpha already at 1 (the scene is already built -- there is nothing left
+ *        to cover up for) but elapsed at 0; the fade math must not mistake that for "just
+ *        starting to cover" and drag alpha back down toward 0 on the very next frame.
+ */
+COOPA_TEST(play_cover_alpha_does_not_collapse_on_the_first_warming_frame) {
+    EditorSession session;
+    auto& engine = session.engine;
+    auto& app = session.app;
+
+    app.play();
+    tick(engine, 1);
+    coopa::test::require(app.playing(), "playing");
+    auto h = engine.scene_load();
+    coopa::test::require(h.valid(), "Play starts a loading cover");
+    expect(h.transition_alpha() > 0.99f,
+           "alpha stays at 1 on the first Warming frame (" + std::to_string(h.transition_alpha()) + ")");
+
+    tick(engine, 1);
+    h = engine.scene_load();
+    expect(!h.valid() || h.transition_alpha() > 0.99f,
+           "and the next frame (" + (h.valid() ? std::to_string(h.transition_alpha()) : std::string("n/a")) + ")");
+
+    for (int i = 0; i < 60 && engine.is_loading(); ++i) tick(engine, 1);
+    expect(!engine.is_loading(), "the cover clears on its own once warm-up finishes");
+    app.stop();
+    tick(engine, 2);
 }
 
 /**
@@ -176,6 +212,59 @@ COOPA_TEST(play_resolves_the_world_matrices_of_the_scene_it_just_built) {
     expect(transforms > 0, "the play scene has transforms to resolve");
     expect(dirty == 0, "every one of them is resolved on the first drawn frame of Play (" +
                            std::to_string(dirty) + " of " + std::to_string(transforms) + " dirty)");
+    app.stop();
+    tick(engine, 2);
+}
+
+/**
+ * @brief Regression for "no loading screen in the editor": Play's cover must draw the built-in
+ *        cycling mark over the viewport, not just a blank fade. begin_scene_warmup() starts the
+ *        Warming stage already covered (alpha 1 -- see the alpha-collapse test above), but the
+ *        viewport's render pipeline takes a couple of frames to pick up the new overlay layer,
+ *        so this waits past that before capturing -- the earlier alpha-only test cannot catch
+ *        a render-side regression like this one, only a logic-side one.
+ */
+COOPA_TEST(play_cover_draws_the_mark_in_the_viewport) {
+    EditorSession session;
+    auto& engine = session.engine;
+    auto& app = session.app;
+
+    app.play();
+    tick(engine, 3);
+    coopa::test::require(app.playing(), "playing");
+    auto h = engine.scene_load();
+    coopa::test::require(h.valid(), "Play starts a loading cover");
+    coopa::test::require(h.transition_alpha() > 0.99f, "caught the cover fully opaque");
+
+    const coopa::gfx::util::ImageData img = engine.capture_image(false);
+    const auto d = engine.display_rect();
+    auto pixel_sum = [&](float fx, float fy) {
+        const uint32_t x = static_cast<uint32_t>(d.x) + static_cast<uint32_t>(fx * d.w);
+        const uint32_t y = static_cast<uint32_t>(d.y) + static_cast<uint32_t>(fy * d.h);
+        const size_t i = (static_cast<size_t>(y) * img.width + x) * img.channels;
+        return int(img.pixels[i]) + int(img.pixels[i + 1]) + int(img.pixels[i + 2]);
+    };
+    // The default loading.background is pure black; count_bright finds the mark's corner.
+    long long bright = 0;
+    const uint32_t xa = static_cast<uint32_t>(d.x) + static_cast<uint32_t>(0.70f * d.w);
+    const uint32_t xb = static_cast<uint32_t>(d.x) + d.w;
+    const uint32_t ya = static_cast<uint32_t>(d.y) + static_cast<uint32_t>(0.70f * d.h);
+    const uint32_t yb = static_cast<uint32_t>(d.y) + d.h;
+    for (uint32_t y = ya; y < yb && y < img.height; ++y) {
+        for (uint32_t x = xa; x < xb && x < img.width; ++x) {
+            const size_t i = (static_cast<size_t>(y) * img.width + x) * img.channels;
+            if (int(img.pixels[i]) + int(img.pixels[i + 1]) + int(img.pixels[i + 2]) > 60) ++bright;
+        }
+    }
+    expect(bright > 50, "play: the loading mark is drawn in the viewport's bottom-right corner (" +
+                             std::to_string(bright) + " px)");
+    // The centre, not a corner: the viewport's own toolbar, nav gizmo and PLAYING badge all sit
+    // in corners (viewport_chrome.cpp), so a corner sample can catch editor chrome rather than
+    // the cover underneath it.
+    expect(pixel_sum(0.5f, 0.5f) < 20, "play: away from the mark the cover stays its own background");
+    dump(engine, "12_play_loading_cover");
+
+    for (int i = 0; i < 60 && engine.is_loading(); ++i) tick(engine, 1);
     app.stop();
     tick(engine, 2);
 }

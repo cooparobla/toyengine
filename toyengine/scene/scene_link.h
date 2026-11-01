@@ -8,7 +8,7 @@
  * - type: SceneLink
  *   target_scene: heavy.yaml           # next to this scene's file, an asset path, or a name
  *   transition: loading_screen         # fade | loading_screen | none
- *   loading_screen: ui/loading_screen  # the UI asset shown while it loads
+ *   loading_screen: ui/my_overlay      # optional UI overlay; blank uses the built-in screen
  *   spawn_point: from_hub              # object in the target scene the player is moved to
  *   size: { x: 2, y: 2, z: 3 }         # the trigger box, in the object's local space
  * @endcode
@@ -46,7 +46,7 @@ namespace scene {
 struct SceneLinkRequest {
     std::string target_scene;
     std::string transition = "fade";
-    std::string loading_screen = "ui/loading_screen";
+    std::string loading_screen;                   ///< Optional UI overlay; blank = the built-in screen alone.
     std::string spawn_point;
     glm::vec3   color{0.0f};
     float       fade_time = 0.35f;
@@ -78,7 +78,7 @@ class SceneLink : public coopa::scene::Component {
 public:
     std::string target_scene;
     std::string transition = "fade";             ///< fade | loading_screen | none
-    std::string loading_screen = "ui/loading_screen";
+    std::string loading_screen;                   ///< Optional UI overlay; blank = the built-in screen alone.
     std::string spawn_point;
     glm::vec3   color{0.0f};
     float       fade_time = 0.35f;

@@ -186,19 +186,28 @@ out with a lock. You can select them to look at them, but not change them. They 
 
 **Edit > Project Settings... > Output** holds:
 
-- **Window**: the game window's **Title**, **Width**, **Height** and **Vsync**, plus its startup
-  screen -- **Splash** shows one at all, **Splash title** is the wording under the logo,
-  **Splash image** replaces the toyengine logo with a PNG of your own, and **Splash color** sets
-  the backdrop. The game shows this while it loads, before the first frame of the scene. (The
-  editor and the hub always show toyengine's own.)
+- **Window**: the game window's **Title**, **Width**, **Height**, **Vsync** and **Splash** --
+  whether a startup screen shows at all before the first frame of the scene. The splash draws
+  the same look as the **Loading** settings below (background fill and the cycling mark), so
+  there is nothing further to style here. (The editor and the hub always show toyengine's own.)
 - **Jobs**: **Worker threads** (how many CPU threads the game uses; `0` uses them all) and
   **Parallel threshold**.
 - **Output**: a screenshot the game can save when it closes. Turn on **Save on exit** and set
   **Filepath** to where it goes. **Save low res** saves the image at the render size instead of
   the window size.
+- **Loading**: the loading screen every game shows while it starts up and whenever it loads a
+  new scene. Turn it off with **Enabled** if your game should skip straight to the scene.
+  **Spinner** draws the built-in white toyengine mark; turn it off if **Overlay ui** (a UI asset
+  of your own, shown over the cover) is the whole screen. **Background** and **Spinner color**
+  set its colours, and **Corner** moves the mark to whichever corner you want. **Min display
+  time** stops the screen flashing by for a fast load, and **Fade in** / **Fade out** are how
+  long it takes to appear and clear. **Warm up timeout** reveals the scene anyway if loading
+  takes too long, instead of leaving players stuck on the cover; **Warm up budget ms** is how
+  much of each frame streaming systems (terrain, painted instances, and so on) get to catch up
+  while the cover is up.
 
-Window and jobs settings apply the next time the game starts. The **Output** tab in Properties
-has **Package Project...** and a shortcut to these settings.
+Window, jobs and loading settings apply the next time the game starts. The **Output** tab in
+Properties has **Package Project...** and a shortcut to these settings.
 
 ## Scene tab
 

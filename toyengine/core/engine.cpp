@@ -137,7 +137,7 @@ Engine::Engine(AppConfig config, EngineOptions options)
     }
 
     edit_mode_ = options_.edit_mode;
-    boot_progress("Loading engine assets...", 0.25f);
+    boot_frame();
     // The project's assets first, then the engine checkout's as the fallback layer (shared
     // meshes, materials, fonts, UI themes); the same directory when building toyengine itself.
     for (const std::string& root : asset_roots()) assets_.add_search_root(root);
@@ -231,13 +231,22 @@ Engine::Engine(AppConfig config, EngineOptions options)
         if (m.on_engine_init) m.on_engine_init(*this);
     }
 
+    // The built-in mark's look is project-global and does not change at runtime, unlike the
+    // per-load transition (fade colour, timing) scene_load_options() layers per scene.
+    transition_.set_loading_style(config_.loading);
+
     if (options_.load_default_scene) {
-        boot_progress("Loading scene...", 0.4f);
+        boot_frame();
         load_scene(scene_path_from_env_(config_.scene.default_scene));
-        // The scene is loaded but its streamed world is not built yet; if it asked to be warmed,
-        // hand the boot splash over to a cover that stays up until it is (begin_scene_warmup()).
+        // The scene is loaded but its streamed world is not built yet; hand the boot splash over
+        // to a cover that stays up until it is (begin_scene_warmup()) -- unless the project has
+        // turned the loading state off and this scene did not explicitly ask for one anyway.
         if (scene_mgr_.has_scene()) {
-            begin_scene_warmup(scene_loading_options_(scene_settings_[&scene_mgr_.get_active_scene()]));
+            const fkyaml::node& settings = scene_settings_[&scene_mgr_.get_active_scene()];
+            const bool scene_opted_in = settings.is_mapping() && settings.contains("loading");
+            if (loading_cover_allowed_() || scene_opted_in) {
+                begin_scene_warmup(loading_options(settings));
+            }
         }
     }
     read_cursor_pos_override_();
@@ -278,6 +287,7 @@ coopa::scene::Scene& Engine::push_scene(coopa::scene::Scene&& scene, bool simula
 
 void Engine::remove_scene(coopa::scene::Scene* scene) {
     ctx_.wait_idle();
+    if (scene_load_ && scene_load_->scene == scene) abandon_scene_load_();
     scene_mgr_.remove_scene(scene);
     scene_settings_.erase(scene);
     scene_paths_.erase(scene);
@@ -490,6 +500,12 @@ void Engine::init_user_settings_() {
 void Engine::clear_scenes_() {
     // Music carries over a scene change (the next scene's MusicPlaylist picks it up or replaces it).
     if (audio_) audio_->stop_oneshots();
+    if (scene_load_ && scene_load_->scene) {
+        const auto scenes = scene_mgr_.scenes();
+        if (std::find(scenes.begin(), scenes.end(), scene_load_->scene) != scenes.end()) {
+            abandon_scene_load_();
+        }
+    }
     for (coopa::scene::Scene* s : scene_mgr_.scenes()) scene_mgr_.remove_scene(s);
     scene_settings_.clear();
     scene_paths_.clear();
@@ -875,6 +891,7 @@ bool Engine::tick() {
         // While a scene loads in the background its uploads are spread over frames.
         assets_.update(dt, scene_loading() ? scene_load_->options.finalize_budget_ms : -1.0f);
         consume_scene_link_requests_();
+        update_loading_holds_();
         // Also after a failure, while the cover fades back off the running scene.
         if (scene_load_ && (!scene_load_->finished() || scene_load_->alpha > 0.0f)) update_scene_load_(dt);
     }
@@ -1116,28 +1133,19 @@ std::unique_ptr<BootSplash> Engine::make_boot_splash_(coopa::gfx::app::Context& 
     std::unique_ptr<BootSplash> splash;
     if (wanted) {
         BootSplashStyle style;
-        style.backdrop   = config.window.splash_color;
-        style.title      = config.window.splash_title;
-        style.logo_image = config.window.splash_image;
+        style.loading = config.loading;
         const std::filesystem::path root = options.project_root.empty() ? default_project_root()
                                                                         : options.project_root;
-        std::vector<std::string> asset_roots{(root / "assets").string()};
-        const std::filesystem::path& engine_assets = RuntimeLayout::current().engine_assets;
-        std::error_code ec;
-        if (!engine_assets.empty() &&
-            !std::filesystem::equivalent(root / "assets", engine_assets, ec)) {
-            asset_roots.push_back(engine_assets.string());
-        }
         try {
             splash = std::make_unique<BootSplash>(
                 ctx.device(), ctx.allocator(), ctx.command_pool(), ctx.render_pass(),
                 ctx.color_format(), coopa::gfx::pipeline::ShaderLibrary(RuntimeLayout::current().shader_roots(root)),
-                asset_roots, std::move(style));
+                std::move(style));
             // The first frame goes to the surface BEFORE the window is mapped, so the compositor
             // never samples an unpainted window -- that flash of whatever was on screen before is
             // the whole reason this exists. The second present covers a window system that
             // discards what was presented to an unmapped surface.
-            splash->present(ctx, "Starting renderer...", 0.1f);
+            splash->present(ctx);
         } catch (const std::exception& e) {
             std::cerr << "[toyengine] No boot splash: " << e.what() << "\n";
             splash.reset();
@@ -1145,13 +1153,13 @@ std::unique_ptr<BootSplash> Engine::make_boot_splash_(coopa::gfx::app::Context& 
     }
     if (options.set_app_icon) set_window_icon(ctx.window());
     ctx.show_window();
-    if (splash) splash->present(ctx, "Starting renderer...", 0.1f);
+    if (splash) splash->present(ctx);
     return splash;
 }
 
-void Engine::boot_progress(const std::string& status, float progress, float min_interval) {
+void Engine::boot_frame(float min_interval) {
     if (!boot_splash_ || !boot_splash_->due(min_interval)) return;
-    boot_splash_->present(ctx_, status, progress);
+    boot_splash_->present(ctx_);
 }
 
 void Engine::dismiss_boot_splash_() {
@@ -1723,16 +1731,11 @@ std::string Engine::resolve_asset_file_(const std::filesystem::path& root, const
 }
 
 void Engine::drain_pending_assets_() {
-    size_t peak = assets_.pending_load_count();
     while (assets_.pending_load_count() > 0) {
         assets_.update(0.0f);
-        // The one startup stage whose progress is actually measurable. Throttled, and only alive
-        // while the splash is: a present per iteration would pace the drain to the refresh rate.
-        peak = std::max(peak, assets_.pending_load_count());
-        boot_progress("Loading assets...",
-                      0.4f + 0.55f * (1.0f - static_cast<float>(assets_.pending_load_count()) /
-                                                 static_cast<float>(std::max<size_t>(peak, 1))),
-                      1.0f / 30.0f);
+        // Throttled, and only alive while the splash is: a present per iteration would pace
+        // the drain to the refresh rate.
+        boot_frame(1.0f / 30.0f);
         std::this_thread::yield();
     }
 

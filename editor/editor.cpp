@@ -59,12 +59,10 @@ toy::core::AppConfig editor_config(const toy::core::AppConfig& project_config, c
     cfg.window.visible = !env_flag("HEADLESS");
     if (!cfg.window.visible) cfg.window.vsync = false;
     // The boot splash is toyengine's here, not the opened project's: this window is the editor,
-    // whatever branding the game inside it ships.
-    const toy::core::WindowConfig splash_defaults;
-    cfg.window.splash       = splash_defaults.splash;
-    cfg.window.splash_title = splash_defaults.splash_title;
-    cfg.window.splash_image = splash_defaults.splash_image;
-    cfg.window.splash_color = splash_defaults.splash_color;
+    // whatever branding the game inside it ships. It draws the loading screen's own look
+    // (toyengine/core/loading_config.h), so both reset to their engine defaults.
+    cfg.window.splash = toy::core::WindowConfig().splash;
+    cfg.loading       = toy::core::LoadingConfig();
     // The editor UI is a screen-space canvas; the game may not use one.
     cfg.render.screen_ui_enabled = true;
     cfg.output.save_on_exit = false;

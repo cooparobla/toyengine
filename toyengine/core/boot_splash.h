@@ -5,15 +5,16 @@
  * A window that the window system maps before anything has been presented into it shows
  * whatever was on that part of the screen before, for as long as startup takes -- pipeline
  * creation, asset loaders, then a whole scene read, built and drained. BootSplash fills that
- * gap: it draws the logo, the wordmark, a progress bar and a status line, and needs nothing but
- * what gfx::app::Context already owns (device, allocator, command pool, a render pass), so it is
- * up and presenting before ToyRenderPipeline exists. Engine builds one in its constructor, pumps
- * it at each startup milestone (Engine::boot_progress()) and drops it after the first frame the
- * app itself renders.
+ * gap: it draws the same flat-fill-and-cycling-block screen as the rest of a scene load (see
+ * loading_screen.h), and needs nothing but what gfx::app::Context already owns (device,
+ * allocator, command pool, a render pass), so it is up and presenting before
+ * ToyRenderPipeline exists. Engine builds one in its constructor, pumps it at each startup
+ * milestone (Engine::boot_frame()) and drops it after the first frame the app itself renders --
+ * so launch is one continuous cover with no seam into the scene-load cover that follows it.
  *
- * The drawing is uicoopa's: a UiPass over the swapchain render pass, with the quads and glyphs
- * emitted by emit_boot_splash() -- a pure function of the canvas size and the status, so the
- * layout is unit-testable without a device.
+ * The drawing is uicoopa's: a UiPass over the swapchain render pass, with the quads emitted by
+ * emit_boot_splash() -- a pure function of the canvas size and the style, so the layout is
+ * unit-testable without a device.
  */
 
 #ifndef TOYENGINE_CORE_BOOT_SPLASH_H
@@ -23,14 +24,12 @@
 
 #include <chrono>
 #include <memory>
-#include <string>
-#include <vector>
 
 #include <gfxcoopa/pipeline/shader_library.h>
 #include <gfxcoopa/types/format.h>
-#include <gfxcoopa/types/texture_view.h>
-#include <uicoopa/ui_resources.h>
 #include <uicoopa/render/draw_list.h>
+
+#include <toyengine/core/loading_screen.h>
 
 namespace coopa::gfx {
 namespace core { class Device; }
@@ -38,85 +37,69 @@ namespace memory { class Allocator; }
 namespace command { class CommandPool; class CommandBuffer; }
 namespace pipeline { class RenderPass; }
 namespace app { class Context; }
-namespace engine::data { class Texture; }
 }  // namespace coopa::gfx
 
 namespace coopa::ui {
 class UiPass;
-class Font;
-namespace imm { class TextRenderer; }
 }  // namespace coopa::ui
 
 namespace toy::core {
 
 /**
  * @struct BootSplashStyle
- * @brief What the splash shows: its backdrop, its wordmark and (optionally) a project's own logo.
- *
- * The defaults are toyengine's own branding (branding.h). A game project overrides them through
- * the `window.splash_color` / `splash_title` / `splash_image` config keys; the editor and the hub
- * always keep the defaults, since they are toyengine rather than the project they opened.
+ * @brief What the splash shows: the same style a scene load's cover uses.
  */
 struct BootSplashStyle {
-    /// Backdrop base colour, display-referred RGB; the gradient darkens it toward the bottom.
-    glm::vec3   backdrop{0.227f, 0.184f, 0.420f};
-    /// Wordmark under the logo. Empty draws no wordmark.
-    std::string title = "toyengine";
-    /// A PNG to draw in place of the toyengine block logo -- absolute, or relative to an asset root.
-    std::string logo_image;
+    /// Background fill and the mark's look -- see LoadingConfig. Defaults match a project that
+    /// never touched `loading:` in config.yaml.
+    LoadingConfig loading;
     /**
      * True decodes every colour to linear before packing it, so the hardware's encode-on-write
      * into an sRGB attachment reproduces the authored value exactly -- the same cancellation
      * upscale.frag does for the game's own image. BootSplash sets it from its target's format;
-     * colours here (and in `window.splash_color`) are always authored display-referred.
+     * `loading`'s colours are always authored display-referred.
      */
     bool linearize = false;
 };
 
 /**
- * @brief Emits one splash frame's geometry into `dl` -- backdrop, logo, wordmark, bar, status.
+ * @brief Emits one splash frame's geometry into `dl` -- the background fill and the cycling
+ *        mark, exactly like a scene load's own cover (see loading_screen.h).
  *
  * Pure: no device, no file access, no state of its own. Canvas space is uicoopa's (origin
  * bottom-left, +Y up) and one canvas pixel is one target pixel, so `canvas` is the framebuffer
  * size. Everything scales with the canvas height, so the same layout reads the same on a 720p
  * window and a 4K one.
  *
- * @param dl       Target draw list. begin() is called here; the caller supplies the white
- *                 default texture (DrawList::set_default_texture()) that the flat fills sample.
- * @param canvas   Target size in pixels.
- * @param style    Backdrop colour, wordmark and logo override.
- * @param logo     The logo texture's view.
- * @param text     Glyph emitter, or null to draw no text at all (a missing font is not fatal).
- * @param status   The status line under the bar, e.g. "Loading scene...". May be empty.
- * @param progress 0..1 fills the bar; negative draws an indeterminate sweep driven by `time`.
- * @param time     Seconds since the splash appeared, for the sweep and the logo's pulse.
+ * @param dl     Target draw list. begin() is called here; the caller supplies the white default
+ *               texture (DrawList::set_default_texture()) that the flat fills sample.
+ * @param canvas Target size in pixels.
+ * @param style  Background colour, mark tint/corner, and the sRGB decode this pass needs.
+ * @param time   Seconds since the splash appeared, driving the mark's face-cycle animation.
  */
 void emit_boot_splash(coopa::ui::DrawList& dl, glm::vec2 canvas, const BootSplashStyle& style,
-                      coopa::gfx::TextureView logo, coopa::ui::imm::TextRenderer* text,
-                      const std::string& status, float progress, float time);
+                      float time);
 
 /**
  * @class BootSplash
  * @brief Owns the splash's GPU resources and presents it into a Context's swapchain.
  *
  * Construction loads the UI pipelines (uicoopa's prebuilt `ui.vert` / `ui_quad.frag` /
- * `ui_text.frag`), rasterizes the logo and loads the wordmark font -- a few tens of
- * milliseconds, deliberately all of it before the window is mapped.
+ * `ui_text.frag`) -- a few milliseconds, deliberately before the window is mapped.
  */
 class BootSplash {
 public:
     /**
-     * @brief Builds the pass, the logo texture and the font.
+     * @brief Builds the pass.
      *
      * @param device      Logical device.
      * @param allocator   VMA allocator.
-     * @param cmd_pool    Command pool for the logo/font uploads.
+     * @param cmd_pool    Command pool for the pass's own setup.
      * @param pass        The render pass the splash records into (Context's swapchain pass, or
      *                    an offscreen target's in a test).
      * @param pass_format The colour format of `pass`'s attachment -- decides whether the
      *                    colours are decoded to linear first (see BootSplashStyle::linearize).
      * @param shaders     Resolves `ui.vert` / `ui_quad.frag` / `ui_text.frag`.
-     * @param asset_roots Asset search roots, for the wordmark font and a project logo PNG.
      * @param style       See BootSplashStyle.
      * @throws std::runtime_error if the UI shaders cannot be resolved.
      */
@@ -126,7 +109,6 @@ public:
                coopa::gfx::pipeline::RenderPass& pass,
                coopa::gfx::Format pass_format,
                const coopa::gfx::pipeline::ShaderLibrary& shaders,
-               const std::vector<std::string>& asset_roots,
                BootSplashStyle style = {});
     ~BootSplash();
 
@@ -139,8 +121,7 @@ public:
      * Must run before the render pass is opened -- UiPass resolves descriptor sets and may grow
      * its geometry buffers here, neither of which is safe mid-pass (see ui_pass.h).
      */
-    void prepare(uint32_t frame_index, uint32_t width, uint32_t height,
-                 const std::string& status, float progress);
+    void prepare(uint32_t frame_index, uint32_t width, uint32_t height);
 
     /** @brief Records the prepared frame into an already-open render pass. */
     void record(coopa::gfx::command::CommandBuffer& cmd, uint32_t frame_index,
@@ -154,7 +135,7 @@ public:
      *
      * @return False if the frame was skipped (a zero-sized/minimized window).
      */
-    bool present(coopa::gfx::app::Context& ctx, const std::string& status, float progress);
+    bool present(coopa::gfx::app::Context& ctx);
 
     /**
      * @brief True at most once per `min_interval` seconds -- the throttle for a pump inside a
@@ -173,9 +154,6 @@ private:
 
     BootSplashStyle style_;
     std::unique_ptr<coopa::ui::UiPass> ui_pass_;
-    std::unique_ptr<coopa::gfx::engine::data::Texture> logo_;
-    coopa::ui::Font* font_ = nullptr;   ///< Owned by UIResourceCache (cleared with the Engine).
-    std::unique_ptr<coopa::ui::imm::TextRenderer> text_;
     coopa::ui::DrawList dl_;
     Clock::time_point start_ = Clock::now();
     Clock::time_point last_pump_ = Clock::time_point{};

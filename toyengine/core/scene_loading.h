@@ -23,9 +23,10 @@
  *      installs; SceneLoadOptions::warm_up_timeout caps the wait so a system that never reports
  *      warm cannot hang the game.
  *
- * The transition covers the swap: a fade to a colour and back, a loading-screen UI asset over
- * that colour (its `progress` StatBar / ProgressBar and `status` Text are filled in
- * automatically), or nothing. It draws on an engine overlay layer, inside the display rect.
+ * The transition covers the swap: a fade to a colour and back, a loading screen over that
+ * colour (the built-in cycling-block-faces mark -- see loading_screen.h -- plus, optionally, a
+ * project's own UI overlay), or nothing. It draws on an engine overlay layer, inside the
+ * display rect.
  *
  * @code
  * toy::core::SceneLoadOptions opts;
@@ -50,8 +51,11 @@
 #include <string>
 #include <vector>
 
+#include <coopa/asset/asset_handle.h>
 #include <coopa/scene/scene_loader.h>
 #include <coopa/scene/scene_system.h>
+#include <toyengine/core/loading_config.h>
+#include <toyengine/ui/ui_panel.h>
 #include <uicoopa/immediate/imm_canvas.h>
 
 
@@ -73,11 +77,13 @@ struct SceneTransition {
     float       fade_out = 0.35f;   ///< Seconds to cover the old scene.
     float       fade_in = 0.35f;    ///< Seconds to uncover the new one.
     /**
-     * @brief Theme the Kind::LoadingScreen screen is styled with ("ui/themes/game_dark").
+     * @brief An optional UI overlay (assets/ui/<name>.yaml) drawn over the built-in
+     *        Kind::LoadingScreen mark.
      *
-     * The screen itself is drawn in code (SceneTransitionLayer), so this only picks its look.
-     * Non-empty is what asks for a screen at all; one that names no readable theme still
-     * draws, in the built-in style.
+     * The screen itself (the background fill and the mark) is drawn in code
+     * (SceneTransitionLayer / emit_loading_screen()) whatever this says; empty is the default
+     * and draws no overlay at all. A ref that cannot be read still leaves the built-in screen
+     * up, because the one thing a loading screen must never do is fail to appear.
      */
     std::string loading_screen;
 
@@ -121,6 +127,27 @@ struct SceneLoadOptions {
     /// being drawn and animated out of these same frames, and an unbounded warm-up freezes it.
     float warm_up_budget_ms = 8.0f;
 };
+
+/**
+ * @brief The project-global SceneLoadOptions every scene load and Engine::begin_scene_warmup()
+ *        starts from, built from `config.yaml`'s `loading:` section.
+ *
+ * `config.enabled == false` returns the old opt-out shape (`warm_up = false`,
+ * `transition = SceneTransition::none()`) exactly as if the project had no `loading:` section
+ * at all -- a scene's own `settings.loading:` block (apply_scene_loading_block()) can still
+ * turn a cover on for itself even then.
+ */
+SceneLoadOptions scene_load_options(const LoadingConfig& config);
+
+/**
+ * @brief Overrides `opts` with a scene's own `settings.loading:` block, if `settings` has one.
+ *
+ * Every key is optional and leaves whatever `opts` already carries (ordinarily the project
+ * defaults from scene_load_options()) when absent -- the layering is engine defaults <
+ * config.yaml's `loading:` < this. `ui` or an explicit `transition:` both count as asking for
+ * a cover and raise `warm_up` to match, unless the block also sets `warm_up` itself.
+ */
+void apply_scene_loading_block(const fkyaml::node& settings, SceneLoadOptions& opts);
 
 /** @brief Where an async load is. Advances in this order; Failed can follow any stage. */
 enum class SceneLoadStage {
@@ -258,22 +285,23 @@ public:
     float alpha() const { return alpha_; }
 
     /**
-     * @brief Starts drawing the loading screen, styled by the theme `ref` names.
+     * @brief Starts drawing the loading screen, with `ref` (a UI panel asset,
+     *        assets/ui/<name>.yaml; extension optional) layered over the built-in mark.
      *
-     * Always succeeds: a theme that cannot be read leaves the built-in style, because
-     * the one thing a loading screen must never do is fail to appear. The bool is kept
-     * for callers that still branch on it.
+     * Always succeeds: a `ref` that cannot be loaded leaves the mark and background fill up on
+     * their own, because the one thing a loading screen must never do is fail to appear. The
+     * bool is kept for callers that still branch on it. Empty draws no overlay.
      */
     bool show_loading_screen(const std::string& ref);
     /** @brief Stops drawing the loading screen from the next frame. */
     void hide_loading_screen();
     bool loading_screen_visible() const { return loading_visible_; }
 
-    /** @brief Sets the bar (0..1) and the line of text under it. */
+    /** @brief Sets the engine's readiness (0..1) -- for the F3 overlay, not drawn on screen. */
     void update_loading_screen(float progress, const std::string& status);
 
-    /** @brief Heading above the bar. Empty draws none. */
-    std::string title = "Loading";
+    /** @brief Style of the built-in mark -- background, tint, corner. See LoadingConfig. */
+    void set_loading_style(const LoadingConfig& style) { style_ = style; }
 
     /** @brief Destroys the scene (before the fonts and the device it draws with go away). */
     void release();
@@ -281,6 +309,11 @@ public:
 private:
     void draw_fade_(coopa::ui::imm::Context& ctx);
     void draw_loading_screen_(coopa::ui::imm::Context& ctx);
+    /// Loads (or clears) the overlay panel named by show_loading_screen()'s `ref`. Through the
+    /// asset system when a host published one (toy::ui::panel_assets()) -- the same seam
+    /// PanelScreen uses, so the overlay hot-reloads in the editor too -- else a direct file
+    /// read, which is what headless unit tests take.
+    void load_overlay_(const std::string& ref);
 
     std::unique_ptr<coopa::scene::Scene> scene_;
     coopa::ui::ImmediateCanvas* canvas_ = nullptr;
@@ -290,9 +323,15 @@ private:
     bool        loading_visible_ = false;
     float       progress_ = 0.0f;
     std::string status_;
-    /// The look, from the theme show_loading_screen() was given. Default-constructed if it
-    /// named none, which is a legible screen rather than an invisible one.
-    coopa::ui::imm::Style loading_style_;
+    /// The built-in mark's look -- background, tint, corner. set_loading_style()'s latest.
+    LoadingConfig style_;
+    /// The overlay panel, if show_loading_screen()'s ref named one that loaded. At most one of
+    /// the two is set: through the asset system (overlay_handle_) or read directly
+    /// (overlay_panel_) -- never both.
+    coopa::asset::AssetHandle<toy::ui::UiPanel> overlay_handle_;
+    std::shared_ptr<toy::ui::UiPanel> overlay_panel_;
+    toy::ui::PanelBindings overlay_bindings_;
+    int overlay_tab_ = 0;
     glm::vec3 color_{0.0f};
     float     alpha_ = 0.0f;
 };
@@ -336,6 +375,22 @@ float advance_load_bar(float current, float target, float dt);
 
 /** @brief Loading-screen status text for a stage. */
 const char* scene_load_status_text(SceneLoadStage stage);
+
+/**
+ * @brief Whether a warming load's cover may lift this frame.
+ *
+ * `warm` is this frame's fold_warmup_states() result and `timed_out` is
+ * SceneLoadOptions::warm_up_timeout having elapsed; either alone is normally enough. `held` is
+ * LoadingState::held() (toyengine/core/loading.h) -- a manual hold blocks the reveal even past
+ * a timeout, deliberately: an explicit `engine.loading().acquire(...)` should not be defeated
+ * by the same escape hatch that exists for a streaming system that never reports warm.
+ * `min_display_met` is SceneLoadOptions::min_display_time having elapsed since the cover went
+ * up; it gates the reveal even past a timeout too -- the timeout exists for a system that never
+ * reports warm, not as a reason to flash the cover for a frame.
+ */
+inline bool loading_reveal_ready(bool warm, bool timed_out, bool held, bool min_display_met) {
+    return (warm || timed_out) && min_display_met && !held;
+}
 
 }  // namespace core
 }  // namespace toy

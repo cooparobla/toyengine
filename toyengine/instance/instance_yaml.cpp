@@ -107,6 +107,7 @@ void register_instance_components(coopa::asset::AssetManager& assets) {
             read(node, "collision_radius", painter->collision_radius);
             read(node, "cast_shadows", painter->cast_shadows);
             read(node, "enabled", painter->enabled);
+            read(node, "chunk_build_budget", painter->chunk_build_budget);
 
             if (node.contains("prototypes") && node.at("prototypes").is_sequence()) {
                 for (const auto& pn : node.at("prototypes").as_seq()) {

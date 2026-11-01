@@ -138,6 +138,21 @@ For big levels use `cell_size: 0.5`; flow mode `auto` goes hierarchical by itsel
 | NavVolume | `size` (1,1,1 full, local), `center`, `area` (`NotWalkable` cuts a hole) |
 | NavLink | `start`, `end` (local space), `bidirectional` (true), `cost` (1), `area`, `snap_radius` (1) |
 
+## Loading screen
+
+Every host (standalone and the editor's Play) launches into a loading state and holds it until
+every streaming system has caught up, then reveals the scene. Configure it project-wide in
+config.yaml's `loading:` section, or override it for one scene under `scene.settings.loading`
+(same keys, layered engine default < config.yaml < scene): `enabled` (true), `spinner` (true;
+draws the built-in white toyengine-block mark, false = overlay only), `background` (0,0,0; the
+cover's fill colour), `spinner_color` (1,1,1), `corner` (`bottom_right` / `bottom_left` /
+`top_right` / `top_left`; which corner the mark sits in), `overlay_ui` (`ui/<name>`, blank =
+none; a project's own panel drawn over the built-in mark), `min_display_time` (0 s; never flash,
+hold at least this long), `fade_in` (0.35 s), `fade_out` (0.35 s), `warm_up_timeout` (20 s; reveal
+anyway so a stuck system cannot hang the game), `warm_up_budget_ms` (8 ms/frame; main-thread
+budget streaming systems get while covered). `TOY_LOADING=0` forces it off for a headless
+capture regardless of config. See toyengine/core/README.md's "The loading state".
+
 ## Audio
 
 | Component | Keys |

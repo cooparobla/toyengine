@@ -1,19 +1,22 @@
-# unified_terrain_demo -- a generated mapcoopa world applied to a SMOOTH terrain.
+# unified_terrain_demo -- one generated world, applied to BOTH terrain modes.
 #
-# The thing this scene exists to show: a map and a heightmap are the same kind of thing to apply.
-# `MapGenerator` holds a world; applying it writes this terrain's height plane, paints its layers
-# from the map's own biomes, and brings the sea, lakes and rivers with it -- water a heightmap
-# terrain could not carry at all before. The shoreline is nowhere in particular: the water is a
-# flat surface at its level and the ground is what ends it, so the terrain's own slope is the
-# beach.
+# The thing this scene exists to show: a map is the same kind of thing to apply whichever shape
+# the terrain underneath it has. One `MapGenerator` (seed 7) is read by two terrain objects side
+# by side -- `terrain_tiles` (mode: tiles) and `terrain_smooth` (mode: heightmap) -- so the same
+# coastline, hills and rivers come out terraced on one and smooth on the other, in one frame.
+# Applying is sequential (one bake in flight at a time): the generator builds its map once, then
+# bakes it into each terrain that still wants one, in turn.
 #
-# The tile world built from the same kind of map is terrain_demo; the hand-sculpted heightmap is
-# heightmap_terrain_demo. This is the two halves meeting.
+# Neither terrain names the generator as its `target`, and the generator names none either --
+# `MapGeneratorComponent::generator_for()` falls back to the only generator going for any terrain
+# not sharing its object, which is both of these. `auto_apply: always` because a smooth terrain's
+# PNG is written by its own store and so is never "missing" -- `when_missing` (the default) is
+# for a tile world with no stored .tiles, and would only ever notice the tiled half here.
+#
+# The tile world built from the same kind of map alone is terrain_demo; the hand-sculpted
+# heightmap alone is heightmap_terrain_demo. This is the two halves meeting.
 #
 #   ./build/toyengine unified_terrain_demo
-#
-# `auto_apply: always` because a smooth terrain's PNG is written by its own store and so is never
-# "missing" -- `when_missing` is for a tile world with no stored .tiles.
 scene:
   scene_name: unified_terrain_demo
   settings:
@@ -37,13 +40,13 @@ scene:
         - type: Transform
           position: { x: 0, y: 0, z: 0 }
         - type: MapGenerator
-          target: terrain
           auto_apply: always
           height_scale: 90
+          world_tiles: 512
+          # A SMALL map, because the whole of it is written across each terrain's ~512 m: an
+          # 18-cell world is nearly 3 km of mapcoopa's ground, which would squeeze the whole
+          # continent into the frame and leave the coast hard against the terrain's edge.
           generator:
-            # A SMALL map, because the whole of it is written across this terrain's 512 m: a
-            # 48-cell world is nearly 3 km of mapcoopa's ground, which would squeeze the whole
-            # continent into the frame and leave the coast hard against the terrain's edge.
             seed: 7
             grid_size: 18
             sea_level: 0.42
@@ -53,10 +56,10 @@ scene:
               plateaus: 0.05
             river_count: 24
 
-    - name: terrain
+    - name: terrain_smooth
       components:
         - type: Transform
-          position: { x: -256, y: -256, z: 0 }
+          position: { x: -520, y: -256, z: 0 }
         - type: Terrain
           mode: heightmap
           size: { x: 512, y: 512 }
@@ -64,7 +67,7 @@ scene:
           chunk_size: 32
           resolution: 513
           splat_resolution: 512
-          heightmap: terrain/height.png
+          heightmap: terrain/unified_smooth_height.png
           layer_texture_size: 512
           collision: true
           layers:
@@ -108,6 +111,40 @@ scene:
         - type: WeatherSurface
           splashes: true
 
+    - name: terrain_tiles
+      components:
+        - type: Transform
+          position: { x: 20, y: -256, z: 0 }
+        - type: Terrain
+          mode: tiles
+          chunk_size: 32
+          collision: true
+          height_step: 1.0
+          tile_set: objects/terrain/tileset_soft
+          kind_tile_sets:
+            ash: objects/terrain/tileset_soft
+            rock: objects/terrain/tileset_rock
+            salt: objects/terrain/tileset_soft
+            sand: objects/terrain/tileset_soft
+            snow: objects/terrain/tileset_soft
+            stone: objects/terrain/tileset_rock
+          material:
+            albedo: { r: 1.0, g: 1.0, b: 1.0 }
+            ao: 1.0
+            metallic: 0.0
+            roughness: 0.9
+            texture_albedo: textures/terrain_atlas.png
+            texture_metallic_roughness: textures/terrain_atlas_mr.png
+          max_wall_steps: 8
+          river_inset: 0.2
+          shadow_distance: 600
+          soil_depth_steps: 1
+          tile_size: 1.0
+          view_radius: 10
+          water_inset: 0.5
+        - type: WeatherSurface
+          splashes: true
+
     - name: sun
       components:
         - type: Transform
@@ -123,11 +160,11 @@ scene:
     - name: camera
       components:
         - type: Transform
-          position: { x: 0, y: -250, z: 110 }
-          rotation: { x: 66, y: 0, z: 0 }
+          position: { x: 6, y: -650, z: 300 }
+          rotation: { x: 58, y: 0, z: 0 }
           scale: { x: 1, y: 1, z: 1 }
         - type: Camera
-          far_clip_plane: 1.2e+03
+          far_clip_plane: 1.4e+03
           fov: 6.0e+01
           main: true
           near_clip_plane: 0.3

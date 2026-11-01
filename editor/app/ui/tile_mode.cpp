@@ -3,6 +3,7 @@
 #include "editor/app/ui/terrain.h"
 
 #include "editor/app/editor_app.h"
+#include "editor/app/ui/terrain_common.h"
 #include "editor/app/ui/world_generator.h"
 
 #include <algorithm>
@@ -20,7 +21,7 @@ namespace toy {
 namespace editor {
 
 bool TileModePanel::is_tile_terrain_object_(ObjectId id) const {
-    return id != 0 && (app_.doc_.find_component(id, "TileTerrain") >= 0 || app_.doc_.find_component(id, "Terrain") >= 0);
+    return id != 0 && terrain_mode_of(app_.doc_, id) == toy::world::TerrainMode::Tiles;
 }
 
 void TileModePanel::set_tile_mode(bool on) {

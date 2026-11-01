@@ -1,0 +1,114 @@
+# loading_screen_demo -- the engine's built-in loading screen, held long enough to actually see.
+#
+# Run: ./build/toyengine loading_screen_demo        (or SCENE=loading_screen_demo)
+#
+# The scene itself is a handful of coloured props around a ground plane -- nothing it does
+# matters; it exists to be revealed. `settings.loading.min_display_time: 4.0` holds the cover
+# for four seconds (~3.6 cycles of the mark's 1.1 s period) at both launch and at every
+# scene load, so the three faces visibly cycle brightness before the fade-in uncovers this.
+# Opening it in the editor and pressing Play shows the same cover over the viewport
+# (EditorApp::play() -> Engine::begin_scene_warmup()).
+#
+# Worth sweeping in assets/config.yaml's `loading:` section or this scene's own `settings.loading`:
+#   spinner            false leaves only the background fill -- for a project with its own mark.
+#   background / spinner_color   the cover's colours.
+#   corner              which corner the mark sits in.
+#   overlay_ui          a UI panel asset drawn over the mark (see assets/ui/loading_screen.yaml).
+scene:
+  scene_name: loading_screen_demo
+  settings:
+    loading: { min_display_time: 4.0, fade_in: 0.6, fade_out: 0.8 }
+  root_objects:
+    - name: ground
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 10.0, y: 10.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: materials/prototype_grid
+      children: []
+
+    - name: prop_red
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3.0, y: 2.0, z: 0.75 }
+          rotation: { x: 0.0, y: 0.0, z: 20.0 }
+          scale: { x: 1.5, y: 1.5, z: 1.5 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { base: materials/plastic, albedo: { r: 0.85, g: 0.15, b: 0.12 } }
+      children: []
+
+    - name: prop_green
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -1.5, z: 1.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { base: materials/plastic, albedo: { r: 0.18, g: 0.75, b: 0.25 } }
+      children: []
+
+    - name: prop_blue
+      active: true
+      components:
+        - type: Transform
+          position: { x: 3.2, y: 1.0, z: 0.6 }
+          rotation: { x: 0.0, y: 0.0, z: -35.0 }
+          scale: { x: 1.2, y: 1.2, z: 1.2 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { base: materials/plastic, albedo: { r: 0.15, g: 0.35, b: 0.85 } }
+      children: []
+
+    - name: prop_yellow
+      active: true
+      components:
+        - type: Transform
+          position: { x: 1.0, y: 3.5, z: 0.5 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { base: materials/plastic, albedo: { r: 0.9, g: 0.8, b: 0.15 } }
+      children: []
+
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -10.0, z: 6.0 }
+          rotation: { x: 65.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 55.0
+          near_clip_plane: 0.1
+          far_clip_plane: 500.0
+        - type: CameraController
+          mode: orbit
+          target: { x: 0.0, y: 0.0, z: 0.75 }
+          min_distance: 2.0
+          max_distance: 40.0
+      children: []
+
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 20.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: DirectionalLight
+          direction: { x: -0.4, y: 0.35, z: -0.85 }
+          color: { r: 1.0, g: 0.96, b: 0.9 }
+          intensity: 1.0
+          cast_shadows: true
+      children: []

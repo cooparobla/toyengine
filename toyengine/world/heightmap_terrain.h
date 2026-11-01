@@ -78,10 +78,11 @@ namespace world {
 /**
  * @brief The `HeightmapTerrain` component.
  *
- * One C++ type serves both terrain modes (toyengine/world/terrain_component.h); this is the name
- * the heightmap half is authored and inspected under. A component whose `mode` is
- * `TerrainMode::Heightmap` reads `geometry`, `layers` and `data`, and reports
- * `type_name() == "HeightmapTerrain"`.
+ * One C++ type serves both terrain modes (toyengine/world/terrain_component.h); this is the
+ * scene-YAML name the heightmap half has traditionally been authored and inspected under (a
+ * parser alias of `Terrain`/`TileTerrain` -- toyengine/scene/register.cpp). A component whose
+ * `mode` is `TerrainMode::Heightmap` reads `geometry`, `layers` and `data`. `type_name()` always
+ * reports `"Terrain"`, whichever mode it is in.
  */
 using HeightmapTerrain = TerrainComponent;
 

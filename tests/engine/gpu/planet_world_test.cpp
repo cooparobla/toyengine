@@ -51,7 +51,7 @@ namespace {
 std::string small_planet() {
     toy::world::TileMapStore::instance().clear();
     std::string path = scene_variant("assets/scenes/terrain/planet_demo/scene.yaml", "small_planet", [](fkyaml::node& doc) {
-        if (fkyaml::node* t = scene_component(doc, "planet", "TileTerrain")) {
+        if (fkyaml::node* t = scene_component(doc, "planet", "Terrain")) {
             (*t)["face_tiles"] = fkyaml::node(32);
             (*t)["height_scale"] = fkyaml::node(6.0);
             (*t)["collision"] = fkyaml::node(true);

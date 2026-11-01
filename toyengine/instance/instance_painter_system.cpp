@@ -127,7 +127,7 @@ void InstancePainterSystem::update_painter_(coopa::scene::Scene& scene, Instance
     }
     p.bounds_ready = all_bounds;
 
-    p.cache.update(*painter.data, painter.prototypes, camera, max_distance, 2);
+    p.cache.update(*painter.data, painter.prototypes, camera, max_distance, painter.chunk_build_budget);
     update_collision_(scene, painter, p, camera);
 }
 

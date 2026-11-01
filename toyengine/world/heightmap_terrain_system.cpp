@@ -160,6 +160,8 @@ void HeightmapTerrainSystem::execute(coopa::scene::Scene& scene, const coopa::sc
     ++frame_;
     time_ += static_cast<double>(ctx.delta_time);
     bindings_.clear();
+    wanted_chunks_ = 0;
+    unfinished_chunks_ = 0;
     // One component type serves both modes, so the lookup returns every terrain in the scene:
     // this system owns the heightmap ones, TerrainSystem (order 60) owns the tile ones.
     for (HeightmapTerrain* terrain : scene.get_components<HeightmapTerrain>()) {
@@ -383,7 +385,9 @@ void HeightmapTerrainSystem::stream_chunks_(HeightmapTerrain& terrain, Heightmap
         for (int cx = 0; cx < rt.chunk_count.x; ++cx) {
             SceneObject*& slot = rt.chunks[static_cast<std::size_t>(cy) * rt.chunk_count.x + cx];
             const float d = chunk_distance(g, origin, cx, cy, camera);
-            if (slot == nullptr && d <= s.view_distance && budget > 0) {
+            const bool wanted = d <= s.view_distance;
+            if (wanted) ++wanted_chunks_;
+            if (slot == nullptr && wanted && budget > 0) {
                 spawn_chunk_(terrain, rt, scene, s, cx, cy);
                 --budget;
             } else if (slot != nullptr && d > keep) {
@@ -391,6 +395,7 @@ void HeightmapTerrainSystem::stream_chunks_(HeightmapTerrain& terrain, Heightmap
                 slot = nullptr;
                 --rt.live_chunks;
             }
+            if (wanted && slot == nullptr) ++unfinished_chunks_;
         }
     }
 }

@@ -51,7 +51,7 @@ public:
     /** @brief The terrain component of the live terrain object (null when it is gone). */
     toy::world::HeightmapTerrain* terrain_live_() const;
 
-    /** @brief True when `id` carries a HeightmapTerrain in the document. */
+    /** @brief True when `id` carries a terrain component in heightmap mode. */
     bool is_terrain_object_(ObjectId id) const;
 
     void enter_terrain_mode_(ObjectId id);

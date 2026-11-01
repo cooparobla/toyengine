@@ -3,9 +3,9 @@
 #
 # Run: ./build/toyengine loading_demo
 # Walk (WASD) through the NORTH door (blue, y = 8): heavy.yaml loads in the background behind the
-# loading screen (ui/loading_screen: a progress bar and a status line). Through the EAST door
-# (orange, x = 8) it loads behind a plain fade. Either way this scene keeps running until the
-# heavy one is built and its assets are in; heavy.yaml's door brings you back here.
+# engine's built-in loading screen (the cycling block mark). Through the EAST door (orange,
+# x = 8) it loads behind a plain fade. Either way this scene keeps running until the heavy one is
+# built and its assets are in; heavy.yaml's door brings you back here.
 scene:
   scene_name: loading_demo
   root_objects:
@@ -84,7 +84,6 @@ scene:
         - type: SceneLink
           target_scene: heavy.yaml
           transition: loading_screen
-          loading_screen: ui/loading_screen
           fade_time: 0.3
           min_display_time: 1.0
           spawn_point: arrive_from_hub

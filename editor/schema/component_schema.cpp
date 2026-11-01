@@ -1270,8 +1270,8 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             with_tip(f_asset("target_scene", "scenes", ".yaml", false, false, "", true),
                      "Scene to load when the player walks in (relative to this scene, or an asset path)"),
             with_tip(f_enum("transition", {"fade", "loading_screen", "none"}, true), "What covers the scene change"),
-            with_tip(f_asset("loading_screen", "ui", ".yaml", true, false, "ui/loading_screen"),
-                     "UI asset shown while loading (transition: loading_screen); a 'progress' bar and 'status' text are filled in"),
+            with_tip(f_asset("loading_screen", "ui", ".yaml", true, false, ""),
+                     "Optional UI overlay shown while loading (transition: loading_screen); blank uses the built-in cycling mark alone"),
             with_tip(f_string("spawn_point", ""), "Object in the target scene the player is moved to"),
             f_color("color", glm::vec3(0.0f)),
             with_tip(f_float("fade_time", 0.35f, 0.01f, 0.0f, 10.0f), "Seconds to fade out, and again to fade in"),
@@ -1429,10 +1429,18 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                 f_material(),
             };
         };
-        // The sculptable heightmap terrain (toyengine/world/heightmap_terrain.h). Its shape and
-        // paint live in PNGs beside the scene; Terrain Mode (viewport mode menu) edits them.
-        // `tessellation:` and `generate:` are YAML-only maps, preserved on save.
-        {
+        // The terrain component (toyengine/world/terrain_component.h): one C++ type, one set of
+        // keys, in two modes -- `mode: tiles` (a terraced world built from a tile set's pieces,
+        // toyengine/world/terrain_component.h) or `mode: heightmap` (a smooth, GPU-displaced
+        // grid, toyengine/world/heightmap_terrain.h). Registered under all three scene names
+        // (`Terrain`, `TileTerrain`, `HeightmapTerrain` are parser aliases of one component) so
+        // every existing scene keeps inspecting correctly; only the `mode` field's own default
+        // differs per alias, matching what each bare name has always meant with no other key
+        // to go on (world::infer_terrain_mode()'s tie-break).
+        //
+        // Heightmap shape and paint live in PNGs beside the scene; Terrain Mode (viewport mode
+        // menu) edits them. `tessellation:` and `generate:` are YAML-only maps, preserved on save.
+        auto terrain_fields = [&](const char* default_mode) {
             Node grass_layer = Node::mapping();
             grass_layer["name"] = std::string("grass");
             grass_layer["tint"] = Node::mapping();
@@ -1442,40 +1450,47 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             grass_layer["tiling"] = 6.0f;
             Node layers_default = Node::sequence();
             layers_default.as_seq().push_back(grass_layer);
-            add({"HeightmapTerrain", "World", {
-                with_tip(f_vec2("size", glm::vec2(256.0f), 1.0f, true), "Width (x) and depth (y) in metres"),
-                with_tip(f_float("height", 64.0f, 0.1f, 0.01f, 10000.0f, true), "Metres at the heightmap's full value"),
-                with_tip(f_float("chunk_size", 32.0f, 0.5f, 4.0f, 2048.0f, true), "Metres per chunk (draw / cull / collide / scatter unit)"),
-                with_tip(f_int("resolution", 257, 3, 8193, true), "Height samples per side (2^n + 1: 257, 513, 1025...)"),
-                f_int("splat_resolution", 512, 4, 8192),
-                with_tip(f_string("heightmap", ""), "16-bit greyscale PNG (scene-relative); default terrain/<object>_height.png"),
-                f_string("splat0", ""),
-                f_string("splat1", ""),
-                f_items("layers", {
-                    f_string("name", "layer"),
-                    f_asset("albedo", "textures", ".png"),
-                    f_asset("normal", "textures", ".png"),
-                    f_color("tint", glm::vec3(1.0f)),
-                    with_tip(f_float("tiling", 8.0f, 0.05f, 0.01f, 1000.0f), "Metres per texture repeat"),
-                    f_float("roughness", 0.85f, 0.005f, 0.0f, 1.0f),
-                    f_float("metallic", 0.0f, 0.005f, 0.0f, 1.0f),
-                    f_float("normal_strength", 1.0f, 0.01f, 0.0f, 4.0f),
-                    with_tip(f_bool("triplanar", false), "Project from the sides on steep slopes (cliffs)"),
-                    f_float("triplanar_sharpness", 4.0f, 0.05f, 1.0f, 16.0f),
-                }, layers_default, true),
-                with_tip(f_bool("deep_snow", false), "Deep snow (with trenches) piles on flat ground when it snows"),
-                with_tip(f_bool("puddles", true), "Rain gathers in hollows"),
-                f_bool("collision", true),
-                f_string("physics_material", ""),
-                f_bool("cast_shadows", true),
-                with_tip(f_float("view_distance", 0.0f, 1.0f, 0.0f, 100000.0f),
-                         "Chunks exist only within this distance of the camera (m). 0 = automatic: the camera's far clip, "
-                         "with frustum culling doing the rest. Set it to cap the cost for close / top-down cameras or huge terrains"),
-                with_tip(f_float("shadow_distance", 0.0f, 1.0f, 0.0f, 100000.0f), "Chunks farther than this cast no shadows (m); 0 = the view distance"),
-                with_tip(f_int("patch_resolution", 0, 0, 64), "Quads per chunk side before tessellation; 0 = automatic (4, or 32 without tessellation)"),
-                f_int("layer_texture_size", 1024, 4, 4096),
-            }});
-        }
+
+            std::vector<FieldDesc> fs;
+            fs.push_back(with_default(with_tip(f_enum("mode", {"tiles", "heightmap"}, true),
+                "Tiles: a terraced world built from a tile set's pieces. Heightmap: a smooth, "
+                "GPU-displaced grid. Decided by the keys below when this is absent"), default_mode));
+            for (auto& f : tile_terrain_fields()) fs.push_back(std::move(f));
+            // Heightmap-only keys. `chunk_size`, `collision`, `physics_material` and
+            // `shadow_distance` are shared with Tiles mode and already came from
+            // tile_terrain_fields() above -- one key, one widget, in both modes.
+            fs.push_back(with_tip(f_vec2("size", glm::vec2(256.0f), 1.0f, true), "Width (x) and depth (y) in metres"));
+            fs.push_back(with_tip(f_float("height", 64.0f, 0.1f, 0.01f, 10000.0f, true), "Metres at the heightmap's full value"));
+            fs.push_back(with_tip(f_int("resolution", 257, 3, 8193, true), "Height samples per side (2^n + 1: 257, 513, 1025...)"));
+            fs.push_back(f_int("splat_resolution", 512, 4, 8192));
+            fs.push_back(with_tip(f_string("heightmap", ""), "16-bit greyscale PNG (scene-relative); default terrain/<object>_height.png"));
+            fs.push_back(f_string("splat0", ""));
+            fs.push_back(f_string("splat1", ""));
+            fs.push_back(f_items("layers", {
+                f_string("name", "layer"),
+                f_asset("albedo", "textures", ".png"),
+                f_asset("normal", "textures", ".png"),
+                f_color("tint", glm::vec3(1.0f)),
+                with_tip(f_float("tiling", 8.0f, 0.05f, 0.01f, 1000.0f), "Metres per texture repeat"),
+                f_float("roughness", 0.85f, 0.005f, 0.0f, 1.0f),
+                f_float("metallic", 0.0f, 0.005f, 0.0f, 1.0f),
+                f_float("normal_strength", 1.0f, 0.01f, 0.0f, 4.0f),
+                with_tip(f_bool("triplanar", false), "Project from the sides on steep slopes (cliffs)"),
+                f_float("triplanar_sharpness", 4.0f, 0.05f, 1.0f, 16.0f),
+            }, layers_default, true));
+            fs.push_back(with_tip(f_bool("deep_snow", false), "Deep snow (with trenches) piles on flat ground when it snows"));
+            fs.push_back(with_tip(f_bool("puddles", true), "Rain gathers in hollows"));
+            fs.push_back(f_bool("cast_shadows", true));
+            fs.push_back(with_tip(f_float("view_distance", 0.0f, 1.0f, 0.0f, 100000.0f),
+                     "Chunks exist only within this distance of the camera (m). 0 = automatic: the camera's far clip, "
+                     "with frustum culling doing the rest. Set it to cap the cost for close / top-down cameras or huge terrains"));
+            fs.push_back(with_tip(f_int("patch_resolution", 0, 0, 64), "Quads per chunk side before tessellation; 0 = automatic (4, or 32 without tessellation)"));
+            fs.push_back(f_int("layer_texture_size", 1024, 4, 4096));
+            return fs;
+        };
+        add({"Terrain", "World", terrain_fields("tiles")});
+        add({"TileTerrain", "World", terrain_fields("tiles")});
+        add({"HeightmapTerrain", "World", terrain_fields("heightmap")});
         // Painted instances (toyengine/instance/). The records are NOT fields: they live in a
         // `.instances` file beside the scene, and `data:` is the only trace of them here.
         {
@@ -1546,8 +1561,6 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                 with_tip(f_bool("enabled", true), "Off leaves the records untouched but draws and collides nothing"),
             }});
         }
-        add({"TileTerrain", "World", tile_terrain_fields()});
-        add({"Terrain", "World", tile_terrain_fields()});   // the unified name; `mode:` picks the half
 
         // The map a terrain is generated from (toyengine/mapgen). Generation is not part of a
         // terrain: this holds the world and APPLIES it, which is why `target` and `auto_apply`

@@ -275,6 +275,8 @@ public:
     const fs::path& active_asset_path() const { return active_path_; }
     Shading shading() const { return shading_; }
     bool playing() const { return play_scene_ != nullptr; }
+    /** @brief The play scene is covered by the loading screen and not yet revealed/playable. */
+    bool loading() const { return play_scene_ != nullptr && engine_.is_loading(); }
     /** @brief Selection outlines the viewport overlay drew last frame (tests / diagnostics). */
     int selection_outlines_drawn() const { return selection_outlines_drawn_; }
     /// @brief Scene Curves the overlay drew last frame. A curve is an overlay, so the Overlays

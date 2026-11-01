@@ -52,15 +52,6 @@ AppConfig AppConfig::from_node(const fkyaml::node& root) {
             read(w, "vsync", config.window.vsync);
             read(w, "visible", config.window.visible);
             read(w, "splash", config.window.splash);
-            read(w, "splash_title", config.window.splash_title);
-            read(w, "splash_image", config.window.splash_image);
-            if (w.contains("splash_color")) {
-                const auto& c = w.at("splash_color");
-                if (c.size() >= 3) {
-                    config.window.splash_color = glm::vec3(
-                        c.at(0).get_value<float>(), c.at(1).get_value<float>(), c.at(2).get_value<float>());
-                }
-            }
         }
 
         if (root.contains("render")) {
@@ -501,6 +492,23 @@ AppConfig AppConfig::from_node(const fkyaml::node& root) {
                 const auto& q = sv.at("quick_slot");
                 config.save.quick_slot = q.is_null() ? std::string() : q.get_value<std::string>();
             }
+        }
+
+        if (root.contains("loading")) {
+            const auto& l = root.at("loading");
+            read(l, "enabled", config.loading.enabled);
+            read(l, "spinner", config.loading.spinner);
+            yaml::read_rgb(l, "background", config.loading.background);
+            yaml::read_rgb(l, "spinner_color", config.loading.spinner_color);
+            if (l.contains("corner")) {
+                config.loading.corner = parse_loading_corner(l.at("corner").get_value<std::string>());
+            }
+            read(l, "overlay_ui", config.loading.overlay_ui);
+            read(l, "min_display_time", config.loading.min_display_time);
+            read(l, "fade_in", config.loading.fade_in);
+            read(l, "fade_out", config.loading.fade_out);
+            read(l, "warm_up_timeout", config.loading.warm_up_timeout);
+            read(l, "warm_up_budget_ms", config.loading.warm_up_budget_ms);
         }
 
         // Schema owned by physxcoopa itself (see util/physics_settings.h's doc) rather than

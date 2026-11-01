@@ -2,6 +2,7 @@
 #include "editor/app/ui/tile_mode.h"
 
 #include "editor/app/editor_app.h"
+#include "editor/app/ui/terrain_common.h"
 #include "editor/app/ui/tile_terrain_panel.h"
 
 #include <cmath>
@@ -205,9 +206,9 @@ WorldGeneratorPanel::WorldPreview make_world_preview(MapConfig authored, int lay
 
 void WorldGeneratorPanel::open_world_generator(ObjectId id) {
     if (id == 0) id = app_.doc_.primary();
-    const int ci = app_.doc_.find_component(id, "TileTerrain");
+    const int ci = find_tile_terrain_component(app_.doc_, id);
     if (ci < 0) {
-        app_.log_warn("World Generator: select a TileTerrain first");
+        app_.log_warn("World Generator: select a tiles-mode terrain first");
         return;
     }
     const Node comp = app_.doc_.find(id)->at("components").as_seq()[static_cast<std::size_t>(ci)];
@@ -270,7 +271,7 @@ void WorldGeneratorPanel::wgen_tick_preview_() {
 
 void WorldGeneratorPanel::wgen_apply_() {
     const ObjectId id = wgen_object_;
-    if (app_.doc_.find_component(id, "TileTerrain") < 0) return;
+    if (find_tile_terrain_component(app_.doc_, id) < 0) return;
     wgen_config_.image_size = coopa::maps::derive_image_size(wgen_config_);
     const Node gen = toy::mapgen::generator_node(wgen_config_);
 
@@ -287,7 +288,7 @@ void WorldGeneratorPanel::wgen_apply_() {
         if (!obj->contains("components")) (*obj)["components"] = Node::sequence();
         auto& seq = (*obj)["components"].as_seq();
 
-        const int ci = app_.doc_.find_component(id, "TileTerrain");
+        const int ci = find_tile_terrain_component(app_.doc_, id);
         if (ci < 0) return {};
         Node comp = seq[static_cast<std::size_t>(ci)];
         for (const char* key : toy::mapgen::k_legacy_generator_keys) erase_key(comp, key);
@@ -384,7 +385,7 @@ void WorldGeneratorPanel::draw_world_generator_modal_(imm::Context& ctx) {
         wgen_object_ = 0;
         ctx.close_modal();
     };
-    if (wgen_close_ || wgen_object_ == 0 || app_.doc_.find_component(wgen_object_, "TileTerrain") < 0) {
+    if (wgen_close_ || wgen_object_ == 0 || find_tile_terrain_component(app_.doc_, wgen_object_) < 0) {
         wgen_close_ = false;
         close();
         ctx.end_modal();

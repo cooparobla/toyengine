@@ -20,6 +20,11 @@ toy::core::AppConfig make_test_config(const std::string& scene, uint32_t win_w, 
     config.window.height  = win_h;
     config.window.vsync   = false;
     config.window.visible = false;
+    // A headless render test is not a player launching a game: FIXED_DT=0 never advances the
+    // cover's fade, so the default-on loading state would never lift. A test that specifically
+    // exercises loading (scene_loading_test) still gets one via its scene's own
+    // settings.loading: block (apply_scene_loading_block() overrides this per scene).
+    config.loading.enabled = false;
 
     config.scene.default_scene = scene;
 
@@ -47,6 +52,9 @@ toy::core::AppConfig make_shipped_config(const std::string& scene, uint32_t rw, 
     config.window.height  = rh * 2;
     config.window.visible = false;
     config.window.vsync   = false;
+    // See make_test_config()'s comment: shipped config.yaml now defaults loading.enabled to
+    // true, and a headless test must opt back out explicitly.
+    config.loading.enabled = false;
     config.render.render_width  = rw;
     config.render.render_height = rh;
     config.scene.default_scene  = scene;

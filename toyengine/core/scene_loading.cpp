@@ -1,12 +1,17 @@
 #include <toyengine/core/scene_loading.h>
 
+#include <toyengine/core/loading_screen.h>
+
+#include <coopa/asset/asset_manager.h>
 #include <coopa/scene/scene.h>
 #include <uicoopa/immediate/imm.h>
-#include <uicoopa/immediate/imm_theme.h>
 #include <uicoopa/text/font_defaults.h>
 
 #include <exception>
 #include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <sstream>
 
 #include <algorithm>
 
@@ -42,6 +47,65 @@ std::optional<SceneTransition::Kind> SceneTransition::parse_kind(std::string s) 
     if (s == "fade") return Kind::Fade;
     if (s == "loading_screen" || s == "loadingscreen") return Kind::LoadingScreen;
     return std::nullopt;
+}
+
+SceneLoadOptions scene_load_options(const LoadingConfig& config) {
+    SceneLoadOptions opts;
+    if (!config.enabled) {
+        opts.warm_up = false;
+        opts.transition = SceneTransition::none();
+        return opts;
+    }
+    opts.transition.kind = SceneTransition::Kind::LoadingScreen;
+    opts.transition.color = config.background;
+    opts.transition.fade_in = config.fade_in;
+    opts.transition.fade_out = config.fade_out;
+    opts.transition.loading_screen = config.overlay_ui;
+    opts.warm_up = true;
+    opts.warm_up_timeout = config.warm_up_timeout;
+    opts.warm_up_budget_ms = config.warm_up_budget_ms;
+    opts.min_display_time = config.min_display_time;
+    return opts;
+}
+
+void apply_scene_loading_block(const fkyaml::node& settings, SceneLoadOptions& opts) {
+    if (!settings.is_mapping() || !settings.contains("loading")) return;
+    const fkyaml::node& node = settings.at("loading");
+    if (!node.is_mapping()) return;
+
+    bool kind_set = false;
+    if (node.contains("ui")) {
+        opts.transition.loading_screen = node.at("ui").get_value<std::string>();
+        if (!opts.transition.loading_screen.empty()) {
+            opts.transition.kind = SceneTransition::Kind::LoadingScreen;
+            kind_set = true;
+        }
+    }
+    if (node.contains("transition")) {
+        if (auto parsed = SceneTransition::parse_kind(node.at("transition").get_value<std::string>())) {
+            opts.transition.kind = *parsed;
+            kind_set = true;
+        } else {
+            std::cerr << "[toyengine] scene settings: loading.transition must be none, fade or "
+                         "loading_screen\n";
+        }
+    }
+    if (node.contains("warm_up")) {
+        opts.warm_up = node.at("warm_up").get_value<bool>();
+    } else if (kind_set) {
+        opts.warm_up = opts.transition.kind != SceneTransition::Kind::None;
+    }
+    if (node.contains("fade_in")) opts.transition.fade_in = node.at("fade_in").get_value<float>();
+    if (node.contains("fade_out")) opts.transition.fade_out = node.at("fade_out").get_value<float>();
+    if (node.contains("warm_up_timeout")) {
+        opts.warm_up_timeout = node.at("warm_up_timeout").get_value<float>();
+    }
+    if (node.contains("warm_up_budget_ms")) {
+        opts.warm_up_budget_ms = node.at("warm_up_budget_ms").get_value<float>();
+    }
+    if (node.contains("min_display_time")) {
+        opts.min_display_time = node.at("min_display_time").get_value<float>();
+    }
 }
 
 } // namespace core
@@ -129,45 +193,23 @@ void SceneTransitionLayer::draw_fade_(coopa::ui::imm::Context& ctx) {
 }
 
 void SceneTransitionLayer::draw_loading_screen_(coopa::ui::imm::Context& ctx) {
-    using coopa::ui::imm::Anchor;
-    using coopa::ui::imm::Box;
-
-    // The screen's own Style, not the Context's: a transition layer is shared, and the game's
-    // theme should not leak into it or out of it.
-    const coopa::ui::imm::Style saved = ctx.style;
-    ctx.style = loading_style_;
-
-    // The FADE's colour at full opacity, not the theme's window background: the screen has to
-    // cover whatever is mid-teardown behind it, and it has to agree with the fade it appears
-    // out of. A theme background would be a second, lighter colour arriving on top of the
-    // fade -- visible as a flash, and brighter than the transition ever asked for.
+    // The FADE's colour at full opacity, not style_.background: the screen has to cover
+    // whatever is mid-teardown behind it, and it has to agree with the fade it appears out of.
+    // A different background would be a second colour arriving on top of the fade -- visible
+    // as a flash. scene_load_options() sets the fade's colour from style_.background for
+    // exactly this reason, so in practice the two already agree.
     ctx.fill(ctx.stretch(), glm::vec4(color_, 1.0f));
 
-    const float bar_w = std::min(560.0f, ctx.canvas_size().x * 0.5f);
-    const Box bar = ctx.anchor(Anchor::Center, {0.0f, 0.0f}, {bar_w, 6.0f});
+    // The mark alone says work is in progress; no text, no bar. It draws straight into the
+    // Context's own DrawList, which is already begun for the fade fill above.
+    emit_loading_screen(ctx.draw_list(), ctx.canvas_size(), style_, static_cast<float>(ctx.time()));
 
-    // A title above the bar: at the moment a screen appears the bar is still empty, and an
-    // empty bar alone reads as a frozen frame rather than as work in progress.
-    if (!title.empty()) {
-        const float size = ctx.style.font_size * 1.6f;
-        const float w = ctx.text.width(title, size);
-        ctx.draw_text({bar.x + (bar.w - w) * 0.5f, bar.y - size - 18.0f}, title, ctx.style.text,
-                      size);
+    // The project's overlay, if one named itself and loaded, drawn on top of the mark.
+    const toy::ui::UiPanel* overlay = overlay_panel_ ? overlay_panel_.get() : overlay_handle_.get();
+    if (overlay) {
+        const coopa::ui::imm::Box b = ctx.anchor(overlay->anchor, overlay->offset, overlay->size);
+        toy::ui::draw_panel(ctx, b, *overlay, overlay_bindings_, &overlay_tab_);
     }
-
-    coopa::ui::imm::BarStyle bs;
-    bs.show_value = false;   // a byte count means nothing to a player
-    bs.rounding = 3.0f;
-    ctx.value_bar(bar, progress_, bs);
-
-    if (!status_.empty()) {
-        // Under the bar, centred: the bar says how far, this says what it is doing.
-        const float w = ctx.text.width(status_, ctx.style.font_size);
-        ctx.draw_text({bar.x + (bar.w - w) * 0.5f, bar.bottom() + 14.0f}, status_,
-                      ctx.style.text_dim);
-    }
-
-    ctx.style = saved;
 }
 
 void SceneTransitionLayer::set_fade(const glm::vec3& color, float alpha) {
@@ -179,25 +221,7 @@ bool SceneTransitionLayer::show_loading_screen(const std::string& ref) {
     scene();   // the canvas has to exist before anything can be drawn in it
     progress_ = 0.0f;
     status_.clear();
-    loading_style_ = coopa::ui::imm::Style{};
-
-    // `ref` names a theme. A screen that cannot find it still draws, in the built-in style:
-    // the one thing a loading screen must never do is fail to appear.
-    if (!ref.empty()) {
-        const bool has_ext = ref.size() > 5 && ref.rfind(".yaml") == ref.size() - 5;
-        const std::string rel = has_ext ? ref : ref + ".yaml";
-        for (const std::string& root : coopa::ui::FontDefaults::search_dirs) {
-            const std::filesystem::path p = std::filesystem::path(root) / rel;
-            std::error_code ec;
-            if (!std::filesystem::exists(p, ec)) continue;
-            try {
-                loading_style_ = coopa::ui::imm::load_theme(p).style;
-            } catch (const std::exception&) {
-                // Keep the built-in style; a malformed theme is not worth failing a load for.
-            }
-            break;
-        }
-    }
+    load_overlay_(ref);
     loading_visible_ = true;
     return true;
 }
@@ -206,6 +230,8 @@ void SceneTransitionLayer::hide_loading_screen() {
     loading_visible_ = false;
     progress_ = 0.0f;
     status_.clear();
+    overlay_handle_ = {};
+    overlay_panel_.reset();
 }
 
 void SceneTransitionLayer::update_loading_screen(float progress, const std::string& status) {
@@ -213,10 +239,54 @@ void SceneTransitionLayer::update_loading_screen(float progress, const std::stri
     status_ = status;
 }
 
+void SceneTransitionLayer::load_overlay_(const std::string& ref) {
+    overlay_handle_ = {};
+    overlay_panel_.reset();
+    overlay_tab_ = 0;
+    if (ref.empty()) return;
+
+    // `.yaml` is optional in config.yaml / a scene's settings, so `overlay_ui: ui/loading_screen`
+    // works; both load paths below want the real filename.
+    const bool has_ext = ref.size() > 5 && ref.rfind(".yaml") == ref.size() - 5;
+    const std::string rel = has_ext ? ref : ref + ".yaml";
+
+    // Through the asset system when a host has published one (set_panel_assets()) -- the same
+    // seam PanelScreen uses, so the file is parsed once and hot-reloads in the editor.
+    if (coopa::asset::AssetManager* assets = toy::ui::panel_assets()) {
+        overlay_handle_ = assets->load<toy::ui::UiPanel>(rel);
+        if (!overlay_handle_.get()) {
+            std::cerr << "[toyengine] Loading screen overlay '" << rel << "' did not load\n";
+        }
+        return;
+    }
+
+    // No host: read the file directly, same as PanelScreen's headless fallback. A missing or
+    // malformed asset leaves the built-in mark up on its own, which is the one thing a loading
+    // screen must never fail to do.
+    for (const std::string& root : coopa::ui::FontDefaults::search_dirs) {
+        const std::filesystem::path p = std::filesystem::path(root) / rel;
+        std::error_code ec;
+        if (!std::filesystem::exists(p, ec)) continue;
+        try {
+            std::ifstream f(p);
+            std::ostringstream ss;
+            ss << f.rdbuf();
+            overlay_panel_ = std::make_shared<toy::ui::UiPanel>(toy::ui::parse_panel(ss.str()));
+        } catch (const std::exception& e) {
+            std::cerr << "[toyengine] Loading screen overlay '" << ref << "' failed to parse ("
+                      << e.what() << ")\n";
+        }
+        return;
+    }
+    std::cerr << "[toyengine] Loading screen overlay '" << ref << "' not found\n";
+}
+
 void SceneTransitionLayer::release() {
     loading_visible_ = false;
     canvas_ = nullptr;
     scene_.reset();
+    overlay_handle_ = {};
+    overlay_panel_.reset();
     alpha_ = 0.0f;
 }
 

@@ -227,6 +227,15 @@ public:
     /** @brief Off here turns shadow casting off for every prototype, whatever each asks. */
     bool cast_shadows = true;
 
+    /**
+     * @brief Chunks the cache may build per frame (see `InstanceRenderCache::update()`).
+     *
+     * Modest by default -- building is a CPU scan of every record in a chunk -- but raised
+     * while the loading screen covers the viewport (`Engine::apply_warmup_budgets_()`), the same
+     * way `TerrainComponent::upload_budget_ms` is.
+     */
+    int chunk_build_budget = 2;
+
     /** @brief Instances are drawn and collided; off leaves the records untouched but invisible. */
     bool enabled = true;
 

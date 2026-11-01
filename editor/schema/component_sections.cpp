@@ -249,29 +249,57 @@ void apply_component_sections(std::map<std::string, ComponentSchema>& table) {
         sec("Planet", "World").keys({"sphere"}).closed().done(),
     });
 
-    layout("HeightmapTerrain", {
-        // A live status line and the way into Terrain Mode, drawn by the terrain panel: the
-        // inspector is where a user looks first, and sculpting is the thing they came to do.
-        sec("Terrain", "Terrain").custom("HeightmapTerrain.edit").done(),
-        sec("Size", "Terrain")
-            .says("How big the landscape is and how finely it is sampled. Resolution is 2^n + 1.")
-            .keys({"size", "height", "chunk_size", "resolution"}).done(),
-        sec("Maps", "Image")
-            .says("The 16-bit height map, and the splat maps that say which layer paints where.")
-            .keys({"heightmap", "splat0", "splat1", "splat_resolution", "layer_texture_size"}).done(),
-        sec("Layers", "Palette")
-            .says("Up to eight painted surfaces. Each has its own textures, tiling and roughness.")
-            .keys({"layers"}).done(),
-        sec("Weather", "World")
-            .says("Water is a surface over this ground too: each tile carries a kind and a level, and "
-                  "the shoreline is wherever the ground crosses it. Paint it in Terrain Mode, or apply "
-                  "a generated world that brings its own sea, lakes and rivers.")
-            .keys({"deep_snow", "puddles"}).closed().done(),
-        sec("Collision", "Collider").toggle("collision").keys({"physics_material"}).closed().done(),
-        sec("Streaming", "Zoom")
-            .says("How much terrain exists around the camera, and how much of it casts shadows.")
-            .keys({"cast_shadows", "view_distance", "shadow_distance", "patch_resolution"}).closed().done(),
-    });
+    // One component, two modes (toyengine/world/terrain_component.h), one layout -- registered
+    // under all three scene names (Terrain, TileTerrain, HeightmapTerrain are parser aliases of
+    // the same component). A key can belong to only one section in this list: an inactive
+    // ShowWhen-gated section still claims its keys so they never fall into "More" (see
+    // draw_section's claim_keys), so the same key in two mutually-exclusive sections would have
+    // the active one silently skip it. That is why `chunk_size` and `shadow_distance` -- shared
+    // by both modes -- get their own ungated homes instead of appearing in both halves.
+    auto terrain_sections = [] {
+        return std::vector<InspectorSection>{
+            // A live status line and the way into Terrain Mode, drawn by the terrain panel: the
+            // inspector is where a user looks first, and sculpting is the thing they came to do.
+            // (Tiles mode has the equivalent inside its own full-takeover panel instead.)
+            sec("Terrain", "Terrain").when("mode", {"heightmap"}).custom("HeightmapTerrain.edit").done(),
+            sec("Shape", "Terrain").keys({"mode", "chunk_size"}).done(),
+            sec("Size", "Terrain").when("mode", {"heightmap"})
+                .says("How big the landscape is and how finely it is sampled. Resolution is 2^n + 1.")
+                .keys({"size", "height", "resolution"}).done(),
+            sec("World", "World").when("mode", {"tiles"})
+                .says("How the generated world is cut into tiles and chunks, and the tile set it is built from.")
+                .keys({"tile_set", "tiles", "world_tiles", "tiles_per_grid_unit", "tile_size", "height_step",
+                       "height_scale", "max_wall_steps", "soil_depth_steps", "view_radius"}).done(),
+            sec("Maps", "Image").when("mode", {"heightmap"})
+                .says("The 16-bit height map, and the splat maps that say which layer paints where.")
+                .keys({"heightmap", "splat0", "splat1", "splat_resolution", "layer_texture_size"}).done(),
+            sec("Layers", "Palette")
+                .says("The surfaces this terrain can wear. A heightmap terrain blends them by weight; a "
+                      "tiled one names one per face -- empty keeps the built-in tile set.")
+                .keys({"layers"}).done(),
+            sec("Material", "Palette").when("mode", {"tiles"}).closed().keys({"material"}).done(),
+            sec("Water", "World").when("mode", {"tiles"})
+                .says("How far the sea, lakes and rivers sit under the terrace they fill; a smooth "
+                      "shoreline is instead wherever the ground crosses the water's level.")
+                .keys({"water_inset", "river_inset"}).closed().done(),
+            sec("Weather", "World")
+                .says("Water is a surface over this ground too: each tile carries a kind and a level, and "
+                      "the shoreline is wherever the ground crosses it. Paint it in Terrain Mode, or apply "
+                      "a generated world that brings its own sea, lakes and rivers.")
+                .keys({"deep_snow", "puddles"}).closed().done(),
+            sec("Collision", "Collider").toggle("collision").keys({"physics_material", "shadow_distance"}).closed().done(),
+            sec("Streaming", "Zoom").when("mode", {"heightmap"})
+                .says("How much terrain exists around the camera, and how much of it casts shadows.")
+                .keys({"cast_shadows", "view_distance", "patch_resolution"}).closed().done(),
+            sec("Streaming", "Zoom").when("mode", {"tiles"})
+                .says("How many chunks stream around the camera, and the budgets that pace it.")
+                .keys({"max_chunk_jobs_per_frame", "max_chunks_in_flight", "upload_budget_ms",
+                       "collision_radius", "dormant_chunks"}).closed().done(),
+        };
+    };
+    layout("Terrain", terrain_sections());
+    layout("TileTerrain", terrain_sections());
+    layout("HeightmapTerrain", terrain_sections());
 
     layout("Curve", {
         sec("Path", "World")

@@ -287,7 +287,7 @@ COOPA_TEST(scene_link_shows_loading_screen_and_lands_on_spawn) {
         const uint8_t* px = &mid.pixels[i * mid.channels];
         if (int(px[0]) + int(px[1]) + int(px[2]) > 200) ++bright;
     }
-    expect_at_least(bright, 200, "scene link: the loading screen draws its title, bar and status");
+    expect_at_least(bright, 200, "scene link: the loading screen draws its animated mark");
 
     for (int i = 0; i < 2000 && !load.is_done(); ++i) engine.tick();
     expect(load.is_done() && !load.failed(), "scene link: the heavy scene loads (" + load.error() + ")");

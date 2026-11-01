@@ -297,9 +297,6 @@ COOPA_TEST(every_render_and_window_key_round_trips) {
             "  vsync: false\n"
             "  visible: false\n"
             "  splash: false\n"
-            "  splash_title: A Game\n"
-            "  splash_image: textures/boot.png\n"
-            "  splash_color: [0.6, 0.1, 0.1]\n"
             "render:\n"
             "  ssr_enabled: false\n"
             "  ssr_max_distance: 7.5\n"
@@ -326,10 +323,6 @@ COOPA_TEST(every_render_and_window_key_round_trips) {
         expect(config.window.vsync == false, "AppConfig::load: window.vsync round-trips");
         expect(config.window.visible == false, "AppConfig::load: window.visible round-trips");
         expect(config.window.splash == false, "AppConfig::load: window.splash round-trips");
-        expect(config.window.splash_title == "A Game", "AppConfig::load: window.splash_title round-trips");
-        expect(config.window.splash_image == "textures/boot.png", "AppConfig::load: window.splash_image round-trips");
-        expect(config.window.splash_color == glm::vec3(0.6f, 0.1f, 0.1f),
-               "AppConfig::load: window.splash_color round-trips");
 
         expect(config.render.ssr_enabled == false, "AppConfig::load: ssr_enabled round-trips");
         expect(config.render.ssr_max_distance == 7.5f, "AppConfig::load: ssr_max_distance round-trips");
@@ -438,6 +431,53 @@ COOPA_TEST(quality_tiers_expand_beneath_explicit_keys) {
         "  volumetrics_quality: low\n");
     expect(vol_low.render.volumetrics_max_scatter_lights == 0, "quality preset: low volumetrics_max_scatter_lights is 0");
     expect(vol_low.render.volumetrics_step_count == 24, "quality preset: low volumetrics_step_count");
+}
+
+/**
+ * @brief The `loading:` section round-trips, including the corner enum's four spellings and
+ *        its unrecognized-string fallback.
+ */
+COOPA_TEST(loading_config_round_trips) {
+    toy::core::AppConfig config = load_config_text("test_loading_config.yaml",
+        "loading:\n"
+        "  enabled: false\n"
+        "  spinner: false\n"
+        "  background: [0.1, 0.2, 0.3]\n"
+        "  spinner_color: [0.4, 0.5, 0.6]\n"
+        "  corner: top_left\n"
+        "  overlay_ui: ui/my_overlay\n"
+        "  min_display_time: 0.5\n"
+        "  fade_in: 0.2\n"
+        "  fade_out: 0.3\n"
+        "  warm_up_timeout: 15.0\n"
+        "  warm_up_budget_ms: 6.0\n");
+
+    expect(config.loading.enabled == false, "AppConfig::load: loading.enabled round-trips");
+    expect(config.loading.spinner == false, "AppConfig::load: loading.spinner round-trips");
+    expect(config.loading.background == glm::vec3(0.1f, 0.2f, 0.3f), "AppConfig::load: loading.background round-trips");
+    expect(config.loading.spinner_color == glm::vec3(0.4f, 0.5f, 0.6f), "AppConfig::load: loading.spinner_color round-trips");
+    expect(config.loading.corner == toy::core::LoadingCorner::TopLeft, "AppConfig::load: loading.corner round-trips");
+    expect(config.loading.overlay_ui == "ui/my_overlay", "AppConfig::load: loading.overlay_ui round-trips");
+    expect(config.loading.min_display_time == 0.5f, "AppConfig::load: loading.min_display_time round-trips");
+    expect(config.loading.fade_in == 0.2f, "AppConfig::load: loading.fade_in round-trips");
+    expect(config.loading.fade_out == 0.3f, "AppConfig::load: loading.fade_out round-trips");
+    expect(config.loading.warm_up_timeout == 15.0f, "AppConfig::load: loading.warm_up_timeout round-trips");
+    expect(config.loading.warm_up_budget_ms == 6.0f, "AppConfig::load: loading.warm_up_budget_ms round-trips");
+
+    using toy::core::parse_loading_corner;
+    using toy::core::LoadingCorner;
+    expect(parse_loading_corner("bottom_right") == LoadingCorner::BottomRight, "parse_loading_corner: bottom_right");
+    expect(parse_loading_corner("bottom_left") == LoadingCorner::BottomLeft, "parse_loading_corner: bottom_left");
+    expect(parse_loading_corner("top_right") == LoadingCorner::TopRight, "parse_loading_corner: top_right");
+    expect(parse_loading_corner("top_left") == LoadingCorner::TopLeft, "parse_loading_corner: top_left");
+    expect(parse_loading_corner("nonsense") == LoadingCorner::BottomRight,
+           "parse_loading_corner: an unrecognized name falls back to bottom_right");
+
+    // Defaults, with no loading: section at all -- the new project-global default is ON.
+    toy::core::AppConfig defaulted = load_config_text("test_loading_default_config.yaml", "window: { width: 1 }\n");
+    expect(defaulted.loading.enabled == true, "AppConfig::load: loading.enabled defaults to true");
+    expect(defaulted.loading.background == glm::vec3(0.0f), "AppConfig::load: loading.background defaults to black");
+    expect(defaulted.loading.spinner_color == glm::vec3(1.0f), "AppConfig::load: loading.spinner_color defaults to white");
 }
 
 /**

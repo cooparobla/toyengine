@@ -1,5 +1,6 @@
 #include "editor/app/ui/particle_panel.h"
 #include "editor/app/ui/assets.h"
+#include "editor/app/ui/terrain_common.h"
 
 #include "editor/app/editor_app.h"
 
@@ -336,7 +337,7 @@ EditResult ParticlePanel::draw_particle_terrain_section_(imm::Context& ctx, Obje
     const toy::world::HeightmapTerrain* terrain = nullptr;
     std::vector<std::string> terrain_names{"(nearest above this object)"};
     for (ObjectId oid : app_.doc_.all_ids()) {
-        if (app_.doc_.find_component(oid, "HeightmapTerrain") < 0) continue;
+        if (!is_any_terrain_object(app_.doc_, oid)) continue;
         if (const Node* o = app_.doc_.find(oid)) terrain_names.push_back(get_string(*o, "name", "?"));
     }
     const std::string named = str_of(tb, "object", "");

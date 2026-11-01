@@ -23,7 +23,8 @@ scene:
           position: { x: 0.0, y: 0.0, z: 0.0 }
           rotation: { x: 0.0, y: 0.0, z: 0.0 }
           scale: { x: 1.0, y: 1.0, z: 1.0 }
-        - type: TileTerrain
+        - type: Terrain
+          mode: tiles
           # 16 is load-bearing, not a default: the parser trims face_tiles to a multiple of it
           # (216 -> 208 here), and terrain/planet.tiles is baked at that width. Changing it
           # reads the stored tiles at the wrong size -- bands of missing sea -- until the world

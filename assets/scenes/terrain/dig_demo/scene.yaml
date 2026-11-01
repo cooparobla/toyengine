@@ -30,7 +30,8 @@ scene:
           position: { x: 0.0, y: 0.0, z: 0.0 }
           rotation: { x: 0.0, y: 0.0, z: 0.0 }
           scale: { x: 1.0, y: 1.0, z: 1.0 }
-        - type: TileTerrain
+        - type: Terrain
+          mode: tiles
           # 16-tile chunks: a dug tile re-meshes a smaller patch, so the change lands sooner.
           chunk_size: 16
           collision: true

@@ -153,6 +153,19 @@ EditResult draw_component(imm::Context& ctx, Node& comp, const InspectorEnv& env
                                  const std::function<void(const std::string&)>& open_material = {},
                                  const std::set<std::string>* hide_keys = nullptr);
 
+/**
+ * @brief Draws `comp` with `schema_type`'s schema and sections, bypassing any full-takeover
+ *        drawer registered under the component's own type name.
+ *
+ * For a component whose type is itself a full takeover (ParticleSystem, TileTerrain, Terrain --
+ * see draw_component()): that takeover's own drawer calls this to fall through to the ordinary
+ * schema+sections rendering for a DIFFERENT, explicitly named schema, instead of hand-drawing
+ * everything itself. Looking `comp` up by its own type would just find the same takeover again.
+ */
+EditResult draw_component_as(imm::Context& ctx, const std::string& schema_type, Node& comp, const InspectorEnv& env,
+                                 const std::function<void(const std::string&)>& open_material = {},
+                                 const std::set<std::string>* hide_keys = nullptr);
+
 } // namespace toy::editor
 
 #endif // TOYEDITOR_SCHEMA_INSPECTOR_H

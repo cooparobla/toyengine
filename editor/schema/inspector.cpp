@@ -993,5 +993,28 @@ EditResult draw_component(imm::Context& ctx, Node& comp, const InspectorEnv& env
     return r;
 }
 
+EditResult draw_component_as(imm::Context& ctx, const std::string& schema_type, Node& comp, const InspectorEnv& env,
+                                 const std::function<void(const std::string&)>& open_material,
+                                 const std::set<std::string>* hide_keys) {
+    const ComponentSchema* schema = find_schema(schema_type);
+    EditResult r;
+    if (schema && !schema->sections.empty()) return draw_sectioned_(ctx, *schema, comp, env, open_material, hide_keys);
+    std::set<std::string> skip{"type", "id"};
+    if (hide_keys) skip.insert(hide_keys->begin(), hide_keys->end());
+    if (schema) {
+        r.absorb(draw_fields(ctx, schema->fields, comp, env, true, skip));
+        for (const auto& f : schema->fields) {
+            if (f.kind != FieldKind::Material || skip.count(f.key)) continue;
+            const float y = ctx.cursor().y;
+            r.absorb(draw_material_field(ctx, comp, env, open_material));
+            if (env.after_field) env.after_field(ctx, f.key, imm::Box{ctx.cursor().x, y, 120.0f, ctx.style.row_height});
+        }
+    } else {
+        r.absorb(draw_fields(ctx, {}, comp, env, true, skip));
+        if (comp.is_mapping() && comp.size() <= 1) ctx.label_dim("(no properties)");
+    }
+    return r;
+}
+
 } // namespace editor
 } // namespace toy

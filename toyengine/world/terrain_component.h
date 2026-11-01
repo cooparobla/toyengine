@@ -284,14 +284,13 @@ public:
     ~TerrainComponent() override;
 
     /**
-     * @brief The component's name in scene YAML, which follows `mode`.
+     * @brief The component's name: always `"Terrain"`, whichever mode it is in.
      *
-     * One C++ type serves both modes; the two names are what scenes, the editor's schemas and
-     * the save path already speak, so they keep working untouched.
+     * One C++ type serves both modes, under one name. `TileTerrain` and `HeightmapTerrain`
+     * remain scene-YAML parser aliases (toyengine/scene/register.cpp) so every existing scene
+     * keeps loading untouched; this is what a freshly authored or re-saved terrain is called.
      */
-    std::string type_name() const override {
-        return mode == TerrainMode::Heightmap ? "HeightmapTerrain" : "TileTerrain";
-    }
+    std::string type_name() const override { return "Terrain"; }
 
     /**
      * @brief Which model this terrain carries its shape in -- the one switch the rest reads.
@@ -418,6 +417,64 @@ public:
     static water::WaterBody default_water_look();
 
     // ------------------------------------------------------------------
+    // Streaming -- Tiles mode only. Heightmap mode streams by distance alone
+    // (HeightmapTerrainSystem); these knobs are inert on it.
+    // ------------------------------------------------------------------
+
+    /**
+     * @brief Chunk meshing jobs submitted per frame.
+     *
+     * A pacing knob, not a limit on parallelism: `max_chunks_in_flight` is what actually bounds
+     * how much work is outstanding, and the jobs themselves run on every worker.
+     */
+    int max_chunk_jobs_per_frame = 16;
+
+    /**
+     * @brief Chunks allowed to be meshing at once; 0 means twice the JobEngine's worker count.
+     *
+     * This, rather than a per-frame submission count, is what keeps a teleport from queueing the
+     * whole world at once -- and what keeps the worker pool fed, which a small per-frame count
+     * cannot do: four submissions a frame leave a twenty-worker engine idle while the camera
+     * waits two seconds for its ground.
+     */
+    int max_chunks_in_flight = 0;
+
+    /**
+     * @brief Owner-thread milliseconds a frame may spend publishing finished chunks.
+     *
+     * A time slice, because the work is not per chunk: attaching a chunk costs a scene insert, a
+     * published asset, its water children's first bake and (near the camera) a physics
+     * re-gather, and those differ by an order of magnitude between a chunk of open sea and a
+     * chunk of cliff. At least one chunk always lands, so the stream can never stall.
+     *
+     * Wall clock, so how many chunks a *transient* (a teleport, a first load) spreads over how
+     * many frames is machine-dependent. The settled region is not: the same chunks end up
+     * loaded either way, so a scripted capture that waits for the world to come up is as
+     * reproducible as it ever was.
+     */
+    float upload_budget_ms = 1.5f;
+
+    /**
+     * @brief Chunks within which a chunk is given a MeshCollider; 0 means every loaded chunk.
+     *
+     * Collision is the most expensive thing a chunk carries: a welded triangle mesh with
+     * adjacency and a BVH, a megabyte or two of it, and a `PhysicsSystem::refresh()` whose
+     * re-gather is linear in every collider in the scene. Ground a few hundred metres away
+     * pays all of that for contacts that never happen. Raise it past where your physics
+     * actually is -- a body resting on a chunk outside this radius has no ground.
+     */
+    int collision_radius = 4;
+
+    /**
+     * @brief Chunks kept whole after leaving view, to be re-attached if the camera comes back.
+     *
+     * Turning round at a chunk boundary, or walking back ten metres, otherwise re-meshes,
+     * re-uploads, re-bakes the water and rebuilds the collider BVH of ground that was complete
+     * a moment ago. A parked chunk costs its GPU mesh (a megabyte or two); 0 disables the tier.
+     */
+    int dormant_chunks = 32;
+
+    // ------------------------------------------------------------------
     // Heightmap mode's authored half (`mode: heightmap`). Inert in Tiles mode.
     // ------------------------------------------------------------------
 
@@ -474,63 +531,10 @@ public:
     std::unique_ptr<HeightmapTerrainRuntime> runtime;
 
     /**
-     * @brief Chunk meshing jobs submitted per frame.
-     *
-     * A pacing knob, not a limit on parallelism: `max_chunks_in_flight` is what actually bounds
-     * how much work is outstanding, and the jobs themselves run on every worker.
-     */
-    int max_chunk_jobs_per_frame = 16;
-
-    /**
-     * @brief Chunks allowed to be meshing at once; 0 means twice the JobEngine's worker count.
-     *
-     * This, rather than a per-frame submission count, is what keeps a teleport from queueing the
-     * whole world at once -- and what keeps the worker pool fed, which a small per-frame count
-     * cannot do: four submissions a frame leave a twenty-worker engine idle while the camera
-     * waits two seconds for its ground.
-     */
-    int max_chunks_in_flight = 0;
-
-    /**
-     * @brief Owner-thread milliseconds a frame may spend publishing finished chunks.
-     *
-     * A time slice, because the work is not per chunk: attaching a chunk costs a scene insert, a
-     * published asset, its water children's first bake and (near the camera) a physics
-     * re-gather, and those differ by an order of magnitude between a chunk of open sea and a
-     * chunk of cliff. At least one chunk always lands, so the stream can never stall.
-     *
-     * Wall clock, so how many chunks a *transient* (a teleport, a first load) spreads over how
-     * many frames is machine-dependent. The settled region is not: the same chunks end up
-     * loaded either way, so a scripted capture that waits for the world to come up is as
-     * reproducible as it ever was.
-     */
-    float upload_budget_ms = 1.5f;
-
-    /**
-     * @brief Chunks within which a chunk is given a MeshCollider; 0 means every loaded chunk.
-     *
-     * Collision is the most expensive thing a chunk carries: a welded triangle mesh with
-     * adjacency and a BVH, a megabyte or two of it, and a `PhysicsSystem::refresh()` whose
-     * re-gather is linear in every collider in the scene. Ground a few hundred metres away
-     * pays all of that for contacts that never happen. Raise it past where your physics
-     * actually is -- a body resting on a chunk outside this radius has no ground.
-     */
-    int collision_radius = 4;
-
-    /**
      * @brief Metres past which a chunk stops casting shadows (MeshRenderer::shadow_max_distance);
-     *        0 leaves every loaded chunk in every cascade. The same knob HeightmapTerrain has.
+     *        0 leaves every loaded chunk in every cascade. Shared with Tiles mode.
      */
     float shadow_distance = 0.0f;
-
-    /**
-     * @brief Chunks kept whole after leaving view, to be re-attached if the camera comes back.
-     *
-     * Turning round at a chunk boundary, or walking back ten metres, otherwise re-meshes,
-     * re-uploads, re-bakes the water and rebuilds the collider BVH of ground that was complete
-     * a moment ago. A parked chunk costs its GPU mesh (a megabyte or two); 0 disables the tier.
-     */
-    int dormant_chunks = 32;
 
     // ------------------------------------------------------------------
     // Runtime state -- driven by TerrainSystem, not by scene YAML.

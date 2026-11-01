@@ -1,6 +1,7 @@
 #include "editor/app/ui/terrain.h"
 
 #include "editor/app/editor_app.h"
+#include "editor/app/ui/terrain_common.h"
 
 #include <chrono>
 #include <cmath>
@@ -15,7 +16,7 @@ namespace toy {
 namespace editor {
 
 bool TerrainPanel::is_terrain_object_(ObjectId id) const {
-    return id != 0 && app_.doc_.find_component(id, "HeightmapTerrain") >= 0;
+    return id != 0 && terrain_mode_of(app_.doc_, id) == toy::world::TerrainMode::Heightmap;
 }
 
 void TerrainPanel::set_terrain_mode(bool on) {

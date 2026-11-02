@@ -495,7 +495,7 @@ public:
         bool  enabled = true;
         float edge_pixels = 8.0f;     ///< Target triangle edge on screen: detail falls off with distance by itself.
         float max_factor = 64.0f;     ///< Cap on splits per patch edge (clamped to the device's limit).
-        float max_distance = 0.0f;    ///< "Detail distance": beyond, the base patch only. 0 = the view distance.
+        float max_distance = 0.0f;    ///< "Detail distance": beyond, the base patch only. 0 = min(view_distance, 2000 m).
     } tessellation;
 
     /// Quads per chunk side before tessellation (the far-away shape). 0 = automatic: 4 with

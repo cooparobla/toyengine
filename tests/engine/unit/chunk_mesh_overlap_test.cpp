@@ -395,6 +395,32 @@ std::vector<Tri> mesh_and_collect(const toy::world::TileMeshLibrary& library,
     return collect_triangles(mesh, offset);
 }
 
+/** @brief The highest hit of a straight-down ray at `(x, y)`, or a large negative sentinel on a miss. */
+float cast_down(const toy::world::ChunkMeshData& mesh, float x, float y) {
+    constexpr float k_miss = -1e8f;
+    float best = k_miss;
+    const glm::vec2 p(x, y);
+    for (std::size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
+        const glm::vec3& a = mesh.vertices[mesh.indices[t]].position;
+        const glm::vec3& b = mesh.vertices[mesh.indices[t + 1]].position;
+        const glm::vec3& c = mesh.vertices[mesh.indices[t + 2]].position;
+        const glm::vec2 a2(a.x, a.y), b2(b.x, b.y), c2(c.x, c.y);
+        // Barycentric weights via signed sub-areas, all over the same (possibly negative)
+        // denominator, so the sign is consistent whatever way the triangle winds.
+        const float area_abc = (b2.x - a2.x) * (c2.y - a2.y) - (b2.y - a2.y) * (c2.x - a2.x);
+        if (std::abs(area_abc) < 1e-9f) continue;
+        const float area_pbc = (b2.x - p.x) * (c2.y - p.y) - (b2.y - p.y) * (c2.x - p.x);
+        const float area_pca = (c2.x - p.x) * (a2.y - p.y) - (c2.y - p.y) * (a2.x - p.x);
+        const float w_a = area_pbc / area_abc;
+        const float w_b = area_pca / area_abc;
+        const float w_c = 1.0f - w_a - w_b;
+        if (w_a < -1e-4f || w_b < -1e-4f || w_c < -1e-4f) continue;
+        const float z = w_a * a.z + w_b * b.z + w_c * c.z;
+        if (z > best) best = z;
+    }
+    return best;
+}
+
 void run_set_audit(const char* set_name) {
     using namespace toy::world;
     const TileMeshLibrary library = make_tile_library({set_name});
@@ -442,9 +468,195 @@ void run_set_audit(const char* set_name) {
                                 std::to_string(total_same) + ")");
 }
 
+/**
+ * @brief Quadrant-granularity top merging must change only the TRIANGULATION of a pad, never the
+ * surface it covers. Mesh a flat, two-kind pad (a kind island, so both the merge and its corner
+ * exclusion fire, with no wall geometry to confound the check) once normally and once with
+ * `TOY_TERRAIN_NO_MERGE=1`, then assert: every merged vertex position exists, within tolerance, in
+ * the unmerged mesh's positions, both cover the same projected top area, and a grid of
+ * straight-down rays agrees on the hit height everywhere.
+ */
+void run_merge_fidelity(const char* set_name) {
+    using namespace toy::world;
+    const TileMeshLibrary library = make_tile_library({set_name});
+    const std::int32_t chunk = 6;
+    const TerrainParams params = make_test_params(chunk);
+
+    ColumnPad pad = make_flat_pad(chunk, 4);
+    for (std::int32_t y = 2; y <= 3; ++y) {
+        for (std::int32_t x = 2; x <= 3; ++x) pad.at(x, y).top_kind = TileKind::Stone;
+    }
+
+    ChunkMeshData merged;
+    mesh_chunk_styled(pad, library, params, merged);
+    ChunkMeshData unmerged;
+    {
+        ScopedEnv no_merge("TOY_TERRAIN_NO_MERGE", "1");
+        mesh_chunk_styled(pad, library, params, unmerged);
+    }
+
+    // 1. Every merged vertex position exists, within tolerance, in the unmerged mesh's positions.
+    // Not bitwise: variant_transform() places a rotated quadrant (orientation > 0) via a sin/cos
+    // matrix, so an unmerged corner at a 90/180/270-degree orientation lands a few ulps off its
+    // axis-exact value (e.g. cosf(radians(90)) is ~4.4e-8, not 0) -- a pre-existing property of
+    // the D4 bake, not something this merge introduces. A tolerance far above that noise floor but
+    // far below a real placement bug still catches the merge deriving the wrong origin.
+    constexpr float k_tolerance = 1e-4f;
+    std::size_t missing = 0;
+    for (const auto& mv : merged.vertices) {
+        bool found = false;
+        for (const auto& uv : unmerged.vertices) {
+            if (std::abs(mv.position.x - uv.position.x) < k_tolerance &&
+                std::abs(mv.position.y - uv.position.y) < k_tolerance &&
+                std::abs(mv.position.z - uv.position.z) < k_tolerance) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            ++missing;
+            std::cerr << "         [" << set_name << "] missing merged vertex at ("
+                      << mv.position.x << ", " << mv.position.y << ", " << mv.position.z << ")\n";
+        }
+    }
+    expect(missing == 0, std::string(set_name) + ": every merged vertex position exists within "
+                                                  "tolerance in the unmerged mesh (" +
+                              std::to_string(missing) + " of " +
+                              std::to_string(merged.vertices.size()) + " missing)");
+
+    // 2. Equal projected top area -- catches a dropped or double-covered quadrant.
+    auto top_area = [](const ChunkMeshData& mesh) {
+        double area = 0.0;
+        for (std::size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
+            const glm::vec3& a = mesh.vertices[mesh.indices[t]].position;
+            const glm::vec3& b = mesh.vertices[mesh.indices[t + 1]].position;
+            const glm::vec3& c = mesh.vertices[mesh.indices[t + 2]].position;
+            if (a.z < 3.999f || b.z < 3.999f || c.z < 3.999f) continue;  // tops only
+            area += 0.5 * std::abs(static_cast<double>((b.x - a.x) * (c.y - a.y) -
+                                                        (b.y - a.y) * (c.x - a.x)));
+        }
+        return area;
+    };
+    const double merged_area = top_area(merged);
+    const double unmerged_area = top_area(unmerged);
+    expect(std::abs(merged_area - unmerged_area) < 1e-6,
+           std::string(set_name) + ": equal top area (" + std::to_string(merged_area) + " vs " +
+               std::to_string(unmerged_area) + ")");
+
+    // 3. A grid of straight-down rays agrees on the hit height everywhere -- no gap the merge
+    // opened or quadrant it duplicated.
+    std::size_t ray_mismatches = 0;
+    for (float y = 0.25f; y < static_cast<float>(chunk); y += 0.5f) {
+        for (float x = 0.25f; x < static_cast<float>(chunk); x += 0.5f) {
+            const float hm = cast_down(merged, x, y);
+            const float hu = cast_down(unmerged, x, y);
+            if (std::abs(hm - hu) > 1e-4f) ++ray_mismatches;
+        }
+    }
+    expect(ray_mismatches == 0, std::string(set_name) + ": straight-down rays agree between "
+                                                        "merged and unmerged (" +
+                                    std::to_string(ray_mismatches) + " mismatches)");
+}
+
+/**
+ * @brief The ChunkLod::style tier's seam safety net. A style level re-meshes independently of its
+ *        neighbour -- chunk_seam_locks() never sees it, since build_chunk_lods() only locks the
+ *        ratio levels sharing LOD 0's vertices -- so whatever keeps a style-overridden chunk's
+ *        border matching an ordinary neighbour's has to come from the style's own geometry, not
+ *        from a shared-vertex contract.
+ *
+ *        Vertex-set equality turns out NOT to be the right check, despite `soft_lod` sharing every
+ *        R_OUT/R_IN/LIP_H/LIP_V/round_kind_corners with `soft`: build_wall() in
+ *        tools/gen_tile_styles.py samples a wall cap as a full (profile x levels) GRID -- the plan
+ *        corner turn (ARC_SEG) crossed with the vertical round-over (LIP_SEG) -- and only the
+ *        grid's HANDFUL OF SHARED CORNERS (both axes at an endpoint) land at the same point
+ *        regardless of segment count. Every other grid point is a real vertex that exists on only
+ *        ONE side -- not a small sagitta off the matching point, but an entirely absent one, since
+ *        a coarser style (soft_lod's ARC_SEG 1 / LIP_SEG 1) simply never samples the corner's
+ *        interior at all. A first version of this test (nearest-vertex matching, both directions)
+ *        measured 0.6-2.8 tile "deviations" this way; that was the test confusing "no corresponding
+ *        sample" for "a hole", not a real one.
+ *
+ *        So the proof instead reuses the same bar the codebase already accepts for every OTHER
+ *        seam, same-style or not (run_set_audit() above, and Stage 1's quadrant-merge audit): mesh
+ *        two adjacent chunks from one shared height field -- A entirely re-meshed with the
+ *        `lod_style_name` override, B left as ordinary `soft` -- and require the combined surface
+ *        to have no SAME-FACING coplanar overlap (the z-fight that would mean two incompatible
+ *        copies of the seam exist). T-junctions are expected and not asserted, exactly as for every
+ *        other style pair. A straight-down probe across the seam band additionally catches an
+ *        actual see-through hole, which the overlap audit alone would not.
+ */
+void run_seam_proof(const char* lod_style_name) {
+    using namespace toy::world;
+    const TileMeshLibrary library = make_tile_library({"soft", lod_style_name});
+    const std::int32_t chunk = 8;
+    TerrainParams params = make_test_params(chunk);
+    const bool verbose = std::getenv("OVERLAP_VERBOSE") != nullptr;
+
+    long long total_pairs = 0, total_same = 0, total_tris = 0, total_tjunctions = 0, total_misses = 0;
+    for (std::uint32_t seed : {7u, 19u, 42u, 1337u}) {
+        const std::int32_t field_size = chunk * 2;
+        const auto field = make_height_field(field_size, seed);
+        const float seam_x = static_cast<float>(chunk) * params.tile_size;
+
+        ChunkMeshData a, b;
+        mesh_chunk_styled(pad_from_field(field, field_size, chunk, 0, 0), library, params, a,
+                          /*style_override=*/1, /*native_border=*/0);
+        mesh_chunk_styled(pad_from_field(field, field_size, chunk, chunk, 0), library, params, b);
+
+        std::vector<Tri> tris = collect_triangles(a, glm::vec3(0.0f));
+        const std::vector<Tri> right = collect_triangles(b, glm::vec3(seam_x, 0.0f, 0.0f));
+        tris.insert(tris.end(), right.begin(), right.end());
+        total_tris += static_cast<long long>(tris.size());
+
+        const OverlapReport report = find_overlaps(tris, verbose);
+        total_pairs += report.pairs;
+        total_same += report.same_facing;
+        total_tjunctions += count_t_junctions(tris);
+        if (report.pairs > 0) {
+            std::cerr << "         [" << lod_style_name << " seam, seed " << seed << "] " << report.pairs
+                      << " overlapping coplanar pairs, " << report.same_facing
+                      << " same-facing (first: " << report.example_area << " wu^2 at "
+                      << report.example_at.x << ", " << report.example_at.y << ", "
+                      << report.example_at.z << ")\n";
+        }
+
+        // Straight down, across the seam band: a combined mesh so a ray can cross from one
+        // chunk's geometry into the other's.
+        ChunkMeshData combined = a;
+        const std::uint32_t base = static_cast<std::uint32_t>(a.vertices.size());
+        combined.vertices.insert(combined.vertices.end(), b.vertices.begin(), b.vertices.end());
+        for (std::size_t i = base; i < combined.vertices.size(); ++i) combined.vertices[i].position.x += seam_x;
+        combined.indices.reserve(combined.indices.size() + b.indices.size());
+        for (const auto idx : b.indices) combined.indices.push_back(idx + base);
+        for (float y = 0.5f; y < static_cast<float>(chunk); y += 0.25f) {
+            for (float x = seam_x - 1.0f; x <= seam_x + 1.0f; x += 0.1f) {
+                if (cast_down(combined, x, y) < -1e7f) ++total_misses;
+            }
+        }
+    }
+    std::cerr << "         [" << lod_style_name << " seam, style tier against a plain neighbour] "
+              << total_tris << " triangles, " << total_pairs << " coplanar overlaps (" << total_same
+              << " same-facing), " << total_tjunctions << " T-junctions, " << total_misses
+              << " straight-down misses across the seam band\n";
+    expect(total_same == 0, std::string(lod_style_name) +
+                                ": the style tier's seam against a plain neighbour has no "
+                                "same-facing coplanar overlap (z-fight)");
+    expect(total_misses == 0, std::string(lod_style_name) +
+                                  ": no straight-down miss crossing from one chunk's geometry "
+                                  "into the other's (a real gap, not just a differently-sampled "
+                                  "round-over)");
+}
+
 } // namespace
 
 COOPA_TEST(voxel_set_has_no_doubled_faces) { run_set_audit("voxel"); }
 COOPA_TEST(round_set_has_no_doubled_faces) { run_set_audit("round"); }
 COOPA_TEST(rock_set_has_no_doubled_faces) { run_set_audit("rock"); }
 COOPA_TEST(soft_set_has_no_doubled_faces) { run_set_audit("soft"); }
+COOPA_TEST(soft_lod_set_has_no_doubled_faces) { run_set_audit("soft_lod"); }
+
+COOPA_TEST(quadrant_merge_changes_only_the_triangulation_soft) { run_merge_fidelity("soft"); }
+COOPA_TEST(quadrant_merge_changes_only_the_triangulation_voxel) { run_merge_fidelity("voxel"); }
+
+COOPA_TEST(soft_lod_style_tier_matches_the_seam_it_replaces) { run_seam_proof("soft_lod"); }

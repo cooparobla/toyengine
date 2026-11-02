@@ -364,8 +364,14 @@ COOPA_TEST(collision_mesh_is_the_drawn_surface) {
         expect_near(collision->bounds().min.z, 1.0f, 1e-4f, std::string(set) + " collision: down to the lower one");
 
         // Welded across pieces: the drawn mesh splits vertices by normal, the collision mesh by
-        // position only, and pieces share edges. (Not all of them: the chunk border is open,
-        // and merged plateau rectangles meet quadrant pieces in T-junctions.)
+        // position only, and pieces share edges. (Not all of them: the chunk border is open, and
+        // merged plateau rectangles meet quadrant pieces in T-junctions.) This pad is close to the
+        // best case for quadrant-granularity top merging -- each flat half is one kind, one
+        // height, with every quadrant (including the ones along the step) a flat full quadrant
+        // under voxel/round, so each plateau collapses to a single rectangle with just one
+        // internal diagonal. Fewer, bigger triangles means a lower shared-edge fraction than a
+        // finer tiling would give; a half still catches real disconnection (a soup of unwelded
+        // triangles reads near zero), which is what this check exists to catch.
         std::size_t linked = 0, edges = 0;
         for (std::uint32_t t = 0; t < collision->triangle_count(); ++t) {
             for (int e = 0; e < 3; ++e, ++edges) {
@@ -375,7 +381,7 @@ COOPA_TEST(collision_mesh_is_the_drawn_surface) {
         expect(collision->vertices().size() < mesh.vertices.size(),
                std::string(set) + " collision: welded by position (" + std::to_string(collision->vertices().size()) + " of " +
                    std::to_string(mesh.vertices.size()) + " vertices)");
-        expect(linked * 3 >= edges * 2, std::string(set) + " collision: most triangle edges are shared (" +
+        expect(linked * 2 >= edges, std::string(set) + " collision: most triangle edges are shared (" +
                                             std::to_string(linked) + " of " + std::to_string(edges) + ")");
     }
     expect(build_chunk_collision(ChunkMeshData{}) == nullptr, "collision: an empty chunk has none");

@@ -196,9 +196,17 @@ void sample_chunk_columns(const TileMapData& tiles, const TerrainParams& params,
  *   wall's end state changes with depth, or the next wall along (a straight or concave end)
  *   where the neighbouring column has another style.
  * - **Feet** under convex halves at a real floor, covering the corner the rounding carved out.
+ *
+ * @param style_override Library style index to mesh every tile in, instead of each tile's own
+ *                        `library.style_of(kind)`. -1 (the default) means "use each tile's own
+ *                        style", which is what every ordinary chunk build (LOD 0) wants.
+ * @param native_border   With `style_override >= 0`, tiles within this many steps of the chunk's
+ *                        rim keep their own style instead of the override -- 0 (the default)
+ *                        overrides every tile. Unused when `style_override < 0`.
  */
 void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
-                              const TerrainParams& params, ChunkMeshData& out);
+                              const TerrainParams& params, ChunkMeshData& out,
+                              int style_override = -1, int native_border = 0);
 
 /**
  * @brief A static collision mesh of a chunk's drawn surface (welded, with adjacency and a BVH),
@@ -220,15 +228,27 @@ std::vector<std::uint8_t> chunk_seam_locks(const TerrainParams& params, const Ch
                                            const ChunkMeshData& mesh);
 
 /**
- * @brief Appends the chunk's coarser levels to `mesh.indices` and returns its LOD table
+ * @brief Appends the chunk's coarser levels to `mesh` and returns its LOD table
  *        ([0] = the full chunk); empty when the terrain has no levels configured.
  *
- * What `ChunkBuildJob::run()` does between welding the chunk and uploading it. Every level
- * shares LOD 0's vertices and holds its seam (chunk_seam_locks()), so the levels cost index
- * ranges only and no two chunks can crack against each other whichever levels they draw.
+ * What `ChunkBuildJob::run()` does between welding the chunk and uploading it. A `ratio` level
+ * shares LOD 0's vertices and holds its seam (chunk_seam_locks()), so it costs index ranges
+ * only and no two chunks can crack against each other whichever levels they draw. A `style`
+ * level (`TerrainParams::ChunkLod::style >= 0`) instead re-meshes the chunk's own columns in
+ * that style, welds independently, and is appended behind every `ratio` level's vertices
+ * (`Mesh::simplify_levels` reads `mesh.indices`' size at entry as LOD 0's extent, so `ratio`
+ * levels must build first) -- drawn with its own `vertex_offset`, costing the chunk's full
+ * vertex set again. Skipped on a planet: the planet path warps the mesh before welding, which a
+ * re-mesh here has no chance to do, and a planet already forces `max_merge = 1` and square
+ * corners.
+ *
+ * @param pad     The chunk's columns, needed to re-mesh any `style` level.
+ * @param library The chunk's baked tile library, needed to re-mesh any `style` level.
  */
 std::vector<coopa::gfx::engine::data::MeshLod> build_chunk_lods(const TerrainParams& params,
                                                                 const ChunkCoord& coord,
+                                                                const ColumnPad& pad,
+                                                                const TileMeshLibrary& library,
                                                                 ChunkMeshData& mesh);
 
 /**

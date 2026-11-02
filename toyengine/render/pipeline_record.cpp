@@ -38,6 +38,7 @@
 #include <gfxcoopa/presentation/renderer.h>
 #include <cstdio>
 #include <cstdlib>
+#include <iostream>
 #include <toyengine/core/runtime_paths.h>
 #include <toyengine/render/frame_profile.h>
 #include <toyengine/render/particle_types.h>
@@ -910,8 +911,9 @@ void ToyRenderPipeline::record_gbuffer_(coopa::gfx::command::CommandBuffer& cmd,
         }
         frame_stats_.camera_draws     += 1;
         frame_stats_.camera_instances += batch.instance_count;
+        const auto& recorded_lod = mesh->lods()[std::min<size_t>(batch.lod, mesh->lods().size() - 1)];
         frame_stats_.camera_triangles += static_cast<uint64_t>(batch.instance_count) *
-            mesh->lods()[std::min<size_t>(batch.lod, mesh->lods().size() - 1)].index_count / 3;
+            recorded_lod.index_count / 3;
     }
 
     // Opaque/Mask SdfRenderers -- BLEND ones go through record_transparent_() instead, same

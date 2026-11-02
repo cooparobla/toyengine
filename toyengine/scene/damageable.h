@@ -10,13 +10,19 @@
  * would do so halfway through a physics step. DestructionSystem drains the queue once per pass.
  *
  * **What is implemented today**: health tracking, the localized DamageField (so repeated hits
- * in one spot read as progressively more damaged), and two of the five responses
- * damage::DamageResponse can call for -- Cleave (via DestructionSystem::slice_object(), once the
- * field's saturated region reads flat enough) and Fracture (via a sibling Destructible's
- * shatter(), if one exists). **Dent, Chip and Hole are not yet implemented** -- they would
- * edit the mesh's own vertices in place, which needs a per-object private mesh clone (the
- * shared asset is not safe to deform) that this stage does not build; a blow that resolves to
- * one of those three still costs HP and marks the field, but changes no geometry.
+ * in one spot read as progressively more damaged), and four of the five responses
+ * damage::DamageResponse can call for. Dent and Chip (`dent`) push vertices inward on a private
+ * per-object mesh clone DestructionSystem builds the first time one lands -- the shared asset
+ * stays untouched, since every other instance of the same mesh must not deform with it. Cleave
+ * cuts the object in two (DestructionSystem::slice_object(), once the field's saturated region
+ * reads flat enough) and Fracture shatters it (via a sibling Destructible's shatter(), if one
+ * exists). **Hole is not implemented** -- punching all the way through is a topology change,
+ * which the dent clone's fixed index buffer cannot express; the blow still costs HP and marks
+ * the field. Three further limits, all deliberate: the object's collider does not follow a
+ * dent (it is centimetres against a decimetre-scale authored shape); a fractured or sliced
+ * object's chunks come from the mesh FILE, so a crushed object shatters into un-crushed debris;
+ * and a dent is not saved (no component in toyengine/scene/ but CharacterController is
+ * ISaveable, so this matches Destructible/Sliceable's own fracture state).
  *
  * Example YAML:
  * @code
@@ -28,6 +34,10 @@
  *   fracture_on_death: true    # shatter when HP reaches 0 (needs a sibling Destructible)
  *   localized_fracture: false  # Destructible has no localized-region fracture yet; always whole-object
  *   min_impulse: 200           # N*s below which a contact is a settling touch, not a blow
+ *   dent: true                 # push vertices inward on Dent/Chip; off still costs HP
+ *   max_dent: 0                # per-vertex push cap, metres; 0 derives one from the mesh
+ *   dent_resolution: 0         # target mean edge for the dent clone, metres; 0 means 0.05
+ *   impact_transfer: 0.35      # fraction of a DamageCursor click that pushes a sibling Rigidbody
  * @endcode
  */
 
@@ -87,6 +97,32 @@ public:
      *         resolve_damage()'s own internal floor, which exists for non-impulse-derived
      *         blows too (a scripted Slash with a tiny `amount`, say). */
     float min_impulse = 200.0f;
+
+    /** @brief Push vertices inward where a blow resolves to DamageResponse::Dent or Chip
+     *         (DestructionSystem::apply_dent_()). Off still costs HP and marks the DamageField,
+     *         same as a blow that resolves to Hole always does. */
+    bool dent = true;
+
+    /** @brief Cap on how far one vertex may be pushed in, accumulated across every hit it has
+     *         taken, metres; 0 derives it from the mesh's own world bounds (0.35 of the
+     *         shortest extent) -- what keeps a thin plate from being crushed through itself. */
+    float max_dent = 0.0f;
+
+    /** @brief Target mean triangle edge, in world metres, for the private mesh clone a dent
+     *         builds on first impact; 0 means 0.05. A mesh already finer than this is left
+     *         alone; a coarser one (a primitive like `cube`) is subdivided once, silently,
+     *         before its first dent -- see toyengine/destruct/dent.h's subdivide_for_dent(). */
+    float dent_resolution = 0.0f;
+
+    /** @brief What fraction of a DamageCursor click's resistance-adjusted magnitude becomes an
+     *         actual physical push on a sibling Rigidbody, via DestructionSystem::
+     *         process_damage_cursors_() -- same name and default as Destructible::
+     *         impact_transfer, which does the equivalent job for a chunk's debris scatter.
+     *         Has no effect without a sibling Rigidbody, and does not apply to a blow that
+     *         arrives from an actual physics contact (physxcoopa's impact_blow()) -- that blow
+     *         already has a real collision response from the solver; adding a second impulse on
+     *         top of every ordinary bump would be energy gained from nothing, not a dial to tune. */
+    float impact_transfer = 0.35f;
 
     /**
      * @brief Listens for impacts on the owner's collider; converts them to an Impact blow

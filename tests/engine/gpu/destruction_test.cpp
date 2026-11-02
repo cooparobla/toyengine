@@ -11,12 +11,15 @@
 
 #include <coopa/testing/test.h>
 
+#include <limits>
 #include <string>
 #include <vector>
 
 #include <glm/glm.hpp>
 #include <coopa/scene/scene.h>
 #include <coopa/scene/scene_object.h>
+#include <gfxcoopa/engine/components/mesh_renderer.h>
+#include <gfxcoopa/engine/data/mesh.h>
 #include <physxcoopa/components/box_collider.h>
 #include <physxcoopa/components/convex_collider.h>
 #include <physxcoopa/components/rigidbody.h>
@@ -30,6 +33,7 @@
 COOPA_TEST_SUITE("destruction");
 
 using namespace toy::test;
+using coopa::gfx::engine::components::MeshRenderer;
 
 namespace {
 
@@ -140,4 +144,51 @@ COOPA_TEST(chunks_with_a_lifetime_are_cleaned_up) {
     for (const std::string& name : mine) left += scene.find_object(name) != nullptr ? 1 : 0;
     expect(left == 0, "cleanup: the short-lived debris was removed (" + std::to_string(left) +
                           " left of " + std::to_string(mine.size()) + ")");
+}
+
+/**
+ * @brief A non-uniformly scaled Destructible (damage_demo's metal_plate: scale 1.5, 1.5, 0.3)
+ *        shatters into chunks that stay plate-thin, not a cube-ish blob -- regression for
+ *        spawn_piece_()'s rotation/scale composition, see that function's own doc.
+ */
+COOPA_TEST(a_non_uniformly_scaled_object_shatters_into_thin_chunks_not_a_cube) {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    toy::core::Engine engine(make_test_config("assets/scenes/physics/damage_demo/scene.yaml", 320, 180, 160, 90));
+    coopa::scene::Scene& scene = engine.scene();
+    auto* plate = breakable(scene, "metal_plate");
+    require(plate != nullptr, "scale: damage_demo carries a Destructible metal_plate");
+
+    tick_frames(engine, 20); // let the prefracture land
+    plate->shatter(glm::vec3(-3.0f, 0.0f, 0.45f), glm::vec3(0.0f, 0.0f, 1.0f));
+    tick_until(engine, 60, [&] { return plate->shattered(); });
+    require(plate->shattered(), "scale: shatter() breaks it without an impact");
+
+    std::vector<coopa::scene::SceneObject*> chunks = chunks_of(scene);
+    require(!chunks.empty(), "scale: it produced chunks");
+
+    float worst_thin_dimension = 0.0f;
+    for (coopa::scene::SceneObject* chunk : chunks) {
+        auto* renderer = chunk->get_component<MeshRenderer>();
+        auto* tc = chunk->get_transform();
+        if (renderer == nullptr || !renderer->is_ready() || tc == nullptr) continue;
+        const glm::vec3 lo = renderer->get_mesh()->bounds_min();
+        const glm::vec3 hi = renderer->get_mesh()->bounds_max();
+        const glm::mat4 world = tc->transform().get_world_matrix();
+        glm::vec3 world_lo(std::numeric_limits<float>::max()), world_hi(std::numeric_limits<float>::lowest());
+        for (int i = 0; i < 8; ++i) {
+            const glm::vec3 corner(i & 1 ? hi.x : lo.x, i & 2 ? hi.y : lo.y, i & 4 ? hi.z : lo.z);
+            const glm::vec3 w(world * glm::vec4(corner, 1.0f));
+            world_lo = glm::min(world_lo, w);
+            world_hi = glm::max(world_hi, w);
+        }
+        const glm::vec3 extent = world_hi - world_lo;
+        worst_thin_dimension = std::max(worst_thin_dimension, std::min({extent.x, extent.y, extent.z}));
+    }
+    // metal_plate is 0.3 m thick at its own scale; the pre-fix bug stretched a piece up to 5x
+    // along a random axis (worst case observed ~1.0 m). 0.6 m sits comfortably between "still a
+    // thin plate's worth of debris" and "became a cube".
+    expect(worst_thin_dimension < 0.6f, "scale: every chunk stays plate-thin, not cube-ish (worst " +
+                                            std::to_string(worst_thin_dimension) + " m)");
 }

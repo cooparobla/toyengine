@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <utility>
 
 #include <coopa/asset/asset_handle.h>
@@ -24,6 +25,7 @@
 #include <physxcoopa/geometry/convex_hull.h>
 #include <physxcoopa/system/physics_system.h>
 
+#include <toyengine/destruct/dent.h>
 #include <toyengine/destruct/slice.h>
 #include <toyengine/scene/damage_cursor.h>
 #include <toyengine/scene/damageable.h>
@@ -39,6 +41,7 @@ namespace {
 using coopa::gfx::engine::components::MeshRenderer;
 using coopa::gfx::engine::components::PBRMaterial;
 using coopa::gfx::engine::data::Mesh;
+using coopa::gfx::engine::data::MeshCpuData;
 using coopa::gfx::engine::data::MeshLod;
 using coopa::gfx::engine::data::MeshPart;
 using coopa::gfx::engine::data::SkinnedMeshSource;
@@ -49,6 +52,20 @@ constexpr coopa::job::JobType k_fracture_job_type = 7;
 
 /// Below this the chunk is a crumb: too small to read, not worth a body.
 constexpr float k_min_chunk_volume_fraction = 1e-4f;
+
+/// A dented hero mesh above this is refused rather than silently costing ~2 * 48 bytes per
+/// vertex of GPU memory (200000 * 96 B =~ 19 MB) -- the blow still costs HP, it just leaves the
+/// mesh alone.
+constexpr std::size_t k_max_dent_vertices = 200000;
+
+/// Default target mean world edge for a dent clone's subdivision, metres -- Damageable::
+/// dent_resolution's 0 means this.
+constexpr float k_default_dent_resolution = 0.05f;
+
+/// How much of a mesh's own shortest world extent one vertex may be pushed in, when
+/// Damageable::max_dent's 0 leaves it to derive one -- enough that a 0.3 m-thick plate dents
+/// visibly without being crushed through itself.
+constexpr float k_default_max_dent_fraction = 0.35f;
 
 /** @brief Parses a DamageCursor::damage_type name; an unknown or absent value falls back to
  *         Impact rather than throwing, same policy as the scene YAML parsers use. */
@@ -206,6 +223,64 @@ coopa::scene::SceneObject* DestructionSystem::spawn_piece_(coopa::scene::Scene& 
     const glm::mat4 world = owner_tc->transform().get_world_matrix();
     const glm::mat3 basis(world);
     const auto* renderer = owner.get_component<MeshRenderer>();
+    const glm::mat3 owner_rotation_mat(glm::normalize(basis[0]), glm::normalize(basis[1]), glm::normalize(basis[2]));
+    const glm::quat owner_rotation = glm::quat_cast(owner_rotation_mat);
+    const glm::vec3 scale(glm::length(basis[0]), glm::length(basis[1]), glm::length(basis[2]));
+
+    // A TRS Transform can only express rotation*scale, never the general rotation*scale*rotation
+    // a piece in its OWN principal frame needs under a non-uniformly scaled owner (world_vertex =
+    // R_owner * S * R_piece * v -- scale sits BETWEEN the two rotations, and does not commute
+    // past R_piece unless S is uniform). So under a non-uniform scale, S and R_piece are baked
+    // straight into a local copy of the piece's geometry instead of being split across the
+    // chunk's own Transform -- every uniformly-scaled Destructible/Sliceable in the repo today
+    // takes the untouched fast path below, unchanged in cost or result.
+    const float max_scale = std::max({scale.x, scale.y, scale.z});
+    const float min_scale = std::min({scale.x, scale.y, scale.z});
+    const bool uniform_scale = min_scale > 1e-6f && max_scale / min_scale < 1.001f;
+
+    std::vector<destruct::Vertex> vertices;
+    glm::vec3 half_extent = piece.half_extent;
+    std::vector<destruct::FractureBox> boxes = piece.boxes;
+    float volume = piece.volume * scale.x * scale.y * scale.z;
+    glm::quat chunk_rotation = owner_rotation * piece.orientation;
+    glm::vec3 chunk_scale = scale;
+    glm::vec3 position_offset(0.0f);
+
+    if (uniform_scale) {
+        vertices = piece.vertices;
+    } else {
+        const glm::mat3 piece_rotation = glm::mat3_cast(piece.orientation);
+        vertices.reserve(piece.vertices.size());
+        for (const destruct::Vertex& v : piece.vertices) {
+            destruct::Vertex baked = v;
+            baked.position = scale * (piece_rotation * v.position);
+            const glm::vec3 n = (piece_rotation * v.normal) / scale; // inverse-transpose of a diagonal S
+            const float n_len = glm::length(n);
+            baked.normal = n_len > 1e-8f ? n / n_len : v.normal;
+            const glm::vec3 t = scale * (piece_rotation * glm::vec3(v.tangent));
+            const float t_len = glm::length(t);
+            baked.tangent = t_len > 1e-8f ? glm::vec4(t / t_len, v.tangent.w) : v.tangent;
+            vertices.push_back(baked);
+        }
+
+        // Re-centre on the BAKED shape's own bounds -- not necessarily the origin any more, since
+        // rotating then non-uniformly scaling an off-centre piece can shift its true middle -- so
+        // the chunk spins about its own centre instead of orbiting an arbitrary point (same
+        // reasoning mesh_solid.h's centre_in_frame() gives for why a piece is centred at all).
+        glm::vec3 lo(std::numeric_limits<float>::max()), hi(std::numeric_limits<float>::lowest());
+        for (const destruct::Vertex& v : vertices) {
+            lo = glm::min(lo, v.position);
+            hi = glm::max(hi, v.position);
+        }
+        const glm::vec3 centre_offset = (lo + hi) * 0.5f;
+        for (destruct::Vertex& v : vertices) v.position -= centre_offset;
+        half_extent = (hi - lo) * 0.5f;
+        boxes.clear(); // the fracture-time boxes are fit to the stale, unbaked piece frame
+        volume = destruct::mesh_volume(vertices, piece.indices);
+        chunk_rotation = owner_rotation; // baked vertices are already in owner-local (unrotated-by-piece) axes
+        chunk_scale = glm::vec3(1.0f);   // ...and already scaled
+        position_offset = owner_rotation_mat * centre_offset;
+    }
 
     // "chunk_" rather than "piece_": a fracture chunk and a slice half are both spawned here,
     // and existing scene code/tests already walk root objects by this prefix to find debris.
@@ -216,12 +291,9 @@ coopa::scene::SceneObject* DestructionSystem::spawn_piece_(coopa::scene::Scene& 
     // the owner's transform, turned by the owner's rotation AND by the piece's own principal
     // frame (toyengine/destruct/mesh_solid.h) -- the frame its collider is measured in.
     auto* tc = object->add_component<TransformComponent>();
-    tc->transform().set_position(glm::vec3(world * glm::vec4(piece.centre, 1.0f)));
-    const glm::quat owner_rotation = glm::quat_cast(glm::mat3(
-        glm::normalize(basis[0]), glm::normalize(basis[1]), glm::normalize(basis[2])));
-    tc->transform().set_rotation_quat(owner_rotation * piece.orientation);
-    const glm::vec3 scale(glm::length(basis[0]), glm::length(basis[1]), glm::length(basis[2]));
-    tc->transform().set_scale(scale);
+    tc->transform().set_position(glm::vec3(world * glm::vec4(piece.centre, 1.0f)) + position_offset);
+    tc->transform().set_rotation_quat(chunk_rotation);
+    tc->transform().set_scale(chunk_scale);
 
     auto* mesh_renderer = object->add_component<MeshRenderer>();
     if (renderer != nullptr) mesh_renderer->material = renderer->material;
@@ -238,7 +310,7 @@ coopa::scene::SceneObject* DestructionSystem::spawn_piece_(coopa::scene::Scene& 
                      MeshPart{piece.cap_first_index, lod.index_count - piece.cap_first_index}};
         lods.push_back(lod);
     }
-    auto gpu = std::make_shared<Mesh>(Mesh::from_arrays(device_, allocator_, piece.vertices, piece.indices, 1,
+    auto gpu = std::make_shared<Mesh>(Mesh::from_arrays(device_, allocator_, vertices, piece.indices, 1,
                                                          false, lods.empty() ? nullptr : &lods));
     mesh_renderer->set_mesh(assets_.create<Mesh>("chunk:" + std::to_string(spawned_), gpu));
     if (!lods.empty()) {
@@ -263,8 +335,8 @@ coopa::scene::SceneObject* DestructionSystem::spawn_piece_(coopa::scene::Scene& 
     std::shared_ptr<coopa::physx::geometry::ConvexHull> hull;
     if (style.use_hull) {
         std::vector<glm::vec3> positions;
-        positions.reserve(piece.vertices.size());
-        for (const destruct::Vertex& v : piece.vertices) positions.push_back(v.position);
+        positions.reserve(vertices.size());
+        for (const destruct::Vertex& v : vertices) positions.push_back(v.position);
         auto built = std::make_shared<coopa::physx::geometry::ConvexHull>();
         if (coopa::physx::geometry::build_convex_hull(positions.data(), positions.size(), *built)) {
             hull = built;
@@ -275,13 +347,12 @@ coopa::scene::SceneObject* DestructionSystem::spawn_piece_(coopa::scene::Scene& 
         collider->set_hull(hull);
         if (material.is_valid()) collider->set_material_asset(material);
     } else {
-        std::vector<destruct::FractureBox> boxes = piece.boxes;
         if (boxes.empty()) {
-            boxes = destruct::fit_boxes(piece.vertices, piece.volume, piece.half_extent,
-                                        glm::clamp(style.collider_fill, 0.0f, 1.0f), std::max(1, style.max_boxes));
+            boxes = destruct::fit_boxes(vertices, volume, half_extent, glm::clamp(style.collider_fill, 0.0f, 1.0f),
+                                        std::max(1, style.max_boxes));
         }
         if (boxes.size() <= 1) {
-            const glm::vec3 half = boxes.empty() ? piece.half_extent : boxes.front().half_extent;
+            const glm::vec3 half = boxes.empty() ? half_extent : boxes.front().half_extent;
             const glm::vec3 box_centre = boxes.empty() ? glm::vec3(0.0f) : boxes.front().centre;
             auto* collider = object->add_component<coopa::physx::components::BoxCollider>();
             collider->set_size(glm::max(half * 2.0f, glm::vec3(1e-3f)));
@@ -308,7 +379,6 @@ coopa::scene::SceneObject* DestructionSystem::spawn_piece_(coopa::scene::Scene& 
     }
 
     auto* body = object->add_component<coopa::physx::components::RigidbodyComponent>();
-    const float volume = piece.volume * scale.x * scale.y * scale.z;
     body->mass = std::max(0.02f, volume * std::max(1.0f, style.density));
 
     // The outward push, plus any inherited motion: set on the creation-time-only initial_*
@@ -478,6 +548,112 @@ int DestructionSystem::slice_object(coopa::scene::Scene& scene, coopa::scene::Sc
     return spawned;
 }
 
+void DestructionSystem::upload_dents(std::uint32_t frame_slot) {
+    for (auto& entry : dents_) {
+        DentedMesh& dented = entry.second;
+        if (dented.mesh) dented.mesh->update_vertices(dented.vertices.data(), dented.vertices.size(), frame_slot);
+    }
+}
+
+DestructionSystem::DentedMesh* DestructionSystem::ensure_dent_mesh_(Damageable& damageable) {
+    const auto existing = dents_.find(&damageable);
+    if (existing != dents_.end()) return &existing->second;
+
+    coopa::scene::SceneObject* owner = damageable.owner;
+    if (owner == nullptr) return nullptr;
+    auto* renderer = owner->get_component<MeshRenderer>();
+    auto* tc = owner->get_transform();
+    if (renderer == nullptr || tc == nullptr || renderer->mesh_path().empty()) return nullptr;
+
+    // Read from the mesh FILE, not the asset manager -- the same reason ensure_fracture_() and
+    // slice_object() do: this same file is already loaded as a GPU Mesh for the renderer, and
+    // one file cannot be two asset types at once. build_cpu() (not SkinnedMeshSource::from_node,
+    // which the fracture/slice paths use) because it welds -- the layout this clone's vertices
+    // need to match is the GPU mesh's own, not the file's raw per-corner one.
+    const std::string file = assets_.source().resolve("meshes/" + renderer->mesh_path() + ".yaml");
+    // Suppresses the file's own `lods:`: a dent clone is one LOD for its whole life (topology is
+    // fixed once built), and without this an LOD level would be appended behind LOD 0 in the
+    // same index buffer, so subdividing or denting would reach into geometry a different screen
+    // size was meant to show.
+    const fkyaml::node no_lods = fkyaml::node::mapping();
+    MeshCpuData cpu;
+    try {
+        cpu = Mesh::build_cpu(coopa::yaml::load_document(file), &no_lods);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[destruct] cannot read '%s' to dent it: %s\n", file.c_str(), e.what());
+        return nullptr;
+    }
+    if (cpu.vertices.size() > k_max_dent_vertices) {
+        std::fprintf(stderr, "[destruct] '%s' has %zu vertices, past the %zu-vertex dent limit; "
+                              "this blow costs HP but leaves its mesh alone\n",
+                     file.c_str(), cpu.vertices.size(), k_max_dent_vertices);
+        return nullptr;
+    }
+
+    const glm::mat4 world = tc->transform().get_world_matrix();
+    const glm::mat3 basis(world);
+    const glm::vec3 axis_lengths(glm::length(basis[0]), glm::length(basis[1]), glm::length(basis[2]));
+    const float world_scale = std::max({axis_lengths.x, axis_lengths.y, axis_lengths.z});
+    const float target_edge = damageable.dent_resolution > 0.0f ? damageable.dent_resolution
+                                                                 : k_default_dent_resolution;
+    destruct::subdivide_for_dent(cpu.vertices, cpu.indices, target_edge, world_scale, /*max_levels=*/4,
+                                 k_max_dent_vertices);
+
+    DentedMesh dented;
+    dented.vertices = std::move(cpu.vertices);
+    dented.indices = std::move(cpu.indices);
+    dented.state.build(dented.vertices, dented.indices);
+
+    // The CAP, not the current shape: computed once, from the clone's UNDENTED bounds, so it
+    // does not shrink as the mesh itself does -- see the field's own doc.
+    const glm::vec3 object_extent = cpu.bounds_max - cpu.bounds_min;
+    const glm::vec3 world_extent = object_extent * axis_lengths;
+    const float min_extent = std::min({world_extent.x, world_extent.y, world_extent.z});
+    dented.default_max_offset = k_default_max_dent_fraction * std::max(0.0f, min_extent);
+
+    dented.mesh = std::make_shared<Mesh>(
+        Mesh::from_arrays(device_, allocator_, dented.vertices, dented.indices, frames_in_flight_));
+    // A monotonic suffix, unlike ClothRenderer's bare owner name: two objects that happen to
+    // share a name must not end up sharing one dent clone.
+    const std::string asset_id = "runtime/dent/" + owner->name() + "/" + std::to_string(next_dent_id_++);
+    renderer->set_mesh(assets_.create<Mesh>(asset_id, dented.mesh));
+
+    return &dents_.emplace(&damageable, std::move(dented)).first->second;
+}
+
+void DestructionSystem::apply_dent_(Damageable& damageable, const coopa::physx::damage::DamageEvent& world_blow,
+                                    const coopa::physx::damage::ResolvedDamage& resolved, const glm::mat4& world,
+                                    const glm::mat4& inv_world) {
+    if (!damageable.dent) return;
+    DentedMesh* dented = ensure_dent_mesh_(damageable);
+    if (dented == nullptr) return;
+
+    // resolve_damage()'s radius/depth are sized in the SAME space DamageField already consumes
+    // them in -- the object's own local space, agnostic to its world scale. A DentBlow is
+    // deliberately a WORLD-space footprint (apply_dent()'s own doc: that is what keeps it round
+    // under a non-uniform scale), so both are scaled up by the object's own world scale here,
+    // uniformly -- the true non-uniform shape is still honoured per vertex, inside apply_dent().
+    const glm::mat3 basis(world);
+    const float world_scale = std::max({glm::length(basis[0]), glm::length(basis[1]), glm::length(basis[2])});
+
+    float radius_local = resolved.radius;
+    if (resolved.response == coopa::physx::damage::DamageResponse::Chip) {
+        // A Slash/Pierce chip's footprint (resolve_damage.h: 0.015 m / 0.008 m) can be smaller
+        // than this mesh's own triangles, in which case it would touch zero or one vertex --
+        // floor it so a chip reads as a narrow gouge, not nothing.
+        radius_local = std::max(radius_local, 2.0f * dented->state.mean_edge);
+    }
+
+    destruct::DentBlow blow;
+    blow.point = world_blow.point;
+    blow.direction = world_blow.direction;
+    blow.radius = radius_local * world_scale;
+    blow.depth = resolved.depth * world_scale;
+    blow.max_offset = damageable.max_dent > 0.0f ? damageable.max_dent : dented->default_max_offset;
+
+    destruct::apply_dent(dented->state, dented->vertices, dented->indices, blow, world, inv_world);
+}
+
 void DestructionSystem::process_damage_(coopa::scene::Scene& scene, Damageable& damageable) {
     if (damageable.queued().empty()) return;
     coopa::scene::SceneObject* owner = damageable.owner;
@@ -564,8 +740,13 @@ void DestructionSystem::process_damage_(coopa::scene::Scene& scene, Damageable& 
                 slice_object(scene, *owner, world_point, world_normal, 0.3f);
             }
         }
-        // Dent/Chip/Hole: HP and the field already recorded the hit; no geometry edit yet --
-        // see damageable.h's file doc for why.
+
+        if (resolved.response == DamageResponse::Dent || resolved.response == DamageResponse::Chip) {
+            // Both push the mesh's vertices in (see apply_dent_()'s doc); Hole stays HP-and-field
+            // only -- punching through is a topology change, which a dynamic Mesh's fixed index
+            // buffer cannot express.
+            apply_dent_(damageable, blow, resolved, world, inv_world);
+        }
     }
 
     if (damageable.destroyed()) damageable.on_destroyed.emit();
@@ -610,8 +791,33 @@ void DestructionSystem::process_damage_cursors_(coopa::scene::Scene& scene,
                 blow.type = parse_damage_type_name_(cursor->damage_type);
                 blow.amount = cursor->amount;
                 blow.point = raycast_hit.point;
-                blow.direction = view_dir;
+                // Into the SURFACE, not along the view ray: raycast_hit.normal points out of
+                // whatever was hit, so -normal is what actually digs a dent in rather than
+                // mostly shearing it sideways (a near-tangential view_dir, on a face closer to
+                // perpendicular to the camera than to it, wastes most of the push that way).
+                blow.direction = glm::length(raycast_hit.normal) > 1e-6f ? -raycast_hit.normal : -view_dir;
                 damageable->apply_damage(blow);
+
+                // A physical reaction, synced with the damage dealt: resolve_damage() itself
+                // isn't available for another frame (it runs inside process_damage_(), once this
+                // queued blow is drained), but the two lines it needs -- load the material,
+                // divide by its resistance to this damage type -- are cheap (the asset is
+                // already cache-loaded by that same call on every later frame) and give the
+                // identical resistance-adjusted magnitude (resolve_damage.h's hp_loss) without
+                // waiting on it. See Damageable::impact_transfer's own doc for why this lives
+                // here and not in the general per-blow loop.
+                if (raycast_hit.rigidbody != nullptr) {
+                    using coopa::physx::damage::DamageMaterial;
+                    DamageMaterial material = DamageMaterial::default_material();
+                    if (!damageable->material.empty()) {
+                        auto handle = assets_.load<DamageMaterial>("damage_materials/" + damageable->material + ".yaml");
+                        if (handle.is_loaded()) material = *handle.get();
+                    }
+                    const float resistance = std::max(1e-3f, material.resistance_to(blow.type));
+                    const float impulse_mag =
+                        std::max(0.0f, blow.amount) / resistance * damageable->impact_transfer;
+                    raycast_hit.rigidbody->add_impulse_at_position(blow.direction * impulse_mag, blow.point);
+                }
             }
         }
     }
@@ -673,11 +879,12 @@ DestructionSystem* install_destruction_system(coopa::scene::Scene& scene,
                                               coopa::gfx::core::Device& device,
                                               coopa::gfx::memory::Allocator& allocator,
                                               coopa::asset::AssetManager& assets,
-                                              coopa::job::JobEngine* jobs) {
+                                              coopa::job::JobEngine* jobs,
+                                              std::uint32_t frames_in_flight) {
     if (auto* existing = scene.find_system("Destruction")) {
         return dynamic_cast<DestructionSystem*>(existing);
     }
-    auto system = std::make_unique<DestructionSystem>(device, allocator, assets, jobs);
+    auto system = std::make_unique<DestructionSystem>(device, allocator, assets, jobs, frames_in_flight);
     DestructionSystem* raw = system.get();
     scene.add_system(std::move(system), 70);
     return raw;

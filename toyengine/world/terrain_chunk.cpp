@@ -58,9 +58,23 @@ void sample_chunk_columns(const TileMapData& tiles, const TerrainParams& params,
 }
 
 void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
-                              const TerrainParams& params, ChunkMeshData& out) {
+                              const TerrainParams& params, ChunkMeshData& out,
+                              int style_override, int native_border) {
     out.clear();
     if (!library.has_styles()) return;
+
+    // With an override (a ChunkLod::style far tier), every tile meshes in that style except
+    // `native_border` steps of the chunk's rim, which keep their own -- see mesh_chunk_styled()'s
+    // doc. Ordinary builds (style_override < 0) always take each tile's own style, unchanged.
+    auto style_at = [&](const glm::ivec2& tile, TileKind kind) -> std::uint8_t {
+        if (style_override < 0) return library.style_of(kind);
+        if (native_border > 0 &&
+            (tile.x < native_border || tile.y < native_border ||
+             tile.x >= params.chunk_size - native_border || tile.y >= params.chunk_size - native_border)) {
+            return library.style_of(kind);
+        }
+        return static_cast<std::uint8_t>(style_override);
+    };
 
     // TOY_TERRAIN_NO_MERGE: diagnostic. Emits every top as its four quadrant pieces and every
     // wall half as its own stamp, bypassing the greedy top-rectangle merge and the straight-run
@@ -108,9 +122,11 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
         float        code;   // the cell's blend code (encode_surface_blend())
     };
     std::vector<StraightHalf> straights;
-    // Tiles with no exposed edge, merged into rectangles after the walk (greedy, row-major):
-    // a flat plateau is then a handful of quads, not two triangles a tile.
-    std::vector<std::uint8_t> full(static_cast<std::size_t>(params.chunk_size) * static_cast<std::size_t>(params.chunk_size), 0);
+    // Flat full quadrants (TileMeshLibrary::top_merges()), merged into rectangles after the walk
+    // (greedy, row-major, in half-tile units): a flat plateau is then a handful of quads, not
+    // four stamps a tile -- and a tile with one mismatched corner still merges its other three.
+    const std::int32_t qn = 2 * params.chunk_size;  // half-tile grid edge
+    std::vector<std::uint8_t> full(static_cast<std::size_t>(qn) * static_cast<std::size_t>(qn), 0);
 
     // A styled chunk runs ~20 triangles a tile; one up-front reservation saves the regrowth.
     const std::size_t tiles = static_cast<std::size_t>(params.chunk_size) * static_cast<std::size_t>(params.chunk_size);
@@ -122,7 +138,7 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
             const glm::ivec2  c(lx, ly);
             const TileColumn& col       = pad.at(c);
             const std::int32_t top_cell = col.steps - 1;
-            const std::uint8_t style    = library.style_of(col.top_kind);
+            const std::uint8_t style    = style_at(c, col.top_kind);
             // A tile set may keep kind boundaries square (a blocky set): then no top is a blend
             // corner, and every quadrant is plain.
             // (A planet keeps them square too: its shader has no tile grid in world space to round on.)
@@ -137,28 +153,27 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
 
             // --- Top ---
             // terrain_styled.frag only acts where a quadrant is a convex corner of its own kind
-            // against level neighbours -- the corners it rounds. Anywhere else a top is one kind,
-            // so it merges and welds like any plateau interior.
-            const bool no_edge = !exposed({0, 1}) && !exposed({0, -1}) && !exposed({1, 0}) && !exposed({-1, 0});
-            bool any_corner = false;
-            for (std::uint8_t q = 0; q < 4 && round_corners; ++q) {
-                const glm::ivec2 sgn = rotate_ccw({1, 0}, q) + rotate_ccw({0, 1}, q);
-                any_corner = any_corner || (level_kind({sgn.x, 0}) != col.top_kind &&
-                                            level_kind({0, sgn.y}) != col.top_kind);
-            }
-            if (!no_merge && no_edge && !any_corner) {
-                full[static_cast<std::size_t>(ly * params.chunk_size + lx)] = 1;
-            } else {
-                for (std::uint8_t q = 0; q < 4; ++q) {
-                    const glm::ivec2 cy = rotate_ccw({0, 1}, q), cx = rotate_ccw({1, 0}, q);
-                    const PiecePlacement place = classify_quadrant(q, exposed(cy), exposed(cx));
-                    const glm::ivec2 sgn = cx + cy; // the quadrant's world directions, each +-1
-                    const TileKind kx = level_kind({sgn.x, 0}), ky = level_kind({0, sgn.y});
-                    const float code = (round_corners && kx != col.top_kind && ky != col.top_kind)
-                        ? encode_surface_blend(SurfaceBlend::Top, col.top_kind, kx, ky, level_kind(sgn), sgn.x, sgn.y)
-                        : encode_surface_flat(col.top_kind);
-                    stamp(library.piece(style, place.piece, place.orientation), origin_of(c, top_cell), code, false);
+            // against level neighbours -- the corners it rounds. Anywhere else a quadrant's
+            // piece is a flat full quadrant (library.top_merges()), so it joins the greedy
+            // rectangle merge below instead of being stamped on its own -- quadrant by quadrant,
+            // so a tile with one mismatched corner still merges its other three.
+            for (std::uint8_t q = 0; q < 4; ++q) {
+                const glm::ivec2 cy = rotate_ccw({0, 1}, q), cx = rotate_ccw({1, 0}, q);
+                const PiecePlacement place = classify_quadrant(q, exposed(cy), exposed(cx));
+                const glm::ivec2 sgn = cx + cy; // the quadrant's world directions, each +-1
+                const TileKind kx = level_kind({sgn.x, 0}), ky = level_kind({0, sgn.y});
+                const bool corner = round_corners && kx != col.top_kind && ky != col.top_kind;
+                if (!no_merge && !corner && library.top_merges(style, place.piece)) {
+                    const std::int32_t qx = 2 * lx + (sgn.x > 0 ? 1 : 0);
+                    const std::int32_t qy = 2 * ly + (sgn.y > 0 ? 1 : 0);
+                    full[static_cast<std::size_t>(qy) * static_cast<std::size_t>(qn) +
+                        static_cast<std::size_t>(qx)] = 1;
+                    continue;
                 }
+                const float code = corner
+                    ? encode_surface_blend(SurfaceBlend::Top, col.top_kind, kx, ky, level_kind(sgn), sgn.x, sgn.y)
+                    : encode_surface_flat(col.top_kind);
+                stamp(library.piece(style, place.piece, place.orientation), origin_of(c, top_cell), code, false);
             }
 
             // --- Walls ---
@@ -242,7 +257,7 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
                             // is the continue taper, square at that end. At an inner corner both
                             // halves are lipped exactly at the lower plateau's top (cap or taper).
                             // So only their styles can differ.
-                            if (next && library.style_of(pad.at(owner).top_kind) != style) {
+                            if (next && style_at(owner, pad.at(owner).top_kind) != style) {
                                 stamp(library.section(style, piece, Plane::End, orient), o, code, lipped);
                             }
                         }
@@ -262,21 +277,23 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
         }
     }
 
-    // --- Interior tops, as greedy rectangles of equal height and kind ---
+    // --- Interior quadrants, as greedy rectangles of equal height and kind, half a tile wide ---
+    // (TOY_TERRAIN_NO_MERGE bypasses this: the loop above then marks nothing in `full`.)
     {
-        const std::int32_t n = params.chunk_size;
+        const std::int32_t n = qn;  // half-tile grid edge
         auto at = [&](std::int32_t x, std::int32_t y) -> std::uint8_t& {
             return full[static_cast<std::size_t>(y * n + x)];
         };
         auto same = [&](std::int32_t ax, std::int32_t ay, std::int32_t bx, std::int32_t by) {
-            const TileColumn& a = pad.at(ax, ay);
-            const TileColumn& b = pad.at(bx, by);
+            const TileColumn& a = pad.at(ax / 2, ay / 2);
+            const TileColumn& b = pad.at(bx / 2, by / 2);
             return at(bx, by) == 1 && a.steps == b.steps && a.top_kind == b.top_kind;
         };
+        // max_merge is in TILES; this grid is half-tiles.
+        const std::int32_t most = params.max_merge > 0 ? 2 * params.max_merge : n;
         for (std::int32_t ly = 0; ly < n; ++ly) {
             for (std::int32_t lx = 0; lx < n; ++lx) {
                 if (at(lx, ly) != 1) continue;
-                const std::int32_t most = params.max_merge > 0 ? params.max_merge : n;
                 std::int32_t w = 1;
                 while (lx + w < n && w < most && same(lx, ly, lx + w, ly)) ++w;
                 std::int32_t h = 1;
@@ -285,11 +302,22 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
                     for (std::int32_t x = lx; x < lx + w && row; ++x) row = same(lx, ly, x, ly + h);
                     if (!row) break;
                 }
+                // max_merge == 1 means "never span a tile" (planets: a merged quad bent onto the
+                // sphere would cut a chord under the tiles beside it). At half-tile granularity
+                // that additionally means never spanning past the tile a run started in.
+                if (params.max_merge == 1) {
+                    w = std::min(w, 2 - (lx & 1));
+                    h = std::min(h, 2 - (ly & 1));
+                }
                 for (std::int32_t y = ly; y < ly + h; ++y)
                     for (std::int32_t x = lx; x < lx + w; ++x) at(x, y) = 2;
-                const TileColumn& col = pad.at(lx, ly);
-                library.append_styled(library.full_top(), origin_of({lx, ly}, col.steps - 1),
-                                      glm::vec3(scale.x * static_cast<float>(w), scale.y * static_cast<float>(h), scale.z),
+                const TileColumn& col = pad.at(lx / 2, ly / 2);
+                const glm::vec3 origin = origin_of({lx / 2, ly / 2}, col.steps - 1) +
+                    glm::vec3((lx & 1) ? 0.5f * params.tile_size : 0.0f,
+                             (ly & 1) ? 0.5f * params.tile_size : 0.0f, 0.0f);
+                library.append_styled(library.full_top(), origin,
+                                      glm::vec3(0.5f * scale.x * static_cast<float>(w),
+                                               0.5f * scale.y * static_cast<float>(h), scale.z),
                                       encode_surface_flat(col.top_kind), false, out.vertices, out.indices);
             }
         }
@@ -625,19 +653,49 @@ std::vector<std::uint8_t> chunk_seam_locks(const TerrainParams& params, const Ch
  */
 std::vector<coopa::gfx::engine::data::MeshLod> build_chunk_lods(const TerrainParams& params,
                                                                 const ChunkCoord& coord,
+                                                                const ColumnPad& pad,
+                                                                const TileMeshLibrary& library,
                                                                 ChunkMeshData& mesh) {
     std::vector<coopa::gfx::engine::data::LodRequest> levels;
+    bool any_style = false;
     for (const TerrainParams::ChunkLod& lod : params.chunk_lods) {
-        if (lod.ratio <= 0.0f) break;   // a zero ratio ends the table
+        if (lod.style >= 0) { any_style = true; continue; }
+        if (lod.ratio <= 0.0f) break;   // a default (ratio 0, no style) entry ends the table
         levels.push_back({lod.ratio, lod.screen_size, 1.0f});
     }
     // TOY_TERRAIN_NO_LODS: diagnostic. Every chunk then draws its base level, which is what
     // separates "the geometry is wrong" from "the COARSE geometry is wrong".
     static const bool no_lods = std::getenv("TOY_TERRAIN_NO_LODS") != nullptr;
-    if (levels.empty() || mesh.empty() || no_lods) return {};
+    if ((levels.empty() && !any_style) || mesh.empty() || no_lods) return {};
+
+    // Always goes through simplify_levels(), even with an empty `levels`: it is what supplies
+    // table[0], the full chunk -- a style-only table (no `ratio` entries) still needs that
+    // anchor before the style loop below appends behind it.
     const std::vector<std::uint8_t> locks = chunk_seam_locks(params, coord, mesh);
-    return coopa::gfx::engine::data::Mesh::simplify_levels(mesh.vertices, mesh.indices, levels,
-                                                           false, &locks);
+    std::vector<coopa::gfx::engine::data::MeshLod> result =
+        coopa::gfx::engine::data::Mesh::simplify_levels(mesh.vertices, mesh.indices, levels, false, &locks);
+    // Style levels re-mesh from the chunk's own columns and weld independently -- appended
+    // behind every ratio level's vertices (simplify_levels() above has already read `ratio`
+    // levels' extent off mesh.indices' size at entry, so this order is load-bearing). Skipped on
+    // a planet: see build_chunk_lods()'s doc.
+    if (any_style && !params.planet) {
+        for (const TerrainParams::ChunkLod& lod : params.chunk_lods) {
+            if (lod.style < 0) continue;
+            ChunkMeshData style_mesh;
+            mesh_chunk_styled(pad, library, params, style_mesh, lod.style, lod.native_border);
+            if (style_mesh.empty()) continue;
+            coopa::gfx::engine::data::Mesh::weld_and_optimize(style_mesh.vertices, style_mesh.indices);
+            coopa::gfx::engine::data::MeshLod out_lod;
+            out_lod.first_index   = static_cast<std::uint32_t>(mesh.indices.size());
+            out_lod.index_count   = static_cast<std::uint32_t>(style_mesh.indices.size());
+            out_lod.vertex_offset = static_cast<std::int32_t>(mesh.vertices.size());
+            out_lod.screen_size   = lod.screen_size;
+            mesh.vertices.insert(mesh.vertices.end(), style_mesh.vertices.begin(), style_mesh.vertices.end());
+            mesh.indices.insert(mesh.indices.end(), style_mesh.indices.begin(), style_mesh.indices.end());
+            result.push_back(out_lod);
+        }
+    }
+    return result;
 }
 
 
@@ -680,7 +738,7 @@ void ChunkBuildJob::run() {
         // happens to be drawing this frame, so it is built from LOD 0's indices alone.
         if (collision) collision_mesh = build_chunk_collision(mesh);
         if (collision_only) return;
-        lods = build_chunk_lods(params, coord, mesh);
+        lods = build_chunk_lods(params, coord, pad, *library, mesh);
         water_hash = chunk_water_hash(water_still, water_flowing);
         upload_chunk_mesh(*this);
         return;
@@ -693,7 +751,7 @@ void ChunkBuildJob::run() {
     // indices, as on the planet path above.
     if (collision) collision_mesh = build_chunk_collision(mesh);
     if (collision_only) return;
-    lods = build_chunk_lods(params, coord, mesh);
+    lods = build_chunk_lods(params, coord, pad, *library, mesh);
     build_chunk_water(pad, params, water_still, water_flowing);
     water_hash = chunk_water_hash(water_still, water_flowing);
     upload_chunk_mesh(*this);

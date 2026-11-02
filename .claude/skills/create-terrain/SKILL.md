@@ -107,7 +107,12 @@ Write `tile_set:` in new scenes.
   coarsest last; `[]` turns them off). The defaults only coarsen chunks small on screen, so a
   ground-level camera is unaffected; they pay on planets seen whole and on terrains with a
   large `view_radius`. Seam vertices are pinned through every level, so chunks at different
-  levels never crack.
+  levels never crack. A level can give `tile_set:` instead of `ratio:`, re-meshing the chunk in
+  another style rather than simplifying LOD 0 -- a style level can't lose a pinned seam vertex
+  to simplification, so it always exists, at the cost of its own vertex buffer instead of shared
+  index ranges. Keep a style tier's radii matching the chunks it borders (a `soft_lod` tile set
+  sharing `soft`'s own radii at coarser segment counts is the shipped example) or the seam shows a
+  visible step. Style levels must come last in the list, and don't apply on planets.
 - **Editing at runtime**: `TerrainComponent::raise_at(world, radius, delta)` /
   `set_tile_height()` / `paint_tiles()` move the ground and queue the water, which then flows in
   (or off) over the next frames at `water_settle_budget` tiles each -- sea, lakes and rivers

@@ -594,7 +594,8 @@ void Engine::prepare_scene_(coopa::scene::Scene& scene, bool drain_assets) {
     hair::install_hair_system(scene, ctx_.device(), ctx_.allocator(), assets_, ctx_.frames_in_flight());
     // Order 70: destruction -- fractures breakable meshes on the job engine and spawns a
     // chunk body per cell. Before Physics (100), so a chunk born this frame falls this frame.
-    scene::install_destruction_system(scene, ctx_.device(), ctx_.allocator(), assets_, &jobs_);
+    scene::install_destruction_system(scene, ctx_.device(), ctx_.allocator(), assets_, &jobs_,
+                                      ctx_.frames_in_flight());
     // Order 90: bakes water surfaces and refreshes the buoyant-body list right before
     // Physics (100) steps, whose substep callback it drives -- see water_system.h's file doc.
     water::install_water_system(scene, &ctx_.device(), &ctx_.allocator(), &assets_)
@@ -1350,12 +1351,36 @@ void Engine::drive_damage_cursors_(coopa::scene::Scene& scene) {
         if (name == "middle") return MouseButton::Middle;
         return MouseButton::Left;
     };
+    // "none" (or empty) disables a button entirely -- button_of()'s own fallback is Left, which
+    // would otherwise make the button impossible to turn off.
+    const auto enabled = [](const std::string& name) { return !name.empty() && name != "none"; };
+
+    // One name per DamageType in enum order -- see damage_cursor.h's doc on `type_keys`.
+    static const char* const k_damage_type_names[5] = {"Impact", "Slash", "Pierce", "Explosive", "Fire"};
 
     for (scene::DamageCursor* c : cursors) {
-        c->slice_requested = !blocked && have_ray && ctx_.input().button_pressed(button_of(c->slice_button));
-        c->hit_requested = !blocked && have_ray && ctx_.input().button_pressed(button_of(c->hit_button));
+        c->slice_requested = !blocked && have_ray && enabled(c->slice_button) &&
+                             ctx_.input().button_pressed(button_of(c->slice_button));
+        c->hit_requested = !blocked && have_ray && enabled(c->hit_button) &&
+                           ctx_.input().button_pressed(button_of(c->hit_button));
         c->ray_origin = origin;
         c->ray_direction = dir;
+
+        if (blocked) continue;
+        for (int i = 0; i < 5 && i < static_cast<int>(c->type_keys.size()); ++i) {
+            const char ch = c->type_keys[i];
+            if (ch == ' ' || ch == '\0') continue;
+            const std::string want(1, ch);
+            // keys.h has a Key -> name table but no name -> Key, same reasoning FireIgniter's
+            // reset_key already gives for matching a component's key NAME against it.
+            for (int k = 0; k < static_cast<int>(coopa::input::Key::Count); ++k) {
+                const auto key = static_cast<coopa::input::Key>(k);
+                if (want == coopa::input::key_name(key) && ctx_.input().key_pressed(key)) {
+                    c->damage_type = k_damage_type_names[i];
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -1553,6 +1578,13 @@ void Engine::upload_dynamic_meshes_(coopa::scene::Scene& scene) {
     // a static mesh and is skipped entirely -- that is what makes the default cost nothing.
     if (auto* hair_system = dynamic_cast<hair::HairSystem*>(scene.find_system("Hair"))) {
         hair_system->upload(scene, ctx_.current_frame());
+    }
+    // Dented objects, same contract again: an object joins this walk on its first dent and
+    // stays in it for the rest of the scene's life -- see DestructionSystem::upload_dents()'s
+    // doc for why a per-frame upload, not a per-hit one, is the safe one. A scene with nothing
+    // dented costs nothing here.
+    if (auto* destruction = dynamic_cast<scene::DestructionSystem*>(scene.find_system("Destruction"))) {
+        destruction->upload_dents(ctx_.current_frame());
     }
 }
 

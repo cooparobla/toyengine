@@ -1204,6 +1204,8 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             f_float("auto_rotate_deg_per_sec", 0.0f, 0.1f),
             with_tip(f_float("key_orbit_speed_deg_per_sec", 0.0f, 0.5f, 0.0f, 3600.0f),
                      "Orbit: WASD / arrow keys turn the camera at this rate; 0 leaves the keys alone"),
+            with_tip(f_float("key_pan_speed", 0.0f, 0.1f, 0.0f, 100.0f),
+                     "Orbit, no tracker: arrow keys slide the static target at this rate (m/s); 0 leaves them alone"),
             f_float("move_speed", 5.0f, 0.05f, 0.0f, 1000.0f),
             f_float("movement_smoothing", 0.0f, 0.005f, 0.0f, 1.0f),
             with_tip(f_bool("collide", true), "Orbit with a tracker: pull in when geometry blocks the view"),
@@ -1368,11 +1370,20 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             with_tip(f_bool("localized_fracture", false), "Reserved -- not implemented yet, currently inert"),
             with_tip(f_float("min_impulse", 200.0f, 5.0f, 0.0f, 1.0e5f),
                      "N*s below which a contact is a settling touch, not a blow"),
+            with_tip(f_bool("dent", true), "Push vertices inward on a Dent or Chip blow; off still costs HP"),
+            with_tip(f_float("max_dent", 0.0f, 0.01f, 0.0f, 5.0f),
+                     "Cap on one vertex's accumulated push, metres; 0 derives one from the mesh"),
+            with_tip(f_float("dent_resolution", 0.0f, 0.01f, 0.0f, 1.0f),
+                     "Target mean edge for the dent clone, metres; 0 means 0.05"),
+            with_tip(f_float("impact_transfer", 0.35f, 0.01f, 0.0f, 2.0f),
+                     "Fraction of a DamageCursor click's magnitude that pushes a sibling Rigidbody"),
         }});
         add({"DamageCursor", "Gameplay", {
-            with_tip(f_enum("slice_button", {"left", "right", "middle"}), "Mouse button that slices what it hits"),
+            with_tip(f_enum("slice_button", {"left", "right", "middle", "none"}), "Mouse button that slices what it hits; none disables slicing"),
             with_tip(f_enum("hit_button", {"right", "left", "middle"}), "Mouse button that deals a blow at what it hits"),
             with_tip(f_enum("damage_type", {"Impact", "Slash", "Pierce", "Explosive"}, true), "The blow hit_button deals"),
+            with_tip(f_string("type_keys", "12345", true),
+                     "5 keys, one per DamageType (Impact/Slash/Pierce/Explosive/Fire); pressing one switches damage_type"),
             with_tip(f_float("amount", 400.0f, 5.0f, 0.0f, 1.0e5f), "hit_button's blow amount"),
             with_tip(f_int("seed", 7, 0, 1000000), "Seeds the slice plane's random angle; the same run repeats"),
             with_unit(with_tip(f_float("max_distance", 1000.0f, 1.0f, 0.1f, 10000.0f), "How far the pick ray reaches"), "m"),
@@ -1490,7 +1501,9 @@ std::map<std::string, ComponentSchema>& schema_table_() {
         // to go on (world::infer_terrain_mode()'s tie-break).
         //
         // Heightmap shape and paint live in PNGs beside the scene; Terrain Mode (viewport mode
-        // menu) edits them. `tessellation:` and `generate:` are YAML-only maps, preserved on save.
+        // menu) edits them. `generate:` is a YAML-only map, preserved on save. `tessellation:`'s
+        // own keys are inspectable below via a dotted FieldDesc ("tessellation.max_distance"),
+        // which draw_field() (editor/schema/inspector.cpp) resolves into that sub-mapping.
         auto terrain_fields = [&](const char* default_mode) {
             Node grass_layer = Node::mapping();
             grass_layer["name"] = std::string("grass");
@@ -1536,6 +1549,18 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                      "Chunks exist only within this distance of the camera (m). 0 = automatic: the camera's far clip, "
                      "with frustum culling doing the rest. Set it to cap the cost for close / top-down cameras or huge terrains"));
             fs.push_back(with_tip(f_int("patch_resolution", 0, 0, 64), "Quads per chunk side before tessellation; 0 = automatic (4, or 32 without tessellation)"));
+            fs.push_back(with_tip(f_bool("tessellation.enabled", true), "Screen-space tessellation: detail near the camera. Off falls straight to patch_resolution everywhere"));
+            fs.push_back(with_tip(f_float("tessellation.edge_pixels", 8.0f, 0.1f, 0.5f, 64.0f),
+                     "Target triangle edge length on screen, in pixels -- smaller is more detail, closer to the camera"));
+            fs.push_back(with_tip(f_float("tessellation.max_factor", 64.0f, 1.0f, 1.0f, 64.0f),
+                     "Cap on splits per patch edge (clamped to the device's own limit)"));
+            fs.push_back(with_tip(f_float("tessellation.max_distance", 0.0f, 1.0f, 0.0f, 100000.0f),
+                     "Detail distance (m): beyond it the mesh falls back to its bare patch_resolution. "
+                     "0 = min(view_distance, 2000 m) -- the whole streamed range on most terrains. A cap short of "
+                     "that drops geometry nothing is close enough to see ONLY if it stays past everywhere the "
+                     "terrain is still visibly dense; set it too low and the fallback reads as a ring of coarse "
+                     "ground sweeping with the camera. To cut cost, raise edge_pixels instead -- it thins "
+                     "triangles uniformly rather than cliffing detail at one radius"));
             fs.push_back(with_tip(f_float("chunk_budget_ms", 2.0f, 0.1f, 0.1f, 16.0f),
                      "Milliseconds a frame may spend spawning chunks, rebuilding their water and folding a freshly "
                      "applied map's water in (at least one chunk/tile always lands)"));

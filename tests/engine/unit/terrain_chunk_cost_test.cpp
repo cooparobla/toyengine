@@ -148,7 +148,7 @@ COOPA_TEST(chunk_lods_shrink_the_chunk_and_keep_its_border) {
     // What the chunk job itself runs, seam locks and all.
     const auto t0 = std::chrono::steady_clock::now();
     const std::vector<coopa::gfx::engine::data::MeshLod> table =
-        build_chunk_lods(params, ChunkCoord{0, 0}, mesh);
+        build_chunk_lods(params, ChunkCoord{0, 0}, busy_pad(params.chunk_size, 7), library, mesh);
     const double build_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 
     const std::vector<glm::vec3> base_border = border_positions(0, base_indices);
@@ -185,4 +185,46 @@ COOPA_TEST(chunk_lods_shrink_the_chunk_and_keep_its_border) {
     // The levels are index ranges over LOD 0's vertices: the geometry itself is not duplicated.
     expect(*std::max_element(mesh.indices.begin(), mesh.indices.end()) < mesh.vertices.size(),
            "every level indexes LOD 0's own vertices -- no geometry is duplicated");
+}
+
+/**
+ * @brief The complement of the border test above, for a `ChunkLod::style` level: unlike a
+ *        simplified (`ratio`) level, a style level does NOT share LOD 0's vertices -- it is
+ *        re-meshed from the chunk's own columns and welded on its own, then appended behind every
+ *        ratio level exactly as Mesh::build_lods_() appends a hand-authored LOD
+ *        (`vertex_offset = mesh.vertices.size()` before the append). Its indices are therefore
+ *        local to ITS OWN appended range, not absolute into the combined buffer -- the opposite
+ *        sense from a ratio level's -- which is what `vertex_offset` exists to re-base at draw
+ *        time (Mesh::draw_lod_part()'s vkCmdDrawIndexed).
+ */
+COOPA_TEST(style_lod_level_indexes_its_own_appended_vertices) {
+    const TileMeshLibrary library = make_tile_library({"soft", "soft_lod", "rock"});
+    TerrainParams params = make_test_params(32);
+    params.chunk_lods    = {};
+    params.chunk_lods[0] = {0.40f, 0.33f};          // one ordinary ratio level
+    params.chunk_lods[1].style       = 1;            // soft_lod, by index in the library above
+    params.chunk_lods[1].screen_size = 0.10f;
+
+    ChunkMeshData mesh;
+    mesh_chunk_styled(busy_pad(params.chunk_size, 3), library, params, mesh);
+    coopa::gfx::engine::data::Mesh::weld_and_optimize(mesh.vertices, mesh.indices);
+    const std::size_t lod0_vertices = mesh.vertices.size();
+
+    const std::vector<coopa::gfx::engine::data::MeshLod> table =
+        build_chunk_lods(params, ChunkCoord{0, 0}, busy_pad(params.chunk_size, 3), library, mesh);
+
+    expect(table.size() == 3, "LOD 0, one ratio level and one style level");
+    expect(table[1].vertex_offset == 0, "the ratio level still shares LOD 0's vertices");
+    expect(table[2].vertex_offset == static_cast<std::int32_t>(lod0_vertices),
+           "the style level's own vertices start where LOD 0's (plus the ratio level, which added "
+           "none) left off");
+
+    const std::size_t style_vertex_count = mesh.vertices.size() - lod0_vertices;
+    expect(style_vertex_count > 0, "the style level actually appended its own geometry");
+    bool in_range = true;
+    for (std::size_t k = table[2].first_index; k < table[2].first_index + table[2].index_count; ++k) {
+        if (mesh.indices[k] >= style_vertex_count) { in_range = false; break; }
+    }
+    expect(in_range, "the style level's indices stay inside its own appended vertex range -- they "
+                     "are local to vertex_offset, not absolute into the combined buffer");
 }

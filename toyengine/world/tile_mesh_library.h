@@ -105,6 +105,12 @@ public:
         std::array<std::array<Oriented, k_section_plane_count>, k_tile_piece_count> sections;
         std::array<bool, k_tile_piece_count> authored{};
 
+        /// Whether each piece's orientation-0 geometry is a flat full quadrant -- occupies all of
+        /// `[0.5,1]^2` at z = 1, facing straight up (see TileMeshLibrary::top_merges()). Computed
+        /// by finish_styles(); a lipped style only passes this for `top_inner`, but a blocky one
+        /// (no lip, no corner rounding) can pass all three top pieces.
+        std::array<bool, k_tile_piece_count> top_mergeable{};
+
         /// straight[cap][turns]: the straight wall half stretched over a whole unit of its
         /// along-wall axis (x in [0,1] instead of [0.5,1]), turned onto each face -- so a run of
         /// straight halves can be stamped as ONE strip (see append_styled()'s `stretch`).
@@ -131,6 +137,19 @@ public:
     /** @brief Whether tops of `style` round the corners where surface kinds meet. */
     bool rounds_kind_corners(std::uint8_t style) const {
         return style < styles_.size() && styles_[style].round_kind_corners;
+    }
+
+    /**
+     * @brief Whether `piece`'s baked geometry is a flat full quadrant under `style` -- so a tile
+     *        stamping it may instead mark its quadrant for the chunk's greedy top-rectangle
+     *        merge (terrain_chunk.cpp), the same as a tile with no exposed edge at all.
+     *
+     * Measured, not assumed: a style's `top_inner` is flat by the generator's own convention, but
+     * a hand-authored one could be a dome or a bevel, and `top_edge` / `top_outer` are only flat
+     * when the style has no lip (`LIP_H = R_OUT = 0`, e.g. voxel) -- see finish_styles().
+     */
+    bool top_merges(std::uint8_t style, TilePiece piece) const {
+        return style < styles_.size() && styles_[style].top_mergeable[static_cast<std::size_t>(piece)];
     }
 
     /** @brief Assigns the style a surface kind's cells are shaped with. */

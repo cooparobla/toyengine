@@ -53,6 +53,12 @@ const toy::world::TileMeshLibrary& styled_library() {
     return library;
 }
 
+/** @brief `soft_lod` alone, every kind -- the far LOD tier's own ray-hole coverage. */
+const toy::world::TileMeshLibrary& soft_lod_library() {
+    static const toy::world::TileMeshLibrary library = make_tile_library({"soft_lod"});
+    return library;
+}
+
 /** @brief A pad (skirt included) with every column at `steps`. */
 toy::world::ColumnPad make_styled_pad(std::int32_t chunk_size, std::int32_t steps) {
     toy::world::ColumnPad pad;
@@ -266,9 +272,9 @@ COOPA_TEST(section_caps_appear_only_at_style_changes) {
     expect(all == east + west, "section caps: ...and only there");
 }
 
-COOPA_TEST(surface_has_no_holes_from_above) {
+/** @brief Shared by surface_has_no_holes_from_above and its soft_lod-only counterpart. */
+void check_no_holes_from_above(const char* label, const toy::world::TileMeshLibrary& library) {
     using namespace toy::world;
-    const TileMeshLibrary& library = styled_library();
     TerrainParams params = make_test_params(16);
     params.soil_depth_steps = 1;   // soil over stone: two atlas kinds down most walls
 
@@ -305,12 +311,17 @@ COOPA_TEST(surface_has_no_holes_from_above) {
             }
         }
     }
-    expect(misses == 0, "styled chunk: every ray from above hits the surface (no see-through holes)");
-    expect(backfaces == 0, "styled chunk: every first hit is a front face (no inside showing)");
+    expect(misses == 0, std::string(label) + ": every ray from above hits the surface (no see-through holes)");
+    expect(backfaces == 0, std::string(label) + ": every first hit is a front face (no inside showing)");
     if (!first_failure.empty()) {
         std::cerr << "         " << misses << " misses, " << backfaces << " back faces of " << rays
                   << " rays; first: " << first_failure << "\n";
     }
+}
+
+COOPA_TEST(surface_has_no_holes_from_above) { check_no_holes_from_above("styled chunk", styled_library()); }
+COOPA_TEST(soft_lod_style_has_no_holes_from_above) {
+    check_no_holes_from_above("soft_lod style", soft_lod_library());
 }
 
 /**
@@ -320,9 +331,9 @@ COOPA_TEST(surface_has_no_holes_from_above) {
  *        and must meet a front face before getting there; rays whose path leaves the chunk's
  *        interior (where neighbouring chunks' geometry is missing) are not counted.
  */
-COOPA_TEST(surface_has_no_holes_at_grazing_angles) {
+/** @brief Shared by surface_has_no_holes_at_grazing_angles and its soft_lod-only counterpart. */
+void check_no_holes_at_grazing_angles(const char* label, const toy::world::TileMeshLibrary& library) {
     using namespace toy::world;
-    const TileMeshLibrary& library = styled_library();
     TerrainParams params = make_test_params(32);
     params.soil_depth_steps = 1;
 
@@ -363,9 +374,16 @@ COOPA_TEST(surface_has_no_holes_at_grazing_angles) {
             }
         }
     }
-    expect(counted > 100, "styled chunk: enough grazing rays stay inside the chunk to mean something");
-    expect(failures == 0, "styled chunk: grazing rays find no holes in walls, corners or fillets");
+    expect(counted > 100, std::string(label) + ": enough grazing rays stay inside the chunk to mean something");
+    expect(failures == 0, std::string(label) + ": grazing rays find no holes in walls, corners or fillets");
     if (failures > 0) std::cerr << "         " << failures << " of " << counted << "; first: " << first_failure << "\n";
+}
+
+COOPA_TEST(surface_has_no_holes_at_grazing_angles) {
+    check_no_holes_at_grazing_angles("styled chunk", styled_library());
+}
+COOPA_TEST(soft_lod_style_has_no_holes_at_grazing_angles) {
+    check_no_holes_at_grazing_angles("soft_lod style", soft_lod_library());
 }
 
 COOPA_TEST(styled_meshing_is_byte_deterministic) {

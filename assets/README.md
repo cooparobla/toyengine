@@ -52,15 +52,18 @@ material and a mesh may both be `brick`; two materials may not).
 | `cube_corner` | unit cube, [0, 1]^3 | corner -- older scenes place boxes by their corner |
 | `plane` | 2x2 quad in XY, normal +Z (its UVs run along one diagonal: no texture or displacement map maps on it) | centre |
 | `sphere` | radius-1 UV sphere, with an LOD sidecar | centre |
+| `sphere_dense` | radius-1 UV sphere, 48 segments x 32 rings (dense enough for toyengine/destruct/'s dent kernel) | centre |
 | `sphere_low` | radius-1 low-poly lathe sphere (water props) | centre |
 | `ball` | radius-0.5 smooth sphere (animation rigs) | centre |
 | `barrel` | capsule, radius 0.35, height 1.3, along Z | centre |
 | `water_grid` | 2x2 plane subdivided 12x12, for wave displacement | centre |
 | `tentacle` | skinned tube, vertex groups `seg_0..seg_3` | base |
 | `mannequin_*` | the mannequin's capsule body parts (tag `characters`) | centre |
+| `props/camp_log_dense` | the `camp_log` prop's bumpy-log shape, 24 segments x 16 rings along its length (dense enough to dent) | centre |
 
 Generators in `tools/` rebuild the generated ones (`gen_water_demo_meshes.py`,
-`gen_water_grid_mesh.py`, `gen_animation_demo_scene.py`, `gen_mannequin.py`; terrain tile sets: `gen_tile_styles.py`).
+`gen_water_grid_mesh.py`, `gen_animation_demo_scene.py`, `gen_mannequin.py`; terrain tile sets:
+`gen_tile_styles.py`; `sphere_dense`/`camp_log_dense`: `gen_damage_dense_meshes.py`).
 
 ## Importing from Blender
 

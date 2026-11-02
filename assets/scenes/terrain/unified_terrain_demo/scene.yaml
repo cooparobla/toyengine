@@ -176,6 +176,23 @@ scene:
           max_wall_steps: 16
           soil_depth_steps: 2
           shadow_distance: 224
+          # The shipped chunk_lods defaults ({0.40,0.14},{0.15,0.07},{0.07,0.03}) are tuned for a
+          # globe held whole in frame; at this scene's chunk_size 32 / view_radius 10 (320 m
+          # resident radius) / fov 60, a 32 m chunk's ~22.6 m bounding radius only crosses the
+          # first (0.14) threshold at ~280 m -- just inside the resident radius -- so almost
+          # every visible chunk draws at LOD 0 the whole time. These thresholds instead spread
+          # the three tiers across the resident radius itself: LOD 1 (ratio 0.40) at ~120 m, LOD 2
+          # (0.15) at ~190 m, LOD 3 (0.07, the coarsest ratio level) at ~260 m -- inside 320 m but
+          # past the 224 m shadow_distance, so shadows never see the coarsened mesh. A fourth, style
+          # level follows past 260 m: tileset_soft_lod re-meshes the chunk in soft's own corner radii
+          # (seam-safe -- see tools/gen_tile_styles.py's `soft_lod` entry) but far coarser segments,
+          # so the chunk still reads as soft terrain instead of ratio simplification's eventual
+          # arbitrary silhouette, with no risk of simplify_levels rejecting the level outright.
+          lods:
+            - { ratio: 0.40, screen_size: 0.33 }
+            - { ratio: 0.15, screen_size: 0.20 }
+            - { ratio: 0.07, screen_size: 0.15 }
+            - { tile_set: objects/terrain/tileset_soft_lod, screen_size: 0.08 }
           collision: true
           tile_set: objects/terrain/tileset_soft
           kind_tile_sets:
@@ -303,11 +320,13 @@ scene:
           collision: true
           shadow_distance: 224
           view_distance: 320
-          # Tessellation's near-ground detail is worth it close in, not at the far edge of a
-          # 320 m view distance a player rarely studies closely. Capping it well short of that
-          # (the grass scatter below already fades by 48 m) is the cheapest per-frame win
-          # available on this flavour -- it only drops detail nothing is close enough to see.
-          tessellation: { max_distance: 128 }
+          # No tessellation.max_distance override: its default is min(view_distance, 2000) = 320,
+          # i.e. the whole streamed range. A cap short of that (128 was tried here) does not drop
+          # detail "nothing is close enough to see" -- past it the surface falls to the bare base
+          # patch (patch_resolution, default 4 quads/chunk = 8 m triangles on this 1 m source
+          # grid), a visible ring sweeping with the camera rather than a saving. If cost needs
+          # trimming, raise tessellation.edge_pixels (default 8) instead -- it thins triangles
+          # uniformly across the whole range rather than cliffing detail at one radius.
           deep_snow: false
           puddles: false
           layers:

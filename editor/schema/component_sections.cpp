@@ -288,6 +288,16 @@ void apply_component_sections(std::map<std::string, ComponentSchema>& table) {
                       "a generated world that brings its own sea, lakes and rivers.")
                 .keys({"deep_snow", "puddles"}).closed().done(),
             sec("Collision", "Collider").toggle("collision").keys({"physics_material", "shadow_distance"}).closed().done(),
+            // Not `.toggle("tessellation.enabled")`: InspectorSection::toggle reads/writes the
+            // component node directly (condition_value() / comp[s.toggle] in inspector.cpp), not
+            // through draw_field()'s dotted resolve, so a dotted toggle key would silently create
+            // a bogus flat "tessellation.enabled" key instead of the nested one. Plain field instead.
+            sec("Tessellation", "Mesh").when("mode", {"heightmap"})
+                .says("Screen-space detail near the camera. max_distance's default already covers the "
+                      "whole streamed range (view_distance, capped at 2000 m) -- a shorter cap trades a "
+                      "visible ring of coarse ground for a saving; edge_pixels is the lever that doesn't.")
+                .keys({"tessellation.enabled", "tessellation.edge_pixels", "tessellation.max_factor",
+                       "tessellation.max_distance"}).closed().done(),
             sec("Streaming", "Zoom").when("mode", {"heightmap"})
                 .says("How much terrain exists around the camera, how much of it casts shadows, and the "
                       "budget that paces spawning chunks and folding their water in.")

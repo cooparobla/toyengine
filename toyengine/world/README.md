@@ -336,6 +336,11 @@ included).
 
 ## Cost model
 
+This section (through Planets, below) is Tile mode's cost model: its chunks are meshed on the
+CPU, and `lods:` names simplification levels of that mesh. A heightmap chunk is a different
+drawing scheme entirely (see [Heightmap terrain](#heightmap-terrain)) — its own cost model lives
+there.
+
 The pipeline frustum-culls every chunk per view (see `ToyRenderPipeline::gather_meshes_()`): the
 camera draws only the chunks it can see, and each shadow cascade/face draws only the chunks inside
 its own frustum. `view_radius` still sets the resident set — `(2 * view_radius + 1)²` chunks meshed
@@ -346,7 +351,10 @@ at the cost of a coarser streaming granularity.
 
 **Levels of detail.** Every chunk mesh is built with coarser levels behind its full one
 (`lods:`, `TerrainParams::chunk_lods`), so a chunk small on screen draws a fraction of its
-triangles:
+triangles. `lods:` is Tile-mode-only: a heightmap chunk draws one shared flat patch with
+`lods_enabled = false` on its `MeshRenderer`, so a `lods:` key on a `mode: heightmap` terrain is
+rejected with a warning, and `select_lod()`, `mesh_lod_bias` and a heightmap renderer's own
+`lod_bias` are all inert for it — its detail comes from tessellation instead.
 
 ```yaml
 - type: TileTerrain
@@ -371,6 +379,30 @@ genuinely small, so a ground-level camera on a streamed terrain sees LOD 0 throu
 their keep on a planet held whole in frame and on terrains with a large `view_radius`. Pin them
 off per renderer with `lods_enabled: false`, or globally with the render config's
 `mesh_lod_bias`.
+
+A level can name `tile_set:` instead of `ratio:`, re-meshing the whole chunk in another style
+(`TerrainParams::ChunkLod::style`, a library index resolved the same way a scene's own `tile_set:`
+/ `kind_tile_sets:` are) rather than simplifying LOD 0:
+
+```yaml
+lods:
+  - { ratio: 0.40, screen_size: 0.14 }
+  - { ratio: 0.15, screen_size: 0.07 }
+  - { tile_set: objects/terrain/tileset_soft_lod, screen_size: 0.03 } # style tier, coarsest last
+```
+
+A style level does not share LOD 0's vertices -- it is meshed and welded independently and
+appended behind every ratio level, with its own `vertex_offset` for `vkCmdDrawIndexed` to rebase
+at draw time -- so it carries none of a `ratio` level's rejection risk (a pinned seam vertex can't
+be lost to simplification if nothing is simplified) at the cost of its own vertex buffer rather
+than shared index ranges. It costs an unconditional extra stamp-and-weld on the chunk's worker,
+whether or not the tier is ever reached on screen, and stays shading-identical at the seam only if
+the override style shares its neighbours' `round_kind_corners` and corner radii -- `soft_lod`
+(below) is `soft`'s own radii at coarser segment counts for exactly this reason. `native_border`
+keeps that many tiles of the chunk's rim in the un-overridden style, for a tier that wants its
+interior cheap but its edge geometry matching a full-detail neighbour exactly. Planets don't
+support this tier: the planet warp and the forced `max_merge = 1` both run before a style level
+would need its own copies of both.
 
 **What a chunk costs the frame it lands in.** Meshing, welding, the collider's BVH *and the
 chunk's GPU buffers* are all built on its worker (see `terrain_chunk.h` for why the Vulkan half
@@ -529,9 +561,36 @@ Re-run that suite for current numbers on any machine; the ratios are the stable 
 keep the meshing there:
 - Straight halves, most of any cliff and most of a lip's rings, are collected and stamped as one
   stretched strip per run.
-- Tiles with no exposed edge merge into flat rectangles of equal height and kind.
+- Top **quadrants** with no exposed edge of their own merge into flat rectangles of equal height
+  and kind (`TileMeshLibrary::top_merges()`), at half-tile granularity -- a tile with one convex
+  same-kind corner still merges its other three quadrants, rather than the whole tile falling out
+  of the merge the way a tile-granularity pass would.
 
 The levers beyond that are the generator's `ARC_SEG` / `LIP_SEG` and `view_radius`.
+
+**Per-piece triangle counts**, read straight off the generated mesh YAMLs (`gen_tile_styles.py`'s
+`profile()` × `levels()` grid), for `soft` against the far-LOD `tile_set:` style `soft_lod` --
+same `R_OUT`/`R_IN`/`LIP_H`/`LIP_V`/`round_kind_corners`, coarser `ARC_SEG`/`LIP_SEG` only:
+
+| piece | soft | soft_lod |
+|---|---|---|
+| `top_inner` | 2 | 2 |
+| `top_edge` | 2 | 2 |
+| `top_outer` | 8 | 4 |
+| `wall_continue` | 2 | 2 |
+| `wall_convex` | 8 | 4 |
+| `wall_concave` | 8 | 4 |
+| `wall_cap_continue` | 10 | 4 |
+| `wall_cap_convex` | 40 | 8 |
+| `wall_cap_concave` | 44 | 10 |
+| `wall_cap_concave_taper` | 31 | 6 |
+| `wall_cap_continue_taper` | 43 | 22 |
+
+The win concentrates in corner-cap pieces, exactly where `soft`'s triangle count diverges from
+voxel's in the first place. There is no before/after chunk total to report here: Stage 1's
+quadrant merge and the `soft_lod` tier both land on top of the demo scene in the same pass, with
+no pre-merge baseline captured on this machine -- `terrain_chunk_cost`'s own printed numbers are
+the up-to-date record; re-run that suite for current ones.
 
 One trap in this code is easy to step into. `append_styled()` runs thousands of times per chunk,
 so it must never `reserve(size + n)`: an exact-size reserve defeats the vector's geometric growth
@@ -685,7 +744,14 @@ and its height range (for culling). Splats and the layer arrays are G-buffer set
 **Cost model.** There is nothing to load per chunk -- all chunks share one patch mesh, the height
 texture and the material -- so the surface relies on frustum culling plus screen-space tessellation
 (a 4-quad base patch, detail added near the camera; `tessellation.max_distance` caps where the
-added detail stops and the base patch takes over -- 0, the default, means the full `view_distance`).
+added detail stops and the base patch -- `patch_resolution` quads per chunk side, default 4 --
+takes over. 0, the default, means `min(view_distance, 2000 m)`, **not** the unclamped
+`view_distance`: a terrain whose `view_distance` runs past 2 km falls back to the base patch
+before its streaming edge even without an explicit cap. A cap short of that clamp trades detail
+nothing is close enough to see for a saving only where it stays past everywhere the terrain is
+still visibly dense -- set it too low and the falloff reads as a ring of coarse ground sweeping
+with the camera; `tessellation.edge_pixels` (default 8) is the lever that thins triangles
+uniformly across the whole range instead of cliffing detail at one radius).
 `view_distance` (default `auto` = the camera's far clip) is a hard cap for close / top-down cameras
 or huge terrains: chunk objects beyond it are not spawned (with one chunk of hysteresis).
 `shadow_distance` drops far chunks from the shadow passes (`MeshRenderer::shadow_max_distance`),
@@ -735,7 +801,7 @@ by layer / slope / height, streamed around the camera, re-scattered where the te
 ## Not here yet
 
 Caves and overhangs (the height-column model has no room for them, though mapcoopa generates cave
-systems), waterfalls as their own effect (a river's step is a steep slope of its surface), chunk LOD,
+systems), waterfalls as their own effect (a river's step is a steep slope of its surface),
 rivers/roads/towns as 3D geometry, loading only the `.tiles` chunks near the camera (the file
 format allows it; everything is loaded today), and a per-tile tile-set override. A mode-agnostic
 water inset (today only the heightmap branch populates the un-inset `water_level_`, see **What

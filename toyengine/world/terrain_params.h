@@ -143,6 +143,17 @@ struct TerrainParams {
     struct ChunkLod {
         float ratio       = 0.0f;  /**< Triangles kept, as a fraction of the full chunk. 0 ends the table. */
         float screen_size = 0.0f;  /**< Drawn while the chunk covers less of the screen's height than this. */
+        /**
+         * @brief Library style index to re-mesh this level in, instead of simplifying LOD 0.
+         *
+         * -1 (the default) simplifies LOD 0 as `ratio` says. A style level is re-meshed from the
+         * chunk's own height field in that style and welded independently -- it does not share
+         * LOD 0's vertices, so `ratio` is ignored for it. Resolved from a `tile_set:` entry under
+         * `lods:` in scene YAML (register.cpp); never set by `ratio`-only levels.
+         */
+        std::int8_t style         = -1;
+        /** @brief Tiles of the chunk's rim kept in the authored (non-style) tile set, style levels only. */
+        std::int8_t native_border = 0;
     };
 
     /** @brief Most levels a chunk mesh carries, past LOD 0. */

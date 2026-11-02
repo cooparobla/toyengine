@@ -30,10 +30,29 @@
  *
  * **Typed damage.** A `Damageable` queues blows (an impact, a slash, ...); this system drains
  * the queue each pass, resolves each through physxcoopa's `damage::resolve_damage()`, deposits
- * it into the object's local `destruct::DamageField`, and carries out two of the five possible
- * responses: Fracture (the Destructible path above, if a sibling Destructible exists) and
- * Cleave (slice_object(), once the field's saturated region reads flat enough to trust as a cut
- * plane). Dent/Chip/Hole are not implemented yet -- see damageable.h's own doc for why.
+ * it into the object's local `destruct::DamageField`, and carries out four of the five possible
+ * responses: Fracture (the Destructible path above, if a sibling Destructible exists), Cleave
+ * (slice_object(), once the field's saturated region reads flat enough to trust as a cut plane),
+ * and Dent/Chip (apply_dent_(), below). Hole is not implemented -- see damageable.h's own doc.
+ *
+ * **Dents.** A Damageable's first Dent or Chip blow calls ensure_dent_mesh_(), which gives the
+ * object a private, deformable clone of its mesh asset: the CPU vertices are read back from the
+ * mesh FILE (`Mesh::build_cpu()`, the same reason ensure_fracture_() reads a file rather than
+ * the asset manager -- one file cannot be two asset types at once), subdivided if it is coarser
+ * than `Damageable::dent_resolution` (toyengine/destruct/dent.h's subdivide_for_dent() -- the
+ * ONLY point this can happen, since a dynamic Mesh's index buffer is fixed for its life), built
+ * as a `frames_in_flight`-buffered dynamic Mesh (Mesh::from_arrays()), published once under a
+ * per-object synthetic asset id, and swapped onto the MeshRenderer (set_mesh()) in place of the
+ * shared asset. From there apply_dent() (toyengine/destruct/dent.h) displaces it per blow. The
+ * clone is kept on THIS system, not on Damageable, because building one needs the device,
+ * allocator and asset manager Damageable deliberately does not carry (see its own file doc).
+ *
+ * The clone's vertex buffer is NOT re-uploaded only on the frames a dent lands: once an object
+ * has one, upload_dents() rewrites it from `vertices_` into `frame_slot` EVERY frame, the same
+ * contract ClothRenderer::upload() keeps (see that file's doc) -- `Mesh::update_vertices()`
+ * pins `active_slot_` to whatever slot it last wrote, so a write only on dent frames could land
+ * in a slot a still-in-flight frame is reading. Engine::upload_dynamic_meshes_() is the window;
+ * a scene with nothing dented costs nothing here, since no object has joined `dents_`.
  *
  * `DESTRUCT_DEBUG=1` in the environment prints one line per break or slice (what broke, into
  * how many pieces) -- the first thing to look at when something refuses to come apart.
@@ -57,6 +76,7 @@
 #ifndef TOYENGINE_SCENE_DESTRUCTION_SYSTEM_H
 #define TOYENGINE_SCENE_DESTRUCTION_SYSTEM_H
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -67,12 +87,15 @@
 #include <coopa/scene/scene.h>
 #include <gfxcoopa/engine/data/skinned_mesh_source.h>
 
+#include <toyengine/destruct/dent.h>
 #include <toyengine/destruct/fracture.h>
 
 namespace coopa::asset { class AssetManager; }
 namespace coopa::gfx::core { class Device; }
 namespace coopa::gfx::memory { class Allocator; }
+namespace coopa::gfx::engine::data { class Mesh; }
 namespace coopa::physx::system { class PhysicsSystem; }
+namespace coopa::physx::damage { struct DamageEvent; struct ResolvedDamage; }
 
 namespace toy {
 namespace scene {
@@ -87,8 +110,10 @@ class Damageable;
 class DestructionSystem : public coopa::scene::ISceneSystem {
 public:
     DestructionSystem(coopa::gfx::core::Device& device, coopa::gfx::memory::Allocator& allocator,
-                      coopa::asset::AssetManager& assets, coopa::job::JobEngine* jobs)
-        : device_(device), allocator_(allocator), assets_(assets), jobs_(jobs) {}
+                      coopa::asset::AssetManager& assets, coopa::job::JobEngine* jobs,
+                      std::uint32_t frames_in_flight = 2)
+        : device_(device), allocator_(allocator), assets_(assets), jobs_(jobs),
+          frames_in_flight_(std::max(1u, frames_in_flight)) {}
 
     ~DestructionSystem() override;
 
@@ -99,6 +124,14 @@ public:
     std::size_t fractures() const { return cache_.size(); }
     /** @brief Chunk objects alive right now. */
     std::size_t live_chunks() const { return chunks_.size(); }
+    /** @brief Objects carrying a private, dented clone of their mesh right now (tests,
+     *         diagnostics). */
+    std::size_t dented_meshes() const { return dents_.size(); }
+
+    /** @brief Rewrites every dented object's vertex buffer into `frame_slot` -- see this file's
+     *         doc for why every frame, not just the ones a dent lands on. Called from
+     *         Engine::upload_dynamic_meshes_(), the only window the in-flight slot is known in. */
+    void upload_dents(std::uint32_t frame_slot);
 
     /**
      * @brief Cuts `object` along a world-space plane into two rigid halves.
@@ -166,6 +199,18 @@ private:
         glm::vec3   initial_angular_velocity{0.0f}; ///< E.g. a sliced object's own spin, inherited.
     };
 
+    /// An object's private, deformable clone of its mesh asset -- built once, on its first Dent
+    /// or Chip, and mutated in place by every blow after.
+    struct DentedMesh {
+        std::shared_ptr<coopa::gfx::engine::data::Mesh> mesh;
+        std::vector<destruct::Vertex>     vertices;
+        std::vector<std::uint32_t>        indices;
+        destruct::DentState               state;
+        /// Damageable::max_dent's 0 default: 0.35 of the UNDENTED mesh's shortest world extent,
+        /// computed once at build time so the cap does not shrink as the mesh itself does.
+        float default_max_offset = 0.0f;
+    };
+
     /// Keyed on the mesh and the settings that shape the break, so identical crates share one.
     static std::string cache_key_(const std::string& mesh_path, const Destructible& d);
 
@@ -195,9 +240,23 @@ private:
     void age_chunks_(coopa::scene::Scene& scene, float dt);
 
     /** @brief Drains one Damageable's blow queue: resolves each against its material, deposits
-     *         it into the local DamageField, and carries out Fracture/Cleave when a blow or the
-     *         accumulated field calls for one (see this file's doc). */
+     *         it into the local DamageField, and carries out Fracture/Cleave/Dent/Chip when a
+     *         blow or the accumulated field calls for one (see this file's doc). */
     void process_damage_(coopa::scene::Scene& scene, Damageable& damageable);
+
+    /** @brief Builds `damageable`'s dent clone on first call (see this file's doc); every call
+     *         after returns the same one. Null if the owner has no MeshRenderer, no mesh asset
+     *         (a slice-spawned half, say -- those have no file to read), the asset cannot be
+     *         read, or its vertex count is past the dent limit -- in every case the blow still
+     *         cost HP in process_damage_(), it just leaves the mesh alone. */
+    DentedMesh* ensure_dent_mesh_(Damageable& damageable);
+
+    /** @brief Pushes `damageable`'s dent clone in at `world_blow`'s point, sized and shaped by
+     *         `resolved` (DamageResponse::Dent or Chip only -- see this file's doc). A no-op if
+     *         `Damageable::dent` is off or ensure_dent_mesh_() could not build a clone. */
+    void apply_dent_(Damageable& damageable, const coopa::physx::damage::DamageEvent& world_blow,
+                     const coopa::physx::damage::ResolvedDamage& resolved, const glm::mat4& world,
+                     const glm::mat4& inv_world);
 
     /** @brief Consumes every DamageCursor's pending slice/hit request: raycasts through
      *         `physics`, and on a hit calls slice_object() (slice_button) or queues a blow on
@@ -209,10 +268,13 @@ private:
     coopa::gfx::memory::Allocator& allocator_;
     coopa::asset::AssetManager&    assets_;
     coopa::job::JobEngine*         jobs_ = nullptr;
+    std::uint32_t                  frames_in_flight_ = 2;
 
     std::unordered_map<std::string, Fracture> cache_;
     std::vector<Chunk> chunks_;
     std::uint64_t      spawned_ = 0;   ///< Names chunk objects and their meshes uniquely.
+    std::unordered_map<const Damageable*, DentedMesh> dents_;
+    std::uint64_t      next_dent_id_ = 0;  ///< Names dent clones' synthetic asset ids uniquely.
     bool               physics_dirty_ = false;
 };
 
@@ -221,12 +283,16 @@ private:
  *
  * @param jobs Job engine for the fracture work; null fractures inline on the owner thread,
  *             which is what the device-free tests do.
+ * @param frames_in_flight Buffer count a dent clone's dynamic Mesh is built with -- must match
+ *                         the renderer's own, or upload_dents() would write into a slot an
+ *                         in-flight frame is still reading.
  */
 DestructionSystem* install_destruction_system(coopa::scene::Scene& scene,
                                               coopa::gfx::core::Device& device,
                                               coopa::gfx::memory::Allocator& allocator,
                                               coopa::asset::AssetManager& assets,
-                                              coopa::job::JobEngine* jobs);
+                                              coopa::job::JobEngine* jobs,
+                                              std::uint32_t frames_in_flight = 2);
 
 } // namespace scene
 } // namespace toy

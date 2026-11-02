@@ -117,6 +117,17 @@ void parse_heightmap_terrain(const fkyaml::node& node, coopa::scene::SceneObject
     t->deep_snow = get_b(node, "deep_snow", t->deep_snow);
     t->puddles = get_b(node, "puddles", t->puddles);
     t->cast_shadows = get_b(node, "cast_shadows", t->cast_shadows);
+    // Owner-thread milliseconds a frame for chunk spawning, water rebuilds and a freshly applied
+    // map's water sweep (HeightmapTerrainSystem::stream_chunks_() / refresh_water_()).
+    t->chunk_budget_ms = get_f(node, "chunk_budget_ms", t->chunk_budget_ms);
+
+    // `lods:` belongs to Tiles mode (parsed in register.cpp's parse_tile_terrain) -- a heightmap
+    // chunk draws one shared patch mesh with lods_enabled = false, so a mesh LOD table has nothing
+    // to attach to. Warn rather than silently drop it.
+    if (node.contains("lods")) {
+        std::cerr << "[HeightmapTerrain] '" << obj.name() << "': `lods:` has no effect in heightmap "
+                     "mode -- detail comes from `tessellation:` instead\n";
+    }
 
     // How its water looks, if it has any -- the same WaterBody keys a tile terrain takes. Both
     // the still and the flowing bodies over a chunk share it: they meet at shared vertices, and

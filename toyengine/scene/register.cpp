@@ -133,6 +133,7 @@ void register_scene_components() {
             if (node.contains("key_orbit_speed_deg_per_sec")) {
                 cc->key_orbit_speed_deg_per_sec = node.at("key_orbit_speed_deg_per_sec").get_value<float>();
             }
+            read(node, "key_pan_speed", cc->key_pan_speed);
             if (node.contains("move_speed")) {
                 cc->move_speed = node.at("move_speed").get_value<float>();
             }
@@ -214,7 +215,7 @@ void register_scene_components() {
 
     // Typed damage accumulation (toyengine/scene/damageable.h). DestructionSystem drains the
     // blow queue and carries out what resolve_damage() decides -- see that file's doc for what
-    // is and is not implemented yet (Dent/Chip/Hole are not).
+    // is and is not implemented (Hole is not).
     SceneLoader::register_component_parser("Damageable",
         [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
             auto* dm = obj.add_component<Damageable>();
@@ -225,16 +226,22 @@ void register_scene_components() {
             read(node, "fracture_on_death", dm->fracture_on_death);
             read(node, "localized_fracture", dm->localized_fracture);
             read(node, "min_impulse", dm->min_impulse);
+            read(node, "dent", dm->dent);
+            read(node, "max_dent", dm->max_dent);
+            read(node, "dent_resolution", dm->dent_resolution);
+            read(node, "impact_transfer", dm->impact_transfer);
         });
 
     // Click-to-cut / click-to-hit (toyengine/scene/damage_cursor.h). Input is pushed in by
-    // Engine::drive_damage_cursors_(); DestructionSystem consumes the requests.
+    // Engine::drive_damage_cursors_(); DestructionSystem consumes the requests. slice_button /
+    // hit_button accept "none" to turn a button off entirely.
     SceneLoader::register_component_parser("DamageCursor",
         [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
             auto* c = obj.add_component<DamageCursor>();
             if (node.contains("slice_button")) c->slice_button = node.at("slice_button").get_value<std::string>();
             if (node.contains("hit_button")) c->hit_button = node.at("hit_button").get_value<std::string>();
             if (node.contains("damage_type")) c->damage_type = node.at("damage_type").get_value<std::string>();
+            if (node.contains("type_keys")) c->type_keys = node.at("type_keys").get_value<std::string>();
             read(node, "amount", c->amount);
             read(node, "seed", c->seed);
             read(node, "max_distance", c->max_distance);
@@ -754,23 +761,6 @@ void register_scene_components(coopa::gfx::core::Device& device,
                 params.face_tiles -= params.face_tiles % std::max<std::int32_t>(1, params.chunk_size);
             }
             read(node, "river_inset", params.river_inset);
-            // `lods:` -- the coarser levels every chunk mesh is built with, coarsest last. An
-            // empty list (or `lods: false`) turns the levels off and draws every chunk at full
-            // density, whatever its size on screen.
-            if (node.contains("lods")) {
-                const fkyaml::node& l = node.at("lods");
-                params.chunk_lods = {};
-                if (l.is_sequence()) {
-                    std::size_t i = 0;
-                    for (const fkyaml::node& level : l) {
-                        if (i >= world::TerrainParams::k_max_chunk_lods) break;
-                        if (!level.is_mapping()) continue;
-                        world::TerrainParams::ChunkLod& out = params.chunk_lods[i++];
-                        if (level.contains("ratio")) out.ratio = level.at("ratio").get_value<float>();
-                        if (level.contains("screen_size")) out.screen_size = level.at("screen_size").get_value<float>();
-                    }
-                }
-            }
             // The water's look: WaterBody's own keys, onto the terrain's stock look.
             if (node.contains("water") && node.at("water").is_mapping()) {
                 water::parse_water_settings(node.at("water"), terrain->water_look);
@@ -943,6 +933,37 @@ void register_scene_components(coopa::gfx::core::Device& device,
                         int style = style_named(path);
                         if (style < 0) style = add_style(path, path);
                         terrain->kind_styles[static_cast<std::size_t>(kind)] = style;
+                    }
+                }
+            }
+
+            // `lods:` -- the coarser levels every chunk mesh is built with, coarsest last. An
+            // empty list (or `lods: false`) turns the levels off and draws every chunk at full
+            // density, whatever its size on screen. A level names either `ratio:` (simplify LOD 0)
+            // or `tile_set:` (re-mesh in another style -- TerrainParams::ChunkLod's doc); `tile_set:`
+            // resolves through the same add_style() / style_named() this terrain's own tile sets do
+            // just above, so a LOD style shares one style library with everything else and bakes
+            // alongside it, reachable only through the override since nothing points a kind at it.
+            if (node.contains("lods")) {
+                const fkyaml::node& l = node.at("lods");
+                params.chunk_lods = {};
+                if (l.is_sequence()) {
+                    std::size_t i = 0;
+                    for (const fkyaml::node& level : l) {
+                        if (i >= world::TerrainParams::k_max_chunk_lods) break;
+                        if (!level.is_mapping()) continue;
+                        world::TerrainParams::ChunkLod& out = params.chunk_lods[i++];
+                        if (level.contains("ratio")) out.ratio = level.at("ratio").get_value<float>();
+                        if (level.contains("screen_size")) out.screen_size = level.at("screen_size").get_value<float>();
+                        if (level.contains("tile_set")) {
+                            const std::string path = level.at("tile_set").get_value<std::string>();
+                            int style = style_named(path);
+                            if (style < 0) style = add_style(path, path);
+                            out.style = static_cast<std::int8_t>(style);
+                        }
+                        if (level.contains("native_border")) {
+                            out.native_border = static_cast<std::int8_t>(level.at("native_border").get_value<int>());
+                        }
                     }
                 }
             }

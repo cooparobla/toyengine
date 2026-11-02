@@ -1,0 +1,7 @@
+# A tyre, a bumper, a rubber block: soft enough to crush deeply under almost any blow and tough
+# enough that it never fractures outright -- it just keeps caving in until its hit points run out.
+hardness: 0.1
+toughness: 0.9
+fibrous: 0.1
+hit_points: 400
+resistance: { impact: 0.9, slash: 1.5, pierce: 1.3, explosive: 0.9, fire: 1.0 }

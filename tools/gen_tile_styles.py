@@ -90,6 +90,14 @@ STYLES = {
                  JITTER=0.0, FLAT_SHADED=False, ROUND_KIND_CORNERS=True),
     "voxel": dict(R_OUT=0.0, R_IN=0.0, LIP_H=0.0, LIP_V=0.0, ARC_SEG=1, LIP_SEG=1,
                   JITTER=0.0, FLAT_SHADED=True, ROUND_KIND_CORNERS=False),
+    # soft's far-LOD tier (terrain_params.h's ChunkLod::style): identical R_OUT / R_IN / LIP_H /
+    # LIP_V / ROUND_KIND_CORNERS to "soft" -- profile() samples its arc at fixed angles
+    # (theta = 90 - 45*i/ARC_SEG), so the two styles' arcs share every endpoint regardless of
+    # segment count and only diverge by the chord sagitta (~0.036 tile at ARC_SEG=1), inside the
+    # engine's already-accepted T-junction class. Coarsened only in segments, which is where
+    # soft's triangle cost concentrates (wall_cap_convex 40->8, wall_cap_concave 44->10).
+    "soft_lod": dict(R_OUT=0.48, R_IN=0.48, LIP_H=0.19, LIP_V=0.42, ARC_SEG=1, LIP_SEG=1,
+                     JITTER=0.0, FLAT_SHADED=False, ROUND_KIND_CORNERS=True),
 }
 """One entry per style; the file prefix is `tile_<name>`."""
 

@@ -6,6 +6,35 @@
 namespace toy {
 namespace world {
 
+namespace {
+
+/**
+ * @brief Whether a baked piece's untransformed (orientation 0) geometry is a flat full quadrant:
+ *        every vertex at z = 1 inside `[0.5,1]^2`, facing straight up, covering exactly a quarter
+ *        of the unit cell. Checked once per style per piece in finish_styles() --
+ *        TileMeshLibrary::top_merges() reads the result.
+ */
+bool is_flat_full_quadrant(const TileMeshLibrary::SideGeometry& g) {
+    if (g.empty()) return false;
+    constexpr float k_eps = 1e-3f;
+    for (const auto& v : g.vertices) {
+        if (std::abs(v.position.z - 1.0f) > k_eps) return false;
+        if (v.position.x < 0.5f - k_eps || v.position.x > 1.0f + k_eps) return false;
+        if (v.position.y < 0.5f - k_eps || v.position.y > 1.0f + k_eps) return false;
+        if (v.normal.z < 1.0f - 1e-2f) return false;
+    }
+    double area = 0.0;
+    for (std::size_t t = 0; t + 2 < g.indices.size(); t += 3) {
+        const glm::vec3& a = g.vertices[g.indices[t]].position;
+        const glm::vec3& b = g.vertices[g.indices[t + 1]].position;
+        const glm::vec3& c = g.vertices[g.indices[t + 2]].position;
+        area += 0.5 * std::abs(static_cast<double>((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)));
+    }
+    return std::abs(area - 0.25) < 1e-3;
+}
+
+} // namespace
+
 std::uint8_t TileMeshLibrary::add_style() {
     finished_ = false;
     styles_.emplace_back();
@@ -101,6 +130,11 @@ void TileMeshLibrary::finish_styles() {
             set.pieces[p]   = set.pieces[f];
             set.sections[p] = set.sections[f];
             if (piece == TilePiece::WallCapContinue) set.straight[1] = set.straight[0];
+        }
+    }
+    for (StyleSet& set : styles_) {
+        for (std::size_t p = 0; p < k_tile_piece_count; ++p) {
+            set.top_mergeable[p] = is_flat_full_quadrant(set.pieces[p][0]);
         }
     }
     finished_ = !styles_.empty();

@@ -1,0 +1,303 @@
+scene:
+  scene_name: damage_demo
+  # Typed damage (libs/physxcoopa/physxcoopa/damage/, toyengine/destruct/damage_field.h,
+  # toyengine/destruct/dent.h): one object per damage_materials/ material, so the SAME blow
+  # reads differently on each. Impact dents wood, metal and rubber -- each CRUSHES INWARD a
+  # different amount, deepening with every hit, until its health runs out and it shatters. The
+  # same blow fractures glass, concrete and clay outright, because they are too brittle to dent
+  # (resolve_damage.h's policy table) -- switch to Slash (key 2) to chip them instead, which
+  # also dents, just in a narrow gouge rather than a broad crush.
+  #
+  # wood_log and clay_pot dent on a mesh AUTHORED dense enough already (camp_log_dense,
+  # sphere_dense -- tools/gen_damage_dense_meshes.py); metal_plate stays on the ordinary 24-vertex
+  # `cube` and is SUBDIVIDED once, silently, the first time it is hit (dent_resolution) -- the
+  # two ways to get enough resolution to dent, side by side.
+  #
+  # Run: ./build/toyengine damage_demo        (or SCENE=damage_demo)
+  #   left click      -- DamageCursor's hit_button: deals the CURRENT damage_type at the hit
+  #                      point AND shoves the object (Damageable's impact_transfer), a real
+  #                      physics impulse synced with the damage dealt
+  #   1 / 2 / 3 / 4 / 5 -- switch damage_type: Impact / Slash / Pierce / Explosive / Fire
+  #                        (DamageCursor's type_keys; Fire costs HP here but marks no geometry --
+  #                        toyengine/fire/ owns actual burning)
+  #   right drag      -- look around (CameraController's look_button)
+  #   arrow keys      -- pan the camera around the scene (key_pan_speed)
+  #
+  # Slicing (slice_button) is off here (`none`) -- it has its own demo, slice_demo, and a random
+  # plane cut competing with a chosen typed blow would defeat a demo about the LATTER.
+  #
+  # No dropped weight here on purpose (unlike destruction_demo): glass's fracture threshold is
+  # low enough that an un-choreographed bounce off a neighbour reliably shatters it before the
+  # scene is even watched, which defeats a demo about CLICKING to choose the blow.
+  settings:
+    render: { shadow_distance: 6.0e+01, shadow_softness: 0.3 }
+  root_objects:
+    - name: ground
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 2.6e+01, y: 1.6e+01, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material:
+            albedo: { b: 0.36, g: 0.34, r: 0.32 }
+            ao: 1.0
+            metallic: 0.0
+            roughness: 0.85
+        - type: BoxCollider
+          center: { x: 0.0, y: 0.0, z: -0.5 }
+          material: concrete
+          size: { x: 2.0, y: 2.0, z: 1.0 }
+      children: []
+
+    # --- One object per damage material, left to right ---------------------------------------
+    - name: wood_log
+      active: true
+      components:
+        - type: Transform
+          position: { x: -6.0, y: 0.0, z: 0.2 }
+          scale: { x: 2.0, y: 2.0, z: 2.0 }
+        - type: MeshRenderer
+          mesh_path: props/camp_log_dense
+          material:
+            albedo: { b: 0.18, g: 0.33, r: 0.45 }
+            metallic: 0.0
+            roughness: 0.8
+        - type: BoxCollider
+          material: wood
+          size: { x: 2.0, y: 0.4, z: 0.4 }
+        - type: Rigidbody
+          mass: 25.0
+        - type: Damageable
+          damage_resolution: 16
+          material: wood
+          hit_points: 1200.0
+          # Default max_dent (0.35 of the log's own shortest world extent) caps out after the
+          # very first hit at this amount -- explicit so it deepens visibly over several hits
+          # instead of saturating immediately.
+          max_dent: 0.3
+        - type: Destructible
+          chunk_density: 700.0
+          chunk_lifetime: 0.0
+          impact_impulse: 0.0
+          interior_material: materials/natural/wood
+          max_slices: 2
+          pieces: 10
+      children: []
+
+    - name: metal_plate
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3.0, y: 0.0, z: 0.3 }
+          scale: { x: 1.5, y: 1.5, z: 0.3 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material:
+            albedo: { b: 0.72, g: 0.74, r: 0.75 }
+            metallic: 0.85
+            roughness: 0.3
+        - type: BoxCollider
+          material: metal
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Rigidbody
+          mass: 4.0e+01
+        - type: Damageable
+          damage_resolution: 16
+          material: metal
+          hit_points: 1300.0
+          dent_resolution: 0.05
+        - type: Destructible
+          chunk_density: 7800.0
+          chunk_lifetime: 0.0
+          impact_impulse: 0.0
+          interior_material: materials/metal/steel
+          max_slices: 2
+          pieces: 10
+      children: []
+
+    - name: glass_pane
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.5 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material:
+            albedo: { b: 0.85, g: 0.9, r: 0.9 }
+            alpha: 0.35
+            alpha_mode: Blend
+            metallic: 0.0
+            roughness: 0.05
+        - type: BoxCollider
+          material: concrete
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Rigidbody
+          mass: 6.0
+        - type: Damageable
+          damage_resolution: 16
+          material: glass
+        - type: Destructible
+          chunk_density: 2500.0
+          chunk_lifetime: 0.0
+          impact_impulse: 0.0
+          interior_material: materials/natural/ice
+          max_slices: 2
+          pieces: 10
+      children: []
+
+    - name: concrete_block
+      active: true
+      components:
+        - type: Transform
+          position: { x: 3.0, y: 0.0, z: 0.6 }
+          scale: { x: 1.2, y: 1.2, z: 1.2 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material:
+            albedo: { b: 0.5, g: 0.5, r: 0.5 }
+            metallic: 0.0
+            roughness: 0.95
+        - type: BoxCollider
+          material: concrete
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Rigidbody
+          mass: 5.0e+01
+        - type: Damageable
+          damage_resolution: 16
+          material: concrete
+          hit_points: 800.0
+        - type: Destructible
+          chunk_density: 2400.0
+          chunk_lifetime: 0.0
+          impact_impulse: 0.0
+          interior_material: materials/natural/stone
+          max_slices: 2
+          pieces: 12
+      children: []
+
+    - name: clay_pot
+      active: true
+      components:
+        - type: Transform
+          position: { x: 6.0, y: 0.0, z: 0.6 }
+          scale: { x: 1.1, y: 1.1, z: 1.1 }
+        - type: MeshRenderer
+          mesh_path: primitives/sphere_dense
+          material:
+            albedo: { b: 0.4, g: 0.45, r: 0.62 }
+            metallic: 0.0
+            roughness: 0.75
+        - type: SphereCollider
+          material: concrete
+          radius: 1.0
+        - type: Rigidbody
+          mass: 1.8e+01
+        - type: Damageable
+          damage_resolution: 16
+          material: clay
+          hit_points: 1000.0
+        - type: Destructible
+          chunk_density: 1700.0
+          chunk_lifetime: 0.0
+          impact_impulse: 0.0
+          interior_material: materials/natural/stone
+          max_slices: 2
+          pieces: 10
+      children: []
+
+    - name: rubber_block
+      active: true
+      components:
+        - type: Transform
+          position: { x: 9.0, y: 0.0, z: 0.45 }
+          scale: { x: 0.9, y: 0.9, z: 0.9 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material:
+            albedo: { b: 0.08, g: 0.08, r: 0.08 }
+            metallic: 0.0
+            roughness: 0.9
+        - type: BoxCollider
+          material: rubber
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Rigidbody
+          mass: 3.0e+01
+        - type: Damageable
+          damage_resolution: 16
+          material: rubber
+          hit_points: 1500.0
+        - type: Destructible
+          chunk_density: 1100.0
+          chunk_lifetime: 0.0
+          impact_impulse: 0.0
+          interior_material: materials/basic/rubber
+          max_slices: 2
+          pieces: 10
+      children: []
+
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -1.5e+01, z: 7.0 }
+          rotation: { x: 68.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          far_clip_plane: 3.0e+02
+          fov: 5.5e+01
+          main: true
+          near_clip_plane: 0.1
+          projection: Perspective
+        - type: CameraController
+          capture_cursor: false
+          collide: false
+          distance: 1.7e+01
+          key_pan_speed: 8.0
+          look_button: right
+          max_distance: 5.0e+01
+          max_pitch_deg: 8.0e+01
+          min_distance: 5.0
+          min_pitch_deg: 2.0
+          mode: orbit
+          mouse_sensitivity: 0.12
+          movement_smoothing: 0.25
+          pitch_deg: 24.0
+          target: { x: 0.0, y: 0.0, z: 1.0 }
+          yaw_deg: 0.0
+          zoom_speed: 2.0
+        - type: DamageCursor
+          amount: 240.0
+          damage_type: Impact
+          hit_button: left
+          max_distance: 1000.0
+          seed: 7
+          slice_button: none
+          type_keys: "12345"
+      children: []
+
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 2.0e+01 }
+        - type: DirectionalLight
+          cast_shadows: true
+          color: { b: 0.92, g: 0.97, r: 1.0 }
+          direction: { x: -0.4, y: 0.65, z: -0.65 }
+          intensity: 1.4
+          shadow_intensity: 0.8
+      children: []
+
+    - name: sky
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+        - type: EnvironmentLight
+          ground_color: { b: 0.2, g: 0.21, r: 0.22 }
+          sky_color: { b: 0.9, g: 0.78, r: 0.68 }
+          sky_intensity: 1.1
+      children: []

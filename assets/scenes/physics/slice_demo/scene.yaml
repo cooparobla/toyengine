@@ -15,9 +15,11 @@ scene:
   # face than on the original surface. max_slices: 2 lets a half be cut once more.
   #
   # --- Damage row: a metal sphere (dents), a glass cube (shatters on the first real hit) -----
-  # Both are Damageable; DESTRUCT_DEBUG=1 prints a line per fracture/cleave this system carries
-  # out. Dent/Chip/Hole cost HP and mark the object's DamageField but do not edit the mesh yet
-  # (toyengine/scene/damageable.h's own doc explains why).
+  # Both are Damageable; DESTRUCT_DEBUG=1 prints a line per fracture/cleave/dent this system
+  # carries out. This DamageCursor's amount (400) exceeds damage_sphere's hit_points (its
+  # material's own 250), so it shatters via fracture_on_death on the first right click even
+  # though the blow itself resolves to Dent -- see damage_demo for a tuned HP pool that actually
+  # shows the crush (toyengine/scene/damageable.h's own doc explains what Dent/Chip/Hole do).
   settings:
     render: { shadow_distance: 6.0e+01, shadow_softness: 0.3 }
   root_objects:

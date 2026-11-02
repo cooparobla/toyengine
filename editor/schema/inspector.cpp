@@ -202,6 +202,18 @@ bool show_when_holds(const Node& block, const ShowWhen& w, const std::vector<Fie
 }
 
 EditResult draw_field(imm::Context& ctx, const FieldDesc& f, Node& block, const InspectorEnv& env) {
+    // A dotted key ("tessellation.max_distance") targets a nested sub-mapping rather than a flat
+    // one -- some components keep a group of related keys as their own map in YAML (tessellation:,
+    // generate:). Resolve one level here, creating the group if absent, and recurse with the leaf
+    // key so every FieldKind branch below only ever sees a flat key again.
+    const std::size_t dot = f.key.find('.');
+    if (dot != std::string::npos) {
+        const std::string group = f.key.substr(0, dot);
+        if (!block.contains(group) || !block.at(group).is_mapping()) block[group] = Node::mapping();
+        FieldDesc inner = f;
+        inner.key = f.key.substr(dot + 1);
+        return draw_field(ctx, inner, block[group], env);
+    }
     EditResult r;
     const std::string label = f.display() + "##" + f.key;
     const bool present = block.contains(f.key);
@@ -948,6 +960,13 @@ EditResult draw_sectioned_(imm::Context& ctx, const ComponentSchema& schema, Nod
         for (const std::string& k : keys_of(comp)) {
             if (drawn.count(k) || k.rfind("__", 0) == 0) continue;
             if (schema.field(k)) continue;
+            // A dotted field ("tessellation.max_distance") targets k as its own sub-mapping, so
+            // k itself has no FieldDesc and the check above misses it -- without this, an already
+            // placed dotted group reappears as a raw "unknown" block alongside its own section.
+            const std::string prefix = k + ".";
+            const bool has_dotted_child = std::any_of(schema.fields.begin(), schema.fields.end(),
+                [&](const FieldDesc& f) { return f.key.rfind(prefix, 0) == 0; });
+            if (has_dotted_child) continue;
             unknown = true;
         }
     }

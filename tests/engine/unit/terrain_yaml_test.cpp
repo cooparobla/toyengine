@@ -17,7 +17,13 @@
 
 #include <glm/glm.hpp>
 
+#include <coopa/asset/asset_manager.h>
+#include <coopa/scene/scene_loader.h>
+#include <coopa/scene/scene_object.h>
 #include <coopa/yaml/document.h>
+
+#include <toyengine/world/heightmap_terrain.h>
+#include <toyengine/world/terrain_component.h>
 
 #include "engine/support/checks.h"
 
@@ -284,4 +290,33 @@ COOPA_TEST(unified_terrain_demo_keeps_its_three_flavours_interchangeable) {
         expect(num_at(ps.at("terrain"), "density") <= 0.6,
                "unified: grass density stays tuned down");
     }
+}
+
+/**
+ * @brief `chunk_budget_ms` reaches the component in `mode: heightmap`.
+ *
+ * `parse_heightmap_terrain` is the body `register_scene_components()` dispatches to for this
+ * mode (terrain_yaml.h's `infer_terrain_mode`), but that registration only happens under the
+ * device-taking overload -- unreachable from a device-free unit test (see find_root_object's
+ * comment above). Called directly instead, the way this file's other tests read the YAML tree
+ * directly: before any device exists, exactly where this parser already runs cleanly.
+ */
+COOPA_TEST(heightmap_terrain_reads_chunk_budget_ms) {
+    static coopa::asset::AssetManager assets;
+
+    fkyaml::node node = fkyaml::node::mapping();
+    node["size"] = fkyaml::node(256);
+    node["resolution"] = fkyaml::node(33);
+    node["chunk_budget_ms"] = fkyaml::node(5.5);
+
+    coopa::scene::SceneObject obj("terrain_chunk_budget_test");
+    coopa::scene::SceneLoader::ParseContext ctx;
+    ctx.scene_dir = ".";
+
+    toy::world::parse_heightmap_terrain(node, obj, ctx, assets);
+
+    auto* t = obj.get_component<toy::world::HeightmapTerrain>();
+    require(t != nullptr, "chunk_budget_ms: the component was added");
+    expect(t->chunk_budget_ms == 5.5f, "chunk_budget_ms: the authored value reaches the component, "
+                                        "not the 2.0f default");
 }

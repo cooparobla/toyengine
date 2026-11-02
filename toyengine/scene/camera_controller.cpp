@@ -110,6 +110,16 @@ void CameraController::update_orbit_(coopa::util::Transform& t, float dt) {
         yaw_deg += keys_x * key_orbit_speed_deg_per_sec * dt * (invert_x ? -1.0f : 1.0f);
         pitch_deg += keys_y * key_orbit_speed_deg_per_sec * dt * (invert_y ? -1.0f : 1.0f);
     }
+    if (key_pan_speed != 0.0f && tracker.empty()) {
+        // Slides the static target in the camera's own horizontal plane: right/left along the
+        // current yaw (the same atan2(offset.x, -offset.y) convention start() derives yaw_deg
+        // from, inverted to point from camera toward target), up/down along world Z. A tracked
+        // camera is never panned -- it would just fight the follow back every frame.
+        const float yaw_rad = glm::radians(yaw_deg);
+        const glm::vec3 right(std::cos(yaw_rad), std::sin(yaw_rad), 0.0f);
+        const glm::vec3 up(0.0f, 0.0f, 1.0f);
+        target += (right * look_input.x + up * look_input.y) * key_pan_speed * dt;
+    }
     pitch_deg = glm::clamp(pitch_deg, min_pitch_deg, max_pitch_deg);
 
     if (scroll_input != 0.0f) {

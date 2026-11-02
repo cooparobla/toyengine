@@ -84,6 +84,7 @@ enum class CameraControlMode {
  *   movement_smoothing: 0.3
  *   mouse_sensitivity: 0.15
  *   look_button: right          # hold to turn; omit for a continuous turn
+ *   key_pan_speed: 0.0          # arrow keys slide a static target; 0 leaves them alone
  *   zoom_speed: 1.0
  *   min_distance: 1.0
  *   max_distance: 20.0
@@ -133,6 +134,18 @@ public:
      * viewer, a map screen -- set a speed and get a keyboard orbit for free.
      */
     float key_orbit_speed_deg_per_sec = 0.0f;
+
+    /**
+     * @brief Pan speed from the KEYS, world units per second; 0 (the default) leaves them alone.
+     *
+     * The arrow keys (`look_input`) slide the static `target` in the camera's own horizontal
+     * plane -- right/left along the current yaw, up/down along world Z -- instead of turning the
+     * orbit, so a scene can offer "right-mouse to look, arrows to move" without the two fighting
+     * over the same keys (`key_orbit_speed_deg_per_sec`, which also reads the arrows, stays 0 in
+     * that case). No effect with a `tracker` set: a tracked camera panning off its own subject
+     * would just fight the follow every frame.
+     */
+    float key_pan_speed = 0.0f;
     bool  capture_cursor         = true;  /**< Whether Engine should hide/unbound the cursor for this controller. */
     /**
      * @brief Mouse button that must be held for the mouse to turn the camera: "" (the default)

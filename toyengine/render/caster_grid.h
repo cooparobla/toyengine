@@ -95,7 +95,8 @@ public:
                 _large.push_back(static_cast<uint32_t>(i));
                 continue;
             }
-            Cell& cell = _cells[key_for_(b.center)];
+            const uint64_t ck = key_for_(b.center);
+            Cell& cell = _cells[ck];
             cell.items.push_back(static_cast<uint32_t>(i));
             cell.pad  = std::max(cell.pad, std::max(b.extent.x, b.extent.y));
             cell.zmin = std::min(cell.zmin, b.center.z - b.extent.z);

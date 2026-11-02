@@ -335,3 +335,56 @@ COOPA_TEST(first_person_mouse_yaw_turns_the_character) {
     // Yaw 90 faces -X (forward(yaw) = (-sin, cos)).
     expect(rig.feet().x < -1.0f && std::abs(rig.feet().y) < 0.1f, "first person: W walks where the camera faces");
 }
+
+COOPA_TEST(arrow_keys_pan_the_static_target_only_when_a_scene_asks_for_it) {
+    {
+        // Default key_pan_speed (0) leaves the arrows alone -- same "off unless a scene opts
+        // in" policy as key_orbit_speed_deg_per_sec.
+        CameraController* cc = nullptr;
+        auto scene = make_orbit_scene(&cc, glm::vec3(0.0f, -10.0f, 0.0f));
+        scene->start();
+        const glm::vec3 target = cc->target;
+
+        cc->look_input = glm::vec2(1.0f, 1.0f);
+        for (int i = 0; i < 60; ++i) scene->update(1.0f / 60.0f);
+        expect(cc->target == target, "camera_controller: arrows leave the target alone at the default key_pan_speed of 0");
+    }
+    {
+        // Seed (0, -10, 0) derives yaw_deg == 0 in start() (atan2(0, 10)); at that yaw "right" is
+        // +X and "up" is world +Z (see update_orbit_()'s own derivation).
+        CameraController* cc = nullptr;
+        auto scene = make_orbit_scene(&cc, glm::vec3(0.0f, -10.0f, 0.0f));
+        cc->key_pan_speed = 5.0f;
+        scene->start();
+        require(std::abs(cc->yaw_deg) < 1e-3f, "camera_controller: the seed yaws the rig to 0, as the math below assumes");
+
+        cc->look_input = glm::vec2(1.0f, 0.0f); // Right
+        for (int i = 0; i < 60; ++i) scene->update(1.0f / 60.0f);
+        expect_near(cc->target.x, 5.0f, 0.01f, "camera_controller: a second of Right pans +X by key_pan_speed");
+        expect_near(cc->target.y, 0.0f, 0.01f, "camera_controller: ...and leaves Y alone");
+
+        cc->look_input = glm::vec2(0.0f, 1.0f); // Up
+        for (int i = 0; i < 60; ++i) scene->update(1.0f / 60.0f);
+        expect_near(cc->target.z, 5.0f, 0.01f, "camera_controller: a second of Up pans +Z by key_pan_speed");
+    }
+    {
+        // A tracked camera must never be panned off its own subject.
+        auto scene = std::make_unique<Scene>("pan_tracker_test");
+        auto target_obj = std::make_unique<SceneObject>("target");
+        target_obj->add_component<TransformComponent>()->transform().set_position(glm::vec3(0.0f));
+        scene->add_root_object(std::move(target_obj));
+
+        auto cam_obj = std::make_unique<SceneObject>("camera");
+        cam_obj->add_component<TransformComponent>()->transform().set_position(glm::vec3(0.0f, -10.0f, 0.0f));
+        auto* cc = cam_obj->add_component<CameraController>();
+        cc->tracker = "target";
+        cc->key_pan_speed = 5.0f;
+        scene->add_root_object(std::move(cam_obj));
+        scene->start();
+
+        const glm::vec3 target_before = cc->target;
+        cc->look_input = glm::vec2(1.0f, 1.0f);
+        for (int i = 0; i < 60; ++i) scene->update(1.0f / 60.0f);
+        expect(cc->target == target_before, "camera_controller: a tracked camera ignores key_pan_speed entirely");
+    }
+}

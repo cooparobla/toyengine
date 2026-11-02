@@ -49,7 +49,7 @@ The other terrain kind, `TileTerrain` (mapcoopa tile worlds), is the create-terr
 | `heightmap`, `splat0`, `splat1` | PNG files (default `terrain/<object>_height.png` ...); splat0 RGBA = layers 0-3, splat1 = 4-7 |
 | `generate {seed, octaves, feature_size, ridges, base, amplitude, island}` | Procedural start when the heightmap file is missing |
 | `layers [{name, albedo, normal, tint, tiling, roughness, metallic, normal_strength, triplanar, triplanar_sharpness}]` | Up to 8 paint layers; `tiling` is metres per repeat; `triplanar` for cliffs |
-| `tessellation {enabled, edge_pixels, max_factor, max_distance}`, `patch_resolution` | Detail by screen size: `patch_resolution` 0 = auto (4 quads, tessellation adds near detail); `max_distance` 0 = the view distance |
+| `tessellation {enabled, edge_pixels, max_factor, max_distance}`, `patch_resolution` | Detail by screen size: `patch_resolution` 0 = auto (4 quads, tessellation adds near detail); `max_distance` 0 = `min(view_distance, 2000 m)`, not the raw `view_distance` -- this is the terrain's LOD distance knob (below `lods:` does not apply to heightmap mode) |
 | `view_distance`, `shadow_distance` | Chunks exist within `view_distance` m (0 / `auto` = the camera's far clip); beyond `shadow_distance` they cast no shadow |
 | `chunk_budget_ms` | Owner-thread milliseconds per frame spent spawning chunks and refreshing their water (default 2.0); raised automatically behind the loading screen, so only lower it for a smaller per-frame tax during steady-state gameplay at the cost of a slower stream-in |
 | `layer_texture_size` | Every layer texture is resized to this (mipmapped array) |
@@ -89,6 +89,16 @@ touched chunks live. Stock meshes: `meshes/nature/{grass_tuft, pine_trunk, pine_
   few triangles. Set a number only as a hard cap: a close / top-down camera that never sees far, or
   a terrain so large that per-chunk bookkeeping shows up. `shadow_distance` (e.g. 600) keeps far
   chunks out of the shadow cascades.
+- **There is no mesh LOD on a heightmap terrain** -- every chunk draws the same shared patch, so
+  `lods:` (Tile mode's chunk-simplification levels), `mesh_lod_bias` and a renderer's own `lod_bias`
+  all do nothing here (the YAML parser rejects a `lods:` key on `mode: heightmap` with a warning).
+  Tessellation IS the LOD mechanism: `tessellation.max_distance` is the detail-distance knob, and its
+  default already spans the whole streamed range (`min(view_distance, 2000 m)`). Lowering it trades a
+  visible ring of coarse ground -- the surface drops straight to `patch_resolution` quads per chunk
+  past the cutoff -- for a saving, and only pays off if the cutoff stays past everywhere the terrain
+  is still visibly dense. To cut cost without a cliff, raise `tessellation.edge_pixels` (default 8)
+  instead: it thins triangles uniformly across the whole range rather than cutting detail at one
+  radius.
 - **Details are the real cost.** Each scatter chunk lives in a persistent GPU buffer (uploaded once
   per rebuild, never re-copied per view); keep `max_draw_distance` modest for small things (or 0 =
   automatic from mesh size), `fade_start` thins them out before the edge, `cast_shadows: false` for

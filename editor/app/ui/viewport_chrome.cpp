@@ -733,7 +733,7 @@ bool in_triangle(glm::vec2 p, glm::vec2 a, glm::vec2 b, glm::vec2 c) {
 /**
  * @brief The octahedral bone from `head` to `tail`, projected to the screen.
  *
- * Pose mode's bone display; the origin styles draw axes or an orb, never a bone.
+ * Pose mode's bone display, and the Bone origin style outside it.
  *
  * `x_hint` rolls the body so it turns with its joint instead of spinning as the direction
  * crosses an axis; `z_hint` is the fallback when the bone runs along `x_hint`.
@@ -788,6 +788,8 @@ void ViewportChromePanel::draw_object_glyph_(imm::Context& ctx, const ViewProj& 
     }
     // Pose mode draws the rig as bones: its own display, not an overlay the user turns off.
     const bool pose_bone = kind.empty() && app_.in_pose_mode_() && app_.timeline_panel_->in_anim_rig_(id);
+    // A rig's own Bone origin style, outside Pose mode -- this one DOES follow "Origins".
+    const bool bone_glyph = kind.empty() && (pose_bone || app_.origin_style_for_(id) == OriginStyle::Bone);
     // "Cameras / Lights" covers the symbols; "Origins" covers everything else's origin.
     if (!pose_bone && (!kind.empty() ? !app_.show_glyphs_ : !app_.show_origins_)) return;
     const float wpp = vp.world_per_pixel(pos);
@@ -842,7 +844,7 @@ void ViewportChromePanel::draw_object_glyph_(imm::Context& ctx, const ViewProj& 
         return;
     }
     (void)wpp;
-    if (pose_bone) draw_pose_bones_(ctx, vp, id, w, col);
+    if (bone_glyph) draw_pose_bones_(ctx, vp, id, w, col);
     else draw_origin_glyph_(ctx, vp, id, w, col);
 }
 
@@ -892,7 +894,7 @@ void ViewportChromePanel::draw_origin_glyph_(imm::Context& ctx, const ViewProj& 
         break;
     }
     case OriginStyle::Axes:
-    default:
+    default:   // and OriginStyle::Bone -- draw_object_glyph_'s bone_glyph routes that to draw_pose_bones_ instead
         seg(pos - X * a, pos + X * a, 1.3f);
         seg(pos - Y * a, pos + Y * a, 1.3f);
         seg(pos - Z * a, pos + Z * a, 1.3f);
@@ -908,6 +910,7 @@ float ViewportChromePanel::origin_glyph_pick_px_(ObjectId id, const ViewProj& vp
     // Only what is actually on screen is clickable by its shape; with the overlay off, or on
     // a camera / light (which draws its own symbol), the origin point is all there is.
     const bool pose_bone = app_.in_pose_mode_() && app_.timeline_panel_->in_anim_rig_(id) && app_.is_joint_object_(id);
+    const bool bone_glyph = app_.is_joint_object_(id) && (pose_bone || app_.origin_style_for_(id) == OriginStyle::Bone);
     if (!app_.show_overlays_ || (!pose_bone && !app_.show_origins_) || !app_.is_joint_object_(id)) return best;
 
     const glm::vec3 X = glm::normalize(glm::vec3(world[0])), Y = glm::normalize(glm::vec3(world[1])),
@@ -917,7 +920,7 @@ float ViewportChromePanel::origin_glyph_pick_px_(ObjectId id, const ViewProj& vp
         const auto pa = vp.project(p), pb = vp.project(q);
         if (pa && pb) best = std::min(best, point_segment_distance(px, *pa, *pb));
     };
-    if (pose_bone) {
+    if (bone_glyph) {
         for (const glm::vec3& tail : app_.bone_tails_(id, a * 2.0f)) {
             glm::vec2 head, tip, q[4];
             if (!project_bone(vp, pos, tail, X, Z, head, tip, q)) continue;
@@ -939,7 +942,7 @@ float ViewportChromePanel::origin_glyph_pick_px_(ObjectId id, const ViewProj& vp
         segment(pos, pos + Z * (a * 0.45f));
         break;
     case OriginStyle::Axes:
-    default:
+    default:   // and OriginStyle::Bone -- bone_glyph above already returned through the bone branch
         segment(pos - X * a, pos + X * a);
         segment(pos - Y * a, pos + Y * a);
         segment(pos - Z * a, pos + Z * a);

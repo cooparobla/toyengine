@@ -36,10 +36,10 @@
 
 #include <gfxcoopa/engine/data/mesh.h>
 
+#include <toyengine/destruct/mesh_solid.h>
+
 namespace toy {
 namespace destruct {
-
-using Vertex = coopa::gfx::engine::data::Vertex;
 
 /**
  * @struct FractureSettings
@@ -92,15 +92,6 @@ struct FractureSettings {
 };
 
 /**
- * @struct FractureBox
- * @brief One box of a piece's collision shape, in the piece's own (principal-axis) space.
- */
-struct FractureBox {
-    glm::vec3 centre{0.0f};
-    glm::vec3 half_extent{0.0f};
-};
-
-/**
  * @struct FracturePiece
  * @brief One chunk: a closed mesh in ITS OWN space, plus where that space sits in the original's.
  *
@@ -120,6 +111,12 @@ struct FracturePiece {
     glm::quat orientation{1.0f, 0.0f, 0.0f, 0.0f}; /**< ...and how it is turned (the principal frame). */
     glm::vec3 half_extent{0.0f};  /**< Half-size of the piece's box in its own frame. */
     float     volume = 0.0f;      /**< Volume of the closed piece, for mass. */
+
+    /** @brief Triangles from here on (into `indices`) are newly-cut interior faces, not the
+     *         source mesh's own surface -- see FractureSettings::cap_interiors. Equal to
+     *         indices.size() when the piece has no interior face of its own (it is the whole
+     *         source mesh, settings.pieces == 1). */
+    std::uint32_t cap_first_index = 0;
 
     /**
      * @brief The piece's collision shape: one box for a blocky shard, a few for an awkward one.
@@ -151,11 +148,24 @@ std::vector<FracturePiece> fracture_mesh(const std::vector<Vertex>& vertices,
  * the thing worth testing on its own: a cube clipped by a plane through its middle is half a
  * cube, closed, with a square cap.
  *
+ * @param out_cap_first_index If not null, set to the index (into `out_indices`) where the cap
+ *                           region starts -- everything before it is the mesh's own surface,
+ *                           everything from here on is a flat cut face. Lets a caller (slicing,
+ *                           a cut-face material) give the cap its own mesh part without having
+ *                           to re-detect it.
+ * @param in_cap_first_index For a chain of clips against the SAME growing piece (fracture_mesh's
+ *                           one cell against several neighbour planes): the previous call's
+ *                           `out_cap_first_index`, into THIS call's `indices` -- so a cap from
+ *                           clip 1 that survives clip 2 is still reported as cap, not as source
+ *                           surface. The default (no previous cap) treats the whole input as
+ *                           surface, which is what a single, one-shot clip (slicing) wants.
  * @return False when the plane removes everything (the output is then empty).
  */
 bool clip_mesh(const std::vector<Vertex>& vertices, const std::vector<std::uint32_t>& indices,
                const glm::vec3& normal, float distance, bool cap,
-               std::vector<Vertex>& out_vertices, std::vector<std::uint32_t>& out_indices);
+               std::vector<Vertex>& out_vertices, std::vector<std::uint32_t>& out_indices,
+               std::uint32_t* out_cap_first_index = nullptr,
+               std::size_t in_cap_first_index = static_cast<std::size_t>(-1));
 
 } // namespace destruct
 } // namespace toy

@@ -748,6 +748,8 @@ public:
     bool warm_budgets_applied_ = false;
     /// Each warming terrain's authored upload_budget_ms, to put back at the reveal.
     std::vector<std::pair<toy::world::TerrainComponent*, float>> warm_saved_upload_ms_;
+    /// Each warming terrain's authored chunk_budget_ms (heightmap mode), to put back at the reveal.
+    std::vector<std::pair<toy::world::TerrainComponent*, float>> warm_saved_heightmap_chunk_ms_;
     /// Each warming painter's authored chunk_build_budget, to put back at the reveal.
     std::vector<std::pair<toy::instance::InstancePainter*, int>> warm_saved_chunk_budget_;
     /// The warming scene's authored water settings, likewise.
@@ -1124,6 +1126,9 @@ private:
      */
     /// Pushes this frame's pick ray and button state onto every FireIgniter.
     void drive_fire_igniters_(coopa::scene::Scene& scene);
+    /// Pushes this frame's pick ray and button edges onto every DamageCursor -- same
+    /// push-not-pull contract as drive_fire_igniters_(); DestructionSystem consumes them.
+    void drive_damage_cursors_(coopa::scene::Scene& scene);
     void drive_turntables_(coopa::scene::Scene& scene);
 
     /**

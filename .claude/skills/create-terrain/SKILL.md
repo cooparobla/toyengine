@@ -91,6 +91,10 @@ Write `tile_set:` in new scenes.
   come from `tools/gen_tile_styles.py` and `tools/gen_terrain_atlas.py` -- extend those
   generators (a new set is a new STYLES entry) rather than hand-editing their outputs. In the
   editor, *Duplicate as New Tile Set* copies a set with its own piece meshes to reshape.
+- **Hard-edged voxel look**: `tile_set: objects/terrain/tileset_voxel`, and **erase any
+  `kind_tile_sets` entries** -- pointing a kind at `tileset_rock` (or any set that uses
+  `round_kind_corners: true`) softens exactly the corners the voxel set draws hard. See
+  `terrain_voxel` in `assets/scenes/terrain/unified_terrain_demo`.
 - **Planets**: `planet: true` with `face_tiles` (tiles per cube-face edge; radius
   `2 * face_tiles * tile_size / pi`), `chunk_size` dividing it, and `gravity` (m/s^2). Everything
   stays loaded and the planet only starts pulling once every chunk is live, so bodies and the

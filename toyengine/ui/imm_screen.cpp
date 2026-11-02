@@ -132,6 +132,22 @@ void ImmScreen::ensure_canvas_() {
     }
     if (!canvas_) return;
 
+    // Scales authored canvas pixels to whatever surface this screen actually draws on, rather
+    // than the raw device pixels build_immediate_canvas() leaves CanvasComponent::scaler at by
+    // default. World space skips this entirely -- CanvasScaler plays no part there (world_size
+    // is what sizes a plate). ImmediateCanvas is a CHILD of the CanvasComponent's object
+    // (see find_canvas_()'s own doc), never on it, so it is reached through the parent.
+    if (space == ImmSpace::Screen && reference_resolution.x > 0.0f && reference_resolution.y > 0.0f) {
+        coopa::scene::SceneObject* canvas_root = canvas_->owner ? canvas_->owner->parent() : nullptr;
+        if (canvas_root != nullptr) {
+            if (auto* cc = canvas_root->get_component<coopa::ui::CanvasComponent>()) {
+                cc->scaler.mode = coopa::ui::ScaleMode::ScaleWithScreenSize;
+                cc->scaler.reference_resolution = reference_resolution;
+                cc->scaler.match_width_or_height = reference_match;
+            }
+        }
+    }
+
     // `hidden` is checked here rather than by the caller so toggling it takes effect on the
     // next frame with no rebuild: the callback stays installed and simply declares nothing.
     // Game UI is reachable without a mouse: Tab walks the widgets, Enter/Space activates.

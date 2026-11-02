@@ -3,6 +3,7 @@
 #include <toyengine/water/water_body.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <sstream>
@@ -11,6 +12,7 @@
 
 #include <coopa/asset/asset_id.h>
 #include <coopa/asset/asset_manager.h>
+#include <coopa/job/engine.h>
 #include <coopa/scene/components/transform_component.h>
 #include <coopa/scene/scene_object.h>
 #include <coopa/scene/scene_system.h>
@@ -25,6 +27,7 @@
 
 #include <toyengine/render/terrain_gpu.h>
 #include <toyengine/scene/runtime_object.h>
+#include <toyengine/world/terrain_views.h>
 
 namespace toy {
 namespace world {
@@ -71,7 +74,15 @@ std::vector<std::uint8_t> load_layer_image(const std::string& path, int size) {
     return out;
 }
 
+/// Distinct from TerrainSystem::k_terrain_job_type (tile mode) so profiling and job-type
+/// dashboards can tell the two terrain modes' work apart.
+constexpr coopa::job::JobType k_heightmap_collider_job_type = 0x7E44A200u;
+
 } // namespace
+
+void HeightmapColliderBuild::run() {
+    result = std::make_shared<const coopa::physx::geometry::HeightGrid>(nx, ny, cell, std::move(heights));
+}
 
 HeightmapTerrainSystem::HeightmapTerrainSystem(coopa::gfx::core::Device& device, coopa::gfx::memory::Allocator& allocator,
                                                coopa::gfx::command::CommandPool& cmd_pool, coopa::asset::AssetManager& assets)
@@ -164,12 +175,25 @@ void HeightmapTerrainSystem::execute(coopa::scene::Scene& scene, const coopa::sc
     unfinished_chunks_ = 0;
     // One component type serves both modes, so the lookup returns every terrain in the scene:
     // this system owns the heightmap ones, TerrainSystem (order 60) owns the tile ones.
+    std::unordered_set<HeightmapTerrain*> live;
     for (HeightmapTerrain* terrain : scene.get_components<HeightmapTerrain>()) {
         if (terrain->mode != TerrainMode::Heightmap) continue;
         if (terrain->data == nullptr || terrain->owner == nullptr) continue;
+        // get_components() already skips a terrain whose own object is inactive; this also
+        // catches an inactive ANCESTOR (an EnvPresetSwitcher preset group, say), which it does
+        // not -- see active_in_hierarchy()'s doc.
+        if (!active_in_hierarchy(*terrain->owner)) continue;
         terrain->sync_field();
         tick_(*terrain, scene, ctx);
+        live.insert(terrain);
     }
+    // Anything ticked last frame but not this one went inactive (or an ancestor did): nothing
+    // else will ever ask this terrain's chunks to go away, so release them now instead of
+    // leaking every chunk object and its collider for as long as the scene runs.
+    for (HeightmapTerrain* terrain : ticked_) {
+        if (live.find(terrain) == live.end()) release_terrain_(*terrain, scene, ctx);
+    }
+    ticked_ = std::move(live);
     evict_();
 }
 
@@ -378,26 +402,43 @@ void HeightmapTerrainSystem::stream_chunks_(HeightmapTerrain& terrain, Heightmap
     const glm::vec3 origin = terrain.origin();
     // One chunk of slack before dropping, so a camera on the boundary does not flicker chunks.
     const float keep = s.view_distance + g.chunk_size;
-    // Spawning is cheap (an object, a transform, a renderer on the shared patch), but a jump
-    // across a huge terrain should spread it over a few frames rather than hitch.
-    int budget = 512;
+
+    // Missing chunks the camera wants, nearest first: spawning (and the water rebuild it
+    // triggers inline) is not jobified here the way Tiles mode is, so a teleport or a first
+    // activation that wants hundreds of chunks at once has to be spread over frames by this
+    // loop alone -- ground nearest the camera first, not whichever corner a row-major scan
+    // happens to reach before the budget below runs out.
+    struct Want { float d; int cx, cy; };
+    std::vector<Want> missing;
     for (int cy = 0; cy < rt.chunk_count.y; ++cy) {
         for (int cx = 0; cx < rt.chunk_count.x; ++cx) {
             SceneObject*& slot = rt.chunks[static_cast<std::size_t>(cy) * rt.chunk_count.x + cx];
             const float d = chunk_distance(g, origin, cx, cy, camera);
             const bool wanted = d <= s.view_distance;
             if (wanted) ++wanted_chunks_;
-            if (slot == nullptr && wanted && budget > 0) {
-                spawn_chunk_(terrain, rt, scene, s, cx, cy);
-                --budget;
+            if (slot == nullptr && wanted) {
+                missing.push_back({d, cx, cy});
             } else if (slot != nullptr && d > keep) {
                 terrain.owner->detach_child(slot);
                 slot = nullptr;
                 --rt.live_chunks;
             }
-            if (wanted && slot == nullptr) ++unfinished_chunks_;
         }
     }
+    std::sort(missing.begin(), missing.end(), [](const Want& a, const Want& b) { return a.d < b.d; });
+
+    const auto budget_start = std::chrono::steady_clock::now();
+    const double budget_ms = std::max(0.1f, terrain.chunk_budget_ms);
+    std::size_t spawned = 0;
+    for (; spawned < missing.size(); ++spawned) {
+        spawn_chunk_(terrain, rt, scene, s, missing[spawned].cx, missing[spawned].cy);
+        // Checked after the first chunk, never before it: a budget too small for even one
+        // chunk would otherwise stall the stream outright (TerrainComponent::upload_budget_ms's
+        // rule, mirrored here).
+        const double spent = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - budget_start).count();
+        if (spent >= budget_ms) { ++spawned; break; }
+    }
+    for (std::size_t i = spawned; i < missing.size(); ++i) ++unfinished_chunks_;
 }
 
 void HeightmapTerrainSystem::refresh_chunk_water_(HeightmapTerrain& terrain,
@@ -420,11 +461,23 @@ void HeightmapTerrainSystem::refresh_chunk_water_(HeightmapTerrain& terrain,
         if (existing == nullptr) {
             auto object = std::make_unique<SceneObject>(name);
             auto* tc = object->add_component<TransformComponent>();
-            // add_child() does not link transforms; the water is placed in the chunk's space.
-            if (auto* parent = chunk_object.get_transform()) tc->set_parent_transform(&parent->transform());
+            // NOT the chunk's own transform: chunk_box() scales it to the chunk's XY extent and
+            // its height range for frustum culling, but build_smooth_chunk_water()'s positions
+            // are chunk-local METRES (xy) and an absolute water level (z) -- the vertex shader
+            // contract a tile chunk's water already has. Parented under the chunk's scaled space
+            // those metres would be stretched by it and the level lifted by the height range, so
+            // the sheet never appeared on screen. Parent to the terrain's transform instead, at
+            // the chunk's origin in the SAME metres the mesh already uses.
+            if (auto* parent = terrain.owner->get_transform()) {
+                tc->set_parent_transform(&parent->transform());
+                const float cs = terrain.data->geometry().chunk_size;
+                tc->transform().set_position(glm::vec3(static_cast<float>(cx) * cs, static_cast<float>(cy) * cs, 0.0f));
+            }
             auto* body = object->add_component<water::WaterBody>();
             water::copy_water_settings(terrain.water_look, *body);
             body->mode = river ? water::WaterMode::Flowing : water::WaterMode::Planar;
+            // Ownership stays with the chunk: add_child() here only links parentage (draining or
+            // destroying the chunk takes this water with it), not the transform set above.
             existing = chunk_object.add_child(std::move(object));
         }
         if (auto* body = existing->get_component<water::WaterBody>()) {
@@ -437,13 +490,32 @@ void HeightmapTerrainSystem::refresh_water_(HeightmapTerrain& terrain, Heightmap
     // The records carry the water's kind and flow, so their revision is what moves when water
     // is painted, flooded, drained or applied from a map.
     const std::uint64_t revision = terrain.field.cursor().tiles;
-    if (revision == rt.water_revision) return;
-    rt.water_revision = revision;
-    for (int cy = 0; cy < rt.chunk_count.y; ++cy) {
-        for (int cx = 0; cx < rt.chunk_count.x; ++cx) {
-            SceneObject* chunk = rt.chunks[static_cast<std::size_t>(cy) * rt.chunk_count.x + cx];
-            if (chunk != nullptr) refresh_chunk_water_(terrain, *chunk, cx, cy);
-        }
+    if (revision != rt.water_rebuild_target) {
+        // A new change mid-sweep restarts it from the top: finishing a stale target would leave
+        // chunks the latest edit touched un-rebuilt until some LATER change happened to sweep
+        // past them again.
+        rt.water_rebuild_target = revision;
+        rt.water_refresh_cursor = 0;
+    }
+    if (rt.water_revision == rt.water_rebuild_target) return;   // already caught up
+
+    const auto budget_start = std::chrono::steady_clock::now();
+    const double budget_ms = std::max(0.1f, terrain.chunk_budget_ms);
+    std::size_t i = rt.water_refresh_cursor;
+    for (; i < rt.chunks.size(); ++i) {
+        SceneObject* chunk = rt.chunks[i];
+        if (chunk == nullptr) continue;
+        const int cx = static_cast<int>(i % static_cast<std::size_t>(rt.chunk_count.x));
+        const int cy = static_cast<int>(i / static_cast<std::size_t>(rt.chunk_count.x));
+        refresh_chunk_water_(terrain, *chunk, cx, cy);
+        // Checked after the first chunk refreshed, never before it -- same rule as stream_chunks_.
+        const double spent = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - budget_start).count();
+        if (spent >= budget_ms) { ++i; break; }
+    }
+    rt.water_refresh_cursor = i;
+    if (rt.water_refresh_cursor >= rt.chunks.size()) {
+        rt.water_revision = rt.water_rebuild_target;
+        rt.water_refresh_cursor = 0;
     }
 }
 
@@ -467,11 +539,13 @@ void HeightmapTerrainSystem::spawn_chunk_(HeightmapTerrain& terrain, HeightmapTe
     // add_child() links ownership only: the chunk's transform must follow the terrain's.
     if (auto* parent = terrain.owner->get_transform()) tc->set_parent_transform(&parent->transform());
     SceneObject* raw = terrain.owner->add_child(std::move(object));
+    // The water over it comes with it: a chunk streaming in beside a lake should arrive wet.
+    // Before adopt(), which stamps Component::scene across the whole subtree -- a water child
+    // added after would otherwise come up with a null scene pointer, same as a tile chunk's.
+    refresh_chunk_water_(terrain, *raw, cx, cy);
     scene.adopt(*raw);
     rt.chunks[static_cast<std::size_t>(cy) * rt.chunk_count.x + cx] = raw;
     ++rt.live_chunks;
-    // The water over it comes with it: a chunk streaming in beside a lake should arrive wet.
-    refresh_chunk_water_(terrain, *raw, cx, cy);
 }
 
 void HeightmapTerrainSystem::destroy_chunks_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt) {
@@ -483,6 +557,26 @@ void HeightmapTerrainSystem::destroy_chunks_(HeightmapTerrain& terrain, Heightma
     rt.chunks.clear();
     rt.live_chunks = 0;
     rt.material_signature.clear();
+    // Fresh chunks get their water from spawn_chunk_() directly; any in-progress sweep over the
+    // old (now gone) chunk array must not resume indexing into the new one partway through.
+    rt.water_refresh_cursor = 0;
+}
+
+void HeightmapTerrainSystem::release_terrain_(HeightmapTerrain& terrain, coopa::scene::Scene& scene,
+                                              const coopa::scene::FrameContext& ctx) {
+    if (!terrain.runtime) return;
+    HeightmapTerrainRuntime& rt = *terrain.runtime;
+    destroy_chunks_(terrain, rt);
+    // destroy_chunks_() leaves rt.chunks empty, which is itself what tick_()'s rebuild check
+    // reads to spawn everything fresh if this terrain is reactivated -- no further reset needed.
+    cancel_collider_build_(rt, ctx);
+    if (rt.collision != nullptr && terrain.owner != nullptr) {
+        terrain.owner->detach_child(rt.collision);
+        rt.collision = nullptr;
+        if (auto* physics = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene.find_system("Physics"))) {
+            physics->refresh();
+        }
+    }
 }
 
 void HeightmapTerrainSystem::apply_material_(const HeightmapTerrain& terrain, const HeightmapTerrainRuntime& rt,
@@ -542,12 +636,13 @@ void HeightmapTerrainSystem::fit_chunk_boxes_(HeightmapTerrain& terrain, Heightm
 }
 
 void HeightmapTerrainSystem::update_collider_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt, coopa::scene::Scene& scene,
-                                              const coopa::scene::FrameContext&) {
+                                              const coopa::scene::FrameContext& ctx) {
     using coopa::physx::components::HeightfieldCollider;
     auto refresh_physics = [&scene]() {
         if (auto* physics = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene.find_system("Physics"))) physics->refresh();
     };
     if (!terrain.collision) {
+        cancel_collider_build_(rt, ctx);
         if (rt.collision != nullptr) {
             terrain.owner->detach_child(rt.collision);
             rt.collision = nullptr;
@@ -572,10 +667,29 @@ void HeightmapTerrainSystem::update_collider_(HeightmapTerrain& terrain, Heightm
         rt.collider_dirty_since = -1.0;
         refresh_physics();
     }
+
+    // A rebuild already in flight: harvest it once done, and do nothing else this frame --
+    // including not starting a second one for an edit that landed while this one was building
+    // (collider_seen_revision below, same debounce as a mid-sculpt edit, picks that up once
+    // this build lands).
+    if (rt.collider_job.is_valid()) {
+        if (!rt.collider_job.is_complete()) return;
+        rt.collider_job.close();
+        rt.collider_job = coopa::job::JobHandle{};
+        if (auto* col = rt.collision->get_component<HeightfieldCollider>()) {
+            if (rt.collider_build && rt.collider_build->result) col->set_grid(rt.collider_build->result);
+        }
+        rt.collider_build.reset();
+        // The revision it was BUILT from, not data.height_revision() now: an edit mid-build
+        // must still be seen as dirty below, same as one that lands mid-debounce.
+    }
     if (rt.collider_revision == data.height_revision()) return;
 
     // While the grid is being sculpted, rebuild once the strokes pause rather than every frame:
-    // the copy and its culling pyramid are a few milliseconds on a big grid.
+    // starting a build mid-drag just means throwing most of them away before they finish. A
+    // freshly activated terrain (collider_revision reset to 0 above) skips straight past this --
+    // its collision should appear as soon as possible, and unlike the old inline cook, "right
+    // away" no longer means a frame hitch: the copy and the pyramid both happen on a job now.
     const bool first = rt.collider_revision == 0;
     if (!first) {
         if (rt.collider_dirty_since < 0.0) rt.collider_dirty_since = time_;
@@ -586,12 +700,39 @@ void HeightmapTerrainSystem::update_collider_(HeightmapTerrain& terrain, Heightm
         }
         if (time_ - rt.collider_dirty_since < 0.25) return;
     }
-    auto* col = rt.collision->get_component<HeightfieldCollider>();
-    if (col == nullptr) return;
-    col->set_grid(std::make_shared<const coopa::physx::geometry::HeightGrid>(data.nx(), data.ny(), data.cell(), data.heights()));
-    rt.collider_revision = data.height_revision();
+
+    // The snapshot is taken here, on the owner thread -- the job builds from its own copy, so
+    // the grid may be edited again while it runs (that edit is simply seen as dirty again once
+    // this build lands, by the height_revision() check above).
+    auto build = std::make_shared<HeightmapColliderBuild>();
+    build->nx = data.nx();
+    build->ny = data.ny();
+    build->cell = data.cell();
+    build->heights = data.heights();
+    const std::uint64_t building_revision = data.height_revision();
+    if (ctx.jobs != nullptr) {
+        rt.collider_build = build;
+        rt.collider_job = ctx.jobs->create_handle();
+        ctx.jobs->submit([build]() { build->run(); }, k_heightmap_collider_job_type, rt.collider_job, nullptr, 0u,
+                         coopa::job::Priority::Normal);
+    } else {
+        // No JobEngine installed (a bare unit test, say): build inline rather than never finishing.
+        build->run();
+        if (auto* col = rt.collision->get_component<HeightfieldCollider>()) {
+            if (build->result) col->set_grid(build->result);
+        }
+    }
+    rt.collider_revision = building_revision;
     rt.collider_seen_revision = rt.collider_revision;
     rt.collider_dirty_since = -1.0;
+}
+
+void HeightmapTerrainSystem::cancel_collider_build_(HeightmapTerrainRuntime& rt, const coopa::scene::FrameContext& ctx) {
+    if (!rt.collider_job.is_valid()) return;
+    if (ctx.jobs != nullptr) ctx.jobs->cancel(rt.collider_job);
+    rt.collider_job.close();
+    rt.collider_job = coopa::job::JobHandle{};
+    rt.collider_build.reset();
 }
 
 void HeightmapTerrainSystem::evict_() {
@@ -624,7 +765,7 @@ std::vector<HeightmapView> heightmap_views(const coopa::scene::Scene& scene) {
     std::vector<HeightmapView> out;
     for (const HeightmapTerrain* t : scene.get_components<HeightmapTerrain>()) {
         if (t->mode != TerrainMode::Heightmap) continue;
-        if (t->data != nullptr && t->owner != nullptr && t->owner->active()) out.push_back(t->view());
+        if (t->data != nullptr && t->owner != nullptr && active_in_hierarchy(*t->owner)) out.push_back(t->view());
     }
     return out;
 }

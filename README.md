@@ -297,6 +297,8 @@ The engine repository runs on its own, with one demo scene per area in [`assets/
 | `water_demo` | Lake, river, foam, ripples, buoyant crates, a raft and a circling boat; a deep pool for the underwater look |
 | `water_stress_demo` | Benchmark: a 1 km ocean, distant lakes and 200 buoyant crates |
 | `terrain_demo` | Streamed procedural world in styled, smooth tiles. WASD moves the focus, Tab/Shift change height |
+| `heightmap_terrain_demo` | A sculpted 1 km valley: eight splat-painted layers, grass/pines/bushes/boulders, a lake |
+| `unified_terrain_demo` | One generated world, three interchangeable terrain flavours (voxel tiles, soft tiles, heightmap) switchable at runtime from a panel |
 | `dig_demo` | Runtime terrain editing: left-drag digs the outlined tiles and the sea, a lake or a river runs into them (ctrl raises) |
 | `destruction_demo` | Mesh destruction: a box, sphere, barrel, boulder and mushroom broken into Voronoi chunks by dropped weights |
 | `physics_demo` | Restitution, friction, stacking, joints, triggers, kinematic platforms |

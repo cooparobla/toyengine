@@ -10,13 +10,16 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <string>
 
 #include <glm/glm.hpp>
 #include <gfxcoopa/engine/components/mesh_renderer.h>
 #include <physxcoopa/system/physics_system.h>
 #include <toyengine/core/engine.h>
+#include <toyengine/env/env_preset.h>
 #include <toyengine/render/toy_render_pipeline.h>
+#include <toyengine/water/water_body.h>
 #include <toyengine/weather/weather_system.h>
 #include <toyengine/world/heightmap_store.h>
 #include <toyengine/world/heightmap_terrain.h>
@@ -292,4 +295,131 @@ COOPA_TEST(foliage_sways_in_the_weather_wind) {
         dump_frame(calm_a, "calm");
         dump_frame(windy, "windy");
     }
+}
+
+/**
+ * @brief Deactivating a heightmap terrain must drop its chunks AND its collider, not leak them.
+ *
+ * `scene.get_components<HeightmapTerrain>()` filters on the component's own object being
+ * active, so the moment a heightmap terrain is deactivated (an EnvPresetSwitcher preset group,
+ * a scripted toggle) HeightmapTerrainSystem's per-frame gather stops seeing it -- and without
+ * this, the chunk objects, their GPU mesh/texture state and the whole-grid `HeightfieldCollider`
+ * stay on the tree and keep answering physics queries for a terrain nothing can see. Reactivating
+ * must rebuild everything, since the whole point is "pay a reload, not a permanent leak".
+ */
+COOPA_TEST(deactivating_a_heightmap_terrain_drops_its_chunks_and_collider) {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::world::HeightmapStore::instance().clear();
+    toy::core::Engine engine(make_test_config(demo(), 160, 90, 160, 90));
+    tick_frames(engine, 30);
+
+    toy::world::HeightmapTerrain* t = terrain_of(engine);
+    auto* physics = dynamic_cast<coopa::physx::system::PhysicsSystem*>(engine.scene().find_system("Physics"));
+    require(t != nullptr && t->runtime != nullptr && t->owner != nullptr && physics != nullptr,
+            "heightmap terrain: terrain and physics present");
+    require(!t->runtime->chunks.empty() && t->runtime->collision != nullptr,
+            "heightmap terrain: chunks and a collider exist before deactivation");
+
+    t->owner->set_active(false);
+    tick_frames(engine, 5);   // destroy_chunks_() and the collider drop are synchronous
+
+    expect(t->runtime->chunks.empty(), "heightmap terrain: deactivating drops every chunk");
+    expect(t->runtime->live_chunks == 0, "heightmap terrain: ...and live_chunks resets");
+    expect(t->runtime->collision == nullptr, "heightmap terrain: ...and the collider is released");
+
+    coopa::physx::geometry::Ray ray;
+    ray.origin = glm::vec3(0.0f, 0.0f, 400.0f);
+    ray.direction = glm::vec3(0.0f, 0.0f, -1.0f);
+    ray.max_distance = 1000.0f;
+    coopa::physx::system::PhysicsSystem::RaycastHit hit;
+    expect(!physics->raycast(ray, hit), "heightmap terrain: the dropped collider no longer answers raycasts");
+
+    t->owner->set_active(true);
+    tick_frames(engine, 30);
+    expect(!t->runtime->chunks.empty() && t->runtime->collision != nullptr,
+           "heightmap terrain: reactivating rebuilds the chunks and the collider");
+    expect(physics->raycast(ray, hit), "heightmap terrain: ...and raycasts hit it again");
+}
+
+/**
+ * @brief A heightmap terrain carrying a `water:` block (unified_terrain_demo's smooth flavour,
+ *        baked by the shared MapGenerator) must draw its lakes and rivers in the SAME world
+ *        space as its own ground -- not stretched and lifted by the chunk's own culling-box
+ *        transform. That box is scaled to the chunk's XY extent and its height range for
+ *        frustum culling alone; build_smooth_chunk_water() builds in absolute metres already,
+ *        so parenting the water under it (as refresh_chunk_water_() once did) stretched a 32 m
+ *        sheet to chunk_tiles x chunk-widths and lifted its level by the height range, putting
+ *        it far above where the camera could ever see it. Regression coverage for that: every
+ *        existing heightmap test uses heightmap_terrain_demo, whose Terrain has no `water:` at
+ *        all, so this path had never run in a scene before.
+ */
+COOPA_TEST(unified_demo_heightmap_water_lands_in_world_space) {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::world::HeightmapStore::instance().clear();
+    const std::string unified = std::string(ROOT_DIR) + "/assets/scenes/terrain/unified_terrain_demo/scene.yaml";
+    toy::core::Engine engine(make_test_config(unified, 160, 90, 160, 90));
+
+    // Through the real switcher, not a raw set_active(): an object authored `active: false` is
+    // skipped by SceneObject::start() at load, and set_active() alone never starts it later --
+    // only EnvPresetSwitcher's select() does, which is exactly what a real flavour switch is.
+    // One tick first, so the switcher's own pending_initial_ (its `start: soft`) resolves before
+    // this test's selection -- otherwise the first on_update() overwrites it right back to soft.
+    auto* switcher = engine.scene().find_first_component<toy::env::EnvPresetSwitcher>();
+    require(switcher != nullptr, "unified: the scene carries its EnvPresetSwitcher");
+    tick_frames(engine, 1);
+    require(switcher->select_by_name("smooth"), "unified: switched to the heightmap flavour");
+
+    toy::world::TerrainComponent* t = nullptr;
+    tick_until(engine, 600, [&] {
+        t = nullptr;
+        for (auto* c : engine.scene().get_components<toy::world::TerrainComponent>()) {
+            if (c->mode == toy::world::TerrainMode::Heightmap) { t = c; break; }
+        }
+        return t != nullptr && t->runtime != nullptr && t->applied_map != nullptr && t->runtime->live_chunks > 0;
+    });
+    require(t != nullptr && t->runtime != nullptr, "unified smooth: the heightmap terrain is running");
+    require(t->applied_map != nullptr, "unified smooth: the shared MapGenerator baked onto it");
+    require(t->runtime->live_chunks > 0, "unified smooth: chunks streamed in");
+
+    // Water lands a frame after its chunk: refresh_water_() runs after stream_chunks_() in tick_.
+    tick_frames(engine, 10);
+
+    const float chunk_size = t->data->geometry().chunk_size;
+    const float height = t->data->geometry().height;
+    const glm::vec3 origin = t->origin();
+
+    int water_bodies = 0;
+    bool all_in_range = true;
+    for (coopa::scene::SceneObject* chunk : t->runtime->chunks) {
+        if (chunk == nullptr) continue;
+        for (const char* name : {"water", "river"}) {
+            coopa::scene::SceneObject* w = chunk->find_child(name);
+            if (w == nullptr) continue;
+            auto* body = w->get_component<toy::water::WaterBody>();
+            if (body == nullptr || body->geometry_positions.empty()) continue;
+            ++water_bodies;
+            const glm::mat4 world = w->get_transform()->transform().get_world_matrix();
+            glm::vec3 lo(1e9f), hi(-1e9f);
+            for (const glm::vec3& p : body->geometry_positions) {
+                const glm::vec3 wp = glm::vec3(world * glm::vec4(p, 1.0f));
+                lo = glm::min(lo, wp);
+                hi = glm::max(hi, wp);
+            }
+            // One chunk's sheet (plus its one-tile skirt into neighbours) spans a few tens of
+            // metres -- never the whole grid, which is what the stretch bug produced.
+            const bool size_ok = (hi.x - lo.x) < chunk_size * 2.0f && (hi.y - lo.y) < chunk_size * 2.0f;
+            // The level is within the terrain's own relief, not lifted by the chunk's
+            // height-range scale (which the bug multiplied the level by).
+            const bool z_ok = lo.z >= origin.z - 5.0f && hi.z <= origin.z + height + 5.0f;
+            if (!(size_ok && z_ok)) {
+                all_in_range = false;
+                std::cout << "unified smooth: " << chunk->name() << "/" << name << " out of range -- "
+                          << "xy=(" << (hi.x - lo.x) << "," << (hi.y - lo.y) << ") z=[" << lo.z << "," << hi.z << "]\n";
+            }
+        }
+    }
+    expect(water_bodies > 0, "unified smooth: the heightmap flavour grew water bodies at all");
+    expect(all_in_range, "unified smooth: every water sheet sits in world space, not the chunk's scaled box");
 }

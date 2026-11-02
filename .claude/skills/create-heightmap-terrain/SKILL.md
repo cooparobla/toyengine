@@ -9,6 +9,10 @@ One terrain component, two modes. This is `mode: heightmap` -- written `Heightma
 `Terrain` with `mode: heightmap`. It can also carry **water** now (a kind and a level per tile,
 painted in Terrain Mode) and have a generated **MapGenerator** world applied to it, which writes
 its heights, layers and water in one go -- see `assets/scenes/terrain/unified_terrain_demo`.
+`height` must equal the generator's `height_scale`, or the bake silently rescales. A generated
+map can emit nine kinds (`grass, stone, sand, snow, ice, moss, clay, ash, salt`) but there are
+only 8 `layers` slots -- drop the rarest (`salt`) and keep `grass` as layer 0, since any kind
+with no matching layer name falls back there.
 
 Copy from `assets/scenes/terrain/heightmap_terrain_demo/scene.yaml` (a 1 km valley: seven layers,
 grass / pines / bushes / boulders, a lake, a player). Component and keys:
@@ -47,6 +51,7 @@ The other terrain kind, `TileTerrain` (mapcoopa tile worlds), is the create-terr
 | `layers [{name, albedo, normal, tint, tiling, roughness, metallic, normal_strength, triplanar, triplanar_sharpness}]` | Up to 8 paint layers; `tiling` is metres per repeat; `triplanar` for cliffs |
 | `tessellation {enabled, edge_pixels, max_factor, max_distance}`, `patch_resolution` | Detail by screen size: `patch_resolution` 0 = auto (4 quads, tessellation adds near detail); `max_distance` 0 = the view distance |
 | `view_distance`, `shadow_distance` | Chunks exist within `view_distance` m (0 / `auto` = the camera's far clip); beyond `shadow_distance` they cast no shadow |
+| `chunk_budget_ms` | Owner-thread milliseconds per frame spent spawning chunks and refreshing their water (default 2.0); raised automatically behind the loading screen, so only lower it for a smaller per-frame tax during steady-state gameplay at the cost of a slower stream-in |
 | `layer_texture_size` | Every layer texture is resized to this (mipmapped array) |
 | `collision`, `physics_material` | Heightfield collider (static) from the same grid |
 | `deep_snow`, `puddles`, `cast_shadows` | Weather and shadows |
@@ -89,6 +94,12 @@ touched chunks live. Stock meshes: `meshes/nature/{grass_tuft, pine_trunk, pine_
   automatic from mesh size), `fade_start` thins them out before the edge, `cast_shadows: false` for
   grass, and give meshes LOD sidecars (`<mesh>.lod.yaml`, see `meshes/nature/`) -- each chunk
   picks a level for one instance at its nearest point.
+- **Streaming is paced, not jobified.** Chunk spawning and water rebuilds run on the owner thread,
+  capped by `chunk_budget_ms` (default 2 ms/frame, nearest chunk first); a large `view_distance`
+  on a big terrain still streams in gradually rather than hitching, and the loading screen
+  temporarily raises this budget so a fresh scene load isn't paced like steady-state gameplay.
+  Only lower `chunk_budget_ms` if a specific scene still shows a per-frame tax after streaming
+  settles -- it trades a smaller tax for a slower stream-in.
 
 ## Editing
 

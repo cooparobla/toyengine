@@ -32,6 +32,11 @@
  * component's object and is destroyed with it; a screen-space canvas ignores the parent's 3D
  * transform and stays window-relative.
  *
+ * A Screen panel's canvas pixels are `reference_resolution` units, not raw device pixels: the
+ * canvas scales so the whole authored layout always fits the surface it draws on, whether that
+ * is a 2560-wide monitor or the editor's much narrower embedded play viewport. `{0, 0}` opts a
+ * screen back into raw device pixels. See `reference_resolution`'s own doc below.
+ *
  * World panels are not clickable: a host deliberately skips world canvases when deciding
  * whether the interface owns the pointer, because nameplates and damage numbers are not
  * buttons. Keep them to bars and labels; a dropdown on a small plate is clamped to the plate
@@ -135,6 +140,29 @@ public:
      * A theme also names a font, which wins over font_ref when font_ref is empty.
      */
     std::string theme_ref;
+
+    /**
+     * @brief Screen space only: the surface size this screen's pixel sizes are authored at.
+     *
+     * Every box a screen declares is in canvas pixels, and without this they are DEVICE pixels
+     * -- the same 360 px panel is 360 px whether the surface is a 2560-wide monitor or the
+     * editor's much narrower embedded play viewport, which is what made a panel authored for a
+     * full window look oversized there. `{0, 0}` (not the default) opts back into that raw
+     * behaviour for a screen that genuinely wants device pixels (the editor's own chrome, the
+     * F3 overlay -- neither goes through ImmScreen, so this only ever affects game screens).
+     * Ignored in World space, where CanvasScaler plays no part at all (see world_size instead).
+     */
+    glm::vec2 reference_resolution{1920.0f, 1080.0f};
+
+    /**
+     * @brief Screen space only: how reference_resolution matches an surface whose aspect ratio
+     *        differs from it. 0 = match width, 1 = match height, in between = a log-blend.
+     *
+     * The same knob CanvasScaler always had (match_width_or_height) and the UI designer's own
+     * preview already assumes implicitly (ui_canvas.cpp matches width); 0.5 is a reasonable
+     * middle ground for a screen that was not tuned for one particular aspect ratio.
+     */
+    float reference_match = 0.5f;
 
     /** @brief Hide the screen without destroying it; draw() is not called while set. */
     bool hidden = false;

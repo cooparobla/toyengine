@@ -29,6 +29,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include <coopa/asset/asset_handle.h>
@@ -45,11 +46,34 @@ namespace coopa {
 namespace gfx {
 namespace command { class CommandPool; }
 } // namespace gfx
+namespace physx {
+namespace geometry { class HeightGrid; }
+} // namespace physx
 } // namespace coopa
 
 namespace toy {
 namespace render { class TextureArray; }
 namespace world {
+
+/**
+ * @struct HeightmapColliderBuild
+ * @brief One collider rebuild's input and (once the job finishes) its output.
+ *
+ * Submitted to the JobEngine as a plain function object, same shape as TerrainSystem's
+ * ChunkBuildJob: the input heights are snapshotted on the owner thread before submission (so a
+ * concurrent edit never races the job's read), and `result` is only read back after
+ * `HeightmapTerrainRuntime::collider_job.is_complete()` -- the job counter hitting zero is what
+ * makes the write visible, the same contract chunk.build->mesh relies on.
+ */
+struct HeightmapColliderBuild {
+    int nx = 0, ny = 0;
+    glm::vec2 cell{0.0f};
+    std::vector<float> heights;   ///< Input; moved out by run().
+    std::shared_ptr<const coopa::physx::geometry::HeightGrid> result;   ///< Output; null until run() finishes.
+
+    /** @brief The job body. Touches nothing but this object's own fields. */
+    void run();
+};
 
 /** @brief After TileTerrain (60), before Physics (100) -- the collider must exist when it steps. */
 inline constexpr int k_heightmap_terrain_system_order = 61;
@@ -88,13 +112,21 @@ struct HeightmapTerrainRuntime {
     /// What the chunk materials were last written with; any change rewrites them.
     std::string material_signature;
 
-    /// The tile revision the chunks' water was built from; moving it rebuilds their surfaces.
+    /// The tile revision the chunks' water was finished being rebuilt to; moving it starts a
+    /// new (budgeted) sweep in refresh_water_().
     std::uint64_t water_revision = 0;
+    std::uint64_t water_rebuild_target = 0;   ///< The revision the in-progress sweep is rebuilding toward.
+    std::size_t water_refresh_cursor = 0;     ///< Index into `chunks` the sweep will resume from next frame.
 
     coopa::scene::SceneObject* collision = nullptr;
     std::uint64_t collider_revision = 0;       ///< data height_revision() the collider was built from
     std::uint64_t collider_seen_revision = 0;  ///< the latest revision seen while waiting to rebuild
     double collider_dirty_since = -1.0;        ///< seconds; rebuilds wait for edits to pause
+
+    /// The in-flight rebuild (the copy + pyramid build, both off this thread) and the handle
+    /// tracking it; collider_job.is_valid() is false when nothing is building.
+    std::shared_ptr<HeightmapColliderBuild> collider_build;
+    coopa::job::JobHandle collider_job;
 };
 
 /**
@@ -187,13 +219,31 @@ private:
      */
     void refresh_chunk_water_(HeightmapTerrain& terrain, coopa::scene::SceneObject& chunk_object, int cx, int cy);
 
-    /** @brief Rebuilds every live chunk's water when the terrain's water has changed. */
+    /**
+     * @brief Rebuilds live chunks' water when the terrain's water has changed, paced by
+     *        `HeightmapTerrain::chunk_budget_ms` and resumable across frames: a terrain-wide
+     *        change (a flood, a drain, a freshly applied map) can touch every chunk at once,
+     *        and none of this is jobified (see the file comment), so a single unbudgeted sweep
+     *        would rebuild hundreds of water meshes inline in one frame.
+     */
     void refresh_water_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt);
     void apply_material_(const HeightmapTerrain& terrain, const HeightmapTerrainRuntime& rt, const ChunkSettings& s,
                          coopa::gfx::engine::components::MeshRenderer& mr) const;
     glm::vec3 camera_position_(const HeightmapTerrain& terrain) const;
     float camera_far_() const;
     void destroy_chunks_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt);
+    /**
+     * @brief Tears down `terrain`'s chunks and collider right away: called the frame it drops
+     *        out of execute()'s gather (deactivated, or an ancestor was), never when it is
+     *        actually destroyed. A chunk itself is a plain SceneObject, never mid-mesh, so that
+     *        part always finishes in one call; the collider's rebuild CAN be mid-flight on a job
+     *        (see HeightmapColliderBuild), which is why this cancels it rather than just dropping
+     *        it.
+     */
+    void release_terrain_(HeightmapTerrain& terrain, coopa::scene::Scene& scene, const coopa::scene::FrameContext& ctx);
+    /** @brief Cancels an in-flight collider rebuild (if any) and closes its JobHandle. Safe to
+     *         call with nothing in flight. */
+    void cancel_collider_build_(HeightmapTerrainRuntime& rt, const coopa::scene::FrameContext& ctx);
     void write_materials_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt, const ChunkSettings& s);
     void fit_chunk_boxes_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt);
     void update_collider_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt, coopa::scene::Scene& scene,
@@ -224,6 +274,11 @@ private:
     /// spawned yet. Accumulated, not assigned -- execute() zeroes the pair each frame.
     std::int32_t wanted_chunks_ = 0;
     std::int32_t unfinished_chunks_ = 0;
+
+    /** @brief Heightmap terrains execute() ticked last frame; diffed each frame against the
+     *         current gather so one going inactive is release_terrain_()'d instead of simply
+     *         never being seen again. */
+    std::unordered_set<HeightmapTerrain*> ticked_;
 };
 
 /** @brief Installs the system (once per scene, before the first update). */

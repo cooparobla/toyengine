@@ -78,12 +78,34 @@ void TerrainSystem::execute(coopa::scene::Scene& scene, const coopa::scene::Fram
     }
     // The lookup returns every terrain in the scene (one component type, two modes); the
     // heightmap ones are HeightmapTerrainSystem's, at order 61.
+    std::unordered_set<TerrainComponent*> live;
     for (TerrainComponent* terrain : scene.get_components<TerrainComponent>()) {
         if (terrain->mode != TerrainMode::Tiles) continue;
+        // get_components() already skips a terrain whose own object is inactive; this also
+        // catches an inactive ANCESTOR (an EnvPresetSwitcher preset group, say), which it does
+        // not -- see active_in_hierarchy()'s doc.
+        if (terrain->owner == nullptr || !active_in_hierarchy(*terrain->owner)) continue;
         // Not ready yet means the world bake or the tile-set bake is still running, and no chunk
         // has been asked for -- a zero wanted count that must not read as "nothing left to do".
         if (!terrain->is_ready() || terrain->baking_) terrain_baking_ = true;
         tick_terrain_(*terrain, scene, ctx);
+        live.insert(terrain);
+    }
+    // Anything streamed last frame but not this one went inactive (or an ancestor did): nothing
+    // else will ever ask this terrain's chunks to go away, so release them now instead of
+    // leaking every chunk object, GPU mesh and collider it built for as long as the scene runs.
+    for (TerrainComponent* terrain : streamed_) {
+        if (live.find(terrain) == live.end()) release_terrain_(*terrain, ctx);
+    }
+    streamed_ = std::move(live);
+    // A terrain release_terrain_() just parked mid-mesh chunks for is kept here even though it
+    // no longer appears in streamed_ at all -- tick_terrain_() would otherwise be the only path
+    // that drains a Retiring chunk, and an inactive terrain never reaches it again.
+    for (auto it = releasing_.begin(); it != releasing_.end();) {
+        TerrainComponent* terrain = *it;
+        advance_retiring_(*terrain);
+        if (terrain->chunks().empty()) it = releasing_.erase(it);
+        else ++it;
     }
     sync_planet_gravity_(scene);
     // One diff per frame however many chunk colliders came or went (PhysicsSystem::refresh()).
@@ -485,6 +507,29 @@ void TerrainSystem::advance_retiring_(TerrainComponent& terrain) {
         ++chunks_released_;
         it = terrain.chunks().erase(it);
     }
+}
+
+void TerrainSystem::release_terrain_(TerrainComponent& terrain, const coopa::scene::FrameContext& ctx) {
+    for (auto& entry : terrain.chunks()) {
+        TerrainChunk& chunk = entry.second;
+        if (chunk.state == ChunkState::Meshing) {
+            // Same handling as release_distant_chunks_()'s Meshing branch: the JobHandle must
+            // still be close()d exactly once, so this chunk is parked Retiring and drained by
+            // advance_retiring_() rather than torn down here.
+            if (ctx.jobs != nullptr) ctx.jobs->cancel(chunk.job);
+            chunk.state = ChunkState::Retiring;
+            chunk.build.reset();
+            continue;
+        }
+        if (chunk.state == ChunkState::Retiring) continue;   // already draining
+        destroy_chunk_object_(terrain, chunk);
+        ++chunks_released_;
+    }
+    for (auto it = terrain.chunks().begin(); it != terrain.chunks().end();) {
+        if (it->second.state == ChunkState::Retiring) ++it;
+        else it = terrain.chunks().erase(it);
+    }
+    if (!terrain.chunks().empty()) releasing_.insert(&terrain);
 }
 
 void TerrainSystem::upload_finished_chunks_(TerrainComponent& terrain, coopa::scene::Scene& scene) {

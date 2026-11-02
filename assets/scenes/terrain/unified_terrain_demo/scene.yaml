@@ -1,20 +1,83 @@
-# unified_terrain_demo -- one generated world, applied to BOTH terrain modes.
+# unified_terrain_demo -- one mapcoopa world, three interchangeable terrain flavours.
 #
-# The thing this scene exists to show: a map is the same kind of thing to apply whichever shape
-# the terrain underneath it has. One `MapGenerator` (seed 7) is read by two terrain objects side
-# by side -- `terrain_tiles` (mode: tiles) and `terrain_smooth` (mode: heightmap) -- so the same
-# coastline, hills and rivers come out terraced on one and smooth on the other, in one frame.
-# Applying is sequential (one bake in flight at a time): the generator builds its map once, then
-# bakes it into each terrain that still wants one, in turn.
+# A panel in the corner switches between three `Terrain` components sitting at the same
+# Transform position -- voxel hard-edged tiles, soft tiles (the stock tileset_soft, the look
+# habitat's own tileset derives from), and a sculptable heightmap -- all baked from the SAME
+# `MapGenerator` (habitat's continent shape, naturals, rivers and lakes, scaled down). Only one
+# is active at a time; everything else in the scene (water, weather, physics, the dropped props)
+# stays exactly where it was across the switch.
 #
-# Neither terrain names the generator as its `target`, and the generator names none either --
-# `MapGeneratorComponent::generator_for()` falls back to the only generator going for any terrain
-# not sharing its object, which is both of these. `auto_apply: always` because a smooth terrain's
-# PNG is written by its own store and so is never "missing" -- `when_missing` (the default) is
-# for a tile world with no stored .tiles, and would only ever notice the tiled half here.
+# `tile_set` is resolved once at parse time, so a tile terrain cannot swap its look at runtime --
+# this is genuinely three `Terrain` components, not one reconfigured. `EnvPresetSwitcher`
+# (toyengine/env/env_preset.h) already does "exclusive subtree activation plus a self-drawn
+# button panel", so it is reused rather than writing a purpose-built component.
 #
-# The tile world built from the same kind of map alone is terrain_demo; the hand-sculpted
-# heightmap alone is heightmap_terrain_demo. This is the two halves meeting.
+# THE NUMERIC INVARIANT -- what makes the three actually interchangeable:
+#   world_tiles 1024  ==  heightmap splat_resolution 1024  ==  resolution 1025 - 1
+#                     ==  heightmap size.x 1024 / tile_size 1.0
+#   height_scale 64   ==  heightmap height 64            (equal, or the 16-bit PNG rescales)
+#   height_step 1.0                                      (bed_kind_for's thresholds are in steps)
+#   heightmap chunk_size 32 -> chunk_tiles 32  ==  tile chunk_size 32
+#   view_radius 10 x chunk_size 32 x tile_size 1  ==  view_distance 320  ==  shadow_distance 320
+# Both tile flavours additionally share max_wall_steps, soil_depth_steps, collision_radius,
+# material and water -- they differ ONLY in `tile_set` (and the voxel one drops kind_tile_sets,
+# since pointing a kind at a rounded set would restore round_kind_corners for it).
+#
+# SCALE: `meters_per_grid_unit: 25` makes the world isotropic -- horizontal scale
+# world_tiles/(grid_size*meters_per_grid_unit) = 1024/(128*25) = 0.32, vertical scale
+# height_scale/elevation_range_m = 64/200 = 0.32 -- matching habitat's own ratio (0.16 at its
+# scale) rather than the 2.4x vertical exaggeration the default meters_per_grid_unit (60) would
+# give here. Every habitat generator key below is carried across at matched physical meaning
+# (a length scales with the grid, a count with its square); `towns:`/`roads:`/`*_width_m` are
+# OMITTED -- `TerrainSampler` has no road kind at all, so those keys only ever became visible
+# terrain through habitat's own settlement-stamping C++, which doesn't exist here.
+#
+# The heightmap's 8 paint layers are the ones a generated map can actually produce. A mapcoopa
+# world only ever emits grass, stone, sand, snow, ice, moss, clay, ash and salt (never dirt,
+# rock or water) -- nine kinds against eight splat slots, so `salt` (the rarest, 1 of 33
+# biomes) is the one left out; the rest without a dedicated texture (ice, moss, clay, ash) are
+# flat tints sampled from the tile palette atlas (tools/gen_terrain_atlas.py's KINDS table), so
+# the two tile flavours and the heightmap read as the same ground.
+#
+# SIX THINGS THAT CANNOT BE MADE IDENTICAL (by design, not oversight -- see
+# toyengine/world/README.md for the full reasoning):
+#   1. The water plane sits 0-1m lower on tiles than on the heightmap (tiles subtract the
+#      water/river inset from a quantised step; the heightmap mesher uses the continuous level).
+#   2. A Buoyancy body floats ~0.5m high on BOTH tile flavours, for the same reason -- so it
+#      reads identically between them, which is what matters here.
+#   3. Shoreline that is sub-step shallow is wet on tiles, dry on the heightmap.
+#   4. Tiles are solid only within collision_radius (default 4 chunks = 128m); the heightfield
+#      is solid everywhere. Keep every dropped prop within ~100m of the camera's start.
+#   5. Switching back to the heightmap after >2s away re-uploads its height/splat textures and
+#      re-decodes every layer PNG synchronously -- mitigated here with layer_texture_size: 256.
+#   6. One frame of TAA ghosting per switch, and ~1s of async bake on each flavour's FIRST
+#      activation (auto_apply: always gates per-terrain on applied_map == nullptr).
+#   7. Switching away from a flavour now frees its chunks, colliders and (heightmap) textures
+#      immediately -- intentional, so the scene never carries all three worlds' GPU state at
+#      once. Switching back therefore pays a visible reload rather than being instant; this is
+#      the explicitly accepted trade for a scene that otherwise degrades with every switch.
+#
+# STREAMING BUDGET (heightmap) -- stream_chunks_() and refresh_water_() in
+# toyengine/world/heightmap_terrain_system.cpp pace chunk spawning and water rebuilds against
+# `chunk_budget_ms` (default 2 ms/frame) instead of doing the whole view-distance window in one
+# frame; the heightfield collider builds on a job thread rather than inline. Measured with
+# HEADLESS=1 PROFILE=1 TOY_VALIDATION=0 after those fixes, this scene's three flavours sit within
+# ~0.06 ms of each other in STEADY STATE (median ~1.3-1.4 ms, p99 ~1.9-2.1 ms, static camera) --
+# the heightmap no longer has a standing per-frame tax of its own. The remaining flavour-switch
+# cost is the GPU texture upload/decode in item 5 above, which this budget does not touch.
+# `tessellation.max_distance: 128` below is the one extra scene-tuning lever applied on top: it
+# was cheap to add and costs only far-ground tessellation detail nothing is close enough to see.
+#
+# SHADOW / SCATTER BUDGET -- tuned down from an earlier, much heavier pass: `shadow_distance`
+# 200 / `shadow_focus_radius` 24 (vs `terrain_demo`'s 100/16) and grass `density: 0.6` /
+# `max_draw_distance: 48` (vs the original 2.0/80). With `shadow_fit: focus` the cascades nest
+# from the focus radius out to shadow_distance, so a large focus radius re-draws every caster
+# in a much bigger ring per cascade -- that, not the three terrain flavours, was most of this
+# scene's steady-state cost. Three flavours' worth of scatter still adds up faster than
+# `terrain_demo`'s one, so this stays a bit above its budget rather than matching it exactly.
+# Also note: saving this scene from the editor writes the heightmap's 16-bit height PNG and two
+# splat PNGs to disk (~10MB) -- nothing is shipped today, so a fresh checkout regenerates all
+# three flavours from the seed on first run.
 #
 #   ./build/toyengine unified_terrain_demo
 scene:
@@ -31,9 +94,9 @@ scene:
       sun_intensity: 1.2
       time_of_day: 9.5
     render:
-      shadow_distance: 600
+      shadow_distance: 200
       shadow_fit: focus
-      shadow_focus_radius: 120
+      shadow_focus_radius: 24
   root_objects:
     - name: world
       components:
@@ -41,92 +104,82 @@ scene:
           position: { x: 0, y: 0, z: 0 }
         - type: MapGenerator
           auto_apply: always
-          height_scale: 90
-          world_tiles: 512
-          # A SMALL map, because the whole of it is written across each terrain's ~512 m: an
-          # 18-cell world is nearly 3 km of mapcoopa's ground, which would squeeze the whole
-          # continent into the frame and leave the coast hard against the terrain's edge.
+          world_tiles: 1024
+          tiles_per_grid_unit: 8   # documentation only -- world_tiles above wins; 128 x 8 = 1024
+          height_scale: 64
+          water_inset: 0.5
+          river_inset: 0.2
           generator:
             seed: 7
-            grid_size: 18
-            sea_level: 0.42
-            natural:
-              hills: 0.08
-              mountains: 0.40
-              plateaus: 0.05
-            river_count: 24
+            grid_size: 128
+            meters_per_grid_unit: 25   # isotropic with height_scale 64 / elevation_range_m 200
+            elevation_range_m: 200
+            shape:
+              shape: continent
+              continent_size_m: 2466.7   # habitat's 0.7708 of map width (128 x 25 x 0.7708)
+              irregularity: 0.54
+              coast_detail: 0.22
+            natural:   # normalised heights -- scale-free, verbatim from habitat
+              mountains: 0.38
+              hills: 0.07
+              plateaus: 0.08
+              plateau_coverage: 0.22
+              seabed: 0.1
+              seabed_ridges: 0.16
+              seabed_shelf: 0.03
+            river_count: 205              # 567 x (128/213)^2 -- a count scales with the grid's square
+            river_width_base_m: 5.0       # 10.0248 / 2 -- a length scales with the grid
+            river_width_per_volume_m: 1.5
+            river_depth_m: 3.125          # >= one step, so the channel survives quantisation
+            lake_depth_m: 10
+            # The noise grain is per mapcoopa CELL, not per world metre, so none of these need
+            # retuning for meters_per_grid_unit -- they reproduce habitat's grain exactly
+            # (authored = mapcoopa default x 0.5 x grid_size / 40).
+            noise_island: { frequency: 0.128 }
+            noise_hills: { frequency: 0.48 }
+            noise_ridge: { frequency: 0.256 }
+            noise_plateau: { frequency: 0.144 }
+            noise_warp: { frequency: 0.32 }
+            noise_seabed: { frequency: 1.44 }
 
-    - name: terrain_smooth
+    - name: ui
+      components:
+        - type: EnvPresetSwitcher
+          start: soft
+          title: Terrain
+          theme_ref: ui/themes/game_dark
+          presets:
+            - name: soft
+              label: "Soft tiles"
+              object: terrain_soft
+              blurb: "Streamed tile terrain, tileset_soft: a generous rounded plan radius and smooth normals, same as habitat's own tiles derive from."
+            - name: voxel
+              label: Voxel
+              object: terrain_voxel
+              blurb: "The same streamed tile world, tileset_voxel: square corners, flat shading, no rounding at kind boundaries."
+            - name: smooth
+              label: Heightmap
+              object: terrain_smooth
+              blurb: "The same generated map, sculpted onto a continuous heightmap instead of terraced tiles."
+
+    - name: terrain_soft
+      active: true
       components:
         - type: Transform
-          position: { x: -520, y: -256, z: 0 }
-        - type: Terrain
-          mode: heightmap
-          size: { x: 512, y: 512 }
-          height: 90
-          chunk_size: 32
-          resolution: 513
-          splat_resolution: 512
-          heightmap: terrain/unified_smooth_height.png
-          layer_texture_size: 512
-          collision: true
-          layers:
-            - name: grass
-              albedo: textures/terrain/layers/grass_albedo.png
-              normal: textures/terrain/layers/grass_normal.png
-              roughness: 0.9
-              tiling: 4
-            - name: dirt
-              albedo: textures/terrain/layers/dirt_albedo.png
-              normal: textures/terrain/layers/dirt_normal.png
-              roughness: 0.85
-              tiling: 5
-            - name: rock
-              albedo: textures/terrain/layers/rock_albedo.png
-              normal: textures/terrain/layers/rock_normal.png
-              roughness: 0.8
-              tiling: 9
-              triplanar: true
-              triplanar_sharpness: 4
-            - name: sand
-              albedo: textures/terrain/layers/sand_albedo.png
-              roughness: 0.9
-              tiling: 4
-            - name: stone
-              albedo: textures/terrain/layers/rock_albedo.png
-              normal: textures/terrain/layers/rock_normal.png
-              roughness: 0.8
-              tiling: 11
-              triplanar: true
-            - name: snow
-              tint: { r: 0.92, g: 0.94, b: 0.97 }
-              roughness: 0.6
-              tiling: 6
-          water:
-            clarity: 2.5
-            wave_amplitude: 0.12
-            wave_length: 6
-            wave_steepness: 0.28
-            shore_foam: 0.6
-        - type: WeatherSurface
-          splashes: true
-
-    - name: terrain_tiles
-      components:
-        - type: Transform
-          position: { x: 20, y: -256, z: 0 }
+          position: { x: 0, y: 0, z: 0 }
         - type: Terrain
           mode: tiles
           chunk_size: 32
-          collision: true
+          view_radius: 10
+          tile_size: 1.0
           height_step: 1.0
+          max_wall_steps: 16
+          soil_depth_steps: 2
+          shadow_distance: 224
+          collision: true
           tile_set: objects/terrain/tileset_soft
           kind_tile_sets:
-            ash: objects/terrain/tileset_soft
             rock: objects/terrain/tileset_rock
-            salt: objects/terrain/tileset_soft
-            sand: objects/terrain/tileset_soft
-            snow: objects/terrain/tileset_soft
             stone: objects/terrain/tileset_rock
           material:
             albedo: { r: 1.0, g: 1.0, b: 1.0 }
@@ -135,15 +188,200 @@ scene:
             roughness: 0.9
             texture_albedo: textures/terrain_atlas.png
             texture_metallic_roughness: textures/terrain_atlas_mr.png
-          max_wall_steps: 8
-          river_inset: 0.2
-          shadow_distance: 600
-          soil_depth_steps: 1
-          tile_size: 1.0
-          view_radius: 10
-          water_inset: 0.5
+          water:
+            wave_amplitude: 0.06
+            wave_length: 3.5
+            wave_steepness: 0.45
+            clarity: 2.5
+            shore_foam_depth: 0.35
+            edge_fade_depth: 0.1
+            ripple_strength: 0.3
+            max_depth: 20.0
         - type: WeatherSurface
           splashes: true
+      children:
+        - name: grass
+          components:
+            - type: Transform
+              position: { x: 0, y: 0, z: 0 }
+            - type: ParticleSystem
+              align_to_normal: true
+              material:
+                albedo: { r: 0.85, g: 1.0, b: 0.75 }
+                alpha_cutoff: 0.4
+                alpha_mode: CUTOUT
+                roughness: 0.8
+                texture_albedo: textures/terrain/layers/grass_blades.png
+                texture_alpha_mask: textures/terrain/layers/grass_blades.png
+                shader: foliage
+                shader_params: [0.35, 2.5, 0.6, 0]
+              max_draw_distance: 48
+              cast_shadows: false
+              mode: scatter
+              random_spin: true
+              render_mesh: nature/grass_tuft
+              render_mode: mesh
+              seed: 11
+              shape: terrain
+              start_size: [0.6, 1.1]
+              terrain: { density: 0.6, fade_start: 0.5, layer: grass, min_weight: 0.35, sink: 0.05, slope_max: 30 }
+
+    - name: terrain_voxel
+      active: false
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 0 }
+        - type: Terrain
+          mode: tiles
+          chunk_size: 32
+          view_radius: 10
+          tile_size: 1.0
+          height_step: 1.0
+          max_wall_steps: 16
+          soil_depth_steps: 2
+          shadow_distance: 224
+          collision: true
+          tile_set: objects/terrain/tileset_voxel
+          material:
+            albedo: { r: 1.0, g: 1.0, b: 1.0 }
+            ao: 1.0
+            metallic: 0.0
+            roughness: 0.9
+            texture_albedo: textures/terrain_atlas.png
+            texture_metallic_roughness: textures/terrain_atlas_mr.png
+          water:
+            wave_amplitude: 0.06
+            wave_length: 3.5
+            wave_steepness: 0.45
+            clarity: 2.5
+            shore_foam_depth: 0.35
+            edge_fade_depth: 0.1
+            ripple_strength: 0.3
+            max_depth: 20.0
+        - type: WeatherSurface
+          splashes: true
+      children:
+        - name: grass
+          components:
+            - type: Transform
+              position: { x: 0, y: 0, z: 0 }
+            - type: ParticleSystem
+              align_to_normal: true
+              material:
+                albedo: { r: 0.85, g: 1.0, b: 0.75 }
+                alpha_cutoff: 0.4
+                alpha_mode: CUTOUT
+                roughness: 0.8
+                texture_albedo: textures/terrain/layers/grass_blades.png
+                texture_alpha_mask: textures/terrain/layers/grass_blades.png
+                shader: foliage
+                shader_params: [0.35, 2.5, 0.6, 0]
+              max_draw_distance: 48
+              cast_shadows: false
+              mode: scatter
+              random_spin: true
+              render_mesh: nature/grass_tuft
+              render_mode: mesh
+              seed: 11
+              shape: terrain
+              start_size: [0.6, 1.1]
+              terrain: { density: 0.6, fade_start: 0.5, layer: grass, min_weight: 0.35, sink: 0.05, slope_max: 30 }
+
+    - name: terrain_smooth
+      active: false
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 0 }
+        - type: Terrain
+          mode: heightmap
+          size: { x: 1024, y: 1024 }
+          height: 64
+          chunk_size: 32
+          resolution: 1025
+          splat_resolution: 1024
+          layer_texture_size: 256
+          collision: true
+          shadow_distance: 224
+          view_distance: 320
+          # Tessellation's near-ground detail is worth it close in, not at the far edge of a
+          # 320 m view distance a player rarely studies closely. Capping it well short of that
+          # (the grass scatter below already fades by 48 m) is the cheapest per-frame win
+          # available on this flavour -- it only drops detail nothing is close enough to see.
+          tessellation: { max_distance: 128 }
+          deep_snow: false
+          puddles: false
+          layers:
+            - name: grass
+              albedo: textures/terrain/layers/grass_albedo.png
+              normal: textures/terrain/layers/grass_normal.png
+              roughness: 0.9
+              tiling: 4
+            - name: stone
+              albedo: textures/terrain/layers/rock_albedo.png
+              normal: textures/terrain/layers/rock_normal.png
+              roughness: 0.86
+              tiling: 9
+              triplanar: true
+              triplanar_sharpness: 4
+            - name: sand
+              albedo: textures/terrain/layers/sand_albedo.png
+              normal: textures/terrain/layers/sand_normal.png
+              roughness: 0.9
+              tiling: 6
+            - name: snow
+              albedo: textures/terrain/layers/snow_albedo.png
+              normal: textures/terrain/layers/snow_normal.png
+              roughness: 0.6
+              tiling: 8
+            - name: ice
+              tint: { r: 0.714, g: 0.878, b: 0.941 }
+              roughness: 0.25
+            - name: moss
+              tint: { r: 0.439, g: 0.627, b: 0.329 }
+              roughness: 0.94
+            - name: clay
+              tint: { r: 0.745, g: 0.541, b: 0.376 }
+              roughness: 0.92
+            - name: ash
+              tint: { r: 0.376, g: 0.353, b: 0.345 }
+              roughness: 0.9
+          water:
+            wave_amplitude: 0.06
+            wave_length: 3.5
+            wave_steepness: 0.45
+            clarity: 2.5
+            shore_foam_depth: 0.35
+            edge_fade_depth: 0.1
+            ripple_strength: 0.3
+            max_depth: 20.0
+        - type: WeatherSurface
+          splashes: true
+      children:
+        - name: grass
+          components:
+            - type: Transform
+              position: { x: 0, y: 0, z: 0 }
+            - type: ParticleSystem
+              align_to_normal: true
+              material:
+                albedo: { r: 0.85, g: 1.0, b: 0.75 }
+                alpha_cutoff: 0.4
+                alpha_mode: CUTOUT
+                roughness: 0.8
+                texture_albedo: textures/terrain/layers/grass_blades.png
+                texture_alpha_mask: textures/terrain/layers/grass_blades.png
+                shader: foliage
+                shader_params: [0.35, 2.5, 0.6, 0]
+              max_draw_distance: 48
+              cast_shadows: false
+              mode: scatter
+              random_spin: true
+              render_mesh: nature/grass_tuft
+              render_mode: mesh
+              seed: 11
+              shape: terrain
+              start_size: [0.6, 1.1]
+              terrain: { density: 0.6, fade_start: 0.5, layer: grass, min_weight: 0.35, sink: 0.05, slope_max: 30 }
 
     - name: sun
       components:
@@ -157,17 +395,95 @@ scene:
           direction: { x: -0.45, y: 0.55, z: -0.6 }
           intensity: 1.0
 
+    - name: sky
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 0 }
+        - type: EnvironmentLight
+          ground_color: { r: 0.24, g: 0.22, b: 0.17 }
+          sky_color: { r: 0.52, g: 0.70, b: 0.94 }
+          sky_intensity: 1.15
+
     - name: camera
       components:
         - type: Transform
-          position: { x: 6, y: -650, z: 300 }
-          rotation: { x: 58, y: 0, z: 0 }
+          # Looking down over the central lake and its valley from the near ridge -- verified
+          # against this seed's actual bake (seed 7, grid 128): a mountain-ringed inland lake
+          # feeding rivers out to the coast, with the green valley floor in frame.
+          position: { x: 470, y: 430, z: 95 }
+          rotation: { x: 42, y: 0, z: 0 }
           scale: { x: 1, y: 1, z: 1 }
         - type: Camera
-          far_clip_plane: 1.4e+03
-          fov: 6.0e+01
+          far_clip_plane: 1400
+          fov: 60
           main: true
           near_clip_plane: 0.3
           projection: Perspective
         - type: FreeMover
-          speed: 40
+          move_speed: 60
+          smoothing: 12
+
+    - name: drop_crate
+      components:
+        - type: Transform
+          position: { x: 505, y: 512, z: 100 }
+          rotation: { x: 10, y: 20, z: 30 }
+          scale: { x: 1.2, y: 1.2, z: 1.2 }
+        - type: MeshRenderer
+          material:
+            albedo: { r: 0.62, g: 0.42, b: 0.24 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+        - type: BoxCollider
+          material: wood
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - { type: Rigidbody, mass: 40.0 }
+
+    - name: drop_ball_red
+      components:
+        - type: Transform
+          position: { x: 510, y: 508, z: 105 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          material:
+            albedo: { r: 0.85, g: 0.2, b: 0.15 }
+            metallic: 0.0
+            roughness: 0.5
+          mesh_path: sphere_low
+        - { type: SphereCollider, material: rubber, radius: 1.0 }
+        - { type: Rigidbody, mass: 10.0 }
+
+    - name: drop_ball_blue
+      components:
+        - type: Transform
+          position: { x: 498, y: 516, z: 110 }
+          scale: { x: 0.5, y: 0.5, z: 0.5 }
+        - type: MeshRenderer
+          material:
+            albedo: { r: 0.2, g: 0.35, b: 0.85 }
+            metallic: 0.0
+            roughness: 0.5
+          mesh_path: sphere_low
+        - { type: SphereCollider, material: rubber, radius: 1.0 }
+        - { type: Rigidbody, mass: 8.0 }
+
+    - name: drop_float_crate
+      components:
+        - type: Transform
+          # Open water, not the shore -- see the water-plane note above: this reads the same on
+          # both tile flavours, which is the point. Reposition once the coastline is known.
+          position: { x: 560, y: 560, z: 40 }
+          rotation: { x: 0, y: 0, z: 20 }
+          scale: { x: 1.2, y: 1.2, z: 1.2 }
+        - type: MeshRenderer
+          material:
+            albedo: { r: 0.62, g: 0.42, b: 0.24 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+        - type: BoxCollider
+          material: wood
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - { type: Rigidbody, mass: 40.0 }
+        - { type: Buoyancy }

@@ -1,0 +1,7 @@
+# A pane, a bottle: hard but almost zero toughness -- nearly any hit that marks it at all
+# fractures it outright, which is the point of glass as a damage material.
+hardness: 0.95
+toughness: 0.05
+fibrous: 0.0
+hit_points: 20
+resistance: { impact: 0.6, slash: 1.0, pierce: 0.7, explosive: 0.5, fire: 1.0 }

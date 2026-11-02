@@ -773,7 +773,7 @@ void PropertiesPanel::draw_object_props_(imm::Context& ctx, ObjectId id) {
             if (t.contains("origin_style")) own_style = &t.at("origin_style");
             if (t.contains("origin_size")) own_size = &t.at("origin_size");
         }
-        static const std::vector<std::string> kStyleItems = {"Inherit", "Axes", "Orb"};
+        static const std::vector<std::string> kStyleItems = {"Inherit", "Axes", "Orb", "Bone"};
         int si = 0;
         if (own_style && own_style->is_string()) {
             const std::string v = own_style->get_value<std::string>();
@@ -783,7 +783,8 @@ void PropertiesPanel::draw_object_props_(imm::Context& ctx, ObjectId id) {
             if (si <= 0) app_.set_selection_origin_style(std::nullopt);
             else app_.set_selection_origin_style(static_cast<OriginStyle>(si - 1));
         }
-        ctx.tooltip("Origin Gizmo Style\nAxis lines or a small ball.\n"
+        ctx.tooltip("Origin Gizmo Style\nAxis lines, a small ball, or a bone.\n"
+                    "Bone is only offered on an object at or under an Animator, where it is the default; elsewhere "
                     "Inherit takes the nearest ancestor's, and the Preferences > Viewport default if none sets one. "
                     "Applies to the whole selection");
         float size = own_size ? as_float(*own_size, 0.0f) : 0.0f;

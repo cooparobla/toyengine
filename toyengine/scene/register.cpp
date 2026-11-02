@@ -29,7 +29,10 @@
 #include <toyengine/scene/ragdoll.h>
 #include <toyengine/scene/rider.h>
 #include <toyengine/scene/scene_link.h>
+#include <toyengine/scene/damage_cursor.h>
+#include <toyengine/scene/damageable.h>
 #include <toyengine/scene/destructible.h>
+#include <toyengine/scene/sliceable.h>
 #include <toyengine/hair/hair.h>
 #include <toyengine/scene/skinned_mesh_renderer.h>
 #include <toyengine/scene/terrain_digger.h>
@@ -182,6 +185,59 @@ void register_scene_components() {
             read(node, "chunk_fade", d->chunk_fade);
             read(node, "chunk_density", d->chunk_density);
             read(node, "collider_fill", d->collider_fill);
+            if (node.contains("interior_material")) {
+                d->interior_material = node.at("interior_material").get_value<std::string>();
+            }
+            if (node.contains("collider")) d->collider = node.at("collider").get_value<std::string>();
+            read(node, "max_slices", d->max_slices);
+        });
+
+    // A cuttable object (toyengine/scene/sliceable.h): the style DestructionSystem::slice_object()
+    // spawns its two halves with.
+    SceneLoader::register_component_parser("Sliceable",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* s = obj.add_component<Sliceable>();
+            if (node.contains("interior_material")) {
+                s->interior_material = node.at("interior_material").get_value<std::string>();
+            }
+            read(node, "density", s->density);
+            read(node, "piece_lifetime", s->piece_lifetime);
+            read(node, "piece_fade", s->piece_fade);
+            if (node.contains("physics_material")) {
+                s->physics_material = node.at("physics_material").get_value<std::string>();
+            }
+            if (node.contains("collider")) s->collider = node.at("collider").get_value<std::string>();
+            read(node, "collider_fill", s->collider_fill);
+            read(node, "max_boxes", s->max_boxes);
+            read(node, "max_slices", s->max_slices);
+        });
+
+    // Typed damage accumulation (toyengine/scene/damageable.h). DestructionSystem drains the
+    // blow queue and carries out what resolve_damage() decides -- see that file's doc for what
+    // is and is not implemented yet (Dent/Chip/Hole are not).
+    SceneLoader::register_component_parser("Damageable",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* dm = obj.add_component<Damageable>();
+            if (node.contains("material")) dm->material = node.at("material").get_value<std::string>();
+            read(node, "hit_points", dm->hit_points);
+            read(node, "damage_resolution", dm->damage_resolution);
+            read(node, "cleave", dm->cleave);
+            read(node, "fracture_on_death", dm->fracture_on_death);
+            read(node, "localized_fracture", dm->localized_fracture);
+            read(node, "min_impulse", dm->min_impulse);
+        });
+
+    // Click-to-cut / click-to-hit (toyengine/scene/damage_cursor.h). Input is pushed in by
+    // Engine::drive_damage_cursors_(); DestructionSystem consumes the requests.
+    SceneLoader::register_component_parser("DamageCursor",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* c = obj.add_component<DamageCursor>();
+            if (node.contains("slice_button")) c->slice_button = node.at("slice_button").get_value<std::string>();
+            if (node.contains("hit_button")) c->hit_button = node.at("hit_button").get_value<std::string>();
+            if (node.contains("damage_type")) c->damage_type = node.at("damage_type").get_value<std::string>();
+            read(node, "amount", c->amount);
+            read(node, "seed", c->seed);
+            read(node, "max_distance", c->max_distance);
         });
 
     // Digging the terrain with the mouse (toyengine/scene/terrain_digger.h). Input is pushed in
@@ -727,6 +783,12 @@ void register_scene_components(coopa::gfx::core::Device& device,
             }
             if (node.contains("upload_budget_ms")) {
                 terrain->upload_budget_ms = node.at("upload_budget_ms").get_value<float>();
+            }
+            // Heightmap mode only: owner-thread milliseconds a frame for chunk spawning, water
+            // rebuilds and a freshly applied map's water sweep (HeightmapTerrainSystem,
+            // MapGeneratorComponent::poll_apply()). Inert in Tiles mode.
+            if (node.contains("chunk_budget_ms")) {
+                terrain->chunk_budget_ms = node.at("chunk_budget_ms").get_value<float>();
             }
             if (node.contains("collision_radius")) {
                 terrain->collision_radius = node.at("collision_radius").get_value<int>();

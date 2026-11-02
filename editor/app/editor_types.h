@@ -65,10 +65,12 @@ enum class Shading { Wireframe = 0, Solid = 1, MaterialPreview = 2, Full = 3 };
  * @brief How an object's origin is drawn in the viewport (Blender's "empty" display).
  *
  * Only objects with no mesh of their own get one -- a rig's joints, markers, group parents.
+ * Bone is reachable only on an object at or under an Animator, where it is the default.
  */
 enum class OriginStyle {
     Axes = 0,   ///< Three lines through the origin, one per local axis. The default.
     Orb,        ///< A small ball at the origin, with a tick along each axis.
+    Bone,       ///< An octahedral bone toward each child joint. Only under an Animator.
 };
 /** @brief The origin glyph's size in metres when neither the object nor an ancestor sets one. */
 inline constexpr float kDefaultOriginSize = 0.5f;

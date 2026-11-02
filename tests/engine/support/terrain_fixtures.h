@@ -23,6 +23,7 @@
 #include <coopa/yaml/document.h>
 #include <gfxcoopa/engine/data/skinned_mesh_source.h>
 #include <toyengine/scene/camera_controller.h>
+#include <toyengine/world/heightmap_store.h>
 #include <toyengine/world/terrain_chunk.h>
 #include <toyengine/world/terrain_component.h>
 #include <toyengine/world/tile_mesh_library.h>
@@ -168,6 +169,53 @@ inline std::string voxel_terrain_demo() {
     std::error_code ec;
     std::filesystem::remove(std::filesystem::path(path).parent_path() / "terrain" / "terrain.tiles", ec);
     return path;
+}
+
+/**
+ * @brief terrain_demo as authored: `tile_set: tileset_soft` with `tileset_rock` on the rock/stone
+ *        kinds, unmodified -- the ~8x-triangle-per-set geometry (ARC_SEG 3, LIP_SEG 4 vs voxel's
+ *        1 and 1) that a mountainous world mostly draws. Only `voxel_terrain_demo()`'s cheap
+ *        variant has ever run through a frame-budget test; this is the expensive one.
+ */
+inline std::string soft_terrain_demo() {
+    toy::world::TileMapStore::instance().clear();
+    std::string path = scene_variant("assets/scenes/terrain/terrain_demo/scene.yaml", "soft_terrain", [](fkyaml::node& doc) {
+        // Same motion-out-of-frame trim as voxel_terrain_demo(); no tile_set override, so this
+        // keeps the demo's authored (expensive) tile sets.
+        auto& roots = doc["scene"]["root_objects"].as_seq();
+        roots.erase(std::remove_if(roots.begin(), roots.end(), [](const fkyaml::node& o) {
+                        return o.contains("name") && o.at("name").get_value<std::string>().rfind("drop_", 0) == 0;
+                    }),
+                    roots.end());
+    });
+    std::error_code ec;
+    std::filesystem::remove(std::filesystem::path(path).parent_path() / "terrain" / "terrain.tiles", ec);
+    return path;
+}
+
+/**
+ * @brief heightmap_terrain_demo patched for a streaming frame-budget test: a finite
+ *        `view_distance` so chunks actually churn in and out as the camera moves (the authored
+ *        demo's 0 keeps the whole 16 x 16 grid live forever, which never exercises
+ *        `stream_chunks_()`'s budget), and no CameraController -- the test drives the camera's
+ *        own Transform directly instead of fighting an orbit rig that recomputes it every tick.
+ */
+inline std::string heightmap_frame_test_demo() {
+    toy::world::HeightmapStore::instance().clear();
+    return scene_variant("assets/scenes/terrain/heightmap_terrain_demo/scene.yaml", "heightmap_frame_budget",
+                         [](fkyaml::node& doc) {
+        if (fkyaml::node* t = scene_component(doc, "terrain", "Terrain")) {
+            (*t)["view_distance"] = fkyaml::node(150.0);
+        }
+        for (auto& obj : doc["scene"]["root_objects"].as_seq()) {
+            if (!obj.contains("name") || obj["name"].get_value<std::string>() != "camera") continue;
+            auto& comps = obj["components"].as_seq();
+            comps.erase(std::remove_if(comps.begin(), comps.end(), [](const fkyaml::node& c) {
+                            return c.contains("type") && c["type"].get_value<std::string>() == "CameraController";
+                        }),
+                        comps.end());
+        }
+    });
 }
 
 } // namespace toy::test

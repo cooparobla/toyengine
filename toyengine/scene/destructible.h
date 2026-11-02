@@ -98,6 +98,24 @@ public:
     /** @brief physics_materials/<name>.yaml for the chunks; empty uses the engine default. */
     std::string chunk_physics_material;
 
+    /** @brief materials/<name>.yaml for a chunk's newly-cut interior faces; empty reuses the
+     *         surface material (see DestructionSystem::spawn_piece_()'s cap-face material). */
+    std::string interior_material;
+
+    /** @brief A chunk's collider: `"hull"` (a convex hull built from its own vertices, the
+     *         default) or `"boxes"` (destruct::fit_boxes(), the only shape this had before
+     *         physxcoopa gained ShapeType::ConvexHull -- the fallback for a degenerate hull). */
+    std::string collider = "hull";
+
+    /**
+     * @brief Also lets THIS object be cut by DestructionSystem::slice_object() without a
+     *         separate Sliceable component, using `interior_material`, `chunk_density`,
+     *         `chunk_physics_material`, `collider`, `collider_fill` and `max_boxes` as the cut
+     *         halves' style. 0 refuses the cut; each half gets this value minus one, carried
+     *         on a Sliceable so it can be cut again until the count runs out.
+     */
+    int max_slices = 1;
+
     /**
      * @brief Fracture as soon as the scene starts rather than at the moment of the break.
      *

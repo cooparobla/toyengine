@@ -3580,14 +3580,38 @@ const Node* EditorApp::inherited_transform_key_(ObjectId id, const char* key) co
     return nullptr;
 }
 
+bool EditorApp::has_animator_(ObjectId id) const {
+    const Node* node = doc_.find(id);
+    if (!node) return false;
+    const Node& eff = instances_panel_->effective_(*node);
+    if (!eff.contains("components") || !eff.at("components").is_sequence()) return false;
+    for (const auto& c : eff.at("components").as_seq()) {
+        if (component_type(c) == "Animator") return true;
+    }
+    return false;
+}
+
+ObjectId EditorApp::rig_root_of_(ObjectId id) const {
+    for (std::optional<ObjectId> cur = id; cur && *cur != 0; cur = doc_.parent_of(*cur)) {
+        if (has_animator_(*cur)) return *cur;
+    }
+    return 0;
+}
+
 OriginStyle EditorApp::origin_style_for_(ObjectId id) const {
+    // Bones are a rig's display: an Animator at or above this object, and nothing else. Reads
+    // the EFFECTIVE Animator (rig_root_of_), not just an override -- unlike Pose mode's rig
+    // detection (TimelinePanel::rig_of_), a scene-placed instance must read as a skeleton too.
+    const bool in_rig = rig_root_of_(id) != 0;
     const Node* n = inherited_transform_key_(id, "origin_style");
     if (n && n->is_string()) {
         const std::string v = n->get_value<std::string>();
         if (v == "Orb") return OriginStyle::Orb;
         if (v == "Axes") return OriginStyle::Axes;
+        if (v == "Bone" && in_rig) return OriginStyle::Bone;
     }
-    return default_origin_style();   // Preferences > Viewport
+    if (in_rig) return OriginStyle::Bone;   // a rig reads as a skeleton unless told otherwise
+    return default_origin_style();          // Preferences > Viewport
 }
 
 float EditorApp::origin_size_for_(ObjectId id) const {
@@ -3615,7 +3639,7 @@ void EditorApp::set_selection_transform_key_(const char* key, const Node* value,
 
 void EditorApp::set_selection_origin_style(std::optional<OriginStyle> style) {
     if (!style) { set_selection_transform_key_("origin_style", nullptr, "Origin Style"); return; }
-    static const char* kNames[] = {"Axes", "Orb"};
+    static const char* kNames[] = {"Axes", "Orb", "Bone"};
     const Node v = Node(std::string(kNames[static_cast<int>(*style)]));   // parens: braces build a sequence
     set_selection_transform_key_("origin_style", &v, "Origin Style");
 }

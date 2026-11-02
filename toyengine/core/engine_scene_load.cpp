@@ -135,14 +135,17 @@ void Engine::apply_warmup_budgets_(detail::SceneLoadState& st, bool warming) {
     if (warming) {
         const float budget = std::max(0.1f, st.options.warm_up_budget_ms);
         warm_saved_upload_ms_.clear();
+        warm_saved_heightmap_chunk_ms_.clear();
         for (toy::world::TerrainComponent* terrain :
              st.scene->get_components<toy::world::TerrainComponent>()) {
             warm_saved_upload_ms_.emplace_back(terrain, terrain->upload_budget_ms);
             terrain->upload_budget_ms = budget;
+            // Heightmap mode's own chunk-spawn pacing (HeightmapTerrainSystem::stream_chunks_()
+            // and refresh_water_(), both paced by chunk_budget_ms); inert in Tiles mode, so
+            // raising it on every terrain here is harmless.
+            warm_saved_heightmap_chunk_ms_.emplace_back(terrain, terrain->chunk_budget_ms);
+            terrain->chunk_budget_ms = budget;
         }
-        // Heightmap terrain's own chunk-spawn cap (HeightmapTerrainSystem::stream_chunks_(),
-        // budget=512/frame) is left alone: it is already far above what any view distance needs
-        // in one frame, unlike the painter's modest default below.
         warm_saved_chunk_budget_.clear();
         for (toy::instance::InstancePainter* painter :
              st.scene->get_components<toy::instance::InstancePainter>()) {
@@ -184,6 +187,12 @@ void Engine::apply_warmup_budgets_(detail::SceneLoadState& st, bool warming) {
         }
     }
     warm_saved_upload_ms_.clear();
+    for (const auto& [terrain, saved] : warm_saved_heightmap_chunk_ms_) {
+        if (std::find(live.begin(), live.end(), terrain) != live.end()) {
+            terrain->chunk_budget_ms = saved;
+        }
+    }
+    warm_saved_heightmap_chunk_ms_.clear();
     const auto live_painters = st.scene->get_components<toy::instance::InstancePainter>();
     for (const auto& [painter, saved] : warm_saved_chunk_budget_) {
         if (std::find(live_painters.begin(), live_painters.end(), painter) != live_painters.end()) {

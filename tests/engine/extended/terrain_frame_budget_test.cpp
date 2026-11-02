@@ -36,6 +36,7 @@
 #include <vector>
 
 #include <glm/glm.hpp>
+#include <gfxcoopa/engine/components/camera_component.h>
 #include <toyengine/core/engine.h>
 #include <toyengine/scene/camera_controller.h>
 #include <toyengine/world/terrain_component.h>
@@ -137,6 +138,95 @@ COOPA_TEST(a_flight_costs_no_more_per_frame_than_standing_still) {
     // of a 2 ms frame. The allowance is what a frame can carry without being felt; the ratio
     // still scales it for a slower machine, and the p95/p99 checks below are what catch a bake
     // or an upload landing unbudgeted in one frame.
+    expect(flight_median < 1.25 * still_median + 0.75,
+           "flying costs about what standing still does (" + std::to_string(flight_median) + " vs " +
+               std::to_string(still_median) + " ms)");
+    expect(flight_p95 < 1.75 * flight_median,
+           "and the common frame is flat (p95 " + std::to_string(flight_p95) + " ms vs median " +
+               std::to_string(flight_median) + " ms)");
+    expect(flight_p99 < 2.5 * flight_median,
+           "with no sustained hitches (p99 " + std::to_string(flight_p99) + " ms vs median " +
+               std::to_string(flight_median) + " ms)");
+}
+
+/**
+ * @brief The same flight-vs-still contract, on the soft tile set instead of voxel's.
+ *
+ * `voxel_terrain_demo()` above is the cheapest tile set shipped (ARC_SEG 1, LIP_SEG 1 --
+ * 14 triangles per piece); `soft_terrain_demo()` is the authored demo's own tile_set, ~8x the
+ * triangles per piece (ARC_SEG 3, LIP_SEG 4). The streamer and its budget are identical code on
+ * both -- this exists to have ANY automated coverage of the soft tile set's actual streaming
+ * cost, since every prior frame test here only ever measured voxel's.
+ */
+COOPA_TEST(a_soft_tile_flight_costs_no_more_per_frame_than_standing_still) {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    toy::core::AppConfig config = make_test_config(soft_terrain_demo(), 320, 180, 160, 90);
+    toy::core::Engine engine(std::move(config));
+
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    coopa::test::require(camera != nullptr && camera->scene != nullptr && camera->owner != nullptr,
+                         "the demo registers a main camera");
+    coopa::scene::Scene& scene = *camera->scene;
+    auto* terrain = scene.find_first_component<toy::world::TerrainComponent>();
+    coopa::test::require(terrain != nullptr, "the demo carries a TileTerrain");
+    terrain->generator.grid_size        = 80;
+    terrain->params.tiles_per_grid_unit = 4;
+    terrain->params.chunk_size          = 32;
+    terrain->params.view_radius         = 4;
+    terrain->collision                  = true;
+
+    const float chunk_world = terrain->params.chunk_world_size();
+    coopa::scene::SceneObject* marker = scene.find_object_by_path(camera->focus_object);
+    coopa::test::require(marker != nullptr && marker->get_transform() != nullptr, "the focus marker is there");
+    auto* marker_transform = marker->get_transform();
+    if (auto* controller = camera->owner->get_component<toy::scene::CameraController>()) {
+        controller->distance           = 2.0f;
+        controller->follow_smoothing   = 0.0f;
+        controller->movement_smoothing = 0.0f;
+        controller->pitch_deg          = 20.0f;
+    }
+    const auto park = [&](float cx, float cy) {
+        marker_transform->transform().set_position(glm::vec3(cx * chunk_world, cy * chunk_world, 48.0f));
+    };
+    park(5.5f, 5.5f);
+    tick_until(engine, 2400, [&] { return count_live_chunks(*terrain) >= 70; });
+    coopa::test::require(terrain->is_ready(), "the world comes up");
+    for (int i = 0; i < 60; ++i) engine.tick();
+
+    const auto time_frame = [&engine] {
+        const auto t0 = std::chrono::steady_clock::now();
+        engine.tick();
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    };
+
+    std::vector<double> still;
+    still.reserve(240);
+    for (int i = 0; i < 240; ++i) still.push_back(time_frame());
+
+    std::vector<double> flight;
+    flight.reserve(480);
+    float angle = 0.0f;
+    for (int step = 0; step < 480; ++step) {
+        angle += 0.026f;
+        park(5.0f + 3.2f * std::cos(angle), 5.0f + 3.2f * std::sin(angle));
+        flight.push_back(time_frame());
+    }
+
+    const double still_median  = percentile(still, 0.5);
+    const double flight_median = percentile(flight, 0.5);
+    const double flight_p95    = percentile(flight, 0.95);
+    const double flight_p99    = percentile(flight, 0.99);
+    const double flight_max    = *std::max_element(flight.begin(), flight.end());
+    std::printf("  soft still:  median %.2f ms, p95 %.2f ms\n", still_median, percentile(still, 0.95));
+    std::printf("  soft flight: median %.2f ms, p95 %.2f ms, p99 %.2f ms, max %.2f ms\n", flight_median,
+                flight_p95, flight_p99, flight_max);
+
+    // Same relative shape as the voxel case above, NOT a cross-flavour parity claim -- soft's
+    // own median is expected to sit well above voxel's (more triangles is more triangles); what
+    // this guards is that soft's flight does not cost more THAN ITS OWN still frame, i.e. the
+    // streamer's budget paces soft chunks the same way it paces voxel ones.
     expect(flight_median < 1.25 * still_median + 0.75,
            "flying costs about what standing still does (" + std::to_string(flight_median) + " vs " +
                std::to_string(still_median) + " ms)");

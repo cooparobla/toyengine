@@ -367,9 +367,9 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             with_tip(f_float("bone_length", 0.0f, 0.01f, 0.0f, 10000.0f),
                      "Optional length of this object as a bone (m), for the editor's Bone origin style. 0 lets the editor guess "
                      "it from the hierarchy; the runtime ignores it"),
-            with_tip(f_enum("origin_style", {"Inherit", "Axes", "Orb"}),
-                     "How this object's origin is drawn in the editor. Inherit takes the nearest ancestor's, and Axes if none "
-                     "sets one; the runtime ignores it"),
+            with_tip(f_enum("origin_style", {"Inherit", "Axes", "Orb", "Bone"}),
+                     "How this object's origin is drawn in the editor. Inherit takes the nearest ancestor's; Bone is only "
+                     "available under an Animator, where it is the default; Axes otherwise. The runtime ignores it"),
             with_tip(f_float("origin_size", 0.0f, 0.005f, 0.0f, 0.5f),
                      "How big this object's origin glyph is drawn (m) in the editor. 0 inherits; the runtime ignores it"),
         }, true, false});
@@ -472,6 +472,22 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             f_asset("mesh_path", "meshes", ".yaml", true, true, "", true),
             f_bool("convex", false),
             phys_mat, f_bool("is_trigger", false), f_int("layer", 0, 0, 31),
+        }, false});
+        add({"ConvexCollider", "Physics", {
+            with_tip(f_asset("hull_mesh", "meshes", ".yaml", true, true, "", true),
+                     "A convex hull built from this mesh's vertices once, cached. Unlike "
+                     "MeshCollider, legal on a dynamic Rigidbody"),
+            f_vec3("center", glm::vec3(0.0f), 0.02f),
+            phys_mat, f_bool("is_trigger", false), f_int("layer", 0, 0, 31),
+        }, false});
+        add({"DamageDealer", "Physics", {
+            with_tip(f_enum("damage_type", {"Impact", "Slash", "Pierce", "Explosive", "Fire"}, true),
+                     "What kind of blow this collider's hits deal"),
+            with_tip(f_float("amount", 0.0f, 1.0f, 0.0f, 1.0e5f), "Blow amount for a non-Impact type; Impact always reads the contact impulse"),
+            with_tip(f_float("amount_from_impulse", 1.0f, 0.01f, 0.0f, 100.0f), "Scales the contact impulse into the blow's amount, Impact only"),
+            f_vec3("edge_axis", glm::vec3(0.0f, 1.0f, 0.0f), 0.02f),
+            with_tip(f_float("radius", 0.0f, 0.005f, 0.0f, 10.0f), "0 lets the receiving Damageable choose its own default"),
+            with_tip(f_bool("one_shot", false), "Deal its blow at most once, then stop"),
         }, false});
         add({"Rigidbody", "Physics", {
             f_float("mass", 1.0f, 0.01f, 0.0f, 1e6f, true),
@@ -1005,8 +1021,10 @@ std::map<std::string, ComponentSchema>& schema_table_() {
         add({"EnvPresetSwitcher", "Effects", {
             with_tip(f_string("start", "", true),
                      "Name of the preset live on load. Empty: the first one in the list"),
-            with_tip(f_string("label_object", ""),
-                     "Optional Text widget shown the active preset's one-line blurb"),
+            with_tip(f_string("title", ""),
+                     "Panel heading. Empty: no heading"),
+            with_tip(f_string("theme_ref", "ui/themes/game_dark", true),
+                     "Theme styling the panel"),
         }});
         // toyengine/weather/: switches lights, effects or children with the time of day / weather.
         add({"WeatherReactor", "Effects", {
@@ -1324,7 +1342,40 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                      "A chunk filling less of its box than this collides as several boxes instead of one"),
             with_tip(f_int("max_boxes", 4, 1, 16), "Most collision boxes one chunk may use; 1 keeps it a single box"),
             with_tip(f_string("chunk_physics_material", ""), "physics_materials/<name>.yaml for the debris"),
+            with_tip(f_string("interior_material", ""), "materials/<name>.yaml for a cut face; empty reuses the surface"),
+            with_tip(f_enum("collider", {"hull", "boxes"}), "A chunk's collider: a convex hull, or fit_boxes()'s box compound"),
+            with_tip(f_int("max_slices", 1, 0, 16), "How many times this object may itself be cut by slice_object(); 0 refuses"),
             with_tip(f_bool("prefracture", true), "Cut the mesh up at load rather than at the moment it breaks"),
+        }});
+        add({"Sliceable", "Gameplay", {
+            with_tip(f_string("interior_material", ""), "materials/<name>.yaml for a cut face; empty reuses the surface"),
+            with_tip(f_float("density", 700.0f, 10.0f, 1.0f, 20000.0f), "kg/m^3 a half's mass comes from"),
+            with_tip(f_float("piece_lifetime", 10.0f, 0.1f, 0.0f, 600.0f), "Seconds before a half is cleaned up; 0 keeps it"),
+            with_tip(f_float("piece_fade", 1.0f, 0.05f, 0.0f, 60.0f), "Seconds a half sinks out of sight for"),
+            with_tip(f_string("physics_material", ""), "physics_materials/<name>.yaml for the halves"),
+            with_tip(f_enum("collider", {"hull", "boxes"}), "A half's collider: a convex hull, or fit_boxes()'s box compound"),
+            with_tip(f_float("collider_fill", 0.6f, 0.05f, 0.0f, 1.0f),
+                     "A half filling less of its box than this collides as several boxes instead of one (boxes collider only)"),
+            with_tip(f_int("max_boxes", 4, 1, 16), "Most collision boxes one half may use (boxes collider only)"),
+            with_tip(f_int("max_slices", 1, 0, 16), "How many more times a half of this object may itself be cut; 0 refuses"),
+        }});
+        add({"Damageable", "Gameplay", {
+            with_tip(f_string("material", ""), "damage_materials/<name>.yaml; empty uses the engine default"),
+            with_tip(f_float("hit_points", 0.0f, 1.0f, 0.0f, 100000.0f), "0 takes the material's own hit_points"),
+            with_tip(f_int("damage_resolution", 16, 2, 64), "Cells on the longest axis of its local damage field"),
+            with_tip(f_bool("cleave", true), "Allow a saturated slash streak to cut it in two"),
+            with_tip(f_bool("fracture_on_death", true), "Shatter at 0 HP; needs a sibling Destructible"),
+            with_tip(f_bool("localized_fracture", false), "Reserved -- not implemented yet, currently inert"),
+            with_tip(f_float("min_impulse", 200.0f, 5.0f, 0.0f, 1.0e5f),
+                     "N*s below which a contact is a settling touch, not a blow"),
+        }});
+        add({"DamageCursor", "Gameplay", {
+            with_tip(f_enum("slice_button", {"left", "right", "middle"}), "Mouse button that slices what it hits"),
+            with_tip(f_enum("hit_button", {"right", "left", "middle"}), "Mouse button that deals a blow at what it hits"),
+            with_tip(f_enum("damage_type", {"Impact", "Slash", "Pierce", "Explosive"}, true), "The blow hit_button deals"),
+            with_tip(f_float("amount", 400.0f, 5.0f, 0.0f, 1.0e5f), "hit_button's blow amount"),
+            with_tip(f_int("seed", 7, 0, 1000000), "Seeds the slice plane's random angle; the same run repeats"),
+            with_unit(with_tip(f_float("max_distance", 1000.0f, 1.0f, 0.1f, 10000.0f), "How far the pick ray reaches"), "m"),
         }});
         // Defaults mirror toyengine/scene/terrain_digger.h.
         add({"TerrainDigger", "Gameplay", {
@@ -1485,6 +1536,9 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                      "Chunks exist only within this distance of the camera (m). 0 = automatic: the camera's far clip, "
                      "with frustum culling doing the rest. Set it to cap the cost for close / top-down cameras or huge terrains"));
             fs.push_back(with_tip(f_int("patch_resolution", 0, 0, 64), "Quads per chunk side before tessellation; 0 = automatic (4, or 32 without tessellation)"));
+            fs.push_back(with_tip(f_float("chunk_budget_ms", 2.0f, 0.1f, 0.1f, 16.0f),
+                     "Milliseconds a frame may spend spawning chunks, rebuilding their water and folding a freshly "
+                     "applied map's water in (at least one chunk/tile always lands)"));
             fs.push_back(f_int("layer_texture_size", 1024, 4, 4096));
             return fs;
         };

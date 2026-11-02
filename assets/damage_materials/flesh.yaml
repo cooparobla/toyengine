@@ -1,0 +1,9 @@
+# Soft and yielding: low resistance across the board (nothing to deflect a blow), fibrous
+# enough that a slash cuts cleanly, and too little hit_points for a hit to ever "fracture" it --
+# Damageable is the wrong tool for a creature's health in any case; this exists for the dressed
+# set, not for a game's actual damage-over-health gameplay.
+hardness: 0.05
+toughness: 0.6
+fibrous: 0.5
+hit_points: 60
+resistance: { impact: 0.8, slash: 0.4, pierce: 0.5, explosive: 0.9, fire: 0.6 }

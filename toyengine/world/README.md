@@ -30,6 +30,25 @@ what a bare `Terrain` has always meant. So no scene ever had to be migrated.
 - **The water** -- a kind (None / Ocean / Lake / River), a surface **level** and a river's flow,
   per tile. Depth is never stored; it is `level - ground`. See [Water](#water).
 
+### What differs at runtime
+
+The shared API makes the two modes *virtually* interchangeable, not identical. Six gaps are
+accepted rather than papered over -- see `assets/scenes/terrain/unified_terrain_demo` for all
+six against one shared map, and the non-parity table in its scene header:
+
+- The water plane sits 0-1 m lower on tiles than on the heightmap -- tiles subtract an inset
+  from a quantised step; the heightmap mesher uses the continuous level raw.
+- A `Buoyancy` body floats slightly high on tiles -- `TerrainField::water_at` returns the
+  un-inset terrace level; only the heightmap branch populates the true `water_level_`.
+- Sub-step-shallow shoreline can be wet on tiles, dry on the heightmap -- tiles force at least
+  one step of channel; the heightmap compares continuous ground.
+- Tiles are solid only within `collision_radius` chunks of the camera; the heightfield is one
+  whole-grid collider, solid everywhere.
+- Switching back to a heightmap that evicted (see **Eviction** under Heightmap terrain below)
+  re-decodes every layer PNG synchronously -- a brief hitch tiles never have.
+- A terrain's first activation bakes once, lazily, per session -- one frame of stale history
+  (TAA ghosting) plus the bake time, on tiles and heightmap alike.
+
 ### What generates a world is not here
 
 Map generation lives in [`toyengine/mapgen`](../mapgen/README.md). A `MapGenerator` component
@@ -366,6 +385,18 @@ turning round at a chunk boundary re-attaches ground that is already built inste
 it; the streaming centre is latched (`latch_stream_centre()`) so that merely *looking* around
 cannot move the loaded region at all.
 
+**Deactivation releases everything, immediately.** `scene.get_components<TerrainComponent>()`
+only sees a terrain that is active in hierarchy, so deactivating one (a preset switch, a script,
+an inspector toggle, or an ancestor going inactive) drops it out of `TerrainSystem::execute()`'s
+gather. The system diffs this frame's gather against last frame's to notice the drop, then
+`release_terrain_()` tears down every chunk the same frame: Live ones are destroyed outright,
+a Meshing one is cancelled and parked `Retiring` and drained over the following frames by the
+same path `release_distant_chunks_()` already uses. Reactivating starts the resident set over
+from nothing — `dormant_chunks` does not survive a deactivation, only a chunk briefly leaving
+view. This is deliberate: a scene that cycles between several terrain flavours (see
+`unified_terrain_demo`) would otherwise carry every flavour's chunks, meshes and colliders at
+once for as long as it runs.
+
 `tiles_per_grid_unit` is quadratic in tiles and does not add detail the map does not have; past
 the point where a map cell is a handful of blocks wide, all it resolves is
 `MapConfig::terrain_roughness`'s fractal displacement.
@@ -653,10 +684,34 @@ and its height range (for culling). Splats and the layer arrays are G-buffer set
 
 **Cost model.** There is nothing to load per chunk -- all chunks share one patch mesh, the height
 texture and the material -- so the surface relies on frustum culling plus screen-space tessellation
-(a 4-quad base patch, detail added near the camera). `view_distance` (default `auto` = the camera's
-far clip) is a hard cap for close / top-down cameras or huge terrains: chunk objects beyond it are
-not spawned (with one chunk of hysteresis). `shadow_distance` drops far chunks from the shadow
-passes (`MeshRenderer::shadow_max_distance`), `cast_shadows` from all of them. Details are the
+(a 4-quad base patch, detail added near the camera; `tessellation.max_distance` caps where the
+added detail stops and the base patch takes over -- 0, the default, means the full `view_distance`).
+`view_distance` (default `auto` = the camera's far clip) is a hard cap for close / top-down cameras
+or huge terrains: chunk objects beyond it are not spawned (with one chunk of hysteresis).
+`shadow_distance` drops far chunks from the shadow passes (`MeshRenderer::shadow_max_distance`),
+`cast_shadows` from all of them.
+**Streaming budget.** Unlike Tiles mode, chunk spawning and water rebuilds are not jobified --
+`HeightmapTerrainSystem::stream_chunks_()` and `refresh_water_()` both run on the owner thread, so
+without pacing a teleport across a big terrain (or the first frame after switching INTO heightmap
+mode, with every chunk in view missing at once) would spawn and water-fold every one of them in a
+single frame. `TerrainComponent::chunk_budget_ms` (default 2 ms/frame) caps how much owner-thread
+time either loop spends per frame, nearest-chunk-first, resuming where it left off next frame; at
+least one chunk always lands, so the stream can never fully stall. `Engine::apply_warmup_budgets_`
+raises this budget behind the loading screen, same as Tiles mode's `upload_budget_ms`, so a fresh
+scene load still streams in quickly rather than being paced as if it were steady-state gameplay.
+The heightfield collider's `HeightGrid` build (a multi-megabyte copy plus a pyramid scan) runs on a
+`coopa::job::JobEngine` job instead of inline, published once `is_complete()`.
+**Eviction:** a terrain untouched for `k_idle_frames` (120) frees its height texture and both
+layer `TextureArray`s (`evict_()`); going idle this way and then becoming visible again (an
+`EnvPresetSwitcher` flipping back to it, say) re-decodes every layer PNG synchronously --
+`layer_texture_size` is the lever to shrink that hitch.
+**Deactivation** is a separate, immediate path: the per-frame gather
+(`scene.get_components<HeightmapTerrain>()`) only sees an active-in-hierarchy terrain, so the
+moment one is deactivated (a preset switch, a script, an inspector toggle) it drops out of that
+gather and `release_terrain_()` tears down its chunk objects AND its `HeightfieldCollider` in the
+same frame -- there is nothing left to go idle. Reactivating pays the same full reload as the
+`k_idle_frames` case; the two paths exist for different reasons (idle vs. explicitly hidden) but
+land on the same rebuild. Details are the
 expensive part: scatter chunks draw from persistent instance buffers the renderer uploads once per
 build (`ParticleMeshBatch::static_key`), thin out toward their draw distance (`fade_start`) and pick
 mesh LODs per chunk for a single instance at the chunk's nearest point.
@@ -682,5 +737,8 @@ by layer / slope / height, streamed around the camera, re-scattered where the te
 Caves and overhangs (the height-column model has no room for them, though mapcoopa generates cave
 systems), waterfalls as their own effect (a river's step is a steep slope of its surface), chunk LOD,
 rivers/roads/towns as 3D geometry, loading only the `.tiles` chunks near the camera (the file
-format allows it; everything is loaded today), and a per-tile tile-set override. Each sits on top of this layer rather
+format allows it; everything is loaded today), and a per-tile tile-set override. A mode-agnostic
+water inset (today only the heightmap branch populates the un-inset `water_level_`, see **What
+differs at runtime** above) and a keep-warm pass for an evicted heightmap (so switching back
+doesn't re-decode every layer PNG synchronously) are both open. Each sits on top of this layer rather
 than requiring it to change shape.

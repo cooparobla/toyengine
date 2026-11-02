@@ -1,0 +1,7 @@
+# A pot, a terracotta tile: soft AND brittle -- it chips and crumbles under almost anything
+# rather than denting, and has little hit_points to spare.
+hardness: 0.2
+toughness: 0.15
+fibrous: 0.0
+hit_points: 40
+resistance: { impact: 0.9, slash: 0.9, pierce: 0.9, explosive: 0.7, fire: 1.0 }

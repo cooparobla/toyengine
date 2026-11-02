@@ -38,6 +38,10 @@ panel asset and needs no C++. Anything else — a HUD, a hotbar, a transport dec
   clears it.
 - **A world plate is bars and labels.** Popups clamp to the plate and clip rather than
   relocating, so a dropdown on a nameplate is a mistake, not a layout bug.
+- **Author boxes at `reference_resolution` (default 1920x1080), not the window's actual size.**
+  A Screen-space `ImmScreen` scales its canvas (`CanvasScaler` / `ScaleWithScreenSize`) so the
+  authored layout always fits the real surface, whether that is a wide monitor or the editor's
+  narrower embedded play viewport. `{0, 0}` opts a screen back into raw device pixels.
 
 ## What a host provides
 

@@ -13,7 +13,7 @@ std::vector<TerrainSceneView> terrain_views(const coopa::scene::Scene& scene) {
     std::vector<TerrainSceneView> out;
     // One loop, both modes: a terrain answers through its field whichever model it carries.
     for (TerrainComponent* t : const_cast<coopa::scene::Scene&>(scene).get_components<TerrainComponent>()) {
-        if (t->owner == nullptr || !t->owner->active()) continue;
+        if (t->owner == nullptr || !active_in_hierarchy(*t->owner)) continue;
         t->sync_field();
         if (t->field.empty()) continue;
         out.push_back(TerrainSceneView{t->field_view(), t->owner});
@@ -26,6 +26,13 @@ TerrainSceneView terrain_view_at(const coopa::scene::Scene& scene, const glm::ve
         if (v.view.contains(world)) return v;
     }
     return TerrainSceneView{};
+}
+
+bool active_in_hierarchy(const coopa::scene::SceneObject& obj) {
+    for (const coopa::scene::SceneObject* o = &obj; o != nullptr; o = o->parent()) {
+        if (!o->active()) return false;
+    }
+    return true;
 }
 
 } // namespace world

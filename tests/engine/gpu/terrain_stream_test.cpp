@@ -43,6 +43,7 @@
 #include <toyengine/core/engine.h>
 #include <toyengine/scene/camera_controller.h>
 #include <physxcoopa/components/mesh_collider.h>
+#include <gfxcoopa/engine/components/mesh_renderer.h>
 
 #include <toyengine/water/water_body.h>
 #include <toyengine/water/water_system.h>
@@ -497,4 +498,59 @@ COOPA_TEST(a_flight_keeps_its_work_off_the_frame) {
         std::printf("  only %lld of %lld lower-half pixels were ground\n", ground, total);
         dump_frame(frame, "terrain_stream_settled");
     }
+}
+
+/**
+ * @brief Deactivating a terrain must free the chunks it streamed in, not leave them parked.
+ *
+ * `scene.get_components<TerrainComponent>()` filters on the component's own object being
+ * active, so the moment a terrain is deactivated (an EnvPresetSwitcher preset group, a scripted
+ * toggle, an inspector checkbox) TerrainSystem's per-frame gather simply stops seeing it -- and
+ * without this, nothing ever tears down what it already built: every chunk SceneObject, its GPU
+ * mesh and its collider stay on the tree for the rest of the scene's life. Reactivating must
+ * bring the region back, since the whole point is "pay a reload, not a permanent leak".
+ */
+COOPA_TEST(deactivating_a_terrain_releases_its_chunks) {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    toy::core::AppConfig config = make_test_config(voxel_terrain_demo(), 320, 180, 160, 90);
+    toy::core::Engine engine(std::move(config));
+
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    coopa::test::require(camera != nullptr && camera->scene != nullptr && camera->owner != nullptr,
+                         "the demo registers a main camera");
+    coopa::scene::Scene& scene = *camera->scene;
+    toy::world::TerrainComponent& terrain = prepare(scene);
+    coopa::test::require(terrain.owner != nullptr, "the terrain has an owner object");
+
+    const float chunk_world = terrain.params.chunk_world_size();
+    coopa::scene::SceneObject* marker = scene.find_object_by_path(camera->focus_object);
+    coopa::test::require(marker != nullptr && marker->get_transform() != nullptr, "the focus marker is there");
+    marker->get_transform()->transform().set_position(glm::vec3(5.5f * chunk_world, 5.5f * chunk_world, 48.0f));
+
+    tick_until(engine, 2400, [&] { return count_live_chunks(terrain) >= 70; });
+    coopa::test::require(terrain.is_ready(), "the world comes up");
+    for (int i = 0; i < 60; ++i) engine.tick();   // let the region settle completely
+
+    const std::size_t tracked_before = terrain.chunks().size();
+    coopa::test::require(tracked_before > 0, "the terrain streamed chunks in");
+
+    terrain.owner->set_active(false);
+    // Most chunks are Live, torn down synchronously the frame the gather drops them; a handful
+    // may be mid-Meshing and drain over the next few frames through the existing Retiring path.
+    for (int i = 0; i < 30 && !terrain.chunks().empty(); ++i) engine.tick();
+
+    expect(terrain.chunks().empty(), "every tracked chunk is released (" +
+           std::to_string(terrain.chunks().size()) + " of " + std::to_string(tracked_before) +
+           " left)");
+    std::size_t chunk_children = 0;
+    for (const auto& child : terrain.owner->children()) {
+        if (child->get_component<coopa::gfx::engine::components::MeshRenderer>() != nullptr) ++chunk_children;
+    }
+    expect(chunk_children == 0, "no chunk objects are left on the tree");
+
+    terrain.owner->set_active(true);
+    tick_until(engine, 2400, [&] { return count_live_chunks(terrain) >= 70; });
+    expect(count_live_chunks(terrain) >= 70, "reactivating brings the region back");
 }

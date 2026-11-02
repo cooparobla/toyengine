@@ -1,7 +1,8 @@
 /**
  * @file destruction_system.h
- * @brief Runs destruction: fractures a Destructible's mesh on a worker, and turns the object
- *        into physical chunks when it breaks.
+ * @brief Runs destruction: fractures a Destructible's mesh on a worker and turns it into
+ *        physical chunks when it breaks, and cuts a Sliceable or Destructible in two along a
+ *        plane on demand (slice_object()).
  *
  * The policy half of destruction, split from the Destructible component the way TerrainSystem
  * is split from TerrainComponent, and for the same reasons: it needs the device, the allocator,
@@ -10,7 +11,7 @@
  * per object.
  *
  * What it does each pass, at UpdatePhase order **70** -- after terrain streaming (60) and
- * before physics (100), so a chunk spawned this frame is simulated this frame rather than
+ * before physics (100), so a piece spawned this frame is simulated this frame rather than
  * hanging in the air for one:
  *
  *  1. **Fracture.** A Destructible with `prefracture` gets its mesh cut into cells on the job
@@ -18,27 +19,39 @@
  *     the component), because they are geometry, and several objects sharing one mesh and one
  *     seed share one fracture -- a wall of fifty identical crates is cut once.
  *  2. **Break.** A Destructible whose `pending()` is set (a hard enough hit, or shatter())
- *     has its chunks spawned: one object each, with a MeshRenderer over the cell's own mesh, a
- *     BoxCollider of its bounds and a Rigidbody weighed from its volume. The original object
- *     is deactivated, not deleted, so whatever referenced it still resolves.
- *  3. **Clean up.** Chunks past their lifetime sink and are removed, so a scene that is broken
+ *     has its chunks spawned through spawn_piece_() (below). The original object is
+ *     deactivated, not deleted, so whatever referenced it still resolves.
+ *  3. **Clean up.** Pieces past their lifetime sink and are removed, so a scene that is broken
  *     over and over does not accumulate bodies for ever.
  *
- * `DESTRUCT_DEBUG=1` in the environment prints one line per break (what broke, into how many
- * chunks) -- the first thing to look at when something refuses to come apart.
+ * **Slicing** (slice_object(), public) is the other way to turn one object into two: a plane
+ * cut (toyengine/destruct/slice.h) rather than a Voronoi break, through the same spawn_piece_()
+ * -- same mesh/collider/Rigidbody path, same cleanup, same cap-face material handling.
  *
- * **Chunk colliders are boxes -- oriented ones.** physxcoopa has no convex-hull shape
- * (collision/shape.h), and a triangle-mesh collider cannot be dynamic. Each cell is therefore
- * boxed in its OWN best-fit frame rather than along the world axes, and a shard that fills too
- * little of that box (Destructible::collider_fill) is cut into up to `max_boxes` parts, spawned
- * as child objects whose colliders PhysicsSystem gathers into one compound body. A wedge then
- * rests on its face instead of hanging off a corner of a box that is mostly air. It is still
- * not the shape to build a puzzle on.
+ * **Typed damage.** A `Damageable` queues blows (an impact, a slash, ...); this system drains
+ * the queue each pass, resolves each through physxcoopa's `damage::resolve_damage()`, deposits
+ * it into the object's local `destruct::DamageField`, and carries out two of the five possible
+ * responses: Fracture (the Destructible path above, if a sibling Destructible exists) and
+ * Cleave (slice_object(), once the field's saturated region reads flat enough to trust as a cut
+ * plane). Dent/Chip/Hole are not implemented yet -- see damageable.h's own doc for why.
  *
- * A child collider's Transform must be parented to the chunk's by hand (SceneObject::add_child
+ * `DESTRUCT_DEBUG=1` in the environment prints one line per break or slice (what broke, into
+ * how many pieces) -- the first thing to look at when something refuses to come apart.
+ *
+ * **Piece colliders are convex hulls by default, boxes as the fallback.** spawn_piece_()
+ * builds a hull from the piece's own vertices (`collider: hull`, physxcoopa's
+ * `ConvexCollider`); a degenerate hull (a near-flat sliver -- a thin slice, a crushed shard) or
+ * an explicit `collider: boxes` falls back to the piece's OWN best-fit box or boxes
+ * (destruct::fit_boxes()), the only shape this system had before physxcoopa gained
+ * `ShapeType::ConvexHull`. A shard that fills too little of its one box (`collider_fill`) is
+ * cut into up to `max_boxes` parts in the box path only, spawned as child objects whose
+ * colliders PhysicsSystem gathers into one compound body -- a wedge then rests on its face
+ * instead of hanging off a corner of a box that is mostly air.
+ *
+ * A child collider's Transform must be parented to the piece's by hand (SceneObject::add_child
  * links ownership only): a compound's shapes are placed from the child's world transform
- * relative to the root's, so an unparented child puts its shape a whole chunk position away
- * from the body, and the chunk falls through the floor it should be resting on.
+ * relative to the root's, so an unparented child puts its shape a whole piece position away
+ * from the body, and the piece falls through the floor it should be resting on.
  */
 
 #ifndef TOYENGINE_SCENE_DESTRUCTION_SYSTEM_H
@@ -59,11 +72,13 @@
 namespace coopa::asset { class AssetManager; }
 namespace coopa::gfx::core { class Device; }
 namespace coopa::gfx::memory { class Allocator; }
+namespace coopa::physx::system { class PhysicsSystem; }
 
 namespace toy {
 namespace scene {
 
 class Destructible;
+class Damageable;
 
 /**
  * @class DestructionSystem
@@ -85,6 +100,25 @@ public:
     /** @brief Chunk objects alive right now. */
     std::size_t live_chunks() const { return chunks_.size(); }
 
+    /**
+     * @brief Cuts `object` along a world-space plane into two rigid halves.
+     *
+     * Transforms the plane into `object`'s local space (the inverse world matrix; the normal
+     * by the inverse-TRANSPOSE, since a plain inverse skews a normal under non-uniform scale),
+     * slices its MeshRenderer's mesh (toyengine/destruct/slice.h), spawns a piece per half
+     * through the same spawn_piece_() a fracture chunk uses, deactivates the original like a
+     * shatter does, and inherits its Rigidbody's linear and angular velocity onto both halves
+     * so a moving object stays moving. `separation_speed` pushes each half away from the plane
+     * (+-world_normal), so they part instead of interpenetrating.
+     *
+     * @return How many halves were spawned: 2 on a cut, 0 if the plane missed the mesh or
+     *         either half came out below Sliceable::min_volume_fraction (or the object has
+     *         neither a Sliceable nor a Destructible to carry the piece settings).
+     */
+    int slice_object(coopa::scene::Scene& scene, coopa::scene::SceneObject& object,
+                     const glm::vec3& world_point, const glm::vec3& world_normal,
+                     float separation_speed = 0.0f);
+
 private:
     /// One mesh broken one way: the cells, and the job cutting them if it is still running.
     struct Fracture {
@@ -101,6 +135,37 @@ private:
         float fade = 0.0f;
     };
 
+    /// One piece's geometry, in its own principal frame -- a FracturePiece or a SlicePiece,
+    /// whichever made it. `boxes` is the fracture piece's pre-fit box compound; empty for a
+    /// slice half, which fits its box compound on demand only if it ends up needing one.
+    struct PieceSpawn {
+        std::vector<destruct::Vertex>        vertices;
+        std::vector<std::uint32_t>           indices;
+        std::uint32_t                        cap_first_index = 0;
+        glm::vec3                            centre{0.0f};
+        glm::quat                            orientation{1.0f, 0.0f, 0.0f, 0.0f};
+        glm::vec3                            half_extent{0.0f};
+        float                                volume = 0.0f;
+        std::vector<destruct::FractureBox>   boxes;
+    };
+
+    /// How to dress and weigh a spawned piece -- the settings a Destructible or Sliceable
+    /// carries, independent of which one produced the geometry.
+    struct PieceStyle {
+        float       density = 700.0f;
+        std::string physics_material;    ///< physics_materials/<name>.yaml; empty = engine default.
+        std::string interior_material;   ///< materials/<name>.yaml for the cap; empty = reuse the surface.
+        float       lifetime = 10.0f;
+        float       fade = 1.0f;
+        bool        use_hull = true;     ///< `collider: hull` (true) or `collider: boxes` (false).
+        float       collider_fill = 0.6f;
+        int         max_boxes = 4;
+        glm::vec3   hit_point{0.0f};      ///< World space; the piece is pushed away from this.
+        glm::vec3   hit_velocity{0.0f};   ///< Extra world-space velocity (already scaled), added as-is.
+        float       scatter = 0.0f;       ///< Outward speed, m/s, away from `hit_point`.
+        glm::vec3   initial_angular_velocity{0.0f}; ///< E.g. a sliced object's own spin, inherited.
+    };
+
     /// Keyed on the mesh and the settings that shape the break, so identical crates share one.
     static std::string cache_key_(const std::string& mesh_path, const Destructible& d);
 
@@ -110,8 +175,35 @@ private:
     /** @brief Spawns one rigid chunk per cell and deactivates the original. */
     int spawn_chunks_(coopa::scene::Scene& scene, Destructible& d, const Fracture& fracture);
 
+    /**
+     * @brief Spawns one rigid piece of `owner`: mesh upload (with a second material slot for
+     *        the cap, when `style.interior_material` is set and the piece has one), a convex
+     *        hull collider (falling back to one-to-several boxes when `style.use_hull` is
+     *        false or the hull builder degenerates on a near-flat sliver), and a Rigidbody
+     *        weighed from the piece's own volume. The outward push and any inherited motion go
+     *        on `RigidbodyComponent::initial_velocity`/`initial_angular_velocity` rather than
+     *        `add_impulse()` -- the body is not bound into PhysicsWorld until PhysicsSystem's
+     *        next reconcile, so an impulse applied now, before that bind, would have nothing to
+     *        act on and silently do nothing; the initial_* fields are read AT bind time for
+     *        exactly this reason. Registers the piece for age_chunks_() cleanup and marks
+     *        physics dirty; does not touch `owner`.
+     */
+    coopa::scene::SceneObject* spawn_piece_(coopa::scene::Scene& scene, coopa::scene::SceneObject& owner,
+                                            const PieceSpawn& piece, const PieceStyle& style);
+
     /** @brief Ages chunks out: sink, then remove. */
     void age_chunks_(coopa::scene::Scene& scene, float dt);
+
+    /** @brief Drains one Damageable's blow queue: resolves each against its material, deposits
+     *         it into the local DamageField, and carries out Fracture/Cleave when a blow or the
+     *         accumulated field calls for one (see this file's doc). */
+    void process_damage_(coopa::scene::Scene& scene, Damageable& damageable);
+
+    /** @brief Consumes every DamageCursor's pending slice/hit request: raycasts through
+     *         `physics`, and on a hit calls slice_object() (slice_button) or queues a blow on
+     *         the hit object's Damageable (hit_button). A miss, or a hit with no Damageable for
+     *         hit_button, is a silent no-op -- the demo's own click, not an error. */
+    void process_damage_cursors_(coopa::scene::Scene& scene, coopa::physx::system::PhysicsSystem& physics);
 
     coopa::gfx::core::Device&      device_;
     coopa::gfx::memory::Allocator& allocator_;

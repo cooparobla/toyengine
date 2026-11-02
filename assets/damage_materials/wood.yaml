@@ -1,0 +1,7 @@
+# A crate, a log, a plank: fibrous enough that a slash along the grain cleaves it cleanly once
+# it clears the cut cost, but a blunt hit just dents or chips it.
+hardness: 0.3
+toughness: 0.55
+fibrous: 0.8
+hit_points: 120
+resistance: { impact: 1.0, slash: 0.6, pierce: 1.1, explosive: 1.0, fire: 0.8 }

@@ -536,6 +536,19 @@ public:
      */
     float shadow_distance = 0.0f;
 
+    /**
+     * @brief Heightmap mode only: owner-thread milliseconds a frame may spend spawning chunks
+     *        and refreshing their water.
+     *
+     * Unlike Tiles mode, nothing in HeightmapTerrainSystem is jobified (see its file comment):
+     * spawning a chunk and rebuilding its water both run on this thread, so a teleport across a
+     * big terrain -- or the first frame after switching INTO heightmap mode, when every chunk in
+     * view is missing at once -- must spread across frames itself rather than paying for all of
+     * them in one. At least one chunk always lands, so the stream can never stall (mirrors
+     * `upload_budget_ms`'s rule above, Tiles mode's equivalent).
+     */
+    float chunk_budget_ms = 2.0f;
+
     // ------------------------------------------------------------------
     // Runtime state -- driven by TerrainSystem, not by scene YAML.
     // ------------------------------------------------------------------

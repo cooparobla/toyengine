@@ -11,6 +11,7 @@
 
 #include <coopa/animation/animation_system.h>
 #include <coopa/animation/animator.h>
+#include <physxcoopa/system/physics_system.h>
 #include <toyengine/particles/particle_system.h>
 #include <toyengine/scene/kinematic_mover.h>
 #include <toyengine/weather/weather_system.h>
@@ -27,7 +28,16 @@ void EnvPresetSwitcher::start() {
 void EnvPresetSwitcher::on_update(float) {
     if (!pending_initial_) return;
     pending_initial_ = false;
-    apply_(initial_);
+    int index = initial_;
+    if (!start_preset.empty()) {
+        for (std::size_t i = 0; i < presets.size(); ++i) {
+            if (presets[i].name == start_preset) {
+                index = static_cast<int>(i);
+                break;
+            }
+        }
+    }
+    apply_(index);
 }
 
 void EnvPresetSwitcher::select(int index) {
@@ -78,6 +88,13 @@ void EnvPresetSwitcher::apply_(int index) {
     // execute, so it needs no equivalent.)
     if (auto* anim = dynamic_cast<coopa::anim::AnimationSystem*>(scene->find_system("Animation"))) {
         anim->refresh();
+    }
+
+    // Same reasoning as the animation nudge above: PhysicsSystem only regathers colliders when
+    // told to, and set_active() does not tell it. Without this a preset's collider stays bound
+    // (or stays dropped) from before the switch.
+    if (auto* physics = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene->find_system("Physics"))) {
+        physics->refresh();
     }
 
     // The global layer moves with it, so a preset can be "the weather does this" rather than

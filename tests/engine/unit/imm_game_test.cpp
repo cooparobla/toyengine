@@ -675,7 +675,11 @@ COOPA_TEST(an_imm_screen_builds_its_canvas_and_draws_through_the_scene) {
 
     canvas->preview_refresh();
     ASSERT_EQ(probe->frames, 1);
-    ASSERT_VEC_NEAR(probe->seen, glm::vec2(1280.0f, 720.0f), 1e-4f);
+    // Probe's authored at ImmScreen's default reference_resolution (1920x1080), so canvas_size()
+    // reports that regardless of the 1280x720 viewport -- the whole point of the scaler
+    // ensure_canvas_() wires up (see an_imm_screen_is_laid_out_at_its_reference_resolution for a
+    // check that actually varies the aspect ratio).
+    ASSERT_VEC_NEAR(probe->seen, glm::vec2(1920.0f, 1080.0f), 1e-4f);
     ASSERT_TRUE(canvas->draw_list().vertices().size() > 0);
 
     // `hidden` stops the declaration without tearing anything down, so toggling it costs a
@@ -688,6 +692,60 @@ COOPA_TEST(an_imm_screen_builds_its_canvas_and_draws_through_the_scene) {
     probe->hidden = false;
     canvas->preview_refresh();
     ASSERT_EQ(probe->frames, 2);
+}
+
+COOPA_TEST(an_imm_screen_is_laid_out_at_its_reference_resolution) {
+    // The actual bug report: a panel authored for a full window read as oversized in the
+    // editor's much narrower embedded play viewport. A box anchored to a corner should sit the
+    // same DESIGN distance from that corner at any surface size, which only holds if the whole
+    // canvas is reported in reference_resolution units -- not raw device pixels.
+    struct Probe : toy::ui::ImmScreen {
+        std::string type_name() const override { return "Probe"; }
+        glm::vec2 seen_size{0.0f};
+        coopa::ui::imm::Box seen_box{};
+        void draw(Context& ctx) override {
+            seen_size = ctx.canvas_size();
+            seen_box = tune().box(ctx, "panel", coopa::ui::imm::Anchor::TopLeft, {20.0f, 20.0f}, {360.0f, 90.0f});
+        }
+    };
+
+    coopa::scene::Scene scene("game");
+    auto obj = std::make_unique<coopa::scene::SceneObject>("Hud");
+    Probe* probe = obj->add_component<Probe>();
+    probe->reference_resolution = glm::vec2(1920.0f, 1080.0f);
+    coopa::scene::SceneObject* raw = scene.add_root_object(std::move(obj));
+    scene.adopt(*raw);
+    scene.start();
+    scene.update(1.0f / 60.0f);
+    scene.late_update(1.0f / 60.0f);
+    ASSERT_TRUE(probe->canvas() != nullptr);
+
+    coopa::ui::CanvasComponent* canvas =
+        probe->canvas()->owner->parent()->get_component<coopa::ui::CanvasComponent>();
+    ASSERT_TRUE(canvas != nullptr);
+
+    // A narrow surface, well off the 16:9 reference -- the editor's embedded play viewport.
+    canvas->set_viewport(640, 480);
+    canvas->preview_refresh();
+    const glm::vec2 narrow_size = probe->seen_size;
+    const coopa::ui::imm::Box narrow_box = probe->seen_box;
+
+    // A wide monitor.
+    canvas->set_viewport(2560, 1440);
+    canvas->preview_refresh();
+    const glm::vec2 wide_size = probe->seen_size;
+    const coopa::ui::imm::Box wide_box = probe->seen_box;
+
+    // The canvas itself must have reported a DIFFERENT size at the two surfaces -- a fixed
+    // ConstantPixelSize canvas would report the exact device-pixel viewport both times, and the
+    // panel would then sit at the same OFFSET but a different FRACTION of the window.
+    ASSERT_TRUE(glm::length(narrow_size - wide_size) > 1.0f);
+    // The panel's own box must have moved WITH the canvas: same anchor, same authored offset
+    // and size, in canvas units -- a top-left corner 20 px in and 360 x 90 px, at both surfaces.
+    ASSERT_VEC_NEAR(narrow_box.pos(), glm::vec2(20.0f, 20.0f), 1e-3f);
+    ASSERT_VEC_NEAR(wide_box.pos(), glm::vec2(20.0f, 20.0f), 1e-3f);
+    ASSERT_VEC_NEAR(narrow_box.size(), glm::vec2(360.0f, 90.0f), 1e-3f);
+    ASSERT_VEC_NEAR(wide_box.size(), glm::vec2(360.0f, 90.0f), 1e-3f);
 }
 
 COOPA_TEST(an_imm_screen_can_live_in_the_world_and_gets_a_tunables_set) {

@@ -161,15 +161,17 @@ how they look decides whether the rig is readable or a thicket.
 How an origin draws has a viewer-wide default you can play with, which any object may
 override. The default is the **Object Origins** section of the Overlays popover, and
 **Edit > Preferences > Viewport**; the override is **Properties > Object > Origin Gizmo**.
-Either way the choices are the same:
 
 | Style | Looks like |
 |---|---|
 | **Axes** | A line through the origin along each of the object's own axes. The default |
 | **Orb** | A small ball with a short tick down each axis -- the least cluttered on a rig |
+| **Bone** | An octahedral bone reaching each child joint, so a rig reads as a skeleton. Only offered on an object at or under an **Animator**, where it is that joint's default |
 
-Bones are not an origin style: they belong to **Pose mode**, which draws them for you while
-you are animating a rig.
+A rig's joints draw as **Bone** the moment they sit under an **Animator** -- no mode switch
+needed. Set **Axes** or **Orb** on the rig's root to put the whole hierarchy back. Bone can't
+be picked outside a rig, and isn't one of the viewer-wide default's choices, so it never
+escapes onto an ordinary marker or group parent.
 
 ## Pose a rig
 
@@ -178,8 +180,9 @@ joint under one -- and pick **Pose Mode** from the mode menu in the viewport hea
 
 In it:
 
-- Every joint draws as a **bone** reaching its child joints, so you can see the skeleton.
-  They show whatever the **Origins** overlay is set to: they are the mode's own display.
+- Every joint draws as a **bone** reaching its child joints, so you can see the skeleton --
+  Pose mode's own display, separate from the **Bone** origin style above: it draws regardless
+  of the **Origins** overlay checkbox, even on a rig whose own style is Axes or Orb.
 - Click a bone anywhere along its body to select that joint. Clicking the same place again
   steps past it to whatever is behind.
 - **G**, **R** and **S** (and the gizmos) move the **pose**, not the object. The pose stays
@@ -197,10 +200,19 @@ In it:
 An object's settings apply to **every selected object**, as one undo step, and they are
 **inherited**. What an object actually draws with is, in order:
 
-1. its own **Style** / **Size**, when they are not **Inherit** / **0**;
-2. the nearest **ancestor** that sets one -- so you can dress a whole rig as bones by
-   selecting its root and setting it once, and still put a single joint back to Axes;
-3. the **viewer-wide default**, which starts at Axes and 0.5 m.
+**Style:**
+
+1. its own **Style**, or the nearest **ancestor's**, when it is Axes or Orb (or Bone, on a
+   joint under an Animator) -- so you can put a single bone in a rig back to Axes by setting
+   it there, overriding the root;
+2. failing that, **Bone** -- when the object sits at or under an **Animator**, that is the
+   rig's own default and needs nothing set;
+3. failing that, the **viewer-wide default**, which starts at Axes.
+
+**Size:**
+
+1. its own **Size**, or the nearest ancestor's, when it is not **0**;
+2. the **viewer-wide default**, which starts at 0.5 m.
 
 The panel shows what is in use (`In use: Bone at 0.200 m`) whenever a value is inherited
 rather than the object's own.

@@ -160,10 +160,22 @@ public:
      */
     bool apply_to(world::TerrainComponent& terrain, coopa::job::JobEngine* jobs);
 
-    /** @brief An apply is in flight. */
+    /** @brief An apply is in flight -- including a heightmap target's budgeted water sweep (see
+     *         poll_apply()), which runs for several frames after the heights themselves land. */
     bool applying() const { return bake_ != nullptr; }
 
-    /** @brief Advances an apply; true on the frame it lands in the terrain. */
+    /**
+     * @brief Advances an apply; true once it has fully landed in the terrain.
+     *
+     * A heightmap target lands its heights and splats the frame the bake job completes (a move,
+     * not a copy -- cheap), then calls `TerrainField::set_water()` once per tile to fold the
+     * bake's per-tile water into the target's own tile records. That loop alone can be a million
+     * iterations on a large world, each a bilinear height sample, so it is paced by the target's
+     * `chunk_budget_ms` and resumed here across as many frames as it takes -- `applying()` stays
+     * true for all of them. Nothing downstream sees a partial result either way: `set_water()`
+     * never bumps the field's revision itself (only mark_all_dirty() does, once, when the sweep
+     * finishes), so the water goes from entirely absent to entirely present in one visible step.
+     */
     bool poll_apply();
 
     /** @brief The terrain this generator last applied to, or null. */
@@ -191,6 +203,11 @@ private:
     coopa::job::JobHandle bake_handle_;
     world::TerrainComponent* target_ = nullptr;
     coopa::job::JobEngine* jobs_ = nullptr;
+
+    /// poll_apply()'s budgeted water sweep (heightmap targets only): whether the heights/splats
+    /// half has already landed this bake, and how far through `bake_->water` the sweep has got.
+    bool water_apply_started_ = false;
+    int water_apply_cursor_ = 0;
 };
 
 /** @brief The generator a terrain is driven by: its `target`, or one on the terrain's own object. */

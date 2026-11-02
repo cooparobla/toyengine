@@ -1,0 +1,8 @@
+# A plate, a barrel, a car door: tough and hard -- it dents under an impact that would fracture
+# something brittle, and shrugs off a blade entirely, but a pierce (a high-velocity slug) still
+# punches a hole through it.
+hardness: 0.85
+toughness: 0.8
+fibrous: 0.0
+hit_points: 250
+resistance: { impact: 1.1, slash: 2.5, pierce: 0.9, explosive: 1.1, fire: 1.2 }

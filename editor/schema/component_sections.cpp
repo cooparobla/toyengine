@@ -289,8 +289,9 @@ void apply_component_sections(std::map<std::string, ComponentSchema>& table) {
                 .keys({"deep_snow", "puddles"}).closed().done(),
             sec("Collision", "Collider").toggle("collision").keys({"physics_material", "shadow_distance"}).closed().done(),
             sec("Streaming", "Zoom").when("mode", {"heightmap"})
-                .says("How much terrain exists around the camera, and how much of it casts shadows.")
-                .keys({"cast_shadows", "view_distance", "patch_resolution"}).closed().done(),
+                .says("How much terrain exists around the camera, how much of it casts shadows, and the "
+                      "budget that paces spawning chunks and folding their water in.")
+                .keys({"cast_shadows", "view_distance", "patch_resolution", "chunk_budget_ms"}).closed().done(),
             sec("Streaming", "Zoom").when("mode", {"tiles"})
                 .says("How many chunks stream around the camera, and the budgets that pace it.")
                 .keys({"max_chunk_jobs_per_frame", "max_chunks_in_flight", "upload_budget_ms",

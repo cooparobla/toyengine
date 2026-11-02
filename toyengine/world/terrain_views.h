@@ -54,6 +54,17 @@ std::vector<TerrainSceneView> terrain_views(const coopa::scene::Scene& scene);
 /** @brief The first terrain `world` lies over, or a falsy view. */
 TerrainSceneView terrain_view_at(const coopa::scene::Scene& scene, const glm::vec3& world);
 
+/**
+ * @brief True when `obj` and every ancestor of it up to the scene root is active.
+ *
+ * `obj.active()` alone only answers for the object itself: a terrain whose own flag is still
+ * true but whose PARENT was deactivated (an EnvPresetSwitcher preset group, say) is not actually
+ * live, and a query keyed on the narrower check keeps answering for it. Shared rather than a
+ * fourth private copy -- PhysicsSystem::regather_, WaterSystem::refresh_bodies and
+ * ParticleSimulationSystem's gather each already walk this same chain on their own.
+ */
+bool active_in_hierarchy(const coopa::scene::SceneObject& obj);
+
 } // namespace world
 } // namespace toy
 

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <utility>
 #include <vector>
@@ -230,32 +231,64 @@ bool MapGeneratorComponent::poll_apply() {
         bake_handle_.close();
         bake_handle_ = coopa::job::JobHandle{};
     }
-    std::shared_ptr<Bake> bake = std::move(bake_);
-    bake_.reset();
     world::TerrainComponent* terrain = target_;
-    if (terrain == nullptr) return false;
+    if (terrain == nullptr) {
+        bake_.reset();
+        return false;
+    }
 
-    if (!bake->heightmap) {
-        if (terrain->tiles) terrain->tiles->assign_baked(std::move(bake->tiles));
+    if (!bake_->heightmap) {
+        if (terrain->tiles) terrain->tiles->assign_baked(std::move(bake_->tiles));
         terrain->applied_map = sampler_;
         terrain->sync_field();
+        bake_.reset();
         return true;
     }
 
-    if (!terrain->data) return false;
-    terrain->data->heights() = std::move(bake->heights);
-    terrain->data->splat(0) = std::move(bake->splat0);
-    terrain->data->splat(1) = std::move(bake->splat1);
-    terrain->data->mark_all_dirty();
-    terrain->sync_field();
-    for (int ty = 0; ty < bake->water_h; ++ty) {
-        for (int tx = 0; tx < bake->water_w; ++tx) {
-            terrain->field.set_water(glm::ivec2(tx, ty),
-                                     bake->water[static_cast<std::size_t>(ty) * bake->water_w + tx]);
-        }
+    if (!terrain->data) {
+        bake_.reset();
+        return false;
     }
+
+    // The heights and splats land the frame the bake completes -- each is a move, not a copy,
+    // so there is nothing here worth spreading across frames.
+    if (!water_apply_started_) {
+        terrain->data->heights() = std::move(bake_->heights);
+        terrain->data->splat(0) = std::move(bake_->splat0);
+        terrain->data->splat(1) = std::move(bake_->splat1);
+        terrain->data->mark_all_dirty();
+        terrain->sync_field();
+        water_apply_started_ = true;
+    }
+
+    // The water is the part worth pacing: up to a million tiles, each a bilinear height sample
+    // inside set_water(). Resumed across frames at the same budget heightmap chunk streaming
+    // uses -- see HeightmapColliderBuild's and HeightmapTerrainSystem::stream_chunks_()'s file
+    // comments for why this terrain mode has nothing jobified to lean on instead.
+    const int total = bake_->water_w * bake_->water_h;
+    const auto start = std::chrono::steady_clock::now();
+    const double budget_ms = std::max(0.1f, terrain->chunk_budget_ms);
+    int i = water_apply_cursor_;
+    for (; i < total; ++i) {
+        const int tx = i % bake_->water_w;
+        const int ty = i / bake_->water_w;
+        terrain->field.set_water(glm::ivec2(tx, ty), bake_->water[static_cast<std::size_t>(i)]);
+        // Checked after the first tile, never before it: a budget too small for even one would
+        // otherwise stall the sweep outright.
+        const double spent = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        if (spent >= budget_ms) { ++i; break; }
+    }
+    water_apply_cursor_ = i;
+    if (water_apply_cursor_ < total) return false;   // more tiles left; not landed yet
+
+    // mark_all_dirty() is what bumps the field's revision -- called exactly once, here, so every
+    // consumer sees the water go from entirely absent to entirely present in a single step, same
+    // as before this was spread across frames.
     terrain->field.mark_all_dirty();
     terrain->applied_map = sampler_;
+    water_apply_started_ = false;
+    water_apply_cursor_ = 0;
+    bake_.reset();
     return true;
 }
 

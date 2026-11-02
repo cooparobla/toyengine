@@ -77,6 +77,7 @@
 #include <toyengine/scene/ragdoll.h>
 #include <toyengine/scene/rider.h>
 #include <toyengine/scene/skinned_mesh_renderer.h>
+#include <toyengine/scene/damage_cursor.h>
 #include <toyengine/scene/destruction_system.h>
 #include <toyengine/scene/terrain_digger.h>
 #include <toyengine/scene/turntable.h>
@@ -905,6 +906,7 @@ bool Engine::tick() {
             drive_kinematic_controllers_(scene_mgr_.get_active_scene());
             drive_free_movers_(scene_mgr_.get_active_scene());
             drive_fire_igniters_(scene_mgr_.get_active_scene());
+            drive_damage_cursors_(scene_mgr_.get_active_scene());
             drive_turntables_(scene_mgr_.get_active_scene());
             drive_terrain_diggers_(scene_mgr_.get_active_scene());
             drive_character_controllers_(scene_mgr_.get_active_scene());
@@ -1331,6 +1333,29 @@ void Engine::drive_fire_igniters_(coopa::scene::Scene& scene) {
         g->reset_requested = reset;
         g->ray_origin = origin;
         g->ray_direction = dir;
+    }
+}
+
+void Engine::drive_damage_cursors_(coopa::scene::Scene& scene) {
+    std::vector<scene::DamageCursor*> cursors = scene.get_components<scene::DamageCursor>();
+    if (cursors.empty()) return;
+
+    using coopa::input::MouseButton;
+    const bool blocked = input_blocked_();
+    glm::vec3 origin(0.0f), dir(0.0f, 1.0f, 0.0f);
+    const bool have_ray = viewport_ray(ctx_.input().cursor_position(), origin, dir);
+
+    const auto button_of = [](const std::string& name) {
+        if (name == "right") return MouseButton::Right;
+        if (name == "middle") return MouseButton::Middle;
+        return MouseButton::Left;
+    };
+
+    for (scene::DamageCursor* c : cursors) {
+        c->slice_requested = !blocked && have_ray && ctx_.input().button_pressed(button_of(c->slice_button));
+        c->hit_requested = !blocked && have_ray && ctx_.input().button_pressed(button_of(c->hit_button));
+        c->ray_origin = origin;
+        c->ray_direction = dir;
     }
 }
 

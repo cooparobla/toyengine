@@ -18,6 +18,7 @@
 #include <coopa/scene/scene.h>
 #include <coopa/scene/scene_object.h>
 #include <physxcoopa/components/box_collider.h>
+#include <physxcoopa/components/convex_collider.h>
 #include <physxcoopa/components/rigidbody.h>
 #include <toyengine/core/engine.h>
 #include <toyengine/scene/destructible.h>
@@ -72,25 +73,27 @@ COOPA_TEST(a_dropped_weight_breaks_a_mesh_into_physical_chunks) {
 
     std::vector<coopa::scene::SceneObject*> chunks = chunks_of(scene);
     require(!chunks.empty(), "destruction: the chunks are in the scene");
-    int with_body = 0, with_collider = 0, compound = 0;
+    int with_body = 0, with_collider = 0, with_hull = 0;
     float heaviest = 0.0f;
     for (coopa::scene::SceneObject* chunk : chunks) {
         auto* body = chunk->get_component<coopa::physx::components::RigidbodyComponent>();
         if (body != nullptr) { ++with_body; heaviest = std::max(heaviest, body->mass); }
-        // A shard that one box fits badly is given several, as child colliders -- PhysicsSystem
-        // gathers those into one compound body (destruction_system.h), so the collider can be
-        // on the chunk itself OR on its children.
-        int boxes = chunk->get_component<coopa::physx::components::BoxCollider>() != nullptr ? 1 : 0;
+        // Hull is the default collider (one ConvexCollider on the chunk itself, no children);
+        // the box path -- one box, or several as child colliders PhysicsSystem gathers into a
+        // compound body -- is the fallback for a degenerate hull or `collider: boxes`, and has
+        // its own coverage in fracture_test.cpp's chunk_colliders_fit_the_shard_not_its_world_box.
+        const bool hull = chunk->get_component<coopa::physx::components::ConvexCollider>() != nullptr;
+        bool boxed = chunk->get_component<coopa::physx::components::BoxCollider>() != nullptr;
         for (const auto& child : chunk->children()) {
-            boxes += child->get_component<coopa::physx::components::BoxCollider>() != nullptr ? 1 : 0;
+            boxed = boxed || child->get_component<coopa::physx::components::BoxCollider>() != nullptr;
         }
-        if (boxes > 0) ++with_collider;
-        if (boxes > 1) ++compound;
+        if (hull) ++with_hull;
+        if (hull || boxed) ++with_collider;
     }
     expect(with_body == static_cast<int>(chunks.size()), "destruction: every chunk is a rigid body");
     expect(with_collider == static_cast<int>(chunks.size()), "destruction: ...with a collider");
-    expect(compound > 0, "destruction: ...and awkward shards collide as several boxes, not one (" +
-                             std::to_string(compound) + " of " + std::to_string(chunks.size()) + ")");
+    expect(with_hull > 0, "destruction: ...most of them a convex hull, not a box compound (" +
+                              std::to_string(with_hull) + " of " + std::to_string(chunks.size()) + ")");
     expect(heaviest > 0.0f, "destruction: ...weighed from its own volume (heaviest " +
                                 std::to_string(heaviest) + " kg)");
 

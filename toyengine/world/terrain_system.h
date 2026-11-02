@@ -62,6 +62,22 @@
  *     chunk's TriangleMesh until its next refresh(), and an async navmesh bake may hold its
  *     snapshot longer. A retired chunk's mesh is therefore parked on the component
  *     (TerrainComponent::retire_collision()) for k_collision_keep_frames before it is freed.
+ *
+ * ### The gather is also the liveness signal
+ *
+ * `execute()` only tiles-mode terrains that are active in hierarchy (`active_in_hierarchy()`,
+ * terrain_views.h) -- so deactivating one (a preset switch, a script, an ancestor going
+ * inactive) makes it vanish from next frame's gather with no event to hook. `streamed_` is last
+ * frame's gather, kept only as pointer keys; diffing it against this frame's is what notices the
+ * drop, and `release_terrain_()` tears the terrain down the same frame it is noticed missing --
+ * cancelling any in-flight job and parking it `Retiring` exactly like `release_distant_chunks_()`
+ * already does for a chunk leaving view, never dereferencing the pointer again once it is gone
+ * from the gather. `releasing_` keeps draining a terrain whose last chunk went `Retiring` even
+ * after it drops out of `streamed_` entirely, since nothing else will ask `advance_retiring_()`
+ * to run on it once the terrain itself is no longer ticked. Without this, a scene that switches
+ * between terrain flavours (unified_terrain_demo) would carry every flavour's chunks, meshes and
+ * colliders for as long as it runs -- deactivating a terrain was previously invisible to this
+ * system entirely.
  */
 
 #ifndef TOYENGINE_WORLD_TERRAIN_SYSTEM_H
@@ -80,6 +96,7 @@
 #include <gfxcoopa/engine/components/camera_component.h>
 
 #include <toyengine/world/terrain_component.h>
+#include <toyengine/world/terrain_views.h>
 
 namespace toy {
 namespace world {
@@ -240,6 +257,19 @@ private:
     void advance_retiring_(TerrainComponent& terrain);
 
     /**
+     * @brief Tears down every one of `terrain`'s chunks right away.
+     *
+     * Called the frame a terrain drops out of execute()'s gather -- deactivated, or an ancestor
+     * was -- never when it is actually destroyed (its own destructor handles that). A chunk
+     * mid-mesh cannot be torn down synchronously (its JobHandle must still be close()d exactly
+     * once), so it is cancelled and parked Retiring exactly as release_distant_chunks_() already
+     * does for a chunk leaving view; everything else goes straight to destroy_chunk_object_().
+     * If anything is left Retiring, `terrain` is kept in releasing_ so execute() keeps draining
+     * it with advance_retiring_() even though it no longer appears in the gather at all.
+     */
+    void release_terrain_(TerrainComponent& terrain, const coopa::scene::FrameContext& ctx);
+
+    /**
      * @brief Publishes chunks whose meshing jobs have finished, nearest first, within
      *        `upload_budget_ms`.
      *
@@ -361,6 +391,15 @@ private:
     std::unordered_map<const TerrainComponent*, std::uint32_t> planet_gravity_;
     /// Planets whose every chunk has been live: their pull is on (and stays on through edits).
     std::unordered_set<const TerrainComponent*> planet_ready_;
+
+    /** @brief Tiles-mode terrains execute() ticked last frame; diffed each frame against the
+     *         current gather so one going inactive is released_terrain_()'d instead of simply
+     *         never being seen again. */
+    std::unordered_set<TerrainComponent*> streamed_;
+    /** @brief Terrains release_terrain_() has torn down but which still have a chunk Retiring
+     *         (its job was cancelled, not yet closed); kept here so execute() goes on draining
+     *         them with advance_retiring_() even after they drop out of streamed_ entirely. */
+    std::unordered_set<TerrainComponent*> releasing_;
 };
 
 /**

@@ -251,7 +251,13 @@ public:
     /** @brief Writes `origin_style` / `origin_size` on every selected object; one undo step. */
     void set_selection_origin_style(std::optional<OriginStyle> style);
     void set_selection_origin_size(float metres);
-    /** @brief The viewer-wide default every object falls back to (Preferences > Viewport). */
+    /**
+     * @brief The viewer-wide default every object falls back to (Preferences > Viewport).
+     *
+     * Deliberately Axes/Orb only -- Bone is reachable only on an Animator rig
+     * (origin_style_for_()), never as this global default, or every mesh-less marker in every
+     * scene would draw as a bone.
+     */
     OriginStyle default_origin_style() const { return static_cast<OriginStyle>(std::clamp(origin_style_, 0, 1)); }
     float default_origin_size() const { return origin_size_; }
     /** @brief The Overlays popover's two glyph toggles (origins; camera and light symbols). */
@@ -1192,6 +1198,18 @@ private:
     bool is_joint_object_(ObjectId id);
     /** @brief The Transform key `key` on `id`, or on the nearest ancestor that sets it. */
     const Node* inherited_transform_key_(ObjectId id, const char* key) const;
+    /**
+     * @brief True when `id`'s EFFECTIVE components (an instance's included, not just overridden)
+     * list an Animator.
+     *
+     * `TimelinePanel::rig_of_` deliberately reads only a scene-placed instance's own node, to
+     * redirect dope-sheet editing to the source asset -- see its comment. The Bone origin style
+     * is a read-only display, not an editing mode, so it has no reason to share that redirect:
+     * a rig placed in a scene must read as a skeleton exactly like the asset itself does.
+     */
+    bool has_animator_(ObjectId id) const;
+    /** @brief The nearest ancestor (or `id` itself) with an effective Animator, or 0. */
+    ObjectId rig_root_of_(ObjectId id) const;
     OriginStyle origin_style_for_(ObjectId id) const;
     float origin_size_for_(ObjectId id) const;
     /** @brief Sets a Transform key on every selected object (null clears it); one undo step. */
@@ -1210,7 +1228,7 @@ private:
     /**
      * @brief Where this object's bone(s) point, in world space -- one tail per bone.
      *
-     * For Pose mode's bone display; no origin style draws bones.
+     * For Pose mode's bone display, and for the Bone origin style on an Animator rig.
      *
      * A joint with children gets one bone reaching each of them, so a rig draws as the
      * skeleton it is. A leaf carries on the way its parent points, for half that span. An

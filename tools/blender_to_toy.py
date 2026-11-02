@@ -689,19 +689,30 @@ class Exporter:
                 return abs(sum(x * y for x, y in zip(a, b))) < 1.0 - 1e-6
             return max(abs(x - y) for x, y in zip(a, b)) > 1e-5
         moving = set()
-        for _, frames in baked:
+        contributed = [False] * len(baked)
+        for i, (_, frames) in enumerate(baked):
             for sample in frames:
                 for bname, vals in sample.items():
                     for ch in range(3):
-                        if (bname, ch) not in moving and bname in rest and differs(ch, vals[ch], rest[bname][ch]):
+                        if bname in rest and differs(ch, vals[ch], rest[bname][ch]):
                             moving.add((bname, ch))
+                            contributed[i] = True
         channels = sorted(moving, key=lambda k: (paths[k[0]], k[1]))
 
+        bone_names = {b.name for b in arm.data.bones}
         states, auto_play = [], None
         assigned = arm.animation_data.action if arm.animation_data else None
-        for action, frames in baked:
+        for i, (action, frames) in enumerate(baked):
             if not frames:
                 continue
+            if not contributed[i]:
+                bad = sorted(self.action_bones(action) - bone_names)
+                if bad:
+                    self.warn(f"action '{action.name}' animates bones not in armature '{arm.name}' "
+                              f"({', '.join(bad)}); the clip is empty")
+                else:
+                    self.warn(f"action '{action.name}' on armature '{arm.name}' never moves from "
+                              f"its rest pose; the clip is empty")
             claimed = self.claim("animations", f"{rig_name}/{sanitize(action.name)}", (arm.name, action.name))
             clip = claimed.split("/", 1)[1]
             text = self.clip_yaml(clip, frames, fps, channels, paths)

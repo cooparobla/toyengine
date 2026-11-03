@@ -280,8 +280,17 @@ void apply_component_sections(std::map<std::string, ComponentSchema>& table) {
             sec("Material", "Palette").when("mode", {"tiles"}).closed().keys({"material"}).done(),
             sec("Water", "World").when("mode", {"tiles"})
                 .says("How far the sea, lakes and rivers sit under the terrace they fill; a smooth "
-                      "shoreline is instead wherever the ground crosses the water's level.")
+                      "terrain's shoreline is instead wherever the ground crosses the water's level -- "
+                      "see Shore for how that bed is kept a beach rather than a cliff.")
                 .keys({"water_inset", "river_inset"}).closed().done(),
+            sec("Shore", "World").when("mode", {"heightmap"})
+                .says("How the bed and the water's own surface meet the bank. The bed is always graded "
+                      "clear of the sampling gap between height corners and tile-centred water (Shore "
+                      "Clearance); Grade Depth/Band add a further guaranteed drop-off for an otherwise "
+                      "flat bed. Skirt Tiles is how far the surface itself runs past the wet tiles, "
+                      "buried under the bank, before the shader's depth fade and foam band take over.")
+                .keys({"shore_clearance", "shore_grade_depth", "shore_grade_band", "water_skirt_tiles"})
+                .closed().done(),
             sec("Weather", "World")
                 .says("Water is a surface over this ground too: each tile carries a kind and a level, and "
                       "the shoreline is wherever the ground crosses it. Paint it in Terrain Mode, or apply "

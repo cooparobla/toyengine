@@ -56,6 +56,7 @@ namespace scene {
  * - type: FreeMover
  *   move_speed: 24.0
  *   smoothing: 12.0
+ *   zoom_speed: 4.0
  * @endcode
  */
 class FreeMover : public coopa::scene::Component {
@@ -85,7 +86,24 @@ public:
     glm::vec3 move_input{0.0f};
 
     /**
-     * @brief Advances the owner along the world axes by one frame of smoothed `move_input`.
+     * @brief This frame's zoom/dolly input, written by Engine (the scroll wheel) before
+     *        Scene::update(). Positive moves along the owner's own forward axis (Blender
+     *        convention, local -Z -- zoom in), negative away from it (zoom out).
+     *
+     * Unlike `move_input`, this travels the owner's OWN basis, not the world axes: a marker
+     * with no notion of "forward" otherwise, so this is the one place FreeMover reads its own
+     * rotation. Matches CameraController::scroll_input's sign convention (+ = zoom in) and is
+     * not scaled by `delta_time` in update() -- a scroll notch is a discrete step, the way
+     * CameraController's own orbit zoom treats it, not a held axis.
+     */
+    float zoom_input = 0.0f;
+
+    /** @brief World units of dolly per unit of `zoom_input`. */
+    float zoom_speed = 1.0f;
+
+    /**
+     * @brief Advances the owner along the world axes by one frame of smoothed `move_input`,
+     *        then dollies along its own forward axis by `zoom_input`.
      * @param delta_time Frame delta time in seconds; a non-positive value is a no-op.
      */
     void update(float delta_time) override;

@@ -15,7 +15,7 @@ physics:
   parallel_threshold: 16
   solver: { position_iterations: 4, relax_iterations: 2, velocity_iterations: 16 }
 render:
-  aa_mode: taa
+  aa_mode: "off"
   ambient_intensity: 1.0
   atmosphere_density: 1.0
   auto_exposure_compensation: 1.0
@@ -201,7 +201,7 @@ render:
   tilt_shift_angle: 0.0
   tilt_shift_blur_bottom: 0.2
   tilt_shift_blur_top: 0.3
-  tilt_shift_enabled: true
+  tilt_shift_enabled: false
   tilt_shift_focus_center: 0.55
   tilt_shift_focus_width: 0.15
   tilt_shift_max_radius: 4.0

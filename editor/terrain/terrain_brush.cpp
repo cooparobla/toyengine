@@ -64,8 +64,10 @@ void for_each_weighted(const HeightmapData& d, const IRect& r, glm::vec2 c, floa
 } // namespace
 
 toy::world::IRect terrain_water_dab(toy::world::TerrainField& field, const TerrainBrushSettings& s,
-                                    glm::vec2 centre, bool invert) {
+                                    glm::vec2 centre, bool invert, const toy::world::ShoreGrade& grade,
+                                    toy::world::IRect* graded_rect) {
     using namespace toy::world;
+    if (graded_rect) *graded_rect = IRect{};
     if (field.empty()) return IRect{};
     const glm::vec2 extent = field.geometry().tile_extent();
     const float r = std::max(0.01f, s.radius);
@@ -87,7 +89,16 @@ toy::world::IRect terrain_water_dab(toy::world::TerrainField& field, const Terra
     }
     if (seeds.empty()) return IRect{};
     if (invert || s.water_kind == WaterKind::None) return drain_water(field, seeds);
-    return flood_water(field, seeds, s.water_level, s.water_kind);
+
+    const IRect flooded = flood_water(field, seeds, s.water_level, s.water_kind);
+    // Only a flood needs grading: draining removes water rather than exposing a bed that has to
+    // fall away from it, and a Tiles field has no continuous ground for grade_water_shore() to
+    // read -- settle_water_rounding() already covers it at build time.
+    if (!flooded.empty() && field.mode() == TerrainMode::Heightmap) {
+        const IRect graded = grade_water_shore(field, flooded, grade);
+        if (graded_rect) *graded_rect = graded;
+    }
+    return flooded;
 }
 
 IRect terrain_dab(HeightmapData& d, const TerrainBrushSettings& s, glm::vec2 centre, bool invert, float flatten_to,

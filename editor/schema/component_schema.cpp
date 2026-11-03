@@ -1565,6 +1565,18 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                      "Milliseconds a frame may spend spawning chunks, rebuilding their water and folding a freshly "
                      "applied map's water in (at least one chunk/tile always lands)"));
             fs.push_back(f_int("layer_texture_size", 1024, 4, 4096));
+            // Heightmap-only: how the bed and the water surface meet the bank
+            // (toyengine/world/terrain_water.{h,cpp}, terrain_water_mesh.cpp). Tiles mode's
+            // equivalent is water_inset / river_inset above, which insets a TERRACE rather than
+            // grading a continuous slope.
+            fs.push_back(with_tip(f_float("shore_clearance", 0.03f, 0.005f, 0.0f, 2.0f),
+                     "Metres a wet tile's bed is kept under its own water level"));
+            fs.push_back(with_tip(f_float("shore_grade_depth", 0.0f, 0.05f, 0.0f, 20.0f),
+                     "Extra depth the bed reaches shore_grade_band tiles in from the shoreline; 0 keeps the bed as generated"));
+            fs.push_back(with_tip(f_float("shore_grade_band", 4.0f, 0.5f, 0.0f, 64.0f),
+                     "Tiles the extra depth in shore_grade_depth ramps over"));
+            fs.push_back(with_tip(f_int("water_skirt_tiles", 4, 0, 16),
+                     "How far the water surface's buried apron reaches past the wet tiles, over ground that stays underwater"));
             return fs;
         };
         add({"Terrain", "World", terrain_fields("tiles")});

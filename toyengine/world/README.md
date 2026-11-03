@@ -40,8 +40,9 @@ six against one shared map, and the non-parity table in its scene header:
   from a quantised step; the heightmap mesher uses the continuous level raw.
 - A `Buoyancy` body floats slightly high on tiles -- `TerrainField::water_at` returns the
   un-inset terrace level; only the heightmap branch populates the true `water_level_`.
-- Sub-step-shallow shoreline can be wet on tiles, dry on the heightmap -- tiles force at least
-  one step of channel; the heightmap compares continuous ground.
+- The shallow shelf's shape differs even though which tiles are wet does not: tiles get a flat
+  terrace `water_inset` deep; the heightmap's bed is continuously graded (`grade_water_shore()`,
+  below) and falls away at whatever rate the generator's own lake/shore grading gave it.
 - Tiles are solid only within `collision_radius` chunks of the camera; the heightfield is one
   whole-grid collider, solid everywhere.
 - Switching back to a heightmap that evicted (see **Eviction** under Heightmap terrain below)
@@ -211,8 +212,8 @@ shore foam, refraction, caustics and buoyancy are the water system's either way:
 
 | | tiles | heightmap |
 |---|---|---|
-| mesh | one quad per flooded tile at its terrace, `water_inset` under the top | a grid at `level`, corners averaged per tile ([`terrain_water_mesh.h`](terrain_water_mesh.h)) |
-| shoreline | where the surface meets the bank's wall -- the tile set's shape | where the surface meets the smooth ground: the terrain's own slope is the beach |
+| mesh | one quad per flooded tile at its terrace, `water_inset` under the top | a grid at `level`, corners averaged per tile, with a buried apron `water_skirt_tiles` wide ([`terrain_water_mesh.h`](terrain_water_mesh.h)) |
+| shoreline | where the surface meets the bank's wall -- the tile set's shape | where the surface meets the smooth ground: the terrain's own slope is the beach, kept that way by grading the bed (`grade_water_shore()`, below) |
 
 **Both kinds of body over a chunk keep the same wave field.** A river and the lake it runs into
 share their seam's vertices, and the vertex stage displaces each from its own body's wave
@@ -236,6 +237,24 @@ and flowing water (rivers, `u` downstream) become two `WaterBody` children of th
 depth colour, shore foam, refraction, buoyancy and caustics are the water system's. The shoreline
 is where that surface meets the bank -- the tile set's shape, rounded or square -- and the beds
 are ordinary ground, so they collide and the water does not. `water:` takes WaterBody keys.
+
+**The heightmap's shore.** A terraced world only has to choose which way a fractional shoreline
+*rounds* (`settle_water_rounding()`, above); a smooth one has to make sure the bed genuinely falls
+away from the waterline, because its shoreline is simply wherever the ground crosses the level and
+the water shader's edge fade and foam band are measured in metres of depth there.
+[`grade_water_shore()`](terrain_water.h) is that: it lowers each wet tile's four corners just far
+enough that their MEAN -- the same bilinear value `TerrainField::set_water()`'s own dryness test
+reads -- clears the level by `shore_clearance` (a few millimetres, enough to beat the half-tile
+offset between corner-sampled height and tile-centred water), and optionally ramps a further
+`shore_grade_depth` in over `shore_grade_band` tiles for an otherwise flat bed. It only ever
+lowers a sample, so it can never flood ground no tile called wet, and running it twice changes
+nothing -- which is what lets the mapgen bake, the heightmap system's own apply, and the editor's
+water brush (`terrain_water_dab()`) all call it over whatever they just flooded instead of
+tracking whether someone already has. `build_smooth_chunk_water()`'s own apron -- `water_skirt_tiles`
+wide, held flat at the level everywhere its own ground stays underwater and tucked a few
+centimetres under it only once that ground has risen to meet the surface -- is the surface's half
+of the same idea: without it the mesh would stop at a tile boundary rather than at the waterline,
+showing a straight edge of water hanging over dry ground.
 
 **The floor under it.** The bed is terrain, and gets the whole treatment: mapcoopa shapes it with
 landforms of its own (`NaturalTerrainConfig::seabed`, `seabed_ridges`) that fade in with depth

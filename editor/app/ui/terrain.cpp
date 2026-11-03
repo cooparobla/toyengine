@@ -129,8 +129,15 @@ void TerrainPanel::terrain_dab_at_(const ViewProj& vp, glm::vec2 px) {
         HeightmapTerrain* live = terrain_live_();
         if (live == nullptr) return;
         live->sync_field();
-        const IRect r = terrain_water_dab(live->field, s, local, terrain_stroke_.invert);
+        const toy::world::ShoreGrade grade{live->params.shore_clearance, live->params.shore_grade_depth,
+                                           live->params.shore_grade_band};
+        IRect graded;
+        const IRect r = terrain_water_dab(live->field, s, local, terrain_stroke_.invert, grade, &graded);
         terrain_stroke_.water_rect.include(r);
+        // A Heightmap flood also grades the bed under it (terrain_water_dab()) -- fold those
+        // height texels into the same rect the non-Water tools use, so terrain_end_stroke_()
+        // captures and undoes them alongside the water.
+        terrain_stroke_.height_rect.include(graded);
         g_last_dab_time = now_seconds();
         g_last_dab_world = hit;
         return;
@@ -225,6 +232,18 @@ void TerrainPanel::terrain_end_stroke_() {
         }
         after = before;
         after.water = capture_water(live->field, s.water_rect);
+        // A Heightmap flood's grading also moved height texels (terrain_dab_at_() folded them
+        // into s.height_rect) -- capture those too, so undo restores the bed along with the
+        // water instead of leaving a graded shelf behind after a reverted flood.
+        if (!s.height_rect.empty()) {
+            const TerrainPatch before_h = capture_patch_from(s.data, s.start_heights, s.data->splat(0),
+                                                              s.data->splat(1), s.height_rect, IRect{});
+            const TerrainPatch after_h = capture_patch(s.data, s.height_rect, IRect{});
+            before.height_rect = before_h.height_rect;
+            before.heights = before_h.heights;
+            after.height_rect = after_h.height_rect;
+            after.heights = after_h.heights;
+        }
     } else if (s.tool == TerrainTool::Paint) {
         before = capture_patch_from(s.data, s.data->heights(), s.start_splat0, s.start_splat1, IRect{}, s.splat_rect);
         after = capture_patch(s.data, IRect{}, s.splat_rect);

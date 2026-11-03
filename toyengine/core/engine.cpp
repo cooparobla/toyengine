@@ -1301,7 +1301,11 @@ void Engine::drive_free_movers_(coopa::scene::Scene& scene) {
         : glm::vec3(input_.axis("move_x", ctx_.input()),
                     input_.axis("move_y", ctx_.input()),
                     input_.axis("move_z", ctx_.input()));
-    for (scene::FreeMover* fm : movers) fm->move_input = move;
+    const float zoom = input_blocked_() ? 0.0f : ctx_.input().scroll_delta().y;
+    for (scene::FreeMover* fm : movers) {
+        fm->move_input = move;
+        fm->zoom_input = zoom;
+    }
 }
 
 void Engine::drive_fire_igniters_(coopa::scene::Scene& scene) {

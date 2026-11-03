@@ -21,6 +21,7 @@
 
 #include <toyengine/world/heightmap_data.h>
 #include <toyengine/world/terrain_field.h>
+#include <toyengine/world/terrain_water.h>
 
 namespace toy::editor {
 
@@ -54,11 +55,21 @@ struct TerrainBrushSettings {
  * stopping at the brush. So the brush only chooses the SEEDS, and the flood decides the extent --
  * which is why the rect this returns is routinely much larger than the circle that started it.
  *
+ * On a Heightmap field, a flood also grades the bed under what it just flooded
+ * (toy::world::grade_water_shore()), so a hand-painted lake gets the same shoreline a generated
+ * one does -- without it, the newly wet tiles would read exactly as dry-looking as the trench the
+ * generator's own bake used to carve. `graded_rect`, if given, receives the height texels that
+ * moved, so the caller can fold them into the stroke's undo patch alongside the water.
+ *
  * @param invert Drain the body under the brush instead of flooding.
+ * @param grade  How the bed is graded; a draining or Tiles-mode dab ignores it.
+ * @param graded_rect Receives the height texels grade_water_shore() moved, if any.
  * @return The tiles changed, for undo and for the chunks to rebuild their surfaces from.
  */
 toy::world::IRect terrain_water_dab(toy::world::TerrainField& field, const TerrainBrushSettings& s,
-                                    glm::vec2 centre, bool invert);
+                                    glm::vec2 centre, bool invert,
+                                    const toy::world::ShoreGrade& grade = toy::world::ShoreGrade{},
+                                    toy::world::IRect* graded_rect = nullptr);
 
 /** @brief The water over `rect`, row-major, for a patch. */
 std::vector<toy::world::WaterCell> capture_water(const toy::world::TerrainField& field, const toy::world::IRect& rect);

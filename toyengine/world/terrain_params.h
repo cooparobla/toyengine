@@ -121,6 +121,31 @@ struct TerrainParams {
      */
     float river_wave_scale = 0.25f;
 
+    // --- Heightmap shoreline (terrain_water.h's grade_water_shore(), terrain_water_mesh.cpp) ---
+    // Tiles mode gets the same result from `water_inset` / `river_inset` and the skirt's own lip
+    // drop (terrain_chunk.cpp) -- a terraced world has banks to sink the shoreline into. These are
+    // the smooth-field counterpart, unused in Tiles mode.
+
+    /** @brief Metres a wet tile's bed is kept under its own water level (ShoreGrade::clearance). */
+    float shore_clearance = 0.03f;
+
+    /** @brief Extra bed depth reached `shore_grade_band` tiles in from the shoreline; 0 keeps the generated bed. */
+    float shore_grade_depth = 0.0f;
+
+    /** @brief Tiles the extra depth in `shore_grade_depth` ramps over. */
+    float shore_grade_band = 4.0f;
+
+    /**
+     * @brief How far past the waterline the water surface runs, in tiles, buried under the bank.
+     *
+     * The smooth mesher's skirt (terrain_water_mesh.cpp): past the wet tiles themselves, the
+     * surface keeps going for this many more, held flat at the water's level everywhere its own
+     * ground is still underwater and tucked a few centimetres under it only where that ground has
+     * risen to meet the surface. One tile is enough on a steep bank; a gentle beach wants more so
+     * the polygon edge never surfaces in the open.
+     */
+    std::int32_t water_skirt_tiles = 4;
+
     // --- Planets (planet.h) ---
 
     /** @brief A planet: six faces of `face_tiles^2` tiles bent onto a sphere, instead of one flat grid. */

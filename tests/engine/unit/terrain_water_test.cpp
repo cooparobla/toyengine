@@ -24,6 +24,7 @@ COOPA_TEST_SUITE("terrain_water");
 using toy::world::borrow_tiles;
 using toy::world::IRect;
 using toy::world::k_water_flood_cap;
+using toy::world::ShoreGrade;
 using toy::world::TerrainField;
 using toy::world::TerrainFieldGeometry;
 using toy::world::TerrainMode;
@@ -262,6 +263,122 @@ COOPA_TEST(a_budgeted_settle_matches_one_call_on_a_smooth_field) {
         }
     }
     expect(same, "settle: a budgeted settle reaches exactly the same water as one call");
+}
+
+namespace {
+
+/** @brief A flat 9 x 9 corner plane (8 x 8 tiles) at `ground`, with a square lake wet at `level`. */
+std::vector<float> flat_plane_with_lake(int n, float ground, float level, std::vector<WaterCell>& water,
+                                        int lake_x0, int lake_y0, int lake_x1, int lake_y1) {
+    std::vector<float> h(static_cast<std::size_t>(n) * n, ground);
+    water.assign(static_cast<std::size_t>(n - 1) * (n - 1), WaterCell{});
+    for (int y = lake_y0; y < lake_y1; ++y) {
+        for (int x = lake_x0; x < lake_x1; ++x) water[static_cast<std::size_t>(y) * (n - 1) + x] = WaterCell{WaterKind::Lake, level, 0};
+    }
+    return h;
+}
+
+/** @brief The mean of a tile's four corners -- the same bilinear value TerrainField::set_water() reads. */
+float tile_mean(const std::vector<float>& h, int n, int x, int y) {
+    return 0.25f * (h[static_cast<std::size_t>(y) * n + x] + h[static_cast<std::size_t>(y) * n + x + 1] +
+                    h[static_cast<std::size_t>(y + 1) * n + x] + h[static_cast<std::size_t>(y + 1) * n + x + 1]);
+}
+
+} // namespace
+
+/** @brief Every wet tile's four-corner mean ends at least `clearance` under its own level. */
+COOPA_TEST(grade_water_shore_clears_the_sampling_mismatch) {
+    constexpr int n = 9;   // 8 x 8 tiles
+    std::vector<WaterCell> water;
+    std::vector<float> h = flat_plane_with_lake(n, 4.0f, 4.0f, water, 2, 2, 6, 6);   // flat at the level: worst case
+
+    grade_water_shore(h, n, n, water, n - 1, n - 1, ShoreGrade{0.03f, 0.0f, 4.0f});
+
+    for (int y = 2; y < 6; ++y) {
+        for (int x = 2; x < 6; ++x) {
+            expect(tile_mean(h, n, x, y) <= 4.0f - 0.03f + 1e-5f,
+                   "grade: a wet tile's corner mean clears the water's own dryness test");
+        }
+    }
+}
+
+/** @brief Grading only ever lowers a sample -- it can never flood ground no tile called wet. */
+COOPA_TEST(grade_water_shore_never_raises_a_sample) {
+    constexpr int n = 9;
+    std::vector<WaterCell> water;
+    std::vector<float> h = flat_plane_with_lake(n, 4.0f, 4.0f, water, 2, 2, 6, 6);
+    const std::vector<float> before = h;
+
+    grade_water_shore(h, n, n, water, n - 1, n - 1, ShoreGrade{0.03f, 1.0f, 3.0f});   // with the ramp too
+
+    for (std::size_t i = 0; i < h.size(); ++i) {
+        expect(h[i] <= before[i] + 1e-6f, "grade: no sample is ever raised");
+    }
+}
+
+/**
+ * @brief A bed mapcoopa already graded is left as it was (within a millimetre) when `depth == 0`.
+ *
+ * The regression test for the old binary clamp: that clamp flattened a hand-graded shelf to a
+ * constant pan, where the mean-deficit fix should find nothing left to do.
+ */
+COOPA_TEST(grade_water_shore_leaves_a_pregraded_shelf_alone) {
+    constexpr int n = 9;
+    std::vector<WaterCell> water;
+    // The lake's bed is already 0.5 m under its level -- comfortably past the 0.03 m clearance --
+    // and the shore outside it ramps smoothly up to the 4.0 m rim, exactly what a real bake does.
+    std::vector<float> h(static_cast<std::size_t>(n) * n);
+    water.assign(static_cast<std::size_t>(n - 1) * (n - 1), WaterCell{});
+    for (int y = 0; y < n; ++y) {
+        for (int x = 0; x < n; ++x) {
+            const int dist = std::max({0, 2 - x, x - 6, 2 - y, y - 6});
+            h[static_cast<std::size_t>(y) * n + x] = dist == 0 ? 3.5f : std::min(4.0f, 3.5f + 0.5f * static_cast<float>(dist));
+        }
+    }
+    for (int y = 2; y < 6; ++y) {
+        for (int x = 2; x < 6; ++x) water[static_cast<std::size_t>(y) * (n - 1) + x] = WaterCell{WaterKind::Lake, 4.0f, 0};
+    }
+    const std::vector<float> before = h;
+
+    grade_water_shore(h, n, n, water, n - 1, n - 1, ShoreGrade{0.03f, 0.0f, 4.0f});
+
+    for (std::size_t i = 0; i < h.size(); ++i) {
+        expect_near(h[i], before[i], 1e-3f, "grade: an already-graded shelf is left alone, not planed flat");
+    }
+}
+
+/** @brief The optional ramp adds depth gradually -- it never opens a vertical wall between neighbours. */
+COOPA_TEST(grade_water_shore_ramp_introduces_no_cliff) {
+    constexpr int n = 17;   // 16 x 16 tiles: room for the ramp's band to run
+    std::vector<WaterCell> water;
+    std::vector<float> h = flat_plane_with_lake(n, 4.0f, 4.0f, water, 6, 6, 10, 10);
+
+    const ShoreGrade grade{0.03f, 1.5f, 4.0f};
+    grade_water_shore(h, n, n, water, n - 1, n - 1, grade);
+
+    float max_step = 0.0f;
+    for (int y = 0; y < n; ++y) {
+        for (int x = 0; x < n - 1; ++x) {
+            max_step = std::max(max_step, std::abs(h[static_cast<std::size_t>(y) * n + x + 1] - h[static_cast<std::size_t>(y) * n + x]));
+        }
+    }
+    expect(max_step <= grade.depth, "grade: the ramp never steps between neighbours by more than its own depth");
+}
+
+/** @brief Running the grade twice changes nothing the second time. */
+COOPA_TEST(grade_water_shore_is_idempotent) {
+    constexpr int n = 13;
+    std::vector<WaterCell> water;
+    std::vector<float> h = flat_plane_with_lake(n, 4.0f, 4.0f, water, 3, 3, 9, 9);
+    const ShoreGrade grade{0.03f, 1.0f, 3.0f};
+
+    grade_water_shore(h, n, n, water, n - 1, n - 1, grade);
+    const std::vector<float> once = h;
+    grade_water_shore(h, n, n, water, n - 1, n - 1, grade);
+
+    for (std::size_t i = 0; i < h.size(); ++i) {
+        expect_near(h[i], once[i], 1e-6f, "grade: a second pass changes nothing");
+    }
 }
 
 /** @brief Over a borrowed grid, a terrace in steps and a level in metres are the same number. */

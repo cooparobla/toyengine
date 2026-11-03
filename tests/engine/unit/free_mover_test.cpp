@@ -138,3 +138,39 @@ COOPA_TEST(smoothing_is_frame_rate_independent) {
         std::cerr << "         30 fps travelled " << slow_y << ", 240 fps travelled " << fast_y << "\n";
     }
 }
+
+/** @brief Unlike move_input, zoom_input dollies along the owner's OWN forward axis (Blender
+ *         convention, local -Z), which is how a scroll wheel gets to mean "zoom in/out" on a
+ *         marker that otherwise has no notion of facing a direction. */
+COOPA_TEST(zoom_input_dollies_along_the_owners_own_forward_axis) {
+    toy::scene::FreeMover* fm = nullptr;
+    auto scene = make_free_mover_scene(&fm, glm::vec3(0.0f));
+    fm->zoom_speed = 5.0f;
+    scene->start();
+    auto* tc = scene->root_objects()[0]->get_transform();
+
+    // Identity rotation: pitch 0 is "straight down" by this engine's own convention (see
+    // camera_controller.h), so forward (local -Z) is world -Z here.
+    fm->zoom_input = 1.0f;
+    scene->update(1.0f / 60.0f);
+    glm::vec3 p = tc->transform().position();
+    expect_near(p.z, -5.0f, 1e-4f, "free_mover: zoom_input at identity rotation dollies -Z (down)");
+    expect(std::fabs(p.x) < 1e-5f && std::fabs(p.y) < 1e-5f,
+           "free_mover: a forward-only dolly causes no horizontal drift");
+
+    // A scroll notch is a discrete step, like CameraController's own orbit zoom -- not a held
+    // axis, so it must not scale with frame time.
+    tc->transform().set_position(glm::vec3(0.0f));
+    scene->update(1.0f / 10.0f);
+    expect_near(tc->transform().position().z, -5.0f, 1e-4f,
+                "free_mover: zoom_input's step size does not depend on frame time");
+
+    // Pitch 90 ("horizon") turns forward to world +Y: the SAME zoom_input now moves
+    // horizontally, because zoom follows the owner's OWN basis, unlike move_input's world axes.
+    tc->transform().set_position(glm::vec3(0.0f));
+    tc->transform().set_rotation(glm::vec3(90.0f, 0.0f, 0.0f));
+    scene->update(1.0f / 60.0f);
+    p = tc->transform().position();
+    expect_near(p.y, 5.0f, 1e-3f, "free_mover: a pitched-up marker dollies horizontally instead");
+    expect(std::fabs(p.z) < 1e-3f, "free_mover: ...not vertically, once rotated");
+}

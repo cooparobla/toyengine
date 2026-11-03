@@ -173,7 +173,9 @@ bool MapGeneratorComponent::apply_to(world::TerrainComponent& terrain, coopa::jo
     // The map covers the terrain's full extent, whatever resolution each is at: a sample at
     // normalised (u, v) reads the map at that fraction of its tile grid.
     const double map_tiles = static_cast<double>(sampler->params().tiles_for_grid(generated_config_.grid_size));
-    auto run = [bake, sampler, nx, ny, sw, sh, tiles_x, tiles_y, map_tiles, layer_for_kind]() {
+    const world::ShoreGrade shore_grade{terrain.params.shore_clearance, terrain.params.shore_grade_depth,
+                                        terrain.params.shore_grade_band};
+    auto run = [bake, sampler, nx, ny, sw, sh, tiles_x, tiles_y, map_tiles, layer_for_kind, shore_grade]() {
         for (int j = 0; j < ny; ++j) {
             for (int i = 0; i < nx; ++i) {
                 const double u = nx > 1 ? static_cast<double>(i) / (nx - 1) : 0.0;
@@ -213,6 +215,15 @@ bool MapGeneratorComponent::apply_to(world::TerrainComponent& terrain, coopa::jo
                 bake->water[static_cast<std::size_t>(ty) * tiles_x + tx] = c;
             }
         }
+        // Heights above are sampled at CORNERS, water at TILE CENTRES, half a tile apart on the
+        // same noise-shaped surface -- so a tile mapcoopa calls wet can have a corner that reads
+        // a hair above its own water level, and TerrainField::set_water() re-checks ground against
+        // water level with zero tolerance, dropping the water mesh there outright.
+        // grade_water_shore() is this mode's counterpart to settle_water_rounding(): it lowers
+        // only as much as the sampling mismatch needs (the MEAN of a tile's four corners, which is
+        // exactly what set_water()'s own dryness test reads), so mapcoopa's own lake and shore
+        // grading survives instead of being planed into a tile-quantised trench.
+        if (nx > 1 && ny > 1) world::grade_water_shore(bake->heights, nx, ny, bake->water, tiles_x, tiles_y, shore_grade);
     };
     bake_ = bake;
     if (jobs_ != nullptr) {

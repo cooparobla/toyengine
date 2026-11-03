@@ -445,7 +445,7 @@ void HeightmapTerrainSystem::refresh_chunk_water_(HeightmapTerrain& terrain,
                                                   coopa::scene::SceneObject& chunk_object, int cx, int cy) {
     ChunkWaterData still, flowing;
     build_smooth_chunk_water(terrain.field, glm::ivec2(cx, cy), terrain.field.geometry().chunk_tiles,
-                             terrain.params.river_wave_scale, still, flowing);
+                             terrain.params.river_wave_scale, terrain.params.water_skirt_tiles, still, flowing);
 
     for (int pass = 0; pass < 2; ++pass) {
         const bool river = pass == 1;

@@ -130,9 +130,61 @@ IRect step_settle(TerrainField& field, WaterSettle& settle, std::size_t budget);
  * `Tiles` only, and deliberately. It exists because a terraced world has to choose which way a
  * fractional shoreline rounds, and choosing the ground's way is what keeps water off dry land. A
  * smooth field has no such choice to make: its shoreline is simply where the ground crosses the
- * water's level, so the terrain's own slope is the beach.
+ * water's level, so the terrain's own slope is the beach -- `grade_water_shore()`, below, is what
+ * keeps that true.
  */
 void settle_water_rounding(TileMapData& tiles, const IRect& rect, const PlanetLayout* planet = nullptr);
+
+/** @brief How the ground is shaped under and around water on a SMOOTH (Heightmap) field. */
+struct ShoreGrade {
+    /** @brief Metres a wet tile's bed is kept under its own water level. */
+    float clearance = 0.03f;
+    /** @brief Extra metres the bed reaches `band` tiles in from the shoreline; 0 keeps the bed as given. */
+    float depth = 0.0f;
+    /** @brief Tiles the extra depth in `depth` ramps over. */
+    float band = 4.0f;
+};
+
+/**
+ * @brief Shapes a raw height plane so a smooth terrain's shoreline is a beach, not a tile-stepped
+ *        trench. `settle_water_rounding()`'s opposite number: a terraced world only has to choose
+ *        which way a fractional shoreline rounds, where a smooth one has to make sure the bed
+ *        genuinely falls away from the waterline, because its shoreline is wherever the ground
+ *        crosses the level and the water shader's edge fade and foam band are measured in metres
+ *        of depth there.
+ *
+ * Two independent passes, each a plain ceiling on a height sample -- so running it twice changes
+ * nothing the second time, and it can never raise a sample, so it can never flood land no tile in
+ * `water` called wet:
+ *   1. Lowers the MEAN of each wet tile's four corners to `clearance` under its level, all four by
+ *      the same amount. Bilinear height at a tile's centre is exactly that mean, and that is what
+ *      `TerrainField::set_water()`'s own dryness test reads -- so this is the minimal fix for a
+ *      wet tile whose corners sample a hair above its own surface, and it leaves whatever grading
+ *      the ground already had (a mapcoopa lake bed, a sculpted shelf) otherwise alone.
+ *   2. Only with `grade.depth > 0`: an additional per-corner ceiling that reaches `grade.depth`
+ *      deeper by `grade.band` tiles in from the shoreline (chamfer distance over the wet mask),
+ *      for authors who want a guaranteed drop-off on an otherwise flat bed. Guarded to a no-op at
+ *      the shoreline tile itself, so it only digs further in than pass 1 already did and never
+ *      flattens the beach.
+ *
+ * @param heights `nx` x `ny` height samples, row-major, corner-addressed (one more than the tiles
+ *                each way).
+ * @param water   `water_w` x `water_h` cells, row-major, one per tile -- `water_w == nx - 1` and
+ *                `water_h == ny - 1` is the ordinary case (a corner grid over a tile grid); passing
+ *                anything else is a silent no-op help for callers over a differently-shaped window.
+ */
+void grade_water_shore(std::vector<float>& heights, int nx, int ny, const std::vector<WaterCell>& water,
+                       int water_w, int water_h, const ShoreGrade& grade);
+
+/**
+ * @brief The same, over a built field's own height plane, for `rect` (tiles). Marks the height
+ *        texels it moved dirty and returns them.
+ *
+ * Heightmap mode only (a `Tiles` field has no height plane to grade); a no-op on anything else,
+ * including a field whose `height_sub` is not 1 -- this reads and writes the raw corner plane
+ * directly, which only lines up one-to-one with the tile grid at `height_sub == 1`.
+ */
+IRect grade_water_shore(TerrainField& field, const IRect& rect, const ShoreGrade& grade);
 
 } // namespace world
 } // namespace toy

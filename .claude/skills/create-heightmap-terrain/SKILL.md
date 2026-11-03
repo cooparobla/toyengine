@@ -55,6 +55,8 @@ The other terrain kind, `TileTerrain` (mapcoopa tile worlds), is the create-terr
 | `layer_texture_size` | Every layer texture is resized to this (mipmapped array) |
 | `collision`, `physics_material` | Heightfield collider (static) from the same grid |
 | `deep_snow`, `puddles`, `cast_shadows` | Weather and shadows |
+| `water {...}` | WaterBody look (waves, depth colour, foam) for any water painted in Terrain Mode |
+| `shore_clearance` (0.03 m), `shore_grade_depth` (0), `shore_grade_band` (4 tiles), `water_skirt_tiles` (4) | How the bed and the water's surface meet the bank -- `grade_water_shore()` keeps the bed at least `shore_clearance` under its own water (the fix for a shoreline that reads wet on a generated map but dry here); `shore_grade_depth`/`shore_grade_band` add a further guaranteed drop-off over an otherwise flat bed; `water_skirt_tiles` is how far the surface's buried apron runs past the wet tiles, flat at the level until the ground under it rises to meet it. Tiles mode's `water_inset`/`river_inset` have no meaning here -- a smooth shoreline is wherever the ground crosses the level, not a terrace to inset from |
 
 Heights and paint are NOT in the scene file: they live in the PNGs, which the editor writes when the
 scene is saved. A 16-bit greyscale heightmap from any tool loads (white = `height`); rows run

@@ -28,6 +28,11 @@ void FreeMover::update(float delta_time) {
 
     coopa::util::Transform& t = tc->transform();
     t.set_position(t.position() + velocity_ * delta_time);
+
+    if (zoom_input != 0.0f) {
+        const glm::vec3 forward = -glm::normalize(glm::vec3(t.get_world_matrix()[2]));
+        t.set_position(t.position() + forward * zoom_input * zoom_speed);
+    }
 }
 
 } // namespace scene

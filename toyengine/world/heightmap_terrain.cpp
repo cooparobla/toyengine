@@ -134,6 +134,17 @@ void parse_heightmap_terrain(const fkyaml::node& node, coopa::scene::SceneObject
     // two different wave fields would pull those apart (terrain_water_mesh.h).
     if (node.contains("water")) water::parse_water_settings(node.at("water"), t->water_look);
 
+    // The shore: how far the bed is graded under the water (grade_water_shore(), terrain_water.h)
+    // and how far the surface's apron runs past the wet tiles, buried under the bank
+    // (build_smooth_chunk_water(), terrain_water_mesh.h). The Tiles-mode equivalents --
+    // water_inset / river_inset -- have no meaning here, where the shoreline is wherever the
+    // ground crosses the water's level rather than a terrace to inset from.
+    world::TerrainParams& params = t->params;
+    params.shore_clearance = get_f(node, "shore_clearance", params.shore_clearance);
+    params.shore_grade_depth = get_f(node, "shore_grade_depth", params.shore_grade_depth);
+    params.shore_grade_band = get_f(node, "shore_grade_band", params.shore_grade_band);
+    params.water_skirt_tiles = get_i(node, "water_skirt_tiles", params.water_skirt_tiles);
+
     t->data = HeightmapStore::instance().acquire(t->files, t->geometry, t->generate);
 }
 

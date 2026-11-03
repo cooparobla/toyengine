@@ -27,7 +27,12 @@
 # world_tiles/(grid_size*meters_per_grid_unit) = 1024/(128*25) = 0.32, vertical scale
 # height_scale/elevation_range_m = 64/200 = 0.32 -- matching habitat's own ratio (0.16 at its
 # scale) rather than the 2.4x vertical exaggeration the default meters_per_grid_unit (60) would
-# give here. Every habitat generator key below is carried across at matched physical meaning
+# give here. The same 0.32 applies to every `water:` block's clarity/shore_foam_depth/
+# edge_fade_depth: WaterBody bakes depth in this already-compressed world space (terrain_sampler.h
+# multiplies by height_scale before anything else sees it), so these thresholds are each the
+# engine default times 0.32, not the default itself -- otherwise a fully-carved lake still reads
+# shallow because its rendered depth never reaches a metres-scale clarity.
+# Every habitat generator key below is carried across at matched physical meaning
 # (a length scales with the grid, a count with its square); `towns:`/`roads:`/`*_width_m` are
 # OMITTED -- `TerrainSampler` has no road kind at all, so those keys only ever became visible
 # terrain through habitat's own settlement-stamping C++, which doesn't exist here.
@@ -45,7 +50,11 @@
 #      water/river inset from a quantised step; the heightmap mesher uses the continuous level).
 #   2. A Buoyancy body floats ~0.5m high on BOTH tile flavours, for the same reason -- so it
 #      reads identically between them, which is what matters here.
-#   3. Shoreline that is sub-step shallow is wet on tiles, dry on the heightmap.
+#   3. The shallow shelf's SHAPE differs even though which tiles are wet does not (tested by
+#      map_generator_test's every_tile_the_map_calls_wet_renders_wet_on_a_heightmap_too): tiles
+#      get a flat terrace water_inset deep, where the heightmap's bed is continuously graded
+#      (toyengine/world/terrain_water.h's grade_water_shore()) and falls away at whatever rate
+#      the generator's own lake/shore grading gave it.
 #   4. Tiles are solid only within collision_radius (default 4 chunks = 128m); the heightfield
 #      is solid everywhere. Keep every dropped prop within ~100m of the camera's start.
 #   5. Switching back to the heightmap after >2s away re-uploads its height/splat textures and
@@ -209,9 +218,9 @@ scene:
             wave_amplitude: 0.06
             wave_length: 3.5
             wave_steepness: 0.45
-            clarity: 2.5
-            shore_foam_depth: 0.35
-            edge_fade_depth: 0.1
+            clarity: 0.8
+            shore_foam_depth: 0.11
+            edge_fade_depth: 0.03
             ripple_strength: 0.3
             max_depth: 20.0
         - type: WeatherSurface
@@ -270,9 +279,9 @@ scene:
             wave_amplitude: 0.06
             wave_length: 3.5
             wave_steepness: 0.45
-            clarity: 2.5
-            shore_foam_depth: 0.35
-            edge_fade_depth: 0.1
+            clarity: 0.8
+            shore_foam_depth: 0.11
+            edge_fade_depth: 0.03
             ripple_strength: 0.3
             max_depth: 20.0
         - type: WeatherSurface
@@ -368,9 +377,9 @@ scene:
             wave_amplitude: 0.06
             wave_length: 3.5
             wave_steepness: 0.45
-            clarity: 2.5
-            shore_foam_depth: 0.35
-            edge_fade_depth: 0.1
+            clarity: 0.8
+            shore_foam_depth: 0.11
+            edge_fade_depth: 0.03
             ripple_strength: 0.3
             max_depth: 20.0
         - type: WeatherSurface
@@ -441,6 +450,7 @@ scene:
         - type: FreeMover
           move_speed: 60
           smoothing: 12
+          zoom_speed: 20   # mouse wheel dollies along the camera's own forward axis
 
     - name: drop_crate
       components:

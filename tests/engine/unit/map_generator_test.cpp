@@ -35,6 +35,7 @@ using toy::world::TerrainComponent;
 using toy::world::TerrainFieldGeometry;
 using toy::world::TerrainMode;
 using toy::world::TileRecord;
+using toy::world::WaterCell;
 using toy::world::WaterKind;
 
 namespace {
@@ -359,6 +360,162 @@ COOPA_TEST(one_map_gives_both_modes_the_same_ground_and_field) {
     expect(off_grass_correct == off_grass_checked,
            "both modes: a non-grass kind never falls back to the grass layer (" +
            std::to_string(off_grass_correct) + "/" + std::to_string(off_grass_checked) + ")");
+}
+
+/**
+ * @brief Every tile the bake calls wet renders wet in a heightmap terrain too, not just a tile
+ *        one.
+ *
+ * Tile mode trusts the baked `WaterCell::wet()` unconditionally (`TerrainField::set_water()`'s
+ * tile branch, `terrain_field.cpp`). Heightmap mode re-derives wet/dry from a fresh ground sample
+ * instead (`:291-292`), and that ground sample is read at the tile CENTRE while the bake's own
+ * heights were written at tile CORNERS, a half-tile offset apart on the same noise-shaped
+ * surface -- so a tile mapcoopa calls wet can read a hair of ground above its own water level and
+ * drop to dry. Two modes baked from the one map should agree on which tiles are wet; this is
+ * `unified_terrain_demo`'s own generator config (large enough, and the exact one, for the offset
+ * to actually bite -- the small synthetic fixture above is not).
+ */
+COOPA_TEST(every_tile_the_map_calls_wet_renders_wet_on_a_heightmap_too) {
+    const std::string path =
+        std::string(ROOT_DIR) + "/assets/scenes/terrain/unified_terrain_demo/scene.yaml";
+    const fkyaml::node doc = coopa::yaml::load_document(path);
+    fkyaml::node gen_node;
+    for (const auto& obj : doc.at("scene").at("root_objects")) {
+        if (obj.at("name").get_value<std::string>() != "world") continue;
+        for (const auto& c : obj.at("components")) {
+            if (c.at("type").get_value<std::string>() == "MapGenerator") gen_node = c;
+        }
+    }
+    require(!gen_node.is_null(), "wet parity: found the world's MapGenerator node");
+
+    MapGeneratorComponent g;
+    g.config = toy::mapgen::generator_config_from_node(gen_node);
+    g.world_tiles = 1024;
+    g.height_scale = 64.0f;
+    g.begin(nullptr);
+    require(g.ready(), "wet parity: the real generator config built");
+
+    TerrainComponent ta;
+    ta.mode = TerrainMode::Tiles;
+    ta.params.world_tiles = 1024;
+    ta.params.tile_size = 1.0f;
+    ta.params.height_step = 1.0f;
+    ta.params.height_scale = 64.0f;
+    ta.params.chunk_size = 32;
+    ta.tiles = std::make_shared<toy::world::TileMapData>();
+
+    TerrainComponent tb;
+    tb.mode = TerrainMode::Heightmap;
+    toy::world::HeightmapGeometry hg;
+    hg.size = glm::vec2(1024.0f);
+    hg.height = 64.0f;
+    hg.chunk_size = 32.0f;
+    hg.resolution = 1025;
+    hg.splat_resolution = 1024;
+    tb.data = std::make_shared<toy::world::HeightmapData>(hg.sanitized());
+
+    require(apply(g, ta), "wet parity: tile apply ran");
+    require(apply(g, tb), "wet parity: heightmap apply ran");
+
+    const TerrainFieldGeometry ga = ta.field.geometry();
+    require(ga.tiles_x == tb.field.geometry().tiles_x && ga.tiles_y == tb.field.geometry().tiles_y,
+            "wet parity: both modes share the same tile grid");
+
+    int tile_wet = 0, heightmap_wet = 0, mismatched = 0;
+    for (int ty = 0; ty < ga.tiles_y; ++ty) {
+        for (int tx = 0; tx < ga.tiles_x; ++tx) {
+            const glm::ivec2 tile(tx, ty);
+            const bool wa = ta.field.water_at(tile).wet();
+            const bool wb = tb.field.water_at(tile).wet();
+            if (wa) ++tile_wet;
+            if (wb) ++heightmap_wet;
+            if (wa != wb) ++mismatched;
+        }
+    }
+    expect(tile_wet > 0, "wet parity: the map has water to compare");
+    expect(mismatched == 0,
+           "wet parity: tile-mode wet " + std::to_string(tile_wet) + ", heightmap-mode wet " +
+           std::to_string(heightmap_wet) + ", mismatched " + std::to_string(mismatched));
+}
+
+/**
+ * @brief Grading a wet tile's bed moves it by millimetres almost everywhere, never by the old
+ *        binary clamp's flat metre.
+ *
+ * The regression test for the clamp `grade_water_shore()` replaced: it dug every wet tile's four
+ * corners down to exactly `level - height_step` (1 m here) regardless of what mapcoopa's own lake
+ * and shore grading had already done, overwriting a real, varying shelf with one flat pit depth
+ * repeated over every wet tile in the world. A raw adjacent-sample bound does not work here --
+ * this generator's real coastline has genuine cliffs metres tall one tile wide, so a large step
+ * at a shoreline is not by itself a bug. What the old clamp actually left behind was a DEFICIT
+ * (how much a tile's own corner-mean had to drop to satisfy `TerrainField::set_water()`'s dryness
+ * test) pinned at a flat 1 m almost everywhere; the fix's deficit should instead track whatever
+ * `shore_clearance` plus the corner-vs-centre sampling offset actually needs, which this real,
+ * noise-shaped map keeps to a few centimetres.
+ */
+COOPA_TEST(grading_moves_the_bed_by_millimetres_not_a_flat_metre) {
+    const std::string path =
+        std::string(ROOT_DIR) + "/assets/scenes/terrain/unified_terrain_demo/scene.yaml";
+    const fkyaml::node doc = coopa::yaml::load_document(path);
+    fkyaml::node gen_node;
+    for (const auto& obj : doc.at("scene").at("root_objects")) {
+        if (obj.at("name").get_value<std::string>() != "world") continue;
+        for (const auto& c : obj.at("components")) {
+            if (c.at("type").get_value<std::string>() == "MapGenerator") gen_node = c;
+        }
+    }
+    require(!gen_node.is_null(), "stair-step: found the world's MapGenerator node");
+
+    MapGeneratorComponent g;
+    g.config = toy::mapgen::generator_config_from_node(gen_node);
+    g.world_tiles = 1024;
+    g.height_scale = 64.0f;
+    g.begin(nullptr);
+    require(g.ready(), "stair-step: the real generator config built");
+
+    TerrainComponent tb;
+    tb.mode = TerrainMode::Heightmap;
+    toy::world::HeightmapGeometry hg;
+    hg.size = glm::vec2(1024.0f);
+    hg.height = 64.0f;
+    hg.chunk_size = 32.0f;
+    hg.resolution = 1025;
+    hg.splat_resolution = 1024;
+    tb.data = std::make_shared<toy::world::HeightmapData>(hg.sanitized());
+    require(apply(g, tb), "stair-step: heightmap apply ran");
+
+    const toy::world::HeightmapData& h = *tb.field.heights();
+    const TerrainFieldGeometry geo = tb.field.geometry();
+    require(h.nx() == geo.tiles_x + 1 && h.ny() == geo.tiles_y + 1, "stair-step: one sample per corner");
+
+    // For every wet tile, how far its own corner-mean had to drop below its water level to pass
+    // set_water()'s dryness test -- the quantity grade_water_shore() controls directly. This is
+    // NOT depth (the open sea is legitimately tens of metres deep, and a tile whose bed was
+    // already graded well clear of its level has a deficit near zero): the signal to watch is
+    // not its typical size but whether a huge FRACTION of wet tiles land on one exact, flat
+    // value, which is what the old clamp -- `level - height_step` on every wet tile regardless
+    // of what the bed already did -- left behind.
+    int wet_tiles = 0, near_old_clamp = 0;
+    constexpr float k_old_clamp = 1.0f;     // the removed clamp's flat drop (height_step here)
+    constexpr float k_old_clamp_slack = 0.02f;
+    for (int ty = 0; ty < geo.tiles_y; ++ty) {
+        for (int tx = 0; tx < geo.tiles_x; ++tx) {
+            const WaterCell w = tb.field.water_at(glm::ivec2(tx, ty));
+            if (!w.wet()) continue;
+            ++wet_tiles;
+            const float mean = 0.25f * (h.at(tx, ty) + h.at(tx + 1, ty) + h.at(tx, ty + 1) + h.at(tx + 1, ty + 1));
+            const float deficit = w.level - mean;
+            if (std::abs(deficit - k_old_clamp) <= k_old_clamp_slack) ++near_old_clamp;
+        }
+    }
+    expect(wet_tiles > 0, "stair-step: the map has water to check");
+    // A small fraction landing near 1 m by chance (a genuinely 1 m-deep corner, say) is fine; the
+    // old clamp pinned nearly ALL of them there, which this bound would catch by a wide margin.
+    const float near_old_clamp_frac = static_cast<float>(near_old_clamp) / static_cast<float>(std::max(1, wet_tiles));
+    expect(near_old_clamp_frac < 0.05f,
+           "stair-step: " + std::to_string(near_old_clamp) + " / " + std::to_string(wet_tiles) +
+           " wet tiles sit at a deficit within " + std::to_string(k_old_clamp_slack) +
+           " m of the old clamp's flat " + std::to_string(k_old_clamp) + " m");
 }
 
 /** @brief TEMPORARY diagnostic: march the demo camera's actual view rays (several pitches

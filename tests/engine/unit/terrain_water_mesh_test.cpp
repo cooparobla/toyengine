@@ -33,6 +33,10 @@ using toy::world::WaterKind;
 
 namespace {
 
+// Mirrors terrain_water_mesh.cpp's k_smooth_skirt_clearance (not exported): the tolerance a
+// tucked corner is allowed to sit under ground that has risen to meet it.
+constexpr float k_smooth_skirt_clearance_test = 0.2f;
+
 /** @brief A 16 x 16 one-metre-tile smooth terrain, ground 5 m, chunks of 8 tiles. */
 TerrainField smooth() {
     TerrainFieldGeometry g;
@@ -80,7 +84,7 @@ std::map<std::pair<int, int>, float> vertex_heights(const ChunkWaterData& w, glm
 COOPA_TEST(a_dry_terrain_builds_nothing) {
     const TerrainField f = smooth();
     ChunkWaterData still, flowing;
-    build_smooth_chunk_water(f, glm::ivec2(0, 0), 8, 0.25f, still, flowing);
+    build_smooth_chunk_water(f, glm::ivec2(0, 0), 8, 0.25f, 1, still, flowing);
     expect(still.empty() && flowing.empty(), "dry: no water, no mesh");
 }
 
@@ -95,7 +99,7 @@ COOPA_TEST(a_tile_field_is_not_this_builders_job) {
     f.reset(g);
     f.set_water(glm::ivec2(2, 2), WaterCell{WaterKind::Lake, 3.0f, 0});
     ChunkWaterData still, flowing;
-    build_smooth_chunk_water(f, glm::ivec2(0, 0), 8, 0.25f, still, flowing);
+    build_smooth_chunk_water(f, glm::ivec2(0, 0), 8, 0.25f, 1, still, flowing);
     expect(still.empty() && flowing.empty(), "tiles: the smooth builder declines a terraced field");
 }
 
@@ -105,7 +109,7 @@ COOPA_TEST(a_lake_becomes_a_still_surface) {
     flood(f, 2, 2, 6, 6, 4.0f, WaterKind::Lake);
 
     ChunkWaterData still, flowing;
-    build_smooth_chunk_water(f, glm::ivec2(0, 0), 8, 0.25f, still, flowing);
+    build_smooth_chunk_water(f, glm::ivec2(0, 0), 8, 0.25f, 1, still, flowing);
     require(!still.empty(), "lake: a still mesh was built");
     expect(flowing.empty(), "lake: and nothing flowing");
     expect(still.indices.size() % 3 == 0, "lake: whole triangles");
@@ -114,8 +118,14 @@ COOPA_TEST(a_lake_becomes_a_still_surface) {
                still.positions.size() == still.uvs.size(),
            "lake: every vertex has a depth, a wave scale and a uv");
 
+    // Corners touching at least one TRULY wet tile keep the exact level -- that is the visible
+    // waterline. The flooded tiles are x,y in [2, 6), so every corner in [2, 6] x [2, 6] touches
+    // one. Corners further out are the skirt, which this fix deliberately tucks under the ground
+    // it crosses rather than holding flat at the level (see `the_skirt_is_tucked_under_the_bank`).
     for (const glm::vec3& p : still.positions) {
-        expect_near(p.z, 4.0f, 1e-4f, "lake: the surface sits at the level it was given");
+        if (p.x >= 2.0f - 1e-4f && p.x <= 6.0f + 1e-4f && p.y >= 2.0f - 1e-4f && p.y <= 6.0f + 1e-4f) {
+            expect_near(p.z, 4.0f, 1e-4f, "lake: the surface sits at the level it was given");
+        }
     }
     float deepest = 0.0f;
     for (const float d : still.depths) deepest = std::max(deepest, d);
@@ -126,17 +136,20 @@ COOPA_TEST(a_lake_becomes_a_still_surface) {
 }
 
 /**
- * @brief The surface reaches one tile PAST the water, so the ground is what ends it.
+ * @brief The surface reaches `skirt_tiles` tiles PAST the water over a cliff, so the ground is
+ *        what ends it.
  *
  * That ring is the skirt: without it the surface would stop on a tile boundary instead of at the
- * waterline, and a shore would show a straight edge of water hanging in the air.
+ * waterline, and a shore would show a straight edge of water hanging in the air. `smooth()`'s
+ * ground outside the lake is a cliff (5 m against a 4 m level), so even a wide `skirt_tiles`
+ * stops at one ring here -- the gentle-bed widening is `the_skirt_widens_only_over_a_gentle_bed`.
  */
 COOPA_TEST(the_surface_reaches_past_the_waterline) {
     TerrainField f = smooth();
     flood(f, 2, 2, 4, 4, 4.0f, WaterKind::Lake);
 
     ChunkWaterData still, flowing;
-    build_smooth_chunk_water(f, glm::ivec2(0, 0), 8, 0.25f, still, flowing);
+    build_smooth_chunk_water(f, glm::ivec2(0, 0), 8, 0.25f, 3, still, flowing);
     require(!still.empty(), "skirt: a mesh was built");
 
     // The wet tiles are x,y in [2, 4); with the skirt ring the surface spans [1, 5] in corners.
@@ -149,13 +162,175 @@ COOPA_TEST(the_surface_reaches_past_the_waterline) {
     expect_near(max_x, 5.0f, 1e-4f, "skirt: ...and one tile past it on the high side");
 }
 
+/**
+ * @brief Over a gentle bed the apron reaches as far as `water_skirt_tiles` allows; over a cliff
+ *        it still stops at one ring regardless, because widening only continues where the ground
+ *        genuinely stays under the water's level (shore_of()'s `d > 1` gate).
+ */
+COOPA_TEST(the_skirt_widens_only_over_a_gentle_bed) {
+    TerrainField f = smooth();
+    flood(f, 4, 4, 6, 6, 4.0f, WaterKind::Lake);   // wet tiles x,y in [4, 6)
+
+    // A gentle bed around the lake: ground climbs 0.3 m per tile of Chebyshev distance from the
+    // lake's own 3x3 corner square, staying under the 4 m level for several rings before the
+    // bulk terrain's 5 m floor would otherwise resume.
+    for (int j = 0; j < f.heights()->ny(); ++j) {
+        for (int i = 0; i < f.heights()->nx(); ++i) {
+            const int dx = std::max({0, 4 - i, i - 6});
+            const int dy = std::max({0, 4 - j, j - 6});
+            const int dist = std::max(dx, dy);
+            if (dist >= 1) f.heights()->at(i, j) = 2.0f + 0.3f * static_cast<float>(dist);
+        }
+    }
+    f.mark_all_dirty();
+
+    ChunkWaterData wide_still, wide_flow, narrow_still, narrow_flow;
+    build_smooth_chunk_water(f, glm::ivec2(0, 0), 8, 0.25f, 3, wide_still, wide_flow);
+    build_smooth_chunk_water(f, glm::ivec2(0, 0), 8, 0.25f, 1, narrow_still, narrow_flow);
+    require(!wide_still.empty() && !narrow_still.empty(), "widen: both builds made a mesh");
+
+    auto span_x = [](const ChunkWaterData& w) {
+        float lo = 1e9f, hi = -1e9f;
+        for (const glm::vec3& p : w.positions) { lo = std::min(lo, p.x); hi = std::max(hi, p.x); }
+        return hi - lo;
+    };
+    expect(span_x(wide_still) > span_x(narrow_still) + 1.0f,
+           "widen: a larger water_skirt_tiles reaches further over ground that stays underwater");
+}
+
+/**
+ * @brief A skirt corner never sits above the ground it is tucked under, nor far below the level,
+ *        and stays exactly at the level wherever its own ground has not yet risen to meet it.
+ */
+COOPA_TEST(the_skirt_is_tucked_under_the_bank_it_crosses) {
+    TerrainField f = smooth();
+    flood(f, 4, 4, 6, 6, 4.0f, WaterKind::Lake);
+    for (int j = 0; j < f.heights()->ny(); ++j) {
+        for (int i = 0; i < f.heights()->nx(); ++i) {
+            const int dx = std::max({0, 4 - i, i - 6});
+            const int dy = std::max({0, 4 - j, j - 6});
+            const int dist = std::max(dx, dy);
+            if (dist >= 1) f.heights()->at(i, j) = 2.0f + 0.3f * static_cast<float>(dist);
+        }
+    }
+    f.mark_all_dirty();
+
+    ChunkWaterData still, flowing;
+    build_smooth_chunk_water(f, glm::ivec2(0, 0), 8, 0.25f, 3, still, flowing);
+    require(!still.empty(), "tuck: a mesh was built");
+
+    for (const glm::vec3& p : still.positions) {
+        expect(p.z <= 4.0f + 1e-4f, "tuck: a skirt corner never rises above the lake's own level");
+        if (p.z >= 4.0f - 1e-4f) continue;   // at the level: nothing to check further
+        // Only a corner whose own ground has risen to meet or pass the level is ever tucked
+        // below it -- a corner still over genuinely submerged ground stays exactly at the level.
+        const float ground = f.ground_at(glm::vec2(p.x, p.y));
+        expect(ground >= 4.0f - 1e-4f, "tuck: a corner only ever drops below the level where its "
+                                       "own ground has risen to meet it");
+    }
+}
+
+/**
+ * @brief A deep pocket one tile in from the shore must not drag the RIM corner down with it --
+ *        the regression test for the "water ramps downward into the bank" defect. The old
+ *        `ground_min`-over-four-tile-centres tuck would pull a rim corner by the pocket's own
+ *        depth; the fix reads only the ground AT that exact corner.
+ */
+COOPA_TEST(a_deep_tile_beside_the_shore_does_not_drag_the_rim_down) {
+    TerrainField f = smooth();
+    flood(f, 4, 4, 6, 6, 4.0f, WaterKind::Lake);   // wet tiles x,y in [4, 6)
+    // A steep bank just past the shore (tile 6 and up): ground at 4.5 m, well above the 4 m
+    // level, so every corner out there should sit flat at the level. One tile further in, dig a
+    // deep pocket (tile 8) well below the level -- it must not reach back and drag the shoreline
+    // rim corner (around tile 6-7) down with it.
+    for (int j = 0; j < f.heights()->ny(); ++j) {
+        for (int i = 0; i < f.heights()->nx(); ++i) {
+            if (i >= 6 && i <= 9 && j >= 4 && j <= 6) f.heights()->at(i, j) = 4.5f;
+        }
+    }
+    for (int j = 4; j <= 6; ++j) f.heights()->at(8, j) = -10.0f;
+    f.mark_all_dirty();
+
+    ChunkWaterData still, flowing;
+    build_smooth_chunk_water(f, glm::ivec2(0, 0), 8, 0.25f, 4, still, flowing);
+    require(!still.empty(), "deep-pocket: a mesh was built");
+
+    for (const glm::vec3& p : still.positions) {
+        if (p.x < 6.0f - 1e-4f) continue;   // only the bank past the shore, not the open water
+        const float ground = f.ground_at(glm::vec2(p.x, p.y));
+        if (ground >= 4.0f - 1e-4f) {
+            expect_near(p.z, 4.0f, k_smooth_skirt_clearance_test + 1e-4f,
+                       "deep-pocket: a corner over ground at/above the level stays close to it, "
+                       "never ramped down toward an unrelated deep tile nearby");
+        }
+    }
+}
+
+/**
+ * @brief Over a gentle bed the apron reaches all the way to where the ground actually crosses the
+ *        waterline -- the regression test for "water doesn't hit the terrain edge". The mesh's
+ *        outermost corner must lie at or past the ground's own crossing point, not stop short of
+ *        it because the widening gate read a tile's centre instead of its corners.
+ */
+COOPA_TEST(the_apron_reaches_the_waterline_over_a_gentle_bed) {
+    TerrainField f = smooth();
+    flood(f, 4, 4, 6, 6, 4.0f, WaterKind::Lake);   // wet tiles x,y in [4, 6)
+    // Ground climbs gently along +x only, crossing the 4 m level partway through tile 9 (at
+    // x = 9.5): 2.0 m at the lake's edge (x = 6), +0.3 m per corner step after that.
+    for (int j = 0; j < f.heights()->ny(); ++j) {
+        for (int i = 0; i < f.heights()->nx(); ++i) {
+            if (i >= 6) f.heights()->at(i, j) = 2.0f + 0.3f * static_cast<float>(i - 6);
+        }
+    }
+    f.mark_all_dirty();
+
+    ChunkWaterData still, flowing;
+    build_smooth_chunk_water(f, glm::ivec2(0, 0), 8, 0.25f, 4, still, flowing);
+    require(!still.empty(), "reach: a mesh was built");
+
+    float max_x = -1e9f;
+    for (const glm::vec3& p : still.positions) max_x = std::max(max_x, p.x);
+    // The ground crosses 4 m at x = 6 + (4 - 2) / 0.3 = 12.67; the apron must reach at least that
+    // far (chunk 0 only spans tiles [0, 8), i.e. corners up to x = 8, so clamp the expectation to
+    // the chunk's own extent -- the point is that it is NOT cut short well before even that).
+    expect(max_x >= 8.0f - 1e-4f, "reach: the apron runs to the chunk's own edge over a gentle "
+                                  "bed rather than stopping a ring early");
+}
+
+/** @brief A corner's depth is exactly the level less the ground sampled AT that corner. */
+COOPA_TEST(a_corner_carries_the_depth_of_the_ground_under_it) {
+    TerrainField f = smooth();
+    flood(f, 4, 4, 6, 6, 4.0f, WaterKind::Lake);
+    for (int j = 0; j < f.heights()->ny(); ++j) {
+        for (int i = 0; i < f.heights()->nx(); ++i) {
+            const int dx = std::max({0, 4 - i, i - 6});
+            const int dy = std::max({0, 4 - j, j - 6});
+            const int dist = std::max(dx, dy);
+            if (dist >= 1) f.heights()->at(i, j) = 2.0f + 0.3f * static_cast<float>(dist);
+        }
+    }
+    f.mark_all_dirty();
+
+    ChunkWaterData still, flowing;
+    build_smooth_chunk_water(f, glm::ivec2(0, 0), 8, 0.25f, 3, still, flowing);
+    require(still.positions.size() == still.depths.size(), "depth: one depth per vertex");
+
+    for (std::size_t i = 0; i < still.positions.size(); ++i) {
+        const glm::vec3& p = still.positions[i];
+        const float ground = f.ground_at(glm::vec2(p.x, p.y));
+        const float expected = std::max(0.0f, p.z - ground);
+        expect_near(still.depths[i], expected, 1e-3f,
+                   "depth: depth is the level less the ground sampled at this exact corner");
+    }
+}
+
 /** @brief A river goes to the flowing mesh, with its own wave scale. */
 COOPA_TEST(a_river_is_a_separate_flowing_mesh) {
     TerrainField f = smooth();
     flood(f, 2, 2, 6, 4, 4.0f, WaterKind::River, 1);   // flowing east
 
     ChunkWaterData still, flowing;
-    build_smooth_chunk_water(f, glm::ivec2(0, 0), 8, 0.25f, still, flowing);
+    build_smooth_chunk_water(f, glm::ivec2(0, 0), 8, 0.25f, 1, still, flowing);
     require(!flowing.empty(), "river: a flowing mesh was built");
     expect(still.empty(), "river: and nothing still");
     for (const float w : flowing.wave_scales) {
@@ -179,19 +354,26 @@ COOPA_TEST(a_river_is_a_separate_flowing_mesh) {
  */
 COOPA_TEST(neighbouring_chunks_agree_on_their_shared_edge) {
     TerrainField f = smooth();
-    // A lake straddling the boundary between chunk (0,0) and chunk (1,0) at tile x = 8, with a
-    // sloping surface across it so an agreement is a real one rather than one constant value.
-    flood(f, 5, 2, 12, 6, 4.0f, WaterKind::Lake);
+    // A lake just short of the boundary between chunk (0,0) and chunk (1,0) at tile x = 8, so the
+    // SHORE -- the skirt ring, not just open water -- is what straddles it; the skirt is where a
+    // ground-aware corner is most likely to disagree between two chunks, so that is what has to
+    // be proven, not a corner deep in open water that never consulted the ground at all.
+    flood(f, 5, 2, 8, 6, 4.0f, WaterKind::Lake);
+    // A visible step per tile of x: with the ramp bug fixed, a corner's level no longer picks up
+    // extra slope from a ground-driven tuck (the surrounding ground here is well above every
+    // level, so none of these corners are tucked at all) -- the ONLY source of slope left is the
+    // water's own level varying by tile, so that has to be large enough on its own to prove this
+    // test's point.
     for (int y = 2; y < 6; ++y) {
-        for (int x = 5; x < 12; ++x) {
-            f.set_water(glm::ivec2(x, y), WaterCell{WaterKind::Lake, 4.0f + 0.05f * static_cast<float>(x), 0});
+        for (int x = 5; x < 8; ++x) {
+            f.set_water(glm::ivec2(x, y), WaterCell{WaterKind::Lake, 4.0f + 0.3f * static_cast<float>(x), 0});
         }
     }
     f.mark_all_dirty();
 
     ChunkWaterData a_still, a_flow, b_still, b_flow;
-    build_smooth_chunk_water(f, glm::ivec2(0, 0), 8, 0.25f, a_still, a_flow);
-    build_smooth_chunk_water(f, glm::ivec2(1, 0), 8, 0.25f, b_still, b_flow);
+    build_smooth_chunk_water(f, glm::ivec2(0, 0), 8, 0.25f, 2, a_still, a_flow);
+    build_smooth_chunk_water(f, glm::ivec2(1, 0), 8, 0.25f, 2, b_still, b_flow);
     require(!a_still.empty() && !b_still.empty(), "seam: both chunks built water");
 
     const auto a = vertex_heights(a_still, glm::vec2(0.0f, 0.0f));

@@ -154,9 +154,8 @@ are the X and Y axes.
 
 ### Object origins
 
-A mesh-less object -- a rig's joint, a marker, a parent you group things under -- draws a glyph
-at its origin so you can see and click it. On a character rig that is one glyph per bone, so
-how they look decides whether the rig is readable or a thicket.
+A mesh-less object -- a marker, a parent you group things under, an IK target or attach
+socket -- draws a glyph at its origin so you can see and click it.
 
 How an origin draws has a viewer-wide default you can play with, which any object may
 override. The default is the **Object Origins** section of the Overlays popover, and
@@ -165,24 +164,31 @@ override. The default is the **Object Origins** section of the Overlays popover,
 | Style | Looks like |
 |---|---|
 | **Axes** | A line through the origin along each of the object's own axes. The default |
-| **Orb** | A small ball with a short tick down each axis -- the least cluttered on a rig |
-| **Bone** | An octahedral bone reaching each child joint, so a rig reads as a skeleton. Only offered on an object at or under an **Animator**, where it is that joint's default |
+| **Orb** | A small ball with a short tick down each axis -- the least cluttered when several overlap |
 
-A rig's joints draw as **Bone** the moment they sit under an **Animator** -- no mode switch
-needed. Set **Axes** or **Orb** on the rig's root to put the whole hierarchy back. Bone can't
-be picked outside a rig, and isn't one of the viewer-wide default's choices, so it never
-escapes onto an ordinary marker or group parent.
+A character's bones are **not** objects, and never draw an origin glyph of their own: a
+skeleton is a `Rig` component's own bone list (`libs/libcoopa/coopa/rig/README.md`), posed by
+a `SkeletalAnimator` and the bone-space IK components in `coopa/rig/`, not by Transforms parented
+under an `Animator`. This is deliberate -- a mesh-less object near a rig (an IK target empty, an
+attach socket) is a plain marker, never a clickable bone of its own.
 
 ## Pose a rig
 
-**Pose mode** is where you animate. Select a rig -- any object with an **Animator**, or a
-joint under one -- and pick **Pose Mode** from the mode menu in the viewport header.
+Posing a `Rig`-based character currently has no dedicated viewport mode: its `SkeletalAnimator`
+clips and the `TwoBoneIK`/`ChainIK`/`LookAtIK`/`BoneAttachment` components in `coopa/rig/` drive
+it, authored as scene/clip YAML rather than posed by hand in the viewport. A full Pose mode and
+Rig Edit mode for it are planned but not built yet.
+
+The rest of this section describes the OLDER property-animation rig style still used by a few
+assets (`robot_arm`, `bouncing_ball`): a joint is an ordinary object with an **Animator** at or
+above it, posed with its own Transform. Select such a rig -- the object with the **Animator**,
+or a joint under one -- and pick **Pose Mode** from the mode menu in the viewport header.
 
 In it:
 
 - Every joint draws as a **bone** reaching its child joints, so you can see the skeleton --
-  Pose mode's own display, separate from the **Bone** origin style above: it draws regardless
-  of the **Origins** overlay checkbox, even on a rig whose own style is Axes or Orb.
+  Pose mode's own display: it draws regardless of the **Origins** overlay checkbox, even on a
+  rig whose own origin style is Axes or Orb.
 - Click a bone anywhere along its body to select that joint. Clicking the same place again
   steps past it to whatever is behind.
 - **G**, **R** and **S** (and the gizmos) move the **pose**, not the object. The pose stays
@@ -202,23 +208,18 @@ An object's settings apply to **every selected object**, as one undo step, and t
 
 **Style:**
 
-1. its own **Style**, or the nearest **ancestor's**, when it is Axes or Orb (or Bone, on a
-   joint under an Animator) -- so you can put a single bone in a rig back to Axes by setting
-   it there, overriding the root;
-2. failing that, **Bone** -- when the object sits at or under an **Animator**, that is the
-   rig's own default and needs nothing set;
-3. failing that, the **viewer-wide default**, which starts at Axes.
+1. its own **Style**, or the nearest **ancestor's**, when it is Axes or Orb;
+2. failing that, the **viewer-wide default**, which starts at Axes.
 
 **Size:**
 
 1. its own **Size**, or the nearest ancestor's, when it is not **0**;
 2. the **viewer-wide default**, which starts at 0.5 m.
 
-The panel shows what is in use (`In use: Bone at 0.200 m`) whenever a value is inherited
+The panel shows what is in use (`In use: Orb at 0.200 m`) whenever a value is inherited
 rather than the object's own.
 
-The settings are editor-only: the game ignores `origin_style`, `origin_size` and
-`bone_length` on a Transform.
+The settings are editor-only: the game ignores `origin_style` and `origin_size` on a Transform.
 
 A glyph is **clickable where it is drawn**: click anywhere along a bone's body to select
 that joint, anywhere along an axis line, or on an orb's ball. Clicking the origin itself

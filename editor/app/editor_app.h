@@ -63,8 +63,13 @@
 #include "../viewport/editor_camera.h"
 #include "../viewport/gizmo.h"
 #include "../viewport/modal_transform.h"
+#include "../rig/bone_pick.h"
+#include "../rig/bone_pose_edit.h"
 #include "../ui/log_view.h"
 #include "../ui/logo.h"
+
+#include <coopa/rig/rig_component.h>
+#include <coopa/rig/skeletal_animator.h>
 
 #include <toyengine/core/config.h>
 #include <toyengine/core/branding.h>
@@ -229,14 +234,9 @@ public:
     Project& project() { return project_; }
     EditorCamera& camera() { return camera_; }
     Gizmo& gizmo() { return gizmo_; }
-    /**
-     * @brief The length the Bone gizmo style draws for `id`: the Transform's own `bone_length`,
-     *        or the hierarchy's guess while that is 0. 0 when neither says anything.
-     */
-    float bone_length_for(ObjectId id) { return effective_bone_length_(id); }
     /** @brief Everything under `px`, nearest first (tests; see pick_candidates_). */
     std::vector<ObjectId> pick_candidates_for_test(glm::vec2 px) { return pick_candidates_(px); }
-    /** @brief World-space tail of each bone the Bone origin style draws for `id`. */
+    /** @brief World-space tail of each bone Pose mode draws for an OLD-style (SceneObject) joint `id`. */
     std::vector<glm::vec3> bone_tails_for(ObjectId id, float fallback_length = 0.5f) {
         return bone_tails_(id, fallback_length);
     }
@@ -254,9 +254,7 @@ public:
     /**
      * @brief The viewer-wide default every object falls back to (Preferences > Viewport).
      *
-     * Deliberately Axes/Orb only -- Bone is reachable only on an Animator rig
-     * (origin_style_for_()), never as this global default, or every mesh-less marker in every
-     * scene would draw as a bone.
+     * Axes or Orb -- see editor_types.h's OriginStyle.
      */
     OriginStyle default_origin_style() const { return static_cast<OriginStyle>(std::clamp(origin_style_, 0, 1)); }
     float default_origin_size() const { return origin_size_; }
@@ -484,6 +482,10 @@ public:
     void rename_animation_clip(const std::string& to);
     void rename_selected_animation_event(const std::string& name);
     void select_all_keys();
+    void select_all_bone_keys();
+    void delete_selected_bone_keys();
+    void set_selected_bone_key_interpolation(const std::string& ease);
+    std::vector<float> bone_clip_key_times() const;
     void select_animation_event(int index);
     int selected_animation_event() const;
     void set_animation_record(bool on);
@@ -1008,8 +1010,21 @@ private:
     bool mesh_mode_target_() const { return (!asset_view_() && edit_object_ != 0) || active_type_ == AssetType::Mesh; }
     bool in_edit_mode_() const { return mesh_mode_target_() && mode_ == InteractionMode::Edit; }
     bool in_sculpt_mode_() const { return mesh_mode_target_() && mode_ == InteractionMode::Sculpt; }
-    /** @brief Posing a rig by hand: its joints draw as bones and transforms edit the pose. */
+    /** @brief Posing a rig by hand: with an OLD-style (Animator) rig, its joints draw as bones
+     *         and transforms edit the pose; with a coopa::rig::Rig, its bones draw and pick
+     *         directly by index -- see rig_pose_mode_(). */
     bool in_pose_mode_() const { return pose_rig_ != 0; }
+    /** @brief The coopa::rig::Rig component on the current pose_rig_, or null (Pose mode is off,
+     *         or pose_rig_'s object is the OLD Animator-joint style instead). */
+    coopa::rig::Rig* pose_rig_component_() const;
+    /** @brief Pose mode is active on a coopa::rig::Rig character: bones are addressed by
+     *         index (pose_bones_selected_), not by ObjectId. */
+    bool rig_pose_mode_() const { return pose_rig_component_() != nullptr; }
+    /** @brief The id Pose Mode should target for `id`: the nearest Animator ancestor
+     *         (timeline_panel_'s rig_of_(), unchanged), or -- when there is none -- the nearest
+     *         ancestor carrying a coopa::rig::Rig. Kept separate from rig_of_() itself so that
+     *         function's many Animator-specific Timeline callers are untouched. */
+    ObjectId pose_target_of_(ObjectId id) const;
 
     /** @brief The edited mesh's object-to-world matrix (identity in the Asset tab). */
     glm::mat4 mesh_world_();
@@ -1049,6 +1064,99 @@ private:
     void extrude_interactive_(const ViewProj& vp, glm::vec2 m);
 
     void invert_mesh_selection_();
+
+    // --- rig pose mode (coopa::rig::Rig bones) ---
+    //
+    // Additive alongside the modal operators above: a coopa::rig::Rig's bones are not
+    // SceneObjects, so they need their own selection set, picking and modal-transform
+    // plumbing instead of doc_'s / modal_'s.
+
+    /** @brief The closest bone of the current pose_rig_component_() to `px`, or -1. */
+    int pick_bone_(glm::vec2 px);
+    /** @brief A click in Pose mode on a coopa::rig::Rig: picks a bone into pose_bones_selected_. */
+    void rig_pose_click_select_(glm::vec2 px, bool shift);
+    /** @brief A box-drag in Pose mode: every bone whose head projects inside the box. */
+    void rig_pose_box_select_(glm::vec2 a, glm::vec2 b, bool additive, bool subtract);
+    /** @brief G/R/S/Alt+G/R/S/A/Alt+A/Ctrl+C/Ctrl+V/Ctrl+M for the selected bones -- the
+     *         bone-mode sibling of the Object Mode keys in viewport_keymap_(). */
+    void rig_pose_keymap_(imm::Context& ctx, const ViewProj& vp, glm::vec2 m);
+    void start_bone_modal_(ModalKind kind, const ViewProj& vp, glm::vec2 mouse);
+    void run_bone_modal_(imm::Context& ctx, const ViewProj& vp, bool ctrl, bool shift);
+    void apply_bone_modal_(ModalKind kind, const ModalTransform::Result& r);
+    void begin_bone_transform_();
+    /** @brief Clear Location/Rotation/Scale (Alt+G/R/S): the selected bones back to rest. */
+    void clear_bone_transform_(int what);
+    /** @brief Ctrl+C: snapshots the selected bones' pose channels into bone_pose_clipboard_. */
+    void copy_bone_pose_();
+    /** @brief Ctrl+V: pastes bone_pose_clipboard_ onto the rig, by bone name. */
+    void paste_bone_pose_();
+    /** @brief Ctrl+M: mirrors each selected `_l`/`_r`-named bone's pose onto its counterpart. */
+    void mirror_selected_bones_pose_();
+    /** @brief The sibling SkeletalAnimator's `states:` node, merged through an inherited
+     *         component like rig_pose_open_clip_ reads it, or null if pose_rig_ has none. */
+    const Node* rig_pose_states_node_() const;
+    /** @brief The sibling SkeletalAnimator's state names, as the Timeline's bone clip dropdown lists them. */
+    std::vector<std::string> rig_pose_states_() const;
+    /** @brief Opens `state`'s clip file (from the sibling SkeletalAnimator's `states:`) as
+     *         rig_pose_clip_, the target "I" keys into. Empty/missing on any failure. */
+    void rig_pose_open_clip_(const std::string& state);
+    /** @brief I: keys every selected bone's CURRENT location/rotation/scale into
+     *         rig_pose_clip_ at anim_time_, opening the sibling SkeletalAnimator's current (or
+     *         first) state's clip first if none is open yet, and saves the file immediately --
+     *         there is no Timeline save button for this model yet (see bone_clip_model.h). */
+    void rig_pose_insert_keys_();
+
+    // --- rig edit mode (authoring a RigModel's rest skeleton) ---
+    //
+    // Pose mode's sibling: edits REST head/tail/roll/parent/connected on a RigDocument instead
+    // of POSE deltas on a live coopa::rig::Rig. Single-select only (one bone, or one of its
+    // endpoints) -- no box select, no multi-bone drag -- since authoring a skeleton is a much
+    // more deliberate, one-joint-at-a-time operation than posing a whole character at once.
+
+    /** @brief Enters RigEdit mode on `id`: pre-populates rig_edit_ from its Rig component's
+     *         asset if it has one (loaded), or starts an EMPTY rig to author from scratch.
+     * @return False if `id` is 0. */
+    bool enter_rig_edit_mode_(ObjectId id);
+    /** @brief Leaves RigEdit mode, saving first if dirty. */
+    void exit_rig_edit_mode_();
+    bool rig_edit_mode_() const { return rig_edit_object_ != 0; }
+
+    /** @brief rig_edit_object_'s world matrix -- RigModel's head/tail are in ITS rig space,
+     *         exactly as a coopa::rig::Rig's bones are in its owner's. Identity if the object
+     *         no longer resolves live (e.g. undo removed it out from under RigEdit mode). */
+    glm::mat4 rig_edit_owner_world_() const;
+    /** @brief The closest bone body OR endpoint to `px`. Endpoint picking wins within its own
+     *         (tighter) radius -- a click meant for dragging a joint must not instead select
+     *         the whole bone. */
+    int rig_edit_pick_(const ViewProj& vp, glm::vec2 px, bool* endpoint_out, toy::editor::rig_pick::BoneEndpoint* which_out);
+    void rig_edit_click_select_(const ViewProj& vp, glm::vec2 px);
+    /** @brief G (move the selected endpoint, or the whole bone if none is specifically picked) /
+     *         E (extrude a new child from the selected bone's tail) / X, Delete (delete the
+     *         selected bone) / Ctrl+C... no: see the .cpp for the exact key list. */
+    void rig_edit_keymap_(imm::Context& ctx, const ViewProj& vp, glm::vec2 m);
+    void start_rig_edit_modal_(ModalKind kind, const ViewProj& vp, glm::vec2 mouse);
+    void run_rig_edit_modal_(imm::Context& ctx, const ViewProj& vp, bool ctrl, bool shift);
+    void apply_rig_edit_modal_(ModalKind kind, const ModalTransform::Result& r);
+    /** @brief Adds a disconnected root bone near the 3D cursor (no bone selected) or extrudes a
+     *         connected child from the selected bone's tail (A/E keys). */
+    void rig_edit_add_or_extrude_(bool extrude);
+    void rig_edit_delete_selected_();
+    void rig_edit_set_roll_(float degrees);
+    /** @brief Renames the selected bone and repoints every referrer this project can find --
+     *         see rig_referrers.h. No-op (logs why) if the name is empty or already taken. */
+    void rig_edit_rename_selected_(const std::string& to);
+    /** @brief Reparents the selected bone under `new_parent` (-1 for root); -2 means "no change"
+     *         (RigModel::reparent_bone's own -1-for-root is a real value, so a UI combo box needs
+     *         a distinct "nothing picked yet" sentinel). */
+    void rig_edit_reparent_selected_(int new_parent);
+    void rig_edit_set_connected_(bool on);
+    /** @brief One undoable edit of rig_edit_.model; the file is written once a frame
+     *         (rig_edit_frame_()), not per edit -- the RigModel sibling of anim_clip_edit_. */
+    void rig_edit_model_edit_(const std::string& label, const std::function<void(RigModel&)>& fn);
+    /** @brief Per frame: flushes a dirty rig_edit_ to disk (creating its file and, the FIRST
+     *         time, a Rig component on rig_edit_object_, if it has none) and ends any open merge. */
+    void rig_edit_frame_(float dt);
+    void rig_edit_save_();
 
     // --- object operations ---
 
@@ -1147,8 +1255,27 @@ public:
     void set_isolate_in_edit(bool on);
     bool isolate_in_edit() const { return isolate_in_edit_; }
     bool is_isolated(ObjectId id) const { return isolated_.count(id) > 0; }
+    // --- RigEdit mode (tests, menus) ---
+    const RigModel& rig_edit_model() const { return rig_edit_.model; }
+    int rig_edit_selected_bone() const { return rig_edit_selected_bone_; }
+    /** @brief Selects bone `i` directly (whole-bone, no endpoint) -- for tests and a future
+     *         bone-list side panel, where picking by clicking in the viewport is not the point. */
+    void select_rig_bone(int i) {
+        rig_edit_selected_bone_ = i;
+        rig_edit_endpoint_selected_ = false;
+    }
+    void extrude_selected_rig_bone() { rig_edit_add_or_extrude_(true); }
+    void add_rig_bone() { rig_edit_add_or_extrude_(false); }
+    void delete_selected_rig_bone() { rig_edit_delete_selected_(); }
+    void set_selected_rig_bone_roll(float degrees) { rig_edit_set_roll_(degrees); }
+    void rename_selected_rig_bone(const std::string& to) { rig_edit_rename_selected_(to); }
+    void reparent_selected_rig_bone(int new_parent) { rig_edit_reparent_selected_(new_parent); }
+    void set_selected_rig_bone_connected(bool on) { rig_edit_set_connected_(on); }
+    fs::path rig_edit_path() const { return rig_edit_.path; }
+
     InteractionMode interaction_mode() const {
         if (pose_rig_) return InteractionMode::Pose;
+        if (rig_edit_object_) return InteractionMode::RigEdit;
         // Pen is reported whatever the object is: unlike the mesh modes it needs no mesh, so
         // gating it behind `edit_object_` would leave it permanently reading as Object Mode.
         if (mode_ == InteractionMode::Pen) return InteractionMode::Pen;
@@ -1185,55 +1312,24 @@ private:
 
     bool gizmo_target_(bool mesh_edit, glm::vec3& pivot, glm::mat3& basis);
 
-    // --- bone length (the Transform's optional `bone_length`, drawn by the Bone gizmo style) ---
-
-    /** @brief The Transform's stored `bone_length` in metres; 0 when the object has none. */
-    float bone_length_(ObjectId id) const;
     /**
-     * @brief True when `id` is a joint: an object that draws an origin glyph of its own.
-     *
-     * A mesh parented to a bone, or a light on it, is not one -- bones run between joints, so
-     * a prop hanging off a hand must not sprout a bone of its own.
+     * @brief True when `id` is a decoration-free object that draws an origin glyph of its own:
+     *        no mesh, and not a camera or a light (those get their own special glyphs).
      */
     bool is_joint_object_(ObjectId id);
     /** @brief The Transform key `key` on `id`, or on the nearest ancestor that sets it. */
     const Node* inherited_transform_key_(ObjectId id, const char* key) const;
-    /**
-     * @brief True when `id`'s EFFECTIVE components (an instance's included, not just overridden)
-     * list an Animator.
-     *
-     * `TimelinePanel::rig_of_` deliberately reads only a scene-placed instance's own node, to
-     * redirect dope-sheet editing to the source asset -- see its comment. The Bone origin style
-     * is a read-only display, not an editing mode, so it has no reason to share that redirect:
-     * a rig placed in a scene must read as a skeleton exactly like the asset itself does.
-     */
-    bool has_animator_(ObjectId id) const;
-    /** @brief The nearest ancestor (or `id` itself) with an effective Animator, or 0. */
-    ObjectId rig_root_of_(ObjectId id) const;
     OriginStyle origin_style_for_(ObjectId id) const;
     float origin_size_for_(ObjectId id) const;
     /** @brief Sets a Transform key on every selected object (null clears it); one undo step. */
     void set_selection_transform_key_(const char* key, const Node* value, const std::string& label);
     /**
-     * @brief A bone length guessed from the hierarchy, in metres.
+     * @brief Where an OLD-style (SceneObject) rig joint's bone(s) point, in world space -- one
+     *        tail per child joint, so a branching rig (a hip with two legs) gets one bone per
+     *        branch, and a leaf carries on the way its parent points for half that span.
      *
-     * The distance to the mean of the object's children, as a rig's bone reaches its child
-     * joint; a leaf falls back to half the distance to its parent, and a lone object to 0.
-     */
-    float bone_length_guess_(ObjectId id);
-    /** @brief bone_length_() when it is set, else bone_length_guess_(). */
-    float effective_bone_length_(ObjectId id);
-    /** @brief Writes the Transform's `bone_length` (<= 0 drops the key); one undo step. */
-    void set_bone_length_(ObjectId id, float metres);
-    /**
-     * @brief Where this object's bone(s) point, in world space -- one tail per bone.
-     *
-     * For Pose mode's bone display, and for the Bone origin style on an Animator rig.
-     *
-     * A joint with children gets one bone reaching each of them, so a rig draws as the
-     * skeleton it is. A leaf carries on the way its parent points, for half that span. An
-     * explicit `bone_length` collapses it to a single bone of exactly that length, along the
-     * mean of the children (or the parent's direction, or the object's own +Y).
+     * For Pose mode's bone display only -- a coopa::rig::Rig-based character's bones are not
+     * SceneObjects, so is_joint_object_() never finds any under it and this is never reached.
      */
     std::vector<glm::vec3> bone_tails_(ObjectId id, float fallback_length);
 
@@ -1544,6 +1640,46 @@ private:
     bool box_selecting_ = false;
     glm::vec2 select_press_{0.0f};
     std::map<ObjectId, DragStart> drag_starts_;
+    std::vector<int> pose_bones_selected_;   ///< Bone indices in the current pose_rig_component_().
+    ModalTransform bone_modal_;              ///< Separate from modal_: bones are not objects or mesh elements.
+    /** @brief One bone's pose channel as captured at a bone modal operator's start -- the base
+     *         start_bone_modal_()/apply_bone_modal_() recompute the live delta from, exactly as
+     *         DragStart does for an object's Transform (see apply_transform_()'s doc). */
+    struct BonePoseDragStart {
+        glm::vec3 location{0.0f};
+        glm::quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
+        glm::vec3 scale{1.0f};
+    };
+    std::unordered_map<int, BonePoseDragStart> bone_drag_starts_;
+    toy::editor::rig_pose_edit::PoseSnapshot bone_pose_clipboard_;   ///< Ctrl+C/Ctrl+V in Pose mode.
+    BoneClipDocument rig_pose_clip_;   ///< "I"'s target on a coopa::rig::Rig -- see rig_pose_insert_keys_()'s doc.
+    // Timeline's bone dope sheet over rig_pose_clip_ -- the bone-addressed sibling of the
+    // anim_sel_keys_/anim_drag_/anim_view_ group below, kept separate (not reused) because the
+    // two dope sheets are mutually exclusive (Pose Mode vs an Animator rig) but independently
+    // stateful (switching back to the other must not lose where this one was scrubbed to).
+    std::set<BoneClipModel::BoneKeyRef> rig_pose_sel_keys_;
+    KeyDrag rig_pose_key_drag_;
+    int rig_pose_sel_event_ = -1;
+    KeyDrag rig_pose_event_drag_;
+    std::set<std::string> rig_pose_expanded_;   ///< Bone names opened into channel rows.
+    TimelineView rig_pose_view_;
+    float rig_pose_menu_time_ = 0.0f;
+    bool rig_pose_show_all_ = false;   ///< off: only bones with tracks or selected (anim_show_all_'s sibling)
+    bool rig_pose_clip_dirty_ = false;
+    int rig_pose_row_scroll_ = 0;
+    std::shared_ptr<coopa::rig::SkeletalClip> rig_pose_runtime_;   ///< Parsed from rig_pose_clip_.model for preview.
+    uint64_t rig_pose_runtime_rev_ = 0;
+    float rig_pose_sample_time_ = -1.0f;
+    // --- rig edit mode ---
+    ObjectId rig_edit_object_ = 0;        ///< The object whose world Transform anchors rig space; 0 = inactive.
+    RigDocument rig_edit_;
+    int rig_edit_selected_bone_ = -1;
+    bool rig_edit_endpoint_selected_ = false;   ///< True: rig_edit_selected_end_ is the drag target, not the whole bone.
+    toy::editor::rig_pick::BoneEndpoint rig_edit_selected_end_ = toy::editor::rig_pick::BoneEndpoint::Head;
+    ModalTransform rig_edit_modal_;       ///< Separate from modal_/bone_modal_: RigModel is rest data, not a live object or pose.
+    struct RigEditDragStart { glm::vec3 head{0.0f}; glm::vec3 tail{0.0f}; float roll = 0.0f; };
+    RigEditDragStart rig_edit_drag_start_;
+    std::string rig_edit_rename_buf_;
     EditMesh mesh_drag_base_;
     std::map<std::string, CachedMesh> mesh_cache_;
     /**

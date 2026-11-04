@@ -1,6 +1,7 @@
 #include <toyengine/scene/ragdoll.h>
 
-#include <coopa/animation/ik_components.h>
+#include <coopa/rig/ik_components.h>
+#include <coopa/rig/rig_pose_math.h>
 #include <coopa/scene/component.h>
 #include <coopa/scene/components/transform_component.h>
 #include <coopa/scene/scene.h>
@@ -38,9 +39,13 @@ void Ragdoll::toggle() {
 
 void Ragdoll::start() {
     if (!owner) return;
+    // Tried optimistically: a synchronous asset loader (e.g. a bare unit-test harness) already
+    // has the sibling Rig's RigAsset ready by now, and bone_count() etc. must answer correctly
+    // with zero engine ticks. A real, async loader may not -- stage_pre_physics() retries build_()
+    // every frame until it succeeds (see that method's doc), so a failure here is not final.
     build_();
     if (start_ragdoll) activate(start_impulse);
-    if (scene) {
+    if (!rt_.empty() && scene) {
         if (auto* physics = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene->find_system("Physics"))) {
             physics->refresh(); // a ragdoll spawned into a running scene: bind its new bodies
         }
@@ -48,7 +53,14 @@ void Ragdoll::start() {
 }
 
 void Ragdoll::stage_pre_physics(float dt, coopa::physx::system::PhysicsSystem* physics) {
-    if (!physics || rt_.empty()) return;
+    if (!physics) return;
+    if (rt_.empty()) {
+        // start()'s own build_() attempt may have found the sibling Rig's RigAsset still loading
+        // (see that method's doc); retry here every frame until it resolves.
+        build_();
+        if (rt_.empty()) return; // still unresolved (or genuinely no Rig/bones) -- retry next frame
+        if (scene) physics->refresh(); // new bodies just appeared: bind them
+    }
     if (!ready_) {
         if (!create_joints_(*physics)) return;
         ready_ = true;
@@ -72,22 +84,22 @@ void Ragdoll::stage_pre_physics(float dt, coopa::physx::system::PhysicsSystem* p
 }
 
 void Ragdoll::stage_pre_animation() {
-    if (mode_ != Mode::Blending) return;
-    for (BoneRt& b : rt_) {
-        coopa::util::Transform& t = b.obj->get_transform()->transform();
-        t.set_position(b.bind_local_pos);
-        t.set_rotation_quat(b.bind_local_rot);
-    }
+    if (mode_ != Mode::Blending || !rig_) return;
+    // Identity = exactly the rest pose (Rig::PoseChannel's contract): this bind-poses the
+    // ragdoll's own bones so the SkeletalAnimator's output is a complete target pose.
+    for (BoneRt& b : rt_) rig_->pose(static_cast<size_t>(b.bone_idx)) = coopa::rig::Rig::PoseChannel{};
 }
 
 void Ragdoll::stage_post_animation(float dt) {
-    if (mode_ != Mode::Blending) return;
+    if (mode_ != Mode::Blending || !rig_) return;
     blend_t_ += std::max(dt, 0.0f);
     const float x = blend_dur_ > 0.0f ? std::clamp(blend_t_ / blend_dur_, 0.0f, 1.0f) : 1.0f;
     const float w = x * x * (3.0f - 2.0f * x);
     std::vector<Pose> target(rt_.size());
     for (size_t i = 0; i < rt_.size(); ++i) {
-        const Pose anim = world_pose_(rt_[i].obj);
+        Pose anim;
+        anim.position = coopa::rig::bone_world_position(*rig_, rt_[i].bone_idx);
+        anim.rotation = coopa::rig::bone_world_rotation(*rig_, rt_[i].bone_idx);
         target[i].position = glm::mix(rt_[i].from.position, anim.position, w);
         target[i].rotation = glm::slerp(rt_[i].from.rotation, anim.rotation, w);
     }
@@ -95,6 +107,7 @@ void Ragdoll::stage_post_animation(float dt) {
     if (x >= 1.0f) {
         mode_ = Mode::Animated;
         set_ik_suspended_(false);
+        set_bones_suspended_(false);
     }
 }
 
@@ -107,80 +120,24 @@ Ragdoll::Pose Ragdoll::world_pose_(const coopa::scene::SceneObject* obj) {
     return p;
 }
 
-int Ragdoll::depth_(const coopa::scene::SceneObject* o) {
-    int d = 0;
-    for (; o; o = o->parent()) ++d;
-    return d;
-}
-
-coopa::scene::SceneObject* Ragdoll::resolve_(const std::string& path) const {
-    coopa::scene::SceneObject* cur = owner;
-    size_t start = 0;
-    while (cur && start <= path.size()) {
-        size_t end = path.find('/', start);
-        const std::string name = path.substr(start, end == std::string::npos ? std::string::npos : end - start);
-        if (!name.empty()) {
-            coopa::scene::SceneObject* next = nullptr;
-            for (const auto& c : cur->children()) {
-                if (c->name() == name) { next = c.get(); break; }
-            }
-            cur = next;
-        }
-        if (end == std::string::npos) break;
-        start = end + 1;
-    }
-    return cur == owner ? nullptr : cur;
-}
-
-std::string Ragdoll::path_of_(const coopa::scene::SceneObject* o) const {
-    std::string p;
-    for (; o && o != owner; o = o->parent()) p = p.empty() ? o->name() : o->name() + "/" + p;
-    return p;
-}
-
 void Ragdoll::auto_generate_() {
-    std::vector<coopa::scene::SceneObject*> joints;
-    owner->for_each_recursive([&](const coopa::scene::SceneObject& o) {
-        if (&o != owner && only_transform_(o)) joints.push_back(const_cast<coopa::scene::SceneObject*>(&o));
-    });
-    auto child_bones = [&](const coopa::scene::SceneObject* o) {
-        std::vector<coopa::scene::SceneObject*> out;
-        for (const auto& c : o->children()) {
-            if (std::find(joints.begin(), joints.end(), c.get()) != joints.end()) out.push_back(c.get());
-        }
-        return out;
-    };
-    for (coopa::scene::SceneObject* j : joints) {
+    if (!rig_) return;
+    for (size_t i = 0; i < rig_->bone_count(); ++i) {
         RagdollBone b;
-        b.bone = path_of_(j);
-        const std::vector<coopa::scene::SceneObject*> kids = child_bones(j);
-        glm::vec3 seg(0.0f);
-        if (kids.size() == 1) {
-            seg = kids[0]->get_transform()->transform().position();
-        } else if (kids.size() > 1) {
-            for (auto* k : kids) seg += k->get_transform()->transform().position();
-            seg /= static_cast<float>(kids.size());
-        } else if (j->parent()) {
-            // A leaf (hand, foot, head): half its parent segment's length, onward.
-            const glm::vec3 from_parent = j->get_transform()->transform().position();
-            seg = from_parent * 0.5f;
-        }
-        float len = glm::length(seg);
+        b.bone = rig_->bone_name(i);
+        const float len = rig_->bone_length(i);
         if (len < 0.05f) {
-            // A hub (pelvis: children spread around it) -- a sphere covering their reach.
-            float reach = 0.0f;
-            for (auto* k : kids) reach = std::max(reach, glm::length(k->get_transform()->transform().position()));
+            // Too short to carry a capsule along its own axis -- a small sphere at the head.
             b.shape = RagdollBone::Shape::Sphere;
-            b.radius = std::max(0.05f, reach * 0.6f);
+            b.radius = 0.08f;
         } else {
-            // A capsule in the bone's frame, rotated onto `seg` by direction + an axis pick:
-            // the dominant component of `seg` picks X/Y/Z (rigs are axis-aligned at bind).
-            glm::vec3 a = glm::abs(seg);
-            b.direction = (a.x >= a.y && a.x >= a.z) ? 0 : (a.y >= a.z ? 1 : 2);
+            // A bone's own rest axis is local +Y, head to tail, by the rig's convention
+            // (rig_asset.h) -- no need to look at children to find "the next joint".
+            b.direction = 1;
             b.radius = std::clamp(len * 0.22f, 0.03f, 0.2f);
             b.height = std::max(len, 2.0f * b.radius + 0.01f);
-            b.center = seg * 0.5f;
-            b.axis = glm::normalize(seg);
+            b.center = glm::vec3(0.0f, len * 0.5f, 0.0f);
+            b.axis = glm::vec3(0.0f, 1.0f, 0.0f);
         }
         b.joint = RagdollBone::Joint::ConeTwist;
         bones.push_back(b);
@@ -200,26 +157,61 @@ float Ragdoll::shape_volume_(const RagdollBone& b) {
     }
 }
 
+coopa::scene::SceneObject* Ragdoll::proxy_object_(const RagdollBone& spec) {
+    const std::string name = "_ragdoll_" + spec.bone;
+    for (const auto& c : owner->children()) if (c->name() == name) return c.get();
+
+    auto proxy_owned = std::make_unique<coopa::scene::SceneObject>(name);
+    auto* tc = proxy_owned->add_component<coopa::scene::TransformComponent>();
+    tc->scene = scene;
+    if (auto* owner_tc = owner->get_transform()) tc->set_parent_transform(&owner_tc->transform());
+    auto* att = proxy_owned->add_component<coopa::rig::BoneAttachment>();
+    att->scene = scene;
+    att->bone = spec.bone;
+    att->at = coopa::rig::BoneAttachment::Anchor::Head;
+    coopa::scene::SceneObject* proxy = owner->add_child(std::move(proxy_owned));
+    // Programmatically-added components get no automatic start() call; this one must run now
+    // -- AFTER add_child() (so its ancestor walk for a Rig finds owner's, not a dead end at an
+    // unparented object) and BEFORE the seeding in build_() below touches the proxy's
+    // Transform, so it captures an identity offset (the proxy rides the bone's head exactly)
+    // rather than that seeded value. capture_offset_() only captures once (see its own doc),
+    // so the scene's own start() calling this a second time later is harmless.
+    att->start();
+    return proxy;
+}
+
 void Ragdoll::build_() {
     rt_.clear();
+    rig_ = nullptr;
+    for (coopa::scene::SceneObject* o = owner; o; o = o->parent()) {
+        if (auto* r = o->get_component<coopa::rig::Rig>()) { rig_ = r; break; }
+    }
+    if (!rig_) {
+        std::cerr << "[Ragdoll] '" << (owner ? owner->name() : std::string("?")) << "': no Rig ancestor" << std::endl;
+        return;
+    }
+    // Still loading (see start()'s doc): return quietly and let stage_pre_physics() retry next
+    // frame, rather than resolving every configured bone name against an empty asset and
+    // reporting each one as genuinely missing.
+    if (!rig_->is_loaded()) return;
     if (bones.empty() && auto_generate) auto_generate_();
     if (bones.empty()) return;
 
     std::vector<BoneRt> list;
     for (size_t i = 0; i < bones.size(); ++i) {
         BoneRt b;
-        b.obj = resolve_(bones[i].bone);
-        if (!b.obj || !b.obj->get_transform()) {
-            std::cerr << "[Ragdoll] '" << (owner ? owner->name() : std::string("?")) << "': bone '" << bones[i].bone
-                      << "' not found -- skipped" << std::endl;
+        b.bone_idx = rig_->find_bone(bones[i].bone);
+        if (b.bone_idx < 0) {
+            std::cerr << "[Ragdoll] '" << (owner ? owner->name() : std::string("?")) << "': no bone named '"
+                      << bones[i].bone << "' on the rig -- skipped" << std::endl;
             continue;
         }
         b.spec = i;
         list.push_back(b);
     }
-    // Parents before children (write_world_poses_() and the joints rely on it).
-    std::stable_sort(list.begin(), list.end(),
-                     [](const BoneRt& x, const BoneRt& y) { return depth_(x.obj) < depth_(y.obj); });
+    // A RigAsset's bones are stored flat, parent-first (rig_asset.h), so sorting by bone index
+    // IS parent-before-child order -- write_world_poses_() and the joints rely on it.
+    std::stable_sort(list.begin(), list.end(), [](const BoneRt& x, const BoneRt& y) { return x.bone_idx < y.bone_idx; });
 
     float free_volume = 0.0f, fixed_mass = 0.0f;
     for (const BoneRt& b : list) {
@@ -229,20 +221,23 @@ void Ragdoll::build_() {
     }
     const float spare_mass = std::max(mass - fixed_mass, 0.0f);
 
+    const glm::mat4 rig_world = owner->get_transform()->get_world_matrix();
     for (size_t i = 0; i < list.size(); ++i) {
         BoneRt& b = list[i];
-        for (const coopa::scene::SceneObject* p = b.obj->parent(); p && p != owner && b.parent < 0; p = p->parent()) {
+        // Nearest ANCESTOR bone in the list (the file doc): walk the rig's own parent chain,
+        // not just one level -- a ragdoll bone can skip rig bones that carry no body of their
+        // own (mannequin_ragdoll's "head" joints straight to "chest", skipping "neck").
+        for (int p = rig_->bone_parent(static_cast<size_t>(b.bone_idx)); p >= 0 && b.parent < 0;
+             p = rig_->bone_parent(static_cast<size_t>(p))) {
             for (size_t k = 0; k < i; ++k) {
-                if (list[k].obj == p) { b.parent = static_cast<int>(k); break; }
+                if (list[k].bone_idx == p) { b.parent = static_cast<int>(k); break; }
             }
         }
-        coopa::util::Transform& t = b.obj->get_transform()->transform();
-        b.bind_local_pos = t.position();
-        b.bind_local_rot = t.rotation_quat();
-        const glm::mat4 m = t.get_world_matrix();
+
+        const glm::mat4 bind_m = rig_world * rig_->rest_model_matrix(static_cast<size_t>(b.bone_idx));
         glm::vec3 skew;
         glm::vec4 persp;
-        glm::decompose(m, b.scale, b.bind_world.rotation, b.bind_world.position, skew, persp);
+        glm::decompose(bind_m, b.scale, b.bind_world.rotation, b.bind_world.position, skew, persp);
 
         const RagdollBone& s = bones[b.spec];
         b.com = s.center * b.scale;
@@ -250,6 +245,22 @@ void Ragdoll::build_() {
         if (body_mass <= 0.0f) {
             body_mass = free_volume > 0.0f ? spare_mass * shape_volume_(s) / free_volume : 1.0f;
             body_mass = std::max(body_mass, 0.2f);
+        }
+
+        b.obj = proxy_object_(s);
+        // Seed the proxy at the bind pose immediately: BoneAttachmentSystem (order 345) will
+        // also place it, but that is later this same frame, and Physics (order 100) must not
+        // see it sitting at the origin for one frame.
+        {
+            const glm::mat4 local = glm::inverse(rig_world) * bind_m;
+            glm::vec3 lpos, lscale, lskew;
+            glm::quat lrot;
+            glm::vec4 lpersp;
+            if (glm::decompose(local, lscale, lrot, lpos, lskew, lpersp)) {
+                coopa::util::Transform& lt = b.obj->get_transform()->transform();
+                lt.set_position(lpos);
+                lt.set_rotation_quat(glm::normalize(lrot));
+            }
         }
 
         using namespace coopa::physx::components;
@@ -261,28 +272,30 @@ void Ragdoll::build_() {
         b.rb->use_gravity = true;
         b.rb->drag = drag;
         b.rb->angular_drag = angular_drag;
-        Collider* col = nullptr;
-        switch (s.shape) {
-            case RagdollBone::Shape::Box: {
-                auto* c = b.obj->add_component<BoxCollider>();
-                c->set_size(s.size);
-                col = c;
-                break;
-            }
-            case RagdollBone::Shape::Sphere: {
-                auto* c = b.obj->add_component<SphereCollider>();
-                c->set_radius(s.radius);
-                col = c;
-                break;
-            }
-            case RagdollBone::Shape::Capsule:
-            default: {
-                auto* c = b.obj->add_component<CapsuleCollider>();
-                c->set_radius(s.radius);
-                c->set_height(s.height);
-                c->set_direction(std::clamp(s.direction, 0, 2));
-                col = c;
-                break;
+        Collider* col = b.obj->get_component<Collider>();
+        if (!col) {
+            switch (s.shape) {
+                case RagdollBone::Shape::Box: {
+                    auto* c = b.obj->add_component<BoxCollider>();
+                    c->set_size(s.size);
+                    col = c;
+                    break;
+                }
+                case RagdollBone::Shape::Sphere: {
+                    auto* c = b.obj->add_component<SphereCollider>();
+                    c->set_radius(s.radius);
+                    col = c;
+                    break;
+                }
+                case RagdollBone::Shape::Capsule:
+                default: {
+                    auto* c = b.obj->add_component<CapsuleCollider>();
+                    c->set_radius(s.radius);
+                    c->set_height(s.height);
+                    c->set_direction(std::clamp(s.direction, 0, 2));
+                    col = c;
+                    break;
+                }
             }
         }
         col->scene = scene;
@@ -374,15 +387,22 @@ void Ragdoll::set_ik_suspended_(bool suspended) {
         for (const auto& comp : o.components()) {
             if (auto* f = dynamic_cast<FootIK*>(comp.get())) {
                 f->set_suspended(suspended);
-            } else if (auto* tb = dynamic_cast<coopa::anim::TwoBoneIK*>(comp.get())) {
+            } else if (auto* tb = dynamic_cast<coopa::rig::TwoBoneIK*>(comp.get())) {
                 if (suspended) { saved_ik_weights_.push_back(tb->weight); tb->weight = 0.0f; }
                 else if (k < saved_ik_weights_.size()) tb->weight = saved_ik_weights_[k++];
-            } else if (auto* la = dynamic_cast<coopa::anim::LookAtIK*>(comp.get())) {
+            } else if (auto* la = dynamic_cast<coopa::rig::LookAtIK*>(comp.get())) {
                 if (suspended) { saved_ik_weights_.push_back(la->weight); la->weight = 0.0f; }
                 else if (k < saved_ik_weights_.size()) la->weight = saved_ik_weights_[k++];
             }
         }
     });
+}
+
+void Ragdoll::set_bones_suspended_(bool suspended) {
+    for (BoneRt& b : rt_) {
+        if (!b.obj) continue;
+        if (auto* att = b.obj->get_component<coopa::rig::BoneAttachment>()) att->suspended = suspended;
+    }
 }
 
 void Ragdoll::go_limp_(coopa::physx::system::PhysicsSystem& physics) {
@@ -393,6 +413,7 @@ void Ragdoll::go_limp_(coopa::physx::system::PhysicsSystem& physics) {
         a->clear();
     }
     set_ik_suspended_(true);
+    set_bones_suspended_(true);
     if (CharacterController* cc = character_()) cc->set_suspended(true);
 
     for (BoneRt& b : rt_) {
@@ -517,7 +538,8 @@ void Ragdoll::begin_recovery_(coopa::physx::system::PhysicsSystem& physics) {
     // Stand the root up under the pelvis (the top bone), facing the way the body lies.
     const BoneRt& top = rt_.front();
     const glm::vec3 pelvis = top.from.position;
-    glm::vec3 ground = pelvis - glm::vec3(0.0f, 0.0f, top.bind_local_pos.z);
+    const glm::vec3 top_rig_space_head = rig_ ? rig_->bone_head_rest(static_cast<size_t>(top.bone_idx)) : glm::vec3(0.0f);
+    glm::vec3 ground = pelvis - glm::vec3(0.0f, 0.0f, top_rig_space_head.z);
     {
         coopa::physx::system::PhysicsSystem::QueryFilter filter;
         filter.include_triggers = false;
@@ -570,33 +592,36 @@ void Ragdoll::begin_recovery_(coopa::physx::system::PhysicsSystem& physics) {
     mode_ = Mode::Blending;
 }
 
+void Ragdoll::set_bone_world_pose_(int bone_idx, const glm::vec3& pos, const glm::quat& rot) {
+    if (!rig_ || bone_idx < 0) return;
+    const glm::quat cur_rot = coopa::rig::bone_world_rotation(*rig_, bone_idx);
+    coopa::rig::apply_world_rotation_delta(*rig_, bone_idx, rot * glm::inverse(cur_rot), 1.0f);
+    const glm::vec3 cur_pos = coopa::rig::bone_world_position(*rig_, bone_idx);
+    coopa::rig::apply_world_translation_delta(*rig_, bone_idx, pos - cur_pos);
+}
+
 void Ragdoll::write_world_poses_(const std::vector<Pose>& world) {
-    const size_t n = rt_.size();
-    std::vector<glm::mat4> old_world(n), new_world(n), parent_old(n);
-    for (size_t i = 0; i < n; ++i) {
-        const coopa::util::Transform& t = rt_[i].obj->get_transform()->transform();
-        old_world[i] = t.get_world_matrix();
-        parent_old[i] = t.parent() ? t.parent()->get_world_matrix() : glm::mat4(1.0f);
-        const glm::vec3 scale(glm::length(glm::vec3(old_world[i][0])), glm::length(glm::vec3(old_world[i][1])),
-                              glm::length(glm::vec3(old_world[i][2])));
-        new_world[i] = glm::translate(glm::mat4(1.0f), world[i].position) * glm::mat4_cast(world[i].rotation) *
-                       glm::scale(glm::mat4(1.0f), scale);
-    }
-    for (size_t i = 0; i < n; ++i) {
-        coopa::util::Transform& t = rt_[i].obj->get_transform()->transform();
-        glm::mat4 parent_world = parent_old[i];
-        if (rt_[i].parent >= 0) {
-            const size_t a = static_cast<size_t>(rt_[i].parent);
-            parent_world = new_world[a] * glm::inverse(old_world[a]) * parent_old[i];
-        }
-        const glm::mat4 local = glm::inverse(parent_world) *
+    if (!rig_) return;
+    // Every proxy is a flat child of owner (see proxy_object_()), so its local transform is
+    // simply the desired world pose expressed in owner's frame -- no ancestor-chain
+    // composition needed; the ragdoll's own hierarchy lives in the physics joints, not in the
+    // scene graph. rt_ is kept parent-bone-before-child-bone (build_()'s doc), so by the time a
+    // child bone's set_bone_world_pose_() reads its "current" world pose, its parent bone's
+    // target for this call has already been written into the Rig.
+    const glm::mat4 owner_world = owner->get_transform()->get_world_matrix();
+    const glm::mat4 inv_owner_world = glm::inverse(owner_world);
+    for (size_t i = 0; i < rt_.size(); ++i) {
+        set_bone_world_pose_(rt_[i].bone_idx, world[i].position, world[i].rotation);
+        if (!rt_[i].obj || !rt_[i].obj->get_transform()) continue;
+        const glm::mat4 local = inv_owner_world *
                                 (glm::translate(glm::mat4(1.0f), world[i].position) * glm::mat4_cast(world[i].rotation));
         glm::vec3 pos, scale, skew;
         glm::quat rot;
         glm::vec4 persp;
-        glm::decompose(local, scale, rot, pos, skew, persp);
+        if (!glm::decompose(local, scale, rot, pos, skew, persp)) continue;
+        coopa::util::Transform& t = rt_[i].obj->get_transform()->transform();
         t.set_position(pos);
-        t.set_rotation_quat(rot);
+        t.set_rotation_quat(glm::normalize(rot));
     }
 }
 

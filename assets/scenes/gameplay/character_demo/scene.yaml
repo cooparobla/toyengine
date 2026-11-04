@@ -29,8 +29,8 @@
 # (its SaveId + CharacterController, an ISaveable), the collected coins and the weather clock
 # (SaveDemo's on_save / on_load hooks). The clock runs a 6-minute day so a load visibly rewinds it.
 #
-# The player moves by ROOT MOTION: the walk / run clips' pelvis travel (Animator apply_root_motion
-# -> CharacterController use_root_motion), so its speed is the clip's (walk ~1.6 m/s, sprint to run
+# The player moves by ROOT MOTION: the walk / run clips' pelvis travel (SkeletalAnimator
+# apply_root_motion -> CharacterController use_root_motion), so its speed is the clip's (walk ~1.6 m/s, sprint to run
 # ~5.3 m/s); input steers. FootIK keeps its feet on stairs and slopes while grounded, and the walk /
 # run clips fire `footstep` events (scene EventBus "anim_event").
 scene:
@@ -61,7 +61,7 @@ scene:
 
     # The player: the mannequin prefab plus a CharacterController (it adds its own kinematic
     # Rigidbody + CapsuleCollider) and the demo CharacterAnimDriver (idle/walk/run/jump). It
-    # moves by root motion (the Animator override + use_root_motion) and plants its feet (FootIK).
+    # moves by root motion (the SkeletalAnimator override + use_root_motion) and plants its feet (FootIK).
     - name: player
       prefab: objects/mannequin_ragdoll
       components:
@@ -78,7 +78,7 @@ scene:
           sprint_multiplier: 2.0
           jump_height: 1.2
           use_root_motion: true
-        - type: Animator
+        - type: SkeletalAnimator
           apply_root_motion: true
         - type: CharacterAnimDriver
           walk_speed: 0.2

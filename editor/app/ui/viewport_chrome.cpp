@@ -733,7 +733,8 @@ bool in_triangle(glm::vec2 p, glm::vec2 a, glm::vec2 b, glm::vec2 c) {
 /**
  * @brief The octahedral bone from `head` to `tail`, projected to the screen.
  *
- * Pose mode's bone display, and the Bone origin style outside it.
+ * Pose mode's bone display -- the only remaining caller; a Transform has no Bone origin
+ * style anymore (a rig's actual bones are coopa::rig::Rig bones, not SceneObjects).
  *
  * `x_hint` rolls the body so it turns with its joint instead of spinning as the direction
  * crosses an axis; `z_hint` is the fallback when the bone runs along `x_hint`.
@@ -788,8 +789,6 @@ void ViewportChromePanel::draw_object_glyph_(imm::Context& ctx, const ViewProj& 
     }
     // Pose mode draws the rig as bones: its own display, not an overlay the user turns off.
     const bool pose_bone = kind.empty() && app_.in_pose_mode_() && app_.timeline_panel_->in_anim_rig_(id);
-    // A rig's own Bone origin style, outside Pose mode -- this one DOES follow "Origins".
-    const bool bone_glyph = kind.empty() && (pose_bone || app_.origin_style_for_(id) == OriginStyle::Bone);
     // "Cameras / Lights" covers the symbols; "Origins" covers everything else's origin.
     if (!pose_bone && (!kind.empty() ? !app_.show_glyphs_ : !app_.show_origins_)) return;
     const float wpp = vp.world_per_pixel(pos);
@@ -844,7 +843,7 @@ void ViewportChromePanel::draw_object_glyph_(imm::Context& ctx, const ViewProj& 
         return;
     }
     (void)wpp;
-    if (bone_glyph) draw_pose_bones_(ctx, vp, id, w, col);
+    if (pose_bone) draw_pose_bones_(ctx, vp, id, w, col);
     else draw_origin_glyph_(ctx, vp, id, w, col);
 }
 
@@ -868,6 +867,64 @@ void ViewportChromePanel::draw_pose_bones_(imm::Context& ctx, const ViewProj& vp
     }
     // The joint, so a chain of bones reads as linked.
     if (const auto c = vp.project(pos)) ctx.ring(*c, 3.5f, 1.3f, col);
+}
+
+void ViewportChromePanel::draw_rig_bones_(imm::Context& ctx, const ViewProj& vp, coopa::rig::Rig& rig, const glm::vec4& col,
+                                          const glm::vec4& selected_col) {
+    for (std::size_t i = 0; i < rig.bone_count(); ++i) {
+        const glm::mat4 w = rig.world_matrix(i);
+        const glm::vec3 head(w[3]);
+        const glm::vec3 tail(w * glm::vec4(0.0f, rig.bone_length(i), 0.0f, 1.0f));
+        const glm::vec3 X = glm::normalize(glm::vec3(w[0])), Z = glm::normalize(glm::vec3(w[2]));
+        const bool selected = std::find(app_.pose_bones_selected_.begin(), app_.pose_bones_selected_.end(),
+                                        static_cast<int>(i)) != app_.pose_bones_selected_.end();
+        const glm::vec4& c = selected ? selected_col : col;
+        glm::vec2 head_px, tail_px, q[4];
+        if (!toy::editor::rig_pick::project_bone(vp, head, tail, X, Z, head_px, tail_px, q)) continue;
+        const glm::vec4 fill = imm::with_alpha(c, c.a * 0.25f);
+        for (int k = 0; k < 4; ++k) {
+            ctx.triangle(head_px, q[k], q[(k + 1) % 4], fill);
+            ctx.triangle(tail_px, q[k], q[(k + 1) % 4], fill);
+        }
+        for (int k = 0; k < 4; ++k) {
+            ctx.line(head_px, q[k], c, 1.3f);
+            ctx.line(q[k], tail_px, c, 1.3f);
+            ctx.line(q[k], q[(k + 1) % 4], c, 1.0f);
+        }
+        if (const auto cj = vp.project(head)) ctx.ring(*cj, 3.5f, 1.3f, c);
+    }
+}
+
+void ViewportChromePanel::draw_rig_edit_bones_(imm::Context& ctx, const ViewProj& vp, const RigModel& model, const glm::mat4& owner_world,
+                                               int selected_bone, bool endpoint_selected, toy::editor::rig_pick::BoneEndpoint selected_end,
+                                               const glm::vec4& col, const glm::vec4& selected_col) {
+    for (std::size_t i = 0; i < model.bones.size(); ++i) {
+        const glm::mat4 rest = owner_world * model.world_rest_matrix(static_cast<int>(i));
+        const glm::vec3 head(glm::vec3(owner_world * glm::vec4(model.bones[i].head, 1.0f)));
+        const glm::vec3 tail(glm::vec3(owner_world * glm::vec4(model.bones[i].tail, 1.0f)));
+        const glm::vec3 X = glm::normalize(glm::vec3(rest[0])), Z = glm::normalize(glm::vec3(rest[2]));
+        const bool selected = static_cast<int>(i) == selected_bone;
+        const glm::vec4& c = selected ? selected_col : col;
+        glm::vec2 head_px, tail_px, q[4];
+        if (!toy::editor::rig_pick::project_bone(vp, head, tail, X, Z, head_px, tail_px, q)) continue;
+        const glm::vec4 fill = imm::with_alpha(c, c.a * 0.25f);
+        for (int k = 0; k < 4; ++k) {
+            ctx.triangle(head_px, q[k], q[(k + 1) % 4], fill);
+            ctx.triangle(tail_px, q[k], q[(k + 1) % 4], fill);
+        }
+        for (int k = 0; k < 4; ++k) {
+            ctx.line(head_px, q[k], c, 1.3f);
+            ctx.line(q[k], tail_px, c, 1.3f);
+            ctx.line(q[k], q[(k + 1) % 4], c, 1.0f);
+        }
+        // A plain joint ring at the head, same as Pose mode's -- and a BIGGER one on whichever
+        // endpoint is the specific drag target (G), so it is clear which end a Grab will move.
+        if (const auto cj = vp.project(head)) ctx.ring(*cj, 3.5f, 1.3f, c);
+        if (selected && endpoint_selected) {
+            const auto ep = vp.project(selected_end == toy::editor::rig_pick::BoneEndpoint::Head ? head : tail);
+            if (ep) ctx.ring(*ep, 6.0f, 2.0f, selected_col);
+        }
+    }
 }
 
 void ViewportChromePanel::draw_origin_glyph_(imm::Context& ctx, const ViewProj& vp, ObjectId id, const glm::mat4& w, const glm::vec4& col) {
@@ -894,7 +951,7 @@ void ViewportChromePanel::draw_origin_glyph_(imm::Context& ctx, const ViewProj& 
         break;
     }
     case OriginStyle::Axes:
-    default:   // and OriginStyle::Bone -- draw_object_glyph_'s bone_glyph routes that to draw_pose_bones_ instead
+    default:
         seg(pos - X * a, pos + X * a, 1.3f);
         seg(pos - Y * a, pos + Y * a, 1.3f);
         seg(pos - Z * a, pos + Z * a, 1.3f);
@@ -910,7 +967,6 @@ float ViewportChromePanel::origin_glyph_pick_px_(ObjectId id, const ViewProj& vp
     // Only what is actually on screen is clickable by its shape; with the overlay off, or on
     // a camera / light (which draws its own symbol), the origin point is all there is.
     const bool pose_bone = app_.in_pose_mode_() && app_.timeline_panel_->in_anim_rig_(id) && app_.is_joint_object_(id);
-    const bool bone_glyph = app_.is_joint_object_(id) && (pose_bone || app_.origin_style_for_(id) == OriginStyle::Bone);
     if (!app_.show_overlays_ || (!pose_bone && !app_.show_origins_) || !app_.is_joint_object_(id)) return best;
 
     const glm::vec3 X = glm::normalize(glm::vec3(world[0])), Y = glm::normalize(glm::vec3(world[1])),
@@ -920,7 +976,7 @@ float ViewportChromePanel::origin_glyph_pick_px_(ObjectId id, const ViewProj& vp
         const auto pa = vp.project(p), pb = vp.project(q);
         if (pa && pb) best = std::min(best, point_segment_distance(px, *pa, *pb));
     };
-    if (bone_glyph) {
+    if (pose_bone) {
         for (const glm::vec3& tail : app_.bone_tails_(id, a * 2.0f)) {
             glm::vec2 head, tip, q[4];
             if (!project_bone(vp, pos, tail, X, Z, head, tip, q)) continue;
@@ -942,7 +998,7 @@ float ViewportChromePanel::origin_glyph_pick_px_(ObjectId id, const ViewProj& vp
         segment(pos, pos + Z * (a * 0.45f));
         break;
     case OriginStyle::Axes:
-    default:   // and OriginStyle::Bone -- bone_glyph above already returned through the bone branch
+    default:
         segment(pos - X * a, pos + X * a);
         segment(pos - Y * a, pos + Y * a);
         segment(pos - Z * a, pos + Z * a);
@@ -995,6 +1051,15 @@ void ViewportChromePanel::draw_mode_menu_items_(imm::Context& ctx) {
     }
     ctx.tooltip("Pose Mode\nPose the rig's joints by hand: they draw as bones, a move edits the pose instead of the "
                 "rest transform, and I keys it at the playhead (Auto-Key keys every edit)");
+    // Any object: author a NEW rig on it, or edit the rest skeleton of one it already has.
+    bool rm = cur == InteractionMode::RigEdit;
+    if (ctx.menu_item("Rig Edit Mode", "", &rm, !app_.asset_view_() && app_.doc_.primary() && !app_.playing(), I::EditMode)) {
+        if (app_.rig_edit_mode_()) app_.exit_rig_edit_mode_();
+        else app_.enter_rig_edit_mode_(app_.doc_.primary());
+    }
+    ctx.tooltip("Rig Edit Mode\nAuthor the REST skeleton: Shift+A adds a bone, E extrudes one from the selected bone's "
+                "tail, G moves a picked head/tail endpoint, R rolls it, X deletes it. Saves to its own rigs/<name>.yaml "
+                "the first time, adding a Rig component here if there wasn't one already.");
     // A HeightmapTerrain object: sculpt and paint the terrain itself.
     bool tm = terrain;
     const ObjectId terrain_id = terrain ? app_.terrain_panel_->terrain_object_ : app_.doc_.primary();

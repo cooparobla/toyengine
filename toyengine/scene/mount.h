@@ -51,7 +51,7 @@
 
 #include <string>
 
-#include <coopa/animation/animator.h>
+#include <coopa/rig/skeletal_animator.h>
 #include <coopa/scene/component.h>
 
 #include <toyengine/scene/character_controller.h>
@@ -138,11 +138,11 @@ public:
     void set_rider(Rider* rider) { rider_ = rider; }
 
 private:
-    coopa::anim::Animator* animator_();
+    coopa::rig::SkeletalAnimator* animator_();
 
     Rider* rider_ = nullptr;
     CharacterController* controller_ = nullptr;
-    coopa::anim::Animator* animator_cached_ = nullptr;
+    coopa::rig::SkeletalAnimator* animator_cached_ = nullptr;
     float speed_ = 0.0f;
     float yaw_rate_ = 0.0f;   ///< Degrees/s turned last steer() (turning in place walks).
     std::string current_;

@@ -18,6 +18,7 @@
 #include <glm/glm.hpp>
 #include <toyengine/core/engine.h>
 #include <coopa/animation/ik.h>
+#include <coopa/rig/rig_component.h>
 #include <toyengine/scene/skinned_mesh_renderer.h>
 
 #include "engine/support/checks.h"
@@ -27,14 +28,15 @@ COOPA_TEST_SUITE("rig_render");
 
 using namespace toy::test;
 
-/** @brief A rig end to end in the engine: an Animator auto-plays a clip FILE on a bone of an
- *         object hierarchy, and a mesh whose vertex groups name the bones (no `bones:`, no inverse
- *         bind matrices -- what the editor's Weight Paint writes) follows it. */
+/** @brief A rig end to end in the engine: a SkeletalAnimator auto-plays a clip FILE on a bone of
+ *         a Rig, and a mesh whose vertex groups name the bones (no `bones:`, no inverse bind
+ *         matrices -- what the editor's Weight Paint writes) follows it. */
 COOPA_TEST(skinned_mesh_follows_an_animated_bone) {
     namespace fs = std::filesystem;
     const fs::path dir = coopa::test::scratch_dir("rig");
     fs::remove_all(dir);
     fs::create_directories(dir / "meshes");
+    fs::create_directories(dir / "rigs");
     fs::create_directories(dir / "animations" / "Rig");
     {
         std::ofstream(dir / "meshes" / "strip.yaml") <<
@@ -44,22 +46,23 @@ COOPA_TEST(skinned_mesh_follows_an_animated_bone) {
             "faces: [[0, 1, 2, 3]]\n"
             "colors: []\n"
             "weights:\n  - {Lower: 1.0}\n  - {Lower: 1.0}\n  - {Upper: 1.0}\n  - {Upper: 1.0}\n";
+        std::ofstream(dir / "rigs" / "arm.yaml") <<
+            "rig:\n  name: arm\n  bones:\n"
+            "    - {name: Lower, head: {x: 0, y: 0, z: 0}, tail: {x: 0, y: 0, z: 1}}\n"
+            "    - {name: Upper, parent: Lower, connected: true, tail: {x: 0, y: 0, z: 2}}\n";
         std::ofstream(dir / "animations" / "Rig" / "sway.yaml") <<
-            "clip:\n  name: sway\n  wrap: once\n  length: 0.5\n  tracks:\n"
-            "    - object: Lower/Upper\n      property: position\n      keys:\n"
-            "        - {time: 0.0, value: [0, 0, 1]}\n        - {time: 0.5, value: [1, 0, 1]}\n";
+            "clip:\n  name: sway\n  wrap: once\n  length: 0.5\n  bones:\n"
+            "    - bone: Upper\n      location:\n"
+            "        - {time: 0.0, value: [0, 0, 0]}\n        - {time: 0.5, value: [1, 0, 0]}\n";
         std::ofstream(dir / "scene.yaml") <<
             "scene:\n  scene_name: RigTest\n  root_objects:\n"
             "    - name: Camera\n      components:\n        - type: Transform\n          position: {x: 0, y: -6, z: 1}\n"
             "          rotation: {x: 90, y: 0, z: 0}\n        - type: Camera\n          main: true\n"
             "    - name: Rig\n      components:\n        - type: Transform\n"
-            "        - type: Animator\n          auto_play: sway\n          states:\n"
+            "        - type: Rig\n          rig: rigs/arm.yaml\n"
+            "        - type: SkeletalAnimator\n          auto_play: sway\n          states:\n"
             "            - {name: sway, clip: animations/Rig/sway.yaml}\n"
             "      children:\n"
-            "        - name: Lower\n          components:\n            - type: Transform\n"
-            "          children:\n"
-            "            - name: Upper\n              components:\n                - type: Transform\n"
-            "                  position: {x: 0, y: 0, z: 1}\n"
             "        - name: Skin\n          components:\n            - type: Transform\n"
             "            - type: MeshRenderer\n              material: {albedo: {r: 0.8, g: 0.6, b: 0.4}}\n"
             "            - type: SkinnedMeshRenderer\n              mesh_path: strip\n";
@@ -72,21 +75,38 @@ COOPA_TEST(skinned_mesh_follows_an_animated_bone) {
     auto* smr = skin_obj ? skin_obj->get_component<toy::scene::SkinnedMeshRenderer>() : nullptr;
     expect(smr && smr->is_ready(), "rig: the skinned mesh built its GPU mesh");
     if (!smr || !smr->is_ready()) return;
-    expect(smr->rig() && smr->rig()->name() == "Rig", "rig: the rig root is the nearest Animator up the hierarchy");
-    expect(smr->bones().size() == 2 && smr->bones()[0] && smr->bones()[1] && smr->bones()[1]->name() == "Upper",
-           "rig: the vertex groups name the bones, found under the rig");
-    tick_frames(engine, 45);   // past the clip's end: Upper rests at x = 1
-    float top_x = 0.0f, bottom_x = 0.0f;
-    for (const auto& v : smr->skinned_vertices()) {
-        if (v.position.z > 1.5f) top_x += v.position.x; else bottom_x += v.position.x;
+    expect(smr->rig() && smr->rig()->owner && smr->rig()->owner->name() == "Rig",
+           "rig: the rig is found on the nearest ancestor carrying a Rig component");
+    require(smr->bone_indices().size() == 2, "rig: the vertex groups name two bones");
+    const int lower_idx = smr->bone_indices()[0];
+    const int upper_idx = smr->bone_indices()[1];
+    expect(lower_idx >= 0 && upper_idx >= 0 && smr->rig()->bone_name(static_cast<size_t>(upper_idx)) == "Upper",
+           "rig: the vertex groups found their bones by name in the rig asset");
+
+    // Independently derive the expected displacement from the rig asset's own rest pose: a pure
+    // local-X pose offset on Upper becomes a world translation by Upper's rest X axis (conjugating
+    // a translation by a rigid rotation -- see compute_palette()'s doc), robust to whatever basis
+    // convention the bone's head/tail/roll happen to produce.
+    const glm::vec3 expected_dir = glm::vec3(smr->rig()->rest_model_matrix(static_cast<size_t>(upper_idx))[0]);
+
+    tick_frames(engine, 45);   // past the clip's end: Upper rests at its pose location (1, 0, 0)
+    glm::vec3 top_bind(0.0f), bottom_bind(0.0f), top_now(0.0f), bottom_now(0.0f);
+    int top_n = 0, bottom_n = 0;
+    const auto& src = *smr->source();
+    for (size_t i = 0; i < smr->skinned_vertices().size(); ++i) {
+        const glm::vec3& bind = src.vertices[i].position;
+        const glm::vec3& now = smr->skinned_vertices()[i].position;
+        if (bind.z > 1.5f) { top_bind += bind; top_now += now; ++top_n; }
+        else { bottom_bind += bind; bottom_now += now; ++bottom_n; }
     }
-    // The quad's triangle corners: top (0.5, 0.5, -0.5) and bottom (-0.5, 0.5, -0.5) -- bind
-    // means of +1/6 and -1/6 in x.
-    const float n = static_cast<float>(smr->skinned_vertices().size()) / 2.0f;
-    expect(std::abs(top_x / n - (1.0f / 6.0f + 1.0f)) < 0.02f,
-           "rig: the vertices weighted to the animated bone moved with it, 1 m (mean x " + std::to_string(top_x / n) + ")");
-    expect(std::abs(bottom_x / n + 1.0f / 6.0f) < 0.02f,
-           "rig: the vertices weighted to the still bone stayed (bind pose from the rest pose)");
+    require(top_n > 0 && bottom_n > 0, "rig: the mesh has vertices on both bones");
+    top_bind /= static_cast<float>(top_n); top_now /= static_cast<float>(top_n);
+    bottom_bind /= static_cast<float>(bottom_n); bottom_now /= static_cast<float>(bottom_n);
+    expect(glm::length(bottom_now - bottom_bind) < 0.02f,
+           "rig: the vertices weighted to the still bone stayed (bind pose, from the rig's rest pose)");
+    const glm::vec3 top_delta = top_now - top_bind;
+    expect(glm::length(top_delta - expected_dir) < 0.02f,
+           "rig: the vertices weighted to the animated bone moved by Upper's own pose offset, 1 m along its rest X axis");
     fs::remove_all(dir);
 }
 
@@ -119,27 +139,36 @@ COOPA_TEST(animation_test_bones_skin_and_ik_move) {
     expect(max_z - min_z > 1.2f, "animation_demo: the ball bounces (z " + std::to_string(min_z) + " .. " + std::to_string(max_z) + ")");
     expect(min_scale_z < 0.45f, "animation_demo: ...and squashes on landing (scale z " + std::to_string(min_scale_z) + ")");
     expect(max_turn > 0.05f, "animation_demo: the arm's elbow bends");
-    expect(smr->is_ready() && smr->bones().size() == 4 && max_tip_x > 0.4f,
+    expect(smr->is_ready() && smr->bone_indices().size() == 4 && max_tip_x > 0.4f,
            "animation_demo: the tentacle's skin follows its bones (tip x " + std::to_string(max_tip_x) + ")");
 
     // IK: the watcher's head follows its orbiting target (LookAtIK), the reacher's hand stays on
-    // its drifting target (TwoBoneIK).
-    auto* head = scene.find_object("head");
+    // its drifting target (TwoBoneIK). "head" and "reach_hand" are bones of a Rig now, not
+    // SceneObjects -- read their world pose through the rig that owns them.
+    auto* watcher = scene.find_object("ik_watcher");
+    auto* reacher = scene.find_object("ik_reacher");
     auto* look_target = scene.find_object("look_target");
-    auto* hand = scene.find_object("reach_hand");
     auto* reach_target = scene.find_object("reach_target");
-    expect(head && look_target && hand && reach_target, "animation_demo: the IK rigs loaded");
-    if (!head || !look_target || !hand || !reach_target) return;
+    auto* watcher_rig = watcher ? watcher->get_component<coopa::rig::Rig>() : nullptr;
+    auto* reacher_rig = reacher ? reacher->get_component<coopa::rig::Rig>() : nullptr;
+    const int head_bone = watcher_rig ? watcher_rig->find_bone("head") : -1;
+    const int hand_bone = reacher_rig ? reacher_rig->find_bone("reach_hand") : -1;
+    expect(watcher_rig && reacher_rig && look_target && reach_target && head_bone >= 0 && hand_bone >= 0,
+           "animation_demo: the IK rigs loaded");
+    if (!watcher_rig || !reacher_rig || !look_target || !reach_target || head_bone < 0 || hand_bone < 0) return;
     auto pos = [](coopa::scene::SceneObject* o) { return glm::vec3(o->get_transform()->get_world_matrix()[3]); };
+    auto head_world = [&]() { return watcher_rig->world_matrix(static_cast<size_t>(head_bone)); };
+    auto hand_pos = [&]() { return glm::vec3(reacher_rig->world_matrix(static_cast<size_t>(hand_bone))[3]); };
     float max_gaze_err = 0.0f, max_reach_err = 0.0f, max_head_turn = 0.0f;
-    const glm::vec3 fwd0 = coopa::anim::ik::rotation_of(head->get_transform()->get_world_matrix()) * glm::vec3(0, -1, 0);
+    const glm::vec3 fwd0 = coopa::anim::ik::rotation_of(head_world()) * glm::vec3(0, -1, 0);
     for (int i = 0; i < 120; ++i) {
         tick_frames(engine, 1);
-        const glm::vec3 fwd = coopa::anim::ik::rotation_of(head->get_transform()->get_world_matrix()) * glm::vec3(0, -1, 0);
-        const glm::vec3 to = glm::normalize(pos(look_target) - pos(head));
+        const glm::mat4 hw = head_world();
+        const glm::vec3 fwd = coopa::anim::ik::rotation_of(hw) * glm::vec3(0, -1, 0);
+        const glm::vec3 to = glm::normalize(pos(look_target) - glm::vec3(hw[3]));
         max_gaze_err = std::max(max_gaze_err, glm::degrees(std::acos(std::clamp(glm::dot(fwd, to), -1.0f, 1.0f))));
         max_head_turn = std::max(max_head_turn, glm::degrees(std::acos(std::clamp(glm::dot(fwd, fwd0), -1.0f, 1.0f))));
-        max_reach_err = std::max(max_reach_err, glm::length(pos(hand) - pos(reach_target)));
+        max_reach_err = std::max(max_reach_err, glm::length(hand_pos() - pos(reach_target)));
     }
     expect(max_head_turn > 30.0f, "animation_demo: the watcher's head turns (" + std::to_string(max_head_turn) + " deg)");
     expect(max_gaze_err < 25.0f, "animation_demo: ...toward its target (worst lag " + std::to_string(max_gaze_err) + " deg)");

@@ -369,7 +369,8 @@ void register_scene_components() {
             read(node, "air_delay", d->air_delay);
         });
 
-    // Ground-adapting legs (toyengine/scene/foot_ik.h), solved by coopa::anim::IkSystem.
+    // Ground-adapting legs (toyengine/scene/foot_ik.h), bracketing coopa::rig::IkSystem via
+    // toy::scene::RigIkDriverSystem.
     SceneLoader::register_component_parser("FootIK",
         [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
             auto* ik = obj.add_component<FootIK>();

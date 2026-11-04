@@ -40,6 +40,7 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <set>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -226,6 +227,23 @@ public:
 
     /** @brief All scene files (assets/scenes/<name>/scene.yaml and any other .yaml in scenes/). */
     std::vector<std::string> scenes() { return scene_files_(list("scenes", ".yaml")); }
+
+    /**
+     * @brief Renames bone `from` to `to` in every file this project can find that addresses it
+     * BY NAME within the rig at `rig_rel_path` (an assets-relative path, e.g. "rigs/mannequin.yaml"):
+     * a SkeletalAnimator clip's bone tracks (every state of every object/scene whose own Rig
+     * component points at this rig asset), and -- on the SAME object as that Rig component only
+     * -- TwoBoneIK/ChainIK/LookAtIK's bone-name fields, FootIK's leg bones and Ragdoll's bone
+     * list; plus any TwoBoneIK/ChainIK/LookAtIK/BoneAttachment ANYWHERE whose own `rig:` field
+     * names this asset directly (they can live on a different object than the Rig itself).
+     *
+     * Mesh vertex-group names are NOT rewritten here (a skinned mesh asset's own, separate
+     * subsystem -- see rig_model.h's doc) -- a renamed bone and its mesh's group keep their old
+     * names in sync only if the caller also updates the mesh, same as the engine would require.
+     *
+     * @return How many files were actually changed.
+     */
+    int rename_rig_bone_everywhere(const std::string& rig_rel_path, const std::string& from, const std::string& to);
 
     // --- recent projects (~/.toyengine_editor.yaml) ---
 

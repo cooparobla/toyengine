@@ -68,6 +68,8 @@ scene:
           use_root_motion: true
         - type: Animator
           apply_root_motion: true
+        - type: SkeletalAnimator
+          apply_root_motion: true
         - type: CharacterAnimDriver
           walk_speed: 0.2
           run_speed: 4.0

@@ -66,10 +66,12 @@ cull_screen_size: 0.004                      # 0/absent = never culled
 
 ## Skinning
 
-Vertex groups in `weights:` name the bone objects (the 4 strongest per corner are used,
-normalise them to 1). The rig object tree holds bones as ordinary child objects; the skin object
-has a MeshRenderer without `mesh_path` plus `SkinnedMeshRenderer { mesh_path: <name> }`. See
-`assets/meshes/animation/tentacle.yaml` + `assets/objects/animation/tentacle.yaml`, and create-animation.
+Vertex groups in `weights:` name bones within a `coopa::rig::Rig` (the 4 strongest per corner are
+used, normalise them to 1) -- a rig's bones are entries in a rig asset
+(`assets/rigs/<name>.yaml`), not SceneObjects; see create-animation for the full system. The skin
+object has a MeshRenderer without `mesh_path` plus `SkinnedMeshRenderer { mesh_path: <name> }` and
+sits under (or on) the object carrying the `Rig`. See
+`assets/meshes/animation/tentacle.yaml` + `assets/objects/animation/tentacle.yaml`.
 
 ## Procedure
 

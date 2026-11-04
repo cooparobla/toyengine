@@ -1,32 +1,50 @@
 #!/usr/bin/env python3
-"""Writes the `horse`: a rideable quadruped object-hierarchy rig, its part meshes and its gait clips.
+"""Writes the `horse`: a rideable quadruped Rig + SkeletalAnimator, its part meshes (riding the
+rig's bones via BoneAttachment) and its gait clips.
 
 Outputs (all under assets/):
-  * objects/animals/horse.yaml -- the rig as an OBJECT ASSET (prefab), ready to ride: a
+  * rigs/horse.yaml -- the skeleton as a RIG ASSET: a flat, parent-first bone list (head/tail/roll
+    in rig space; see coopa/rig/rig_asset.h).
+  * objects/animals/horse.yaml -- a Rig + SkeletalAnimator OBJECT ASSET (prefab), ready to ride: a
     CharacterController (`player_input: false`), a Mount (gaits, steering, sockets -- see
-    toyengine/scene/mount.h), a four-legged FootIK (hooves on the ground, the body pitched
-    between front and hind legs) and an Animator with idle / walk / trot / gallop.
+    toyengine/scene/mount.h), a four-legged FootIK (hooves on the ground, the body pitched between
+    front and hind legs), its capsule parts attached to bones via BoneAttachment.
   * meshes/animals/horse_*.yaml -- one capsule mesh per body part (Z-up, centred).
-  * animations/horse/{idle,walk,trot,gallop}.yaml -- the clips. The gaits are solved from hoof
-    paths: each hoof is planted on the ground and slides back at the gait's ground speed during
-    its stance, then swings forward in an arc; a two-bone solve in the leg's plane turns that into
-    upper / lower joint angles. So a gait played at speed / <gait>_speed never slides its hooves
-    -- the Mount's speeds below are those ground speeds, printed into the prefab.
+  * animations/horse/{idle,walk,trot,gallop}.yaml -- SKELETAL clips the SkeletalAnimator plays. The
+    gaits are solved from hoof paths: each hoof is planted on the ground and slides back at the
+    gait's ground speed during its stance, then swings forward in an arc; a two-bone solve in the
+    leg's plane turns that into upper / lower joint angles -- so a gait played at speed /
+    <gait>_speed never slides its hooves (the Mount's speeds below are those ground speeds, printed
+    into the prefab). No root motion: Mount drives the CharacterController's travel directly from
+    those speeds, not from clip-extracted root motion.
 
 The rig, Z-up, facing local +Y (its right is +X), origin on the ground under the barrel, about
 1.6 m at the withers and 2.4 m nose to tail:
 
-  horse
-    body                       z 1.22 -- the barrel; FootIK's `pelvis` (raised / pitched)
-      neck > head              head + muzzle + ears; neck carries the rein sockets
-      tail
-      saddle                   the rider's seat (socket); stirrup_l / stirrup_r hang from it
-      fore_upper_l/_r > fore_lower_l/_r > fore_hoof_l/_r    shoulders at y +0.55
-      hind_upper_l/_r > hind_lower_l/_r > hind_hoof_l/_r    hips at y -0.55 (hocks bend back)
-    mount_point_l / _r         ground level beside the saddle: where a rider gets on and off
+  body (Rig root)            z 1.22 -- the barrel; FootIK's `pelvis` (raised / pitched)
+    neck > head               head + muzzle + ears; neck carries the rein sockets
+    tail
+    saddle                    the rider's seat (socket); stirrup_l / stirrup_r hang from it
+    fore_upper_l/_r > fore_lower_l/_r > fore_hoof_l/_r    shoulders at y +0.55
+    hind_upper_l/_r > hind_lower_l/_r > hind_hoof_l/_r    hips at y -0.55 (hocks bend back)
+  mount_point_l / _r         ground level beside the saddle: where a rider gets on and off
 
-Joints are empty objects with identity rest rotations; a positive X rotation swings a limb
-forward. Each visible part is a child `<joint>_shape` (or a named part) of its joint.
+Bones are flat entries in rigs/horse.yaml (head/tail/roll in rig space; NOT SceneObjects),
+addressed by name. A positive X rotation (in this generator's OLD identity-rest joint convention
+-- see CONJUGATION below) swings a limb forward. Each visible part is a plain object carrying
+`BoneAttachment { bone: <bone> }`, flat (not nested) under the rig's root object -- except the
+rein/stirrup sockets, which are small BoneAttachment-anchored parents (`neck_socket`,
+`saddle_socket`) holding Mount's rein/stirrup targets as plain position-only children.
+
+CONJUGATION: this generator's gait/leg-solving math (`solve_leg`, `gait_clip`, `idle_clip`) is
+still written in the OLD convention -- each bone's local-to-parent rotation, as if every joint had
+an identity rest rotation -- because that is what the forward/inverse leg geometry (hip-knee-hoof
+triangle) is naturally expressed in. `write_clip()` converts each OLD rotation key into the Rig's
+pose-delta convention (a delta from rest, in the bone's own rest-local frame) by conjugating it
+through the bone's own rest-basis quaternion, exactly as `tools/gen_mannequin.py`'s `write_clip()`
+does -- see that file's CONJUGATION doc for the full derivation (`inverse(B) * R_old * B`). The
+`body` bone's LOCATION channel (its height bob) undergoes the analogous translation-side
+conversion: `inverse(B_body) * (old_pos - body_head)`.
 
 Run:  python3 tools/gen_horse.py
 """
@@ -36,11 +54,12 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import gen_mannequin as gm  # noqa: E402  (capsule meshes, rig emit, clip writer, quaternions)
+import gen_mannequin as gm  # noqa: E402  (quaternion/conjugation math, capsule meshes)
 
 ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets")
 MESH_DIR = os.path.join(ASSETS, "meshes", "animals")
 OBJECT_PATH = os.path.join(ASSETS, "objects", "animals", "horse.yaml")
+RIG_PATH = os.path.join(ASSETS, "rigs", "horse.yaml")
 ANIM_DIR = os.path.join(ASSETS, "animations", "horse")
 GENERATED = "GENERATED by tools/gen_horse.py; edit that, not this file."
 
@@ -76,35 +95,296 @@ LEATHER = "{albedo: {r: 0.24, g: 0.13, b: 0.07}, roughness: 0.55}"
 BLANKET = "{albedo: {r: 0.55, g: 0.12, b: 0.1}, roughness: 0.8}"
 METAL = "{albedo: {r: 0.7, g: 0.68, b: 0.62}, roughness: 0.3, metallic: 0.9}"
 
-joint, shape = gm.joint, gm.shape
+# ---------------------------------------------------------------------------------------------
+# The rig: a flat, parent-first bone list (name, parent or None, head, tail, roll), rig space.
+# ---------------------------------------------------------------------------------------------
+
+RIG_BONES = [
+    ("body", None, (0, 0, 1.22), (0, 0.7, 1.22), 0),
+    ("neck", "body", (0, 0.7, 1.42), (0, 1.12, 2.04), 0),
+    ("head", "neck", (0, 1.12, 2.04), (0, 1.12, 2.16), 0),
+    ("rein_l", "neck", (-0.13, 0.38, 1.72), (-0.13, 0.28, 1.72), 0),
+    ("rein_r", "neck", (0.13, 0.38, 1.72), (0.13, 0.28, 1.72), 0),
+    ("tail", "body", (0, -0.86, 1.44), (0, -0.96, 1.44), 0),
+    ("saddle", "body", (0, 0.08, 1.58), (0, 0.18, 1.58), 180),
+    ("stirrup_l", "saddle", (-0.36, 0.1, 0.9), (-0.36, 0.1, 0.8), 0),
+    ("stirrup_r", "saddle", (0.36, 0.1, 0.9), (0.36, 0.1, 0.8), 0),
+    ("fore_upper_l", "body", (-0.2, 0.55, 1.1), (-0.2, 0.55, 0.57), 0),
+    ("fore_lower_l", "fore_upper_l", (-0.2, 0.55, 0.57), (-0.2, 0.55, 0.05), 0),
+    ("fore_hoof_l", "fore_lower_l", (-0.2, 0.55, 0.05), (-0.2, 0.7, 0.05), 0),
+    ("fore_upper_r", "body", (0.2, 0.55, 1.1), (0.2, 0.55, 0.57), 0),
+    ("fore_lower_r", "fore_upper_r", (0.2, 0.55, 0.57), (0.2, 0.55, 0.05), 0),
+    ("fore_hoof_r", "fore_lower_r", (0.2, 0.55, 0.05), (0.2, 0.7, 0.05), 0),
+    ("hind_upper_l", "body", (-0.2, -0.55, 1.12), (-0.2, -0.69, 0.54), 0),
+    ("hind_lower_l", "hind_upper_l", (-0.2, -0.69, 0.54), (-0.2, -0.67, 0.08), 0),
+    ("hind_hoof_l", "hind_lower_l", (-0.2, -0.67, 0.08), (-0.2, -0.82, 0.08), 0),
+    ("hind_upper_r", "body", (0.2, -0.55, 1.12), (0.2, -0.69, 0.54), 0),
+    ("hind_lower_r", "hind_upper_r", (0.2, -0.69, 0.54), (0.2, -0.67, 0.08), 0),
+    ("hind_hoof_r", "hind_lower_r", (0.2, -0.67, 0.08), (0.2, -0.82, 0.08), 0),
+]
+
+BONE_HEAD = {name: head for name, _parent, head, _tail, _roll in RIG_BONES}
 
 
-def unit(v):
-    ln = math.sqrt(sum(c * c for c in v)) or 1.0
-    return [c / ln for c in v]
-
-
-def along(d):
-    """Euler (X only) turning a Z-aligned capsule onto direction d in the YZ plane."""
-    d = unit(d)
-    # Rx(a) * (0, 0, 1) = (0, -sin a, cos a)
-    return (math.degrees(math.atan2(-d[1], d[2])), 0, 0)
-
-
-def aim(d):
-    """Euler (X, then Z) turning a Z-aligned capsule onto any direction d."""
-    d = unit(d)
-    r = math.hypot(d[0], d[1])
-    return (math.degrees(math.atan2(r, d[2])), 0, math.degrees(math.atan2(d[0], -d[1])) if r > 1e-6 else 0)
-
-
-def limb_shape(name, mesh, vec, material, frac=0.5, scale=(1, 1, 1)):
-    """A capsule along `vec` (from the joint toward its child), centred at `frac` of it."""
-    return shape(name, mesh, tuple(c * frac for c in vec), material, rot=along(vec), scale=scale)
+def write_rig(path=RIG_PATH):
+    lines = [
+        "# horse: a rideable quadruped rig (bones, parts ride them via BoneAttachment), facing +Y,",
+        "# origin on the ground. Bone names are a contract (clips, FootIK legs, Mount sockets) --",
+        f"# see tools/gen_horse.py. {GENERATED}",
+        "rig:",
+        "  name: horse",
+        "  bones:",
+    ]
+    for name, parent, head, tail, roll in RIG_BONES:
+        lines.append(f"    - name: {name}")
+        if parent:
+            lines.append(f"      parent: {parent}")
+        lines.append(f"      {gm.vec('head', head)}")
+        lines.append(f"      {gm.vec('tail', tail)}")
+        if roll:
+            lines.append(f"      roll: {num(roll)}")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
 
 
 # ---------------------------------------------------------------------------------------------
-# The rig
+# Bone rest basis (mirrors coopa/rig/rig_asset.h's bone_rest_matrix; see gen_mannequin.py's own
+# bone_basis -- this is the same algorithm, over the horse's own bone table).
+# ---------------------------------------------------------------------------------------------
+
+_BASIS_CACHE = {}
+
+
+def bone_basis(name):
+    if name in _BASIS_CACHE:
+        return _BASIS_CACHE[name]
+    head = BONE_HEAD[name]
+    tail = next(t for n, _p, _h, t, _r in RIG_BONES if n == name)
+    y = gm.vnorm(gm.vsub(tail, head))
+    seed = (0.0, 0.0, 1.0) if abs(gm.vdot(y, (0.0, 0.0, 1.0))) < 0.999 else (1.0, 0.0, 0.0)
+    x = gm.vnorm(gm.vcross(seed, y))
+    z = gm.vcross(x, y)
+    q = gm.mat_to_quat(x, y, z)
+    _BASIS_CACHE[name] = q
+    return q
+
+
+def vecp(label, v):
+    """Like gm.vec(), but at 9 significant digits -- several of the part placements below (the
+    legs' near-90-degree rest rotations) carry more precision than gm.vec()'s 6-sig-fig num()
+    preserves exactly; %g never pads a shorter value, so this reproduces every other field
+    identically."""
+    return f"{label}: {{x: {v[0]:.9g}, y: {v[1]:.9g}, z: {v[2]:.9g}}}"
+
+
+def emit_shape(name, bone, mesh, material, pos, rot, scale):
+    p = "    "
+    out = [f"{p}- name: {name}", f"{p}  components:", f"{p}    - type: Transform"]
+    if pos is not None:
+        out.append(f"{p}      {vecp('position', pos)}")
+    out.append(f"{p}      {vecp('rotation', rot)}")
+    if scale is not None:
+        out.append(f"{p}      {vecp('scale', scale)}")
+    out += [f"{p}    - type: BoneAttachment", f"{p}      bone: {bone}",
+            f"{p}    - type: MeshRenderer", f"{p}      mesh_path: {mesh}", f"{p}      material: {material}",
+            f"{p}  children: []"]
+    return out
+
+
+# ---------------------------------------------------------------------------------------------
+# Shapes: capsule / prop parts riding the rig's bones via BoneAttachment, in the order the
+# prefab lists them (two socket groups -- rein targets under the neck, stirrup targets under the
+# saddle -- interrupt the flat list; see neck_socket_children()/saddle_socket_children()).
+# ---------------------------------------------------------------------------------------------
+
+SHAPES_BARREL_TO_MANE = [
+    ("barrel", "body", "horse_barrel", COAT, (0, -0.02, 0), (-90, 0, 180), (0.86, 1, 1)),
+    ("chest_shape", "body", "horse_quarters", COAT, (0, 0.5, 0.02), (-90, 0, 180), (0.9, 1, 1.02)),
+    ("quarters", "body", "horse_quarters", COAT, (0, -0.52, -0.04), (-90, 0, 180), (0.95, 1, 1.05)),
+    ("withers", "body", "horse_quarters", COAT, (0, 0.48, -0.18), (-90, 0, 180), (0.55, 0.7, 0.7)),
+    ("neck_shape", "neck", "horse_neck", COAT, (0, 0.36, 0), (90, 0, 180), (0.75, 1, 1)),
+    ("mane", "neck", "horse_mane", MANE, (0, 0.4, -0.13), (90, 0, 180), (0.7, 1.4, 1)),
+]
+
+SHAPES_HEAD_TO_TAIL = [
+    ("head_shape", "head", "horse_head", COAT, (-0.156, -0.208, 0), (126.87, 90, 0), (0.8, 1, 1)),
+    ("muzzle", "head", "horse_muzzle", COAT, (-0.312, -0.416, 0), (126.87, 90, 0), (0.85, 1, 1)),
+    ("ear_l", "head", "horse_ear", COAT, (0.04, 0.14, 0.065), (-15, 78, 90), None),
+    ("eye_l", "head", "horse_ear", MANE, (-0.12, -0.04, 0.1), (0, 90, 0), (0.9, 0.9, 0.3)),
+    ("ear_r", "head", "horse_ear", COAT, (0.04, 0.14, -0.065), (165, 78, -90), None),
+    ("eye_r", "head", "horse_ear", MANE, (-0.12, -0.04, -0.1), (0, 90, 0), (0.9, 0.9, 0.3)),
+    ("bit", "head", "horse_hoof", METAL, (-0.3, -0.4, 0), (180, 0, -90), (0.2, 0.2, 1.2)),
+    ("rein_l_shape", "rein_l", "horse_strap", LEATHER, (0.03, -0.52, 0.04), (-85.6086, 0, -176.698), (1, 1, 1.02031)),
+    ("rein_r_shape", "rein_r", "horse_strap", LEATHER, (-0.03, -0.52, 0.04), (-85.6086, 0, 176.698), (1, 1, 1.02031)),
+    ("tail_root", "tail", "horse_ear", MANE, (0, 0.03, 0), (-106.6992, 0, 0), (2.2, 2.2, 1.4)),
+    ("tail_shape", "tail", "horse_tail", MANE, (0, 0.143541, 0.330145), (-23.499, 0, 0), (1.1, 0.7, 1)),
+]
+
+SHAPES_SADDLE_TO_END = [
+    ("blanket", "saddle", "cube", BLANKET, (0, -0.02, 0.035), (180, 0, 180), (0.62, 0.78, 0.04)),
+    ("seat", "saddle", "cube", LEATHER, None, (180, 0, 180), (0.46, 0.56, 0.07)),
+    ("cantle", "saddle", "cube", LEATHER, (0, -0.27, -0.06), (180, 0, 180), (0.36, 0.07, 0.13)),
+    ("pommel", "saddle", "cube", LEATHER, (0, 0.27, -0.05), (180, 0, 180), (0.22, 0.08, 0.12)),
+    ("stirrup_l_iron", "stirrup_l", "cube", METAL, (0.03, 0.03, 0), (90, 90, 0), (0.11, 0.14, 0.025)),
+    ("stirrup_l_strap", "stirrup_l", "horse_strap", LEATHER, (0, -0.34, -0.06), (100.008, 0, 0), (2.5, 2.5, 0.674323)),
+    ("stirrup_r_iron", "stirrup_r", "cube", METAL, (0.03, 0.03, 0), (90, 90, 0), (0.11, 0.14, 0.025)),
+    ("stirrup_r_strap", "stirrup_r", "horse_strap", LEATHER, (0, -0.34, 0.06), (-79.992, 0, -180), (2.5, 2.5, 0.674323)),
+    ("fore_upper_l_shape", "fore_upper_l", "horse_fore_upper", COAT, (0, 0.265, 0), (-90, 90, 0), (1, 1.25, 1)),
+    ("fore_lower_l_shape", "fore_lower_l", "horse_fore_lower", COAT, (0, 0.26, 0), (-90, 90, 0), None),
+    ("fore_hoof_l_shape", "fore_hoof_l", "horse_hoof", HOOF, (0, 0.015, 0.065), (180, 0, 180), (1, 1.15, 1)),
+    ("fore_upper_r_shape", "fore_upper_r", "horse_fore_upper", COAT, (0, 0.265, 0), (-90, 90, 0), (1, 1.25, 1)),
+    ("fore_lower_r_shape", "fore_lower_r", "horse_fore_lower", COAT, (0, 0.26, 0), (-90, 90, 0), None),
+    ("fore_hoof_r_shape", "fore_hoof_r", "horse_hoof", HOOF, (0, 0.015, 0.065), (180, 0, 180), (1, 1.15, 1)),
+    ("hind_upper_l_shape", "hind_upper_l", "horse_hind_upper", COAT, (0, 0.298329, 0), (-89.999566, 0, 0), (0.85, 1.3, 1)),
+    ("hind_lower_l_shape", "hind_lower_l", "horse_hind_lower", COAT, (0, 0.230217, 0), (-89.999553, 90, 0), None),
+    ("hind_hoof_l_shape", "hind_hoof_l", "horse_hoof", HOOF, (0, -0.015, 0.065), (180, 0, 0), (1, 1.15, 1)),
+    ("hind_sock_l", "hind_hoof_l", "horse_fore_lower", SOCK, (0, 0, -0.12), (180, 0, 0), (1.08, 1.08, 0.3)),
+    ("hind_upper_r_shape", "hind_upper_r", "horse_hind_upper", COAT, (0, 0.298329, 0), (-89.999566, 0, 0), (0.85, 1.3, 1)),
+    ("hind_lower_r_shape", "hind_lower_r", "horse_hind_lower", COAT, (0, 0.230217, 0), (-89.999553, 90, 0), None),
+    ("hind_hoof_r_shape", "hind_hoof_r", "horse_hoof", HOOF, (0, -0.015, 0.065), (180, 0, 0), (1, 1.15, 1)),
+]
+
+REIN_SOCKET = (0.13, 0.068904, -0.433188)        # neck_socket-relative, x mirrored
+STIRRUP_SOCKET = (-0.36, 0.02, -0.68)            # saddle_socket-relative, x mirrored
+MOUNT_POINT = (1.05, 0.08, 0.0)                  # root-relative, x mirrored
+
+
+def neck_socket_children():
+    return [
+        "    - name: neck_socket",
+        "      components:",
+        "        - type: Transform",
+        "        - type: BoneAttachment",
+        "          bone: neck",
+        "      children:",
+        "        - name: rein_l_socket",
+        "          components:",
+        "            - type: Transform",
+        f"              {vecp('position', (REIN_SOCKET[0], REIN_SOCKET[1], REIN_SOCKET[2]))}",
+        "          children: []",
+        "        - name: rein_r_socket",
+        "          components:",
+        "            - type: Transform",
+        f"              {vecp('position', (-REIN_SOCKET[0], REIN_SOCKET[1], REIN_SOCKET[2]))}",
+        "          children: []",
+    ]
+
+
+def saddle_socket_children():
+    return [
+        "    - name: saddle_socket",
+        "      components:",
+        "        - type: Transform",
+        "        - type: BoneAttachment",
+        "          bone: saddle",
+        "      children:",
+        "        - name: stirrup_l_socket",
+        "          components:",
+        "            - type: Transform",
+        f"              {vecp('position', STIRRUP_SOCKET)}",
+        "          children: []",
+        "        - name: stirrup_r_socket",
+        "          components:",
+        "            - type: Transform",
+        f"              {vecp('position', (-STIRRUP_SOCKET[0], STIRRUP_SOCKET[1], STIRRUP_SOCKET[2]))}",
+        "          children: []",
+    ]
+
+
+def write_object(speeds):
+    walk, trot, gallop = speeds
+    lines = [
+        "# horse: a rideable quadruped rig (rigs/horse.yaml); capsule parts ride its bones via",
+        "# BoneAttachment, facing +Y, origin on the ground. Clips idle / walk / trot / gallop. Ride it",
+        "# with a Rider on the player (F near a mount point) -- see tools/gen_horse.py and",
+        "# toyengine/scene/mount.h.",
+        f"# {GENERATED}",
+        "object:",
+        "  name: horse",
+        "  components:",
+        "    - type: Transform",
+        "      position: {x: 0, y: 0, z: 0}",
+        "    - type: Rig",
+        "      rig: rigs/horse.yaml",
+        "    - type: SkeletalAnimator",
+        "      auto_play: idle",
+        "      default_crossfade: 0.25",
+        "      states:",
+        "        - {name: idle, clip: animations/horse/idle.yaml}",
+        "        - {name: walk, clip: animations/horse/walk.yaml}",
+        "        - {name: trot, clip: animations/horse/trot.yaml}",
+        "        - {name: gallop, clip: animations/horse/gallop.yaml}",
+        "    # The body: a capsule round the barrel (head and rump overhang it). Its Mount steers it.",
+        "    - type: CharacterController",
+        "      radius: 0.62",
+        "      height: 2.0",
+        "      step_height: 0.4",
+        "      slope_limit: 40",
+        "      snap_distance: 0.45",
+        "      acceleration: 40",
+        "      jump_height: 0.9",
+        "      face_movement: false",
+        "      push_strength: 500",
+        "      player_input: false",
+        "    - type: Mount",
+        f"      walk_speed: {num(round(walk, 3))}       # the gait clips' ground speeds (m/s)",
+        f"      trot_speed: {num(round(trot, 3))}",
+        f"      gallop_speed: {num(round(gallop, 3))}",
+        "      acceleration: 4",
+        "      braking: 6",
+        "      turn_rate: 150",
+        "      gallop_turn_rate: 70",
+        "      saddle: saddle_socket",
+        "      stirrup_l: saddle_socket/stirrup_l_socket",
+        "      stirrup_r: saddle_socket/stirrup_r_socket",
+        "      rein_l: neck_socket/rein_l_socket",
+        "      rein_r: neck_socket/rein_r_socket",
+        "      mount_point_l: mount_point_l",
+        "      mount_point_r: mount_point_r",
+        "      camera_offset_z: 2.2",
+        "      camera_distance: 6.5",
+        "    # Four hooves on the ground; the body rises / drops and pitches between front and hind.",
+        "    - type: FootIK",
+        "      pelvis: body",
+        "      mode: solve",
+        "      body_pitch: true",
+        "      max_body_pitch: 18",
+        "      ray_up: 0.45",
+        "      ray_down: 0.45",
+        "      max_pelvis_drop: 0.3",
+        "      max_foot_angle: 25",
+        "      blend_speed: 10",
+        "      legs:",
+    ]
+    for kind in ("fore", "hind"):
+        for side in "lr":
+            thigh, shin, foot = f"{kind}_upper_{side}", f"{kind}_lower_{side}", f"{kind}_hoof_{side}"
+            extra = ", front: true" if kind == "fore" else ", pole: {x: 0, y: -1, z: 0}"
+            lines.append(f"        - {{thigh: {thigh}, shin: {shin}, foot: {foot}{extra}}}")
+    lines.append("  children:")
+    for s in SHAPES_BARREL_TO_MANE:
+        lines += emit_shape(*s)
+    lines += neck_socket_children()
+    for s in SHAPES_HEAD_TO_TAIL:
+        lines += emit_shape(*s)
+    lines += saddle_socket_children()
+    for s in SHAPES_SADDLE_TO_END:
+        lines += emit_shape(*s)
+    for side, sx in (("l", -1), ("r", 1)):
+        lines += [f"    - name: mount_point_{side}",
+                  "      components:",
+                  "        - type: Transform",
+                  f"          {vecp('position', (sx * MOUNT_POINT[0], MOUNT_POINT[1], MOUNT_POINT[2]))}",
+                  "      children: []"]
+    os.makedirs(os.path.dirname(OBJECT_PATH), exist_ok=True)
+    with open(OBJECT_PATH, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
+# ---------------------------------------------------------------------------------------------
+# Clips: hoof paths -> two-bone angles, in the OLD identity-rest-joint convention (see this
+# file's CONJUGATION doc); write_clip() below converts to the Rig's pose-delta convention.
 # ---------------------------------------------------------------------------------------------
 
 BODY_Z = 1.22
@@ -117,105 +397,7 @@ FORE_FETLOCK = (0, 0, -0.52)        # fore_lower -> fore_hoof
 HIND_HOCK = (0, -0.14, -0.58)
 HIND_FETLOCK = (0, 0.02, -0.46)
 HOOF_Z = 0.12                       # a planted hoof joint's height (its shape reaches the ground)
-NECK = (0, 0.7, 0.2)
-NECK_DIR = unit((0, 0.42, 0.62))
-HEAD = (0, 0.42, 0.62)              # neck -> head
-HEAD_DIR = unit((0, 0.6, -0.8))
-SADDLE = (0, 0.08, 0.36)
-STIRRUP = (0.36, 0.02, -0.68)       # saddle-relative, x mirrored
-REIN = (0.13, -0.32, 0.3)           # neck-relative, x mirrored
-MOUNT_POINT = (1.05, 0.08, 0.0)     # root-relative, x mirrored
 
-
-def leg(kind, side):
-    sx = -1 if side == "l" else 1
-    if kind == "fore":
-        hip, knee, fet = FORE_HIP, FORE_KNEE, FORE_FETLOCK
-        upper_mesh, lower_mesh, upper_scale = "horse_fore_upper", "horse_fore_lower", (1, 1.25, 1)
-    else:
-        hip, knee, fet = HIND_HIP, HIND_HOCK, HIND_FETLOCK
-        upper_mesh, lower_mesh, upper_scale = "horse_hind_upper", "horse_hind_lower", (0.85, 1.3, 1)
-    hoof_parts = [shape(f"{kind}_hoof_{side}_shape", "horse_hoof", (0, 0.015, -HOOF_Z + 0.055), HOOF, scale=(1, 1.15, 1))]
-    if side == "l" and kind == "hind":   # one white sock: the horse's left from the front
-        hoof_parts.append(shape(f"{kind}_sock_{side}", "horse_fore_lower", (0, 0, 0.12), SOCK, scale=(1.08, 1.08, 0.3)))
-    return joint(f"{kind}_upper_{side}", (sx * hip[0], hip[1], hip[2]), [
-        joint(f"{kind}_lower_{side}", knee, [
-            joint(f"{kind}_hoof_{side}", fet, [], hoof_parts),
-        ], [limb_shape(f"{kind}_lower_{side}_shape", lower_mesh, fet, COAT)]),
-    ], [limb_shape(f"{kind}_upper_{side}_shape", upper_mesh, knee, COAT, frac=0.5, scale=upper_scale)])
-
-
-def head():
-    d = HEAD_DIR
-    parts = [shape("head_shape", "horse_head", tuple(c * 0.26 for c in d), COAT, rot=along(d), scale=(0.8, 1, 1)),
-             shape("muzzle", "horse_muzzle", tuple(c * 0.52 for c in d), COAT, rot=along(d), scale=(0.85, 1, 1))]
-    for side, sx in (("l", -1), ("r", 1)):
-        parts.append(shape(f"ear_{side}", "horse_ear", (sx * 0.065, -0.04, 0.14), COAT, rot=(-15, sx * 12, 0)))
-        parts.append(shape(f"eye_{side}", "horse_ear", (sx * 0.1, 0.12, -0.04), MANE, rot=(90, 0, 0), scale=(0.9, 0.9, 0.3)))
-    # The bridle's bit, where the reins run to.
-    parts.append(shape("bit", "horse_hoof", tuple(c * 0.5 for c in d), METAL, rot=(0, 90, 0), scale=(0.2, 0.2, 1.2)))
-    return joint("head", HEAD, [], parts)
-
-
-def neck():
-    d = NECK_DIR
-    back = (0, -d[2], d[1])   # perpendicular, up and back: the crest
-    parts = [shape("neck_shape", "horse_neck", tuple(c * 0.36 for c in d), COAT, rot=along(d), scale=(0.75, 1, 1)),
-             shape("mane", "horse_mane", tuple(d[i] * 0.4 + back[i] * 0.13 for i in range(3)), MANE, rot=along(d),
-                   scale=(0.7, 1.4, 1))]
-    # The reins: from each rein socket (where the rider's hands are) to the bit.
-    bit = [HEAD[i] + HEAD_DIR[i] * 0.5 for i in range(3)]
-    rein_children = []
-    for side, sx in (("l", -1), ("r", 1)):
-        rein = (sx * REIN[0], REIN[1], REIN[2])
-        tgt = (sx * 0.07, bit[1], bit[2])
-        vec = [tgt[i] - rein[i] for i in range(3)]
-        ln = math.sqrt(sum(c * c for c in vec))
-        rein_children.append(joint(f"rein_{side}", rein, [], [
-            shape(f"rein_{side}_shape", "horse_strap", tuple(c * 0.5 for c in vec), LEATHER,
-                  rot=aim(vec), scale=(1, 1, ln / 1.024))]))
-    return joint("neck", NECK, [head()] + rein_children, parts)
-
-
-def saddle():
-    parts = [shape("blanket", "cube", (0, -0.02, -0.035), BLANKET, scale=(0.62, 0.78, 0.04)),
-             shape("seat", "cube", (0, 0, 0.0), LEATHER, scale=(0.46, 0.56, 0.07)),
-             shape("cantle", "cube", (0, -0.27, 0.06), LEATHER, scale=(0.36, 0.07, 0.13)),
-             shape("pommel", "cube", (0, 0.27, 0.05), LEATHER, scale=(0.22, 0.08, 0.12))]
-    stirrups = []
-    for side, sx in (("l", -1), ("r", 1)):
-        p = (sx * STIRRUP[0], STIRRUP[1], STIRRUP[2])
-        strap_top = (sx * 0.24, 0.02, 0.0)
-        vec = [strap_top[i] - p[i] for i in range(3)]
-        ln = math.sqrt(sum(c * c for c in vec))
-        stirrups.append(joint(f"stirrup_{side}", p, [], [
-            shape(f"stirrup_{side}_iron", "cube", (0, 0.03, -0.03), METAL, scale=(0.11, 0.14, 0.025)),
-            shape(f"stirrup_{side}_strap", "horse_strap", tuple(c * 0.5 for c in vec), LEATHER,
-                  rot=aim(vec), scale=(2.5, 2.5, ln / 1.024))]))
-    return joint("saddle", SADDLE, stirrups, parts)
-
-
-def tail():
-    d = unit((0, -0.4, -0.92))
-    return joint("tail", (0, -0.86, 0.22), [], [
-        shape("tail_root", "horse_ear", (0, -0.03, 0.0), MANE, rot=along((0, -1, 0.3)), scale=(2.2, 2.2, 1.4)),
-        shape("tail_shape", "horse_tail", tuple(c * 0.36 for c in d), MANE, rot=along(d), scale=(1.1, 0.7, 1))])
-
-
-RIG = joint("body", (0, 0, BODY_Z), [
-    neck(), tail(), saddle(),
-    leg("fore", "l"), leg("fore", "r"), leg("hind", "l"), leg("hind", "r"),
-], [
-    shape("barrel", "horse_barrel", (0, -0.02, 0.0), COAT, rot=(90, 0, 0), scale=(0.86, 1, 1)),
-    shape("chest_shape", "horse_quarters", (0, 0.5, -0.02), COAT, rot=(90, 0, 0), scale=(0.9, 1, 1.02)),
-    shape("quarters", "horse_quarters", (0, -0.52, 0.04), COAT, rot=(90, 0, 0), scale=(0.95, 1, 1.05)),
-    shape("withers", "horse_quarters", (0, 0.48, 0.18), COAT, rot=(90, 0, 0), scale=(0.55, 0.7, 0.7)),
-])
-
-
-# ---------------------------------------------------------------------------------------------
-# Clips: hoof paths -> two-bone angles
-# ---------------------------------------------------------------------------------------------
 
 def rot_x(v, deg):
     a = math.radians(deg)
@@ -253,12 +435,105 @@ def wrap180(a):
     return (a + 180.0) % 360.0 - 180.0
 
 
+def hemisphere(keys):
+    out, prev = [], None
+    for t, q in keys:
+        if prev is not None and sum(a * b for a, b in zip(q, prev)) < 0:
+            q = [-c for c in q]
+        prev = q
+        out.append((t, [round(c, 6) for c in q]))
+    return out
+
+
+def write_clip(name, length, tracks, wrap="loop", events=(), root_motion=None, anim_dir=ANIM_DIR, label="horse"):
+    """Writes a SKELETAL clip (`bones: - bone: <name> location:/rotation:`) from OLD-convention
+    tracks: rotation keys are conjugated through the bone's own rest basis, and `body`'s
+    position.z key becomes one conjugated `location` curve -- see gen_mannequin.py's write_clip,
+    which this mirrors exactly over the horse's own bone table. events: [(time, name, string)];
+    root_motion: (bone, translation, rotation) or None (the horse's gaits never use one -- Mount
+    drives travel from the gait's own ground speed instead, not from clip root motion).
+
+    Known residual (see gen_mannequin.py's own write_clip() doc for the full precedent): a
+    handful of gait-clip rotation keys differ from the shipped asset by 1 in the 6th decimal
+    place of a quaternion component (e.g. 0.870943 vs this code's 0.870942) -- the W/other
+    component is exactly invariant under conjugation regardless of basis, so this is a
+    floating-point-path difference, not a formula error. idle.yaml, the rig asset, the object
+    asset and every mesh are byte-identical."""
+    assert abs(length * FPS - round(length * FPS)) < 1e-6, f"{name}: length {length} is not a whole frame"
+    lines = [f"# {label} {name}. {GENERATED}", "clip:", f"  name: {name}", f"  wrap: {wrap}",
+             f"  length: {num(length)}"]
+    if root_motion:
+        bone, translation, rotation = root_motion
+        lines.append(f"  root_motion: {{bone: {bone}, translation: {translation}, rotation: {rotation}}}")
+    if events:
+        lines.append("  events:")
+        for t, ev_name, ev_str in events:
+            lines.append(f"    - {{time: {num(round(gm.on_frame(t), 4))}, name: {ev_name}, string: {ev_str}}}")
+
+    order = []
+    rot_by_bone, pos_by_bone = {}, {}
+    for bone, prop, keys, easing in tracks:
+        if bone not in order:
+            order.append(bone)
+        if prop == "rotation_quat":
+            rot_by_bone[bone] = (keys, easing)
+        elif prop.startswith("position."):
+            pos_by_bone.setdefault(bone, {})[prop.split(".")[1]] = (keys, easing)
+
+    lines.append("  bones:")
+    for bone in order:
+        lines.append(f"    - bone: {bone}")
+        if bone in pos_by_bone:
+            basis = bone_basis(bone)
+            head = BONE_HEAD[bone]
+            chans = pos_by_bone[bone]
+            driver_ch = max(chans, key=lambda c: len(chans[c][0]))
+            times = [t for t, _ in chans[driver_ch][0]]
+            easing = chans[driver_ch][1]
+
+            def old_at(ch, t):
+                if ch not in chans:
+                    return 0.0
+                keys = chans[ch][0]
+                if len(keys) == 1 or t <= keys[0][0]:
+                    return keys[0][1]
+                if t >= keys[-1][0]:
+                    return keys[-1][1]
+                for i in range(len(keys) - 1):
+                    if keys[i][0] <= t <= keys[i + 1][0]:
+                        span = keys[i + 1][0] - keys[i][0]
+                        u = (t - keys[i][0]) / span if span > 0 else 0.0
+                        return keys[i][1] + (keys[i + 1][1] - keys[i][1]) * u
+                raise AssertionError(f"{name}: bone {bone} channel {ch} has no key covering t={t}")
+
+            lines.append("      location:")
+            for t in times:
+                t4 = round(gm.on_frame(t), 4)
+                old_pos = tuple(old_at(ch, t if ch == driver_ch else t4) for ch in "xyz")
+                delta = tuple(old_pos[i] - head[i] for i in range(3))
+                loc = gm.clean0(gm.qrot(gm.qconj(basis), delta))
+                ease = "" if easing == "linear" else f", easing: {easing}"
+                lines.append(f"        - {{time: {num(t4)}, value: {gm.fmt6(loc)}{ease}}}")
+        if bone in rot_by_bone:
+            basis = bone_basis(bone)
+            keys, easing = rot_by_bone[bone]
+            lines.append("      rotation:")
+            frames = [round(t * FPS) for t, _ in keys]
+            assert len(set(frames)) == len(frames), f"{name}: two {bone} rotation keys snap to one frame"
+            for t, q_old in keys:
+                q_pose = gm.clean0([round(c, 6) for c in gm.conjugate_quat(q_old, basis)])
+                ease = "" if easing == "linear" else f", easing: {easing}"
+                lines.append(f"        - {{time: {num(round(gm.on_frame(t), 4))}, value: {gm.fmt(q_pose)}{ease}}}")
+    os.makedirs(anim_dir, exist_ok=True)
+    with open(os.path.join(anim_dir, f"{name}.yaml"), "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
 def gait_clip(name, length, duty, stride, lift_fore, lift_hind, phases, bob, bob_freq, pitch, neck_nod, tail_sway):
     """A gait: `phases` = {leg: phase offset}, each hoof planted for `duty` of the cycle, sliding
     back `stride` metres, then swinging forward in an arc. Returns the ground speed (m/s)."""
     frames = round(length * FPS)
     speed = stride / (duty * length)
-    tracks = {}
 
     def body_pose(p):
         z = BODY_Z + bob * math.cos(2 * math.pi * bob_freq * p)
@@ -318,47 +593,35 @@ def gait_clip(name, length, duty, stride, lift_fore, lift_hind, phases, bob, bob
                 a1, a2 = solve_leg(kind, side, (0, hip_local[1], hip_local[2]), rel)
                 # The hoof stays level on the ground and curls back in the swing.
                 a3 = -(a1 + a2 + bp) - (55 if kind == "fore" else 35) * curl
-                base = f"body/{kind}_upper_{side}"
-                keys.setdefault((base, "rotation_quat"), []).append((t, gm.quat_xyz(a1)))
-                keys.setdefault((f"{base}/{kind}_lower_{side}", "rotation_quat"), []).append((t, gm.quat_xyz(a2)))
-                keys.setdefault((f"{base}/{kind}_lower_{side}/{kind}_hoof_{side}", "rotation_quat"), []).append(
-                    (t, gm.quat_xyz(a3)))
-        keys.setdefault(("body/neck", "rotation_quat"), []).append(
+                keys.setdefault((f"{kind}_upper_{side}", "rotation_quat"), []).append((t, gm.quat_xyz(a1)))
+                keys.setdefault((f"{kind}_lower_{side}", "rotation_quat"), []).append((t, gm.quat_xyz(a2)))
+                keys.setdefault((f"{kind}_hoof_{side}", "rotation_quat"), []).append((t, gm.quat_xyz(a3)))
+        keys.setdefault(("neck", "rotation_quat"), []).append(
             (t, gm.quat_xyz(neck_nod * math.sin(2 * math.pi * bob_freq * p + 0.6) - bp)))
-        keys.setdefault(("body/neck/head", "rotation_quat"), []).append(
+        keys.setdefault(("head", "rotation_quat"), []).append(
             (t, gm.quat_xyz(-0.5 * neck_nod * math.sin(2 * math.pi * bob_freq * p + 0.6))))
-        keys.setdefault(("body/tail", "rotation_quat"), []).append(
+        keys.setdefault(("tail", "rotation_quat"), []).append(
             (t, gm.quat_xyz(-10 - 0.5 * pitch * math.sin(2 * math.pi * p), tail_sway * math.sin(2 * math.pi * p), 0)))
-    for (path, prop), ks in keys.items():
+
+    tracks = []
+    for (bone, prop), ks in keys.items():
         if prop == "rotation_quat":
             ks = hemisphere(ks)
-        tracks[(path, prop)] = ks
-    gm.write_clip(name, length, [(path, prop, ks, "linear") for (path, prop), ks in tracks.items()],
-                  anim_dir=ANIM_DIR, label="horse")
+        tracks.append((bone, prop, ks, "linear"))
+    write_clip(name, length, tracks, anim_dir=ANIM_DIR, label="horse")
     return speed
 
 
-def hemisphere(keys):
-    out, prev = [], None
-    for t, q in keys:
-        if prev is not None and sum(a * b for a, b in zip(q, prev)) < 0:
-            q = [-c for c in q]
-        prev = q
-        out.append((t, [round(c, 6) for c in q]))
-    return out
-
-
 def idle_clip():
-    length, n = 3.0, 12
-    tau = 2 * math.pi
+    length, n, tau = 3.0, 12, 2 * math.pi
     tracks = [
         ("body", "position.z", [(length * i / n, round(BODY_Z - 0.006 * (1 - math.sin(tau * i / n)), 5)) for i in range(n + 1)], "linear"),
-        ("body/neck", "rotation_quat", hemisphere([(length * i / n, gm.quat_xyz(-4 + 4 * math.sin(tau * i / n))) for i in range(n + 1)]),
+        ("neck", "rotation_quat", hemisphere([(length * i / n, gm.quat_xyz(-4 + 4 * math.sin(tau * i / n))) for i in range(n + 1)]),
          "ease_in_out"),
-        ("body/neck/head", "rotation_quat",
+        ("head", "rotation_quat",
          hemisphere([(length * i / n, gm.quat_xyz(3 * math.sin(tau * i / n + 1.0), 0, 6 * math.sin(tau * i / n * 0.5 * 2)))
                      for i in range(n + 1)]), "ease_in_out"),
-        ("body/tail", "rotation_quat",
+        ("tail", "rotation_quat",
          hemisphere([(length * i / n, gm.quat_xyz(-12, 18 * math.sin(2 * tau * i / n) * (1 if i < n // 2 else 0.3), 0))
                      for i in range(n + 1)]), "ease_in_out"),
     ]
@@ -370,109 +633,17 @@ def idle_clip():
         rest_y = hip[1] + knee_v[1] + fet_v[1]
         for side in "lr":
             a1, a2 = solve_leg(kind, side, (0, hip[1], hip[2]), (0, rest_y, HOOF_Z - BODY_Z))
-            base = f"body/{kind}_upper_{side}"
-            for path, a in ((base, a1), (f"{base}/{kind}_lower_{side}", a2),
-                            (f"{base}/{kind}_lower_{side}/{kind}_hoof_{side}", -(a1 + a2))):
+            for bone, a in ((f"{kind}_upper_{side}", a1), (f"{kind}_lower_{side}", a2), (f"{kind}_hoof_{side}", -(a1 + a2))):
                 q = [round(c, 6) for c in gm.quat_xyz(a)]
-                tracks.append((path, "rotation_quat", [(0.0, q), (length, q)], "linear"))
-    gm.write_clip("idle", length, tracks, anim_dir=ANIM_DIR, label="horse")
-
-
-# ---------------------------------------------------------------------------------------------
-# The prefab
-# ---------------------------------------------------------------------------------------------
-
-def leg_paths(kind, side):
-    up = f"body/{kind}_upper_{side}"
-    lo = f"{up}/{kind}_lower_{side}"
-    return up, lo, f"{lo}/{kind}_hoof_{side}"
-
-
-def write_object(speeds):
-    walk, trot, gallop = speeds
-    lines = [
-        "# horse: a rideable quadruped object-hierarchy rig (joints are empties, parts are capsule",
-        "# meshes), facing +Y, origin on the ground. Clips idle / walk / trot / gallop. Ride it with a",
-        "# Rider on the player (F near a mount point) -- see tools/gen_horse.py and toyengine/scene/mount.h.",
-        f"# {GENERATED}",
-        "object:",
-        "  name: horse",
-        "  components:",
-        "    - type: Transform",
-        "      position: {x: 0, y: 0, z: 0}",
-        "    - type: Animator",
-        "      auto_play: idle",
-        "      default_crossfade: 0.25",
-        "      states:",
-        "        - {name: idle, clip: animations/horse/idle.yaml}",
-        "        - {name: walk, clip: animations/horse/walk.yaml}",
-        "        - {name: trot, clip: animations/horse/trot.yaml}",
-        "        - {name: gallop, clip: animations/horse/gallop.yaml}",
-        "    # The body: a capsule round the barrel (head and rump overhang it). Its Mount steers it.",
-        "    - type: CharacterController",
-        "      radius: 0.62",
-        "      height: 2.0",
-        "      step_height: 0.4",
-        "      slope_limit: 40",
-        "      snap_distance: 0.45",
-        "      acceleration: 40",
-        "      jump_height: 0.9",
-        "      face_movement: false",
-        "      push_strength: 500",
-        "      player_input: false",
-        "    - type: Mount",
-        f"      walk_speed: {num(round(walk, 3))}       # the gait clips' ground speeds (m/s)",
-        f"      trot_speed: {num(round(trot, 3))}",
-        f"      gallop_speed: {num(round(gallop, 3))}",
-        "      acceleration: 4",
-        "      braking: 6",
-        "      turn_rate: 150",
-        "      gallop_turn_rate: 70",
-        "      saddle: body/saddle",
-        "      stirrup_l: body/saddle/stirrup_l",
-        "      stirrup_r: body/saddle/stirrup_r",
-        "      rein_l: body/neck/rein_l",
-        "      rein_r: body/neck/rein_r",
-        "      mount_point_l: mount_point_l",
-        "      mount_point_r: mount_point_r",
-        "      camera_offset_z: 2.2",
-        "      camera_distance: 6.5",
-        "    # Four hooves on the ground; the body rises / drops and pitches between front and hind.",
-        "    - type: FootIK",
-        "      pelvis: body",
-        "      mode: solve",
-        "      body_pitch: true",
-        "      max_body_pitch: 18",
-        "      ray_up: 0.45",
-        "      ray_down: 0.45",
-        "      max_pelvis_drop: 0.3",
-        "      max_foot_angle: 25",
-        "      blend_speed: 10",
-        "      legs:",
-    ]
-    for kind in ("fore", "hind"):
-        for side in "lr":
-            up, lo, hoof = leg_paths(kind, side)
-            extra = ", front: true" if kind == "fore" else ", pole: {x: 0, y: -1, z: 0}"
-            lines.append(f"        - {{thigh: {up}, shin: {lo}, foot: {hoof}{extra}}}")
-    lines.append("  children:")
-    lines += gm.emit_node(RIG, 4)
-    for side, sx in (("l", -1), ("r", 1)):
-        lines += [f"    - name: mount_point_{side}",
-                  "      components:",
-                  "        - type: Transform",
-                  f"          {gm.vec('position', (sx * MOUNT_POINT[0], MOUNT_POINT[1], MOUNT_POINT[2]))}",
-                  "          rotation: {x: 0, y: 0, z: 0}",
-                  "      children: []"]
-    os.makedirs(os.path.dirname(OBJECT_PATH), exist_ok=True)
-    with open(OBJECT_PATH, "w") as fh:
-        fh.write("\n".join(lines) + "\n")
+                tracks.append((bone, "rotation_quat", [(0.0, q), (length, q)], "linear"))
+    write_clip("idle", length, tracks, anim_dir=ANIM_DIR, label="horse")
 
 
 def main():
     os.makedirs(MESH_DIR, exist_ok=True)
     for name, (r, length) in PART_MESHES.items():
         gm.capsule_mesh(os.path.join(MESH_DIR, f"{name}.yaml"), r, length, label="horse part", generated=GENERATED)
+    write_rig()
     idle_clip()
     # Walk: four-beat (LH, LF, RH, RF a quarter apart), each hoof down 62% of the cycle.
     walk = gait_clip("walk", 0.9, duty=0.62, stride=0.75, lift_fore=0.14, lift_hind=0.1,
@@ -487,7 +658,7 @@ def main():
                        phases={"hind_l": 0.0, "hind_r": -0.1, "fore_l": -0.32, "fore_r": -0.42},
                        bob=0.06, bob_freq=1, pitch=5.0, neck_nod=8, tail_sway=8)
     write_object((walk, trot, gallop))
-    print(f"wrote {OBJECT_PATH} + {len(PART_MESHES)} meshes + 4 clips "
+    print(f"wrote {RIG_PATH} + {OBJECT_PATH} + {len(PART_MESHES)} meshes + 4 clips "
           f"(walk {walk:.2f} m/s, trot {trot:.2f} m/s, gallop {gallop:.2f} m/s)")
 
 

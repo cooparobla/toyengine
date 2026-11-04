@@ -364,12 +364,9 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             f_vec3("position", glm::vec3(0.0f), 0.02f, true),
             f_vec3("rotation", glm::vec3(0.0f), 0.5f, true),
             f_vec3("scale", glm::vec3(1.0f), 0.01f, true),
-            with_tip(f_float("bone_length", 0.0f, 0.01f, 0.0f, 10000.0f),
-                     "Optional length of this object as a bone (m), for the editor's Bone origin style. 0 lets the editor guess "
-                     "it from the hierarchy; the runtime ignores it"),
-            with_tip(f_enum("origin_style", {"Inherit", "Axes", "Orb", "Bone"}),
-                     "How this object's origin is drawn in the editor. Inherit takes the nearest ancestor's; Bone is only "
-                     "available under an Animator, where it is the default; Axes otherwise. The runtime ignores it"),
+            with_tip(f_enum("origin_style", {"Inherit", "Axes", "Orb"}),
+                     "How this object's origin is drawn in the editor. Inherit takes the nearest ancestor's; Axes otherwise. "
+                     "The runtime ignores it"),
             with_tip(f_float("origin_size", 0.0f, 0.005f, 0.0f, 0.5f),
                      "How big this object's origin glyph is drawn (m) in the editor. 0 inherits; the runtime ignores it"),
         }, true, false});
@@ -1702,12 +1699,36 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             with_tip(f_bool("apply_root_motion", false),
                      "Move this object by the clips' root motion (a CharacterController with "
                      "Use Root Motion takes it instead)")}});
+        add({"Rig", "Animation", {
+            with_tip(f_asset("rig", "rigs", ".yaml", true, true), "The skeleton asset: bone names, rest head/tail/roll"),
+        }});
+        add({"SkeletalAnimator", "Animation", {
+            with_tip(f_items("states", {
+                f_string("name"),
+                f_asset("clip", "animations", ".yaml"),
+                f_enum("wrap", {"loop", "once", "pingpong", ""}),
+                f_float("speed", 1.0f, 0.01f, 0.0f, 100.0f),
+            }), "The rig's skeletal clips, by the state name gameplay crossfades to (bone tracks, "
+                "not object/property tracks -- see coopa/rig/skeletal_clip.h).\n"
+                "Clip: the file played — shared with every other rig naming the same path.\n"
+                "Wrap and Speed override the clip's own; (none) keeps what the clip says"),
+            f_string("auto_play", "", true),
+            f_float("speed", 1.0f, 0.01f, 0.0f, 100.0f),
+            f_float("default_crossfade", 0.0f, 0.005f, 0.0f, 10.0f),
+            with_tip(f_bool("apply_root_motion", false),
+                     "Move this object by the clips' root motion (a CharacterController with "
+                     "Use Root Motion takes it instead)")}});
+        add({"BoneAttachment", "Animation", {
+            with_tip(f_string("bone", "", true), "Bone name in the rig this object rides"),
+            with_tip(f_string("rig", ""), "Optional explicit Rig (a scene path); empty finds the nearest ancestor carrying one"),
+            with_tip(f_enum("at", {"head", "tail"}), "Which end of the bone this object's own Transform offsets from"),
+        }});
         // IK over the animated pose (coopa/animation/ik_components.h, toyengine/scene/foot_ik.h).
         // Bone and target fields are paths from this object, like an animation track's object.
         add({"TwoBoneIK", "Animation", {
-            with_tip(f_string("upper", "", true), "Hip / shoulder bone path"),
-            with_tip(f_string("lower", "", true), "Knee / elbow bone path"),
-            with_tip(f_string("end", "", true), "Ankle / wrist bone path (its origin reaches the target)"),
+            with_tip(f_string("upper", "", true), "Hip / shoulder bone path or name (a Rig's bone, if the object carries one)"),
+            with_tip(f_string("lower", "", true), "Knee / elbow bone path or name"),
+            with_tip(f_string("end", "", true), "Ankle / wrist bone path or name (its origin reaches the target)"),
             with_tip(f_string("target", "", true), "Object to reach for"),
             with_tip(f_string("pole", ""), "Object the knee / elbow bends toward; empty keeps the animated bend"),
             f_float("weight", 1.0f, 0.01f, 0.0f, 1.0f, true),
@@ -1716,7 +1737,7 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             with_tip(f_int("priority", 0, -1000, 1000), "Solve order: lower first (ties: chains, two-bone, look-at)"),
         }});
         add({"ChainIK", "Animation", {
-            with_tip(f_string("root", "", true), "First bone of the chain (it pivots in place)"),
+            with_tip(f_string("root", "", true), "First bone of the chain (it pivots in place); a path or a Rig bone name"),
             with_tip(f_string("tip", "", true), "Last bone, under root: its origin reaches the target"),
             with_tip(f_string("target", "", true), "Object to reach for"),
             f_float("weight", 1.0f, 0.01f, 0.0f, 1.0f, true),
@@ -1726,7 +1747,7 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             with_tip(f_int("priority", 0, -1000, 1000), "Solve order: lower first (ties: chains, two-bone, look-at)"),
         }});
         add({"LookAtIK", "Animation", {
-            with_tip(f_string("bone", "", true), "Bone path; empty turns this object"),
+            with_tip(f_string("bone", "", true), "Bone path or Rig bone name; empty turns this object"),
             with_tip(f_string("target", "", true), "Object to look at"),
             with_tip(f_vec3("forward_axis", glm::vec3(0.0f, 1.0f, 0.0f), 0.01f), "The bone's local looking axis"),
             with_tip(f_vec3("up_axis", glm::vec3(0.0f, 0.0f, 1.0f), 0.01f), "The bone's local up, kept from rolling"),

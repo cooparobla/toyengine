@@ -16,6 +16,8 @@
 
 #include <coopa/animation/animated_property.h>
 #include <coopa/animation/animation_clip.h>
+#include <coopa/rig/rig_component.h>
+#include <coopa/rig/skeletal_clip.h>
 #include <coopa/scene/scene_object.h>
 
 #include <algorithm>
@@ -36,6 +38,19 @@ float wrap_clip_time(const coopa::anim::AnimationClip& clip, float t);
  * @return How many tracks were applied.
  */
 int apply_clip_pose(const coopa::anim::AnimationClip& clip, float t, coopa::scene::SceneObject* root);
+
+/**
+ * @brief Writes a SkeletalClip's pose at clip time `t` (not wrapped here) into `rig`'s pose
+ *        buffer -- the bone-addressed sibling of apply_clip_pose(), for the Timeline's edit-mode
+ *        preview over a coopa::rig::Rig character. Bone lookup is by name
+ *        (`coopa::rig::Rig::find_bone`), matching `coopa::rig::SkeletalAnimator::rebind()`'s own
+ *        rule. A channel with no keys is left untouched (a hand-posed or IK-driven bone shows
+ *        through). Root-motion translation/yaw is held at the clip's start value, exactly as
+ *        `coopa::rig::SkeletalAnimator::write_sampled_` holds it during real playback, so a
+ *        walk cycle previews in place rather than sliding the rig out of the viewport.
+ * @return How many bone tracks were applied.
+ */
+int apply_bone_pose(const coopa::rig::SkeletalClip& clip, float t, coopa::rig::Rig* rig);
 
 }  // namespace toy::editor
 

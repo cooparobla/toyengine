@@ -101,33 +101,6 @@ struct Torso {
     }
 };
 
-/** A prefab's rig nodes without its renderers or Animator (the test adds its own Animator). */
-fkyaml::node strip_rig(const fkyaml::node& obj) {
-    fkyaml::node out = fkyaml::node::mapping();
-    out["name"] = obj["name"];
-    fkyaml::node comps = fkyaml::node::sequence();
-    for (const auto& c : obj["components"]) {
-        const std::string type = c["type"].get_value<std::string>();
-        if (type == "Animator" || type == "MeshRenderer") continue;
-        comps.get_value_ref<fkyaml::node::sequence_type&>().push_back(c);
-    }
-    out["components"] = comps;
-    fkyaml::node kids = fkyaml::node::sequence();
-    if (obj.contains("children") && obj["children"].is_sequence()) {
-        for (const auto& child : obj["children"]) {
-            bool render_part = false;
-            for (const auto& c : child["components"]) render_part = render_part || c["type"].get_value<std::string>() == "MeshRenderer";
-            if (!render_part) kids.get_value_ref<fkyaml::node::sequence_type&>().push_back(strip_rig(child));
-        }
-    }
-    out["children"] = kids;
-    return out;
-}
-
-fkyaml::node read_yaml(const std::string& path) {
-    std::ifstream in(path);
-    return fkyaml::node::deserialize(in);
-}
 
 } // namespace
 
@@ -208,77 +181,8 @@ COOPA_TEST(match_target_rotation_turns_the_end_bones) {
     expect(glm::length(world(t.hand) - world(t.hand_target)) < 2e-3f, "match rotation: ...and the hand still reaches it");
 }
 
-/**
- * @brief The fully IK mannequin moves like the keyframed one: mannequin_ik playing each baked
- *        clip (only target empties keyed) and mannequin playing the keyframed clip put every
- *        joint in the same place, frame for frame.
- */
-COOPA_TEST(ik_mannequin_reproduces_the_keyframed_clips) {
-    static coopa::asset::AssetManager assets;   // parsers capture it; must outlive them
-    coopa::anim::register_animation_components(assets);
-    const std::string root_dir = ROOT_DIR;
-    const fkyaml::node fk_prefab = read_yaml(root_dir + "/assets/objects/characters/mannequin.yaml");
-    const fkyaml::node ik_prefab = read_yaml(root_dir + "/assets/objects/characters/mannequin_ik.yaml");
-
-    const char* joints[] = {"pelvis", "chest", "neck", "head", "hand_l", "hand_r", "lower_arm_l", "lower_arm_r",
-                            "shin_l", "shin_r", "foot_l", "foot_r"};
-    struct Error { float worst = 0.0f, mean = 0.0f; std::string at; };
-    // Plays `clip` on both rigs at a fixed dt for 50 frames; returns the joints' position error.
-    auto compare = [&](const char* clip, float dt) {
-        Error e;
-        fkyaml::node doc = fkyaml::node::mapping();
-        doc["scene"] = fkyaml::node::mapping();
-        doc["scene"]["scene_name"] = fkyaml::node(std::string("ik_mimic"));
-        doc["scene"]["root_objects"] = fkyaml::node::sequence();
-        doc["scene"]["root_objects"].get_value_ref<fkyaml::node::sequence_type&>().push_back(strip_rig(fk_prefab["object"]));
-        doc["scene"]["root_objects"].get_value_ref<fkyaml::node::sequence_type&>().push_back(strip_rig(ik_prefab["object"]));
-        Scene scene = coopa::scene::SceneLoader::load_from_node(doc, (coopa::test::scratch_dir() / "ik_mimic.yaml").string());
-        SceneObject* fk_root = scene.find_object("mannequin");
-        SceneObject* ik_root = scene.find_object("mannequin_ik");
-        if (!fk_root || !ik_root) { e.worst = 1e9f; e.at = "missing rig"; return e; }
-        const glm::vec3 apart(3.0f, 0.0f, 0.0f);
-        ik_root->get_transform()->transform().set_position(apart);
-        auto play = [&](SceneObject* root, const std::string& dir) {
-            auto* a = root->add_component<coopa::anim::Animator>();
-            a->add_state(clip, std::make_shared<coopa::anim::AnimationClip>(coopa::anim::parse_clip(
-                                   read_yaml(root_dir + "/assets/animations/" + dir + "/" + clip + ".yaml"))));
-            a->auto_play = clip;
-        };
-        play(fk_root, "mannequin");
-        play(ik_root, "mannequin_ik");
-        scene.start();
-        coopa::anim::install_animation_system(scene);
-        coopa::anim::install_ik_system(scene);
-        coopa::scene::install_transform_system(scene);
-        double sum = 0.0;
-        int n = 0;
-        for (int frame = 0; frame < 50; ++frame) {
-            scene.update(dt);
-            scene.late_update(dt);
-            for (const char* j : joints) {
-                SceneObject* a = fk_root->find_descendant(j);
-                SceneObject* b = ik_root->find_descendant(j);
-                if (!a || !b) { e.worst = 1e9f; e.at = j; continue; }
-                const float err = glm::length((world(b) - apart) - world(a));
-                sum += err;
-                ++n;
-                if (err > e.worst) { e.worst = err; e.at = std::string(j) + " @" + std::to_string(frame); }
-            }
-        }
-        e.mean = n ? static_cast<float>(sum / n) : 0.0f;
-        return e;
-    };
-    for (const char* clip : {"idle", "walk", "run", "jump"}) {
-        // On the keys (30 fps, the baked clips' frame grid): the same pose, to the millimetre.
-        const Error on = compare(clip, 1.0f / 30.0f);
-        expect(on.worst < 2e-3f, std::string(clip) + ": on every key the IK mannequin's joints match the keyframed ones (worst " +
-                                      std::to_string(on.worst) + " m at " + on.at + ")");
-        // Between keys (60 fps): targets interpolate along straight chords while the keyframed
-        // limbs swing along arcs, so a near-straight leg's knee can stray for a frame -- a few
-        // centimetres at most in the run, and millimetres on average.
-        const Error mid = compare(clip, 1.0f / 60.0f);
-        expect(mid.mean < 5e-3f && mid.worst < 0.08f,
-               std::string(clip) + ": between keys the joints stay close (mean " + std::to_string(mid.mean) + " m, worst " +
-                   std::to_string(mid.worst) + " m at " + mid.at + ")");
-    }
-}
+// A former test here (ik_mannequin_reproduces_the_keyframed_clips) compared the mannequin and
+// mannequin_ik prefabs' SceneObject-addressed joints frame-for-frame. Both prefabs now pose a
+// coopa::rig::Rig instead (bones are not SceneObjects), so that comparison no longer has
+// anything to address; coopa/rig/ik_components.h's own bone-space IK is covered by
+// tests/engine/unit/rig_ik_test.cpp instead.

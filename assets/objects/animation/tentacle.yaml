@@ -5,32 +5,13 @@ object:
   components:
     - type: Transform
       position: {x: 0, y: 0, z: 0}
-    - type: Animator
+    - type: Rig
+      rig: rigs/tentacle.yaml
+    - type: SkeletalAnimator
       auto_play: sway
       states:
         - {name: sway, clip: animations/tentacle/sway.yaml}
   children:
-    - name: seg_0
-      components:
-        - type: Transform
-          position: {x: 0, y: 0, z: 0.0}
-      children:
-        - name: seg_1
-          components:
-            - type: Transform
-              position: {x: 0, y: 0, z: 0.75}
-          children:
-            - name: seg_2
-              components:
-                - type: Transform
-                  position: {x: 0, y: 0, z: 0.75}
-              children:
-                - name: seg_3
-                  components:
-                    - type: Transform
-                      position: {x: 0, y: 0, z: 0.75}
-                  children:
-                    []
     - name: tentacle_skin
       components:
         - type: Transform

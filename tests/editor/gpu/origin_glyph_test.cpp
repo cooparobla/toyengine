@@ -147,18 +147,7 @@ COOPA_TEST(bones_point_at_the_child_joints) {
     expect(with_props.size() == 1 && glm::distance(with_props[0], world_of(foot)) < 1e-4f,
            "a mesh prop and a light on a joint add no bones (" + std::to_string(with_props.size()) + " tail(s))");
 
-    // An explicit bone_length collapses the hip to one bone of exactly that length.
-    const int ci = doc.find_component(hip, "Transform");
-    Node t = doc.find(hip)->at("components").as_seq()[static_cast<size_t>(ci)];
-    t["bone_length"] = make_float(0.25);
-    doc.set_component(hip, ci, t, "Bone Length");
-    const std::vector<glm::vec3> forced = app.bone_tails_for(hip);
-    expect(forced.size() == 1 && std::abs(glm::distance(forced[0], hip_p) - 0.25f) < 1e-4f,
-           "a stored bone_length draws one bone of that length");
-
     // A look at the rig itself (EDITOR_DUMP_DIR), in each style.
-    t.as_map().erase("bone_length");
-    doc.set_component(hip, ci, t, "Bone Length");
     app.camera().focus = hip_p;
     app.camera().distance = 3.0f;
     app.camera().apply();
@@ -419,113 +408,13 @@ COOPA_TEST(pose_mode_draws_and_picks_bones) {
  *        display -- a styled bone follows the Origins overlay. Bone can never be reached
  *        without an Animator above the object.
  */
-COOPA_TEST(bone_is_an_animator_rigs_default) {
-    EditorSession session;
-    auto& engine = session.engine;
-    auto& app = session.app;
-    auto& doc = app.document();
-    auto& in = session.in;
-    const ObjectId cube = object_named(app, "cube");
-    const ObjectId hip = doc.add_object(doc.make_object("hip"), cube);
-    doc.add_object(doc.make_object("knee"), hip);
-    doc.set_transform(hip, {0.0f, 0.0f, 1.2f}, {}, {1, 1, 1}, "pose");
-    doc.set_transform(object_named(app, "knee"), {0.0f, 0.0f, 1.2f}, {}, {1, 1, 1}, "pose");
-    app.sync().rebuild(engine, doc);
-    app.camera().focus = {0.0f, 0.0f, 1.8f};
-    app.camera().distance = 6.0f;
-    app.camera().apply();
-    doc.clear_selection();
-    tick(engine, 4);
-    const coopa::gfx::util::ImageData no_animator = engine.capture_image(false);
-    expect(app.origin_style_for(hip) == OriginStyle::Axes, "no Animator yet: Axes, like any other joint");
-
-    doc.select(cube);
-    app.add_animator(cube);
-    doc.clear_selection();
-    tick(engine, 4);
-    expect(app.origin_style_for(hip) == OriginStyle::Bone, "an Animator above it: Bone, with nothing set");
-    const coopa::gfx::util::ImageData default_bone = engine.capture_image(false);
-    expect(changed_pixels(no_animator, default_bone) > 150, "the rig draws as a bone with no mode switch (" +
-                                                                 std::to_string(changed_pixels(no_animator, default_bone)) + " pixels moved)");
-
-    const auto mid = screen_of(engine, app, hip, {0.0f, 0.0f, 0.6f}, in.scale);
-    coopa::test::require(mid.has_value(), "the bone's middle would be on screen");
-    expect(app.pick_object(*mid) == hip, "...and it is clickable along its body");
-
-    // Axes on the rig's root overrides the default and switches the whole hierarchy back.
-    doc.select(cube);
-    app.set_selection_origin_style(OriginStyle::Axes);
-    doc.clear_selection();
-    tick(engine, 4);
-    expect(app.origin_style_for(hip) == OriginStyle::Axes, "Axes on the root overrides the rig default");
-    const coopa::gfx::util::ImageData axes_override = engine.capture_image(false);
-    expect(changed_pixels(default_bone, axes_override) > 150, "...and the picture changes back (" +
-                                                                    std::to_string(changed_pixels(default_bone, axes_override)) + " pixels moved)");
-
-    // Clearing the override returns to the rig default, and -- unlike Pose mode's own bone
-    // display -- a styled bone is hidden by the Origins overlay.
-    doc.select(cube);
-    app.set_selection_origin_style(std::nullopt);
-    doc.clear_selection();
-    tick(engine, 4);
-    expect(app.origin_style_for(hip) == OriginStyle::Bone, "Inherit hands it back to the rig default");
-    app.set_show_origins(false);
-    tick(engine, 3);
-    expect(app.pick_object(*mid) != hip, "turning Origins off hides a styled bone");
-    app.set_show_origins(true);
-    tick(engine, 3);
-
-    // Bone can't be reached without an Animator above the object -- a hand-edited key on a
-    // plain hierarchy is inert, and falls back to Axes like anything else unstyled.
-    const ObjectId marker = doc.add_object(doc.make_object("marker"));
-    doc.select(marker);
-    app.set_selection_origin_style(OriginStyle::Bone);
-    doc.clear_selection();
-    app.sync().rebuild(engine, doc);
-    tick(engine, 3);
-    expect(app.origin_style_for(marker) == OriginStyle::Axes,
-           "Bone set explicitly with no Animator above it still resolves to Axes");
-}
-
-/**
- * @brief A rig placed as a prefab instance in a scene reads as a skeleton too, not just the
- * asset itself. `TimelinePanel::rig_of_` deliberately reads only a scene instance's own override
- * node (to redirect dope-sheet editing to the source asset); the Bone style is a read-only
- * display, so it must not inherit that redirect -- it resolves through the instance's EFFECTIVE
- * components instead (`EditorApp::rig_root_of_`).
- */
-COOPA_TEST(bone_reaches_through_a_scene_placed_instance) {
-    EditorSession session;
-    auto& engine = session.engine;
-    auto& app = session.app;
-    auto& doc = app.document();
-    const ObjectId cube = object_named(app, "cube");
-    const ObjectId hip = doc.add_object(doc.make_object("hip"), cube);
-    doc.add_object(doc.make_object("knee"), hip);
-    doc.set_transform(hip, {0.0f, 0.0f, 1.2f}, {}, {1, 1, 1}, "pose");
-    doc.set_transform(object_named(app, "knee"), {0.0f, 0.0f, 1.2f}, {}, {1, 1, 1}, "pose");
-    app.add_animator(cube);
-    app.sync().rebuild(engine, doc);
-    tick(engine, 4);
-    expect(app.origin_style_for(hip) == OriginStyle::Bone, "a directly-authored rig: Bone, as established above");
-
-    // Turn the rig into an object asset: `cube` becomes a placed instance (`prefab: objects/...`),
-    // and `hip`/`knee` no longer have their own overrides -- their Animator and Transform are
-    // only reachable through the instance's effective components, exactly like outlandia's
-    // rig_player.yaml placed into a scene.
-    doc.select(cube);
-    expect(app.create_object_asset_from_selection(), "Create Object Asset from the rig's selection");
-    doc.clear_selection();
-    tick(engine, 4);
-    const Node* inst = doc.find(cube);
-    expect(inst && get_string(*inst, "prefab") == "objects/cube", "the rig root is now a placed instance");
-    // The conversion replaces `cube`'s own node outright, so its old children's ids are gone --
-    // re-find "hip" by name, as a fresh editor session opening this scene would.
-    const ObjectId hip_in_instance = object_named(app, "hip");
-    coopa::test::require(hip_in_instance != 0, "the instance's materialized placeholder for \"hip\" exists");
-    expect(app.origin_style_for(hip_in_instance) == OriginStyle::Bone,
-           "a joint under a PLACED instance's Animator still reads as Bone, not Axes");
-}
+// Two former tests here (bone_is_an_animator_rigs_default, bone_reaches_through_a_scene_placed_
+// instance) covered the Bone OriginStyle defaulting on at or under an Animator. That default is
+// gone: a rig's actual bones are coopa::rig::Rig bones now, not SceneObjects, so a Transform has
+// nothing left to style as one -- which is the fix for the bug that motivated removing it (an IK
+// target empty, an attach socket, or any other mesh-less object near an Animator used to sprout
+// a clickable bone glyph of its own). Pose mode's own bone display (pose_mode_draws_and_picks_
+// bones, above) is unaffected -- it never depended on this default.
 
 /** @brief "Origins" shows and hides them; "Cameras / Lights" is a separate toggle. */
 COOPA_TEST(the_origins_toggle_is_what_hides_them) {

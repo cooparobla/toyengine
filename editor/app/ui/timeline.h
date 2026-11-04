@@ -28,6 +28,13 @@
  * - Space plays, Left / Right step a frame, Up / Down jump to the previous / next key, Home goes
  * to the start; the wheel zooms the frame range, Shift-wheel or a middle-drag pans it.
  *
+ * Pose Mode on a coopa::rig::Rig (editor/rig/, bone_pose_edit.h) draws a SEPARATE bone dope
+ * sheet (draw_bone_timeline_/draw_bone_dope_sheet_) over a BoneClipModel (rig_pose_clip_,
+ * bone_clip_model.h) instead of this one's ClipModel -- rows are bone names, not objects, G/R/S
+ * poses bones rather than Transforms, and "I" is EditorApp::rig_pose_insert_keys_(). The two dope
+ * sheets are mutually exclusive per frame (draw_timeline_ picks one), each with its own
+ * selection/drag/view state so switching between them never loses either one's place.
+ *
  * One class per panel, owning its own state (see editor/app/README.md). EditorApp holds it
  * behind a forward declaration, so editing this header recompiles this panel and
  * editor_app.cpp -- not every panel.
@@ -40,6 +47,7 @@
 
 // Types this panel's declarations name (pre-seeded from the repo's type index;
 // prune anything the declarations do not actually need).
+#include "editor/anim/bone_clip_model.h"
 #include "editor/anim/clip_model.h"
 #include "editor/core/undo.h"
 #include <coopa/animation/animator.h>
@@ -251,6 +259,35 @@ public:
 
     void anim_select_all_keys_();
 
+    // =================================================================================
+    // Timeline's bone dope sheet (Pose Mode on a coopa::rig::Rig, over rig_pose_clip_)
+    // =================================================================================
+
+    /** @brief The bone-clip header + dope sheet, drawn instead of the property one while Pose
+     *         Mode is open on a coopa::rig::Rig (`app_.pose_rig_component_()` non-null). */
+    void draw_bone_timeline_(imm::Context& ctx, const imm::Box& hb, const imm::Box& body, float x);
+
+    /** @brief The bone-addressed sibling of draw_dope_sheet_: bone-name rows (depth from the
+     *         rig's parent chain) expand into location/rotation/scale channel sub-rows. */
+    void draw_bone_dope_sheet_(imm::Context& ctx, const imm::Box& body);
+
+    /** @brief One undoable edit of rig_pose_clip_.model; the file is written once a frame
+     *         (timeline_frame_()), not per edit -- the bone-clip sibling of anim_clip_edit_. */
+    void rig_pose_clip_edit_(const std::string& label, const std::function<void(BoneClipModel&)>& fn, const std::string& merge_key = {});
+
+    void rig_pose_save_clip_();
+
+    void rig_pose_delete_selected_keys_();
+
+    void rig_pose_delete_selected_event_();
+
+    void rig_pose_select_all_keys_();
+
+    /** @brief The bone-clip sibling of draw_events_lane_, over rig_pose_clip_.model.events. */
+    template<typename XOf, typename TOf>
+    void draw_bone_events_lane_(imm::Context& ctx, const imm::Box& track, float y, float row_h, const XOf& x_of, const TOf& t_of,
+                                float pps, bool in_track, bool& on_key);
+
 public:
     // --- Animation (tests, menus) ---
     ObjectId animation_rig() const;
@@ -282,6 +319,12 @@ public:
     bool keyed_now(ObjectId id, const std::string& property) const { return anim_keyed_now_(id, property); }
     void select_all_keys() { anim_select_all_keys_(); }
     void set_selected_key_interpolation(const std::string& ease);
+    /** @brief The bone-clip siblings of the three above, over rig_pose_clip_ (Pose Mode). */
+    void select_all_bone_keys() { rig_pose_select_all_keys_(); }
+    void delete_selected_bone_keys() { rig_pose_delete_selected_keys_(); }
+    void set_selected_bone_key_interpolation(const std::string& ease);
+    /** @brief Every distinct key time rig_pose_clip_ has, for a test to assert against. */
+    std::vector<float> bone_clip_key_times() const;
     void rename_animation_clip(const std::string& to) { anim_rename_clip_(to); }
     void add_animator(ObjectId id) { anim_add_animator_(id); }
     void new_animation_clip(const std::string& name = "clip") { anim_new_clip_(name); }

@@ -11,18 +11,19 @@
  * mount point, checks the character's capsule fits there (the other side when not), and
  * teleports the controller there when the climb-down ends.
  *
- * Placement is an coopa::anim::IkDriver (IkSystem, order 320 -- after the Animator, before the
- * limb solvers): each frame the rider's root is put on the saddle (`seat_offset` in the saddle's
- * frame), so it rides the saddle's bob with no frame of lag; then the rig's own leg TwoBoneIKs
- * are pointed at the stirrups (knees pushed out round the barrel), its arm TwoBoneIKs at the
- * reins, and its spine ChainIK leans forward with the horse's speed. The rig must be IK-driven
- * like objects/characters/mannequin_ik (TwoBoneIKs ending at the feet and hands, a ChainIK
+ * Placement is a toy::scene::RigIkDriver (RigIkDriverSystem's pre-solve bracket, order 319 --
+ * before coopa::rig::IkSystem's 320): each frame the rider's root is put on the saddle
+ * (`seat_offset` in the saddle's frame), so it rides the saddle's bob with no frame of lag;
+ * then the rig's own leg coopa::rig::TwoBoneIKs are pointed at the stirrups (knees pushed out
+ * round the barrel), its arm TwoBoneIKs at the reins, and its spine coopa::rig::ChainIK leans
+ * forward with the horse's speed. The rig must be IK-driven like objects/characters/mannequin_ik
+ * (TwoBoneIKs whose `end` is the bone name "foot_l"/"foot_r"/"hand_l"/"hand_r", a ChainIK
  * spine); a rig without them is still seated, posed by the ride clip alone. Climbing on and
  * off follows an arc between the mount point and the seat over `mount_time` / `dismount_time`,
  * the IK weights ramping with it.
  *
- * The Rider's IK `priority` defaults to 100, so IkSystem runs it after the horse's own drivers
- * (its FootIK raises and pitches the body, and so the saddle) whatever the scene order.
+ * The Rider's `priority` defaults to 100, so RigIkDriverSystem runs it after the horse's own
+ * drivers (its FootIK raises and pitches the body, and so the saddle) whatever the scene order.
  *
  * `interact` is pushed by Engine::drive_character_controllers_() (the "interact" action, F).
  *
@@ -48,10 +49,11 @@
 
 #include <string>
 
-#include <coopa/animation/animator.h>
-#include <coopa/animation/ik_components.h>
+#include <coopa/rig/ik_components.h>
+#include <coopa/rig/skeletal_animator.h>
 
 #include <toyengine/scene/character_controller.h>
+#include <toyengine/scene/rig_ik_driver.h>
 
 namespace toy {
 namespace scene {
@@ -63,7 +65,7 @@ class Mount;
  * @class Rider
  * @brief Mounts, rides and dismounts a Mount (see the file doc).
  */
-class Rider : public coopa::anim::IkDriver {
+class Rider : public coopa::scene::Component, public RigIkDriver {
 public:
     std::string type_name() const override { return "Rider"; }
 
@@ -112,7 +114,7 @@ public:
 
 private:
     struct Limb {
-        coopa::anim::TwoBoneIK* ik = nullptr;
+        coopa::rig::TwoBoneIK* ik = nullptr;
         std::string end;             ///< The end bone's name.
     };
 
@@ -133,8 +135,8 @@ private:
     Mount* mount_ = nullptr;
     CharacterController* controller_ = nullptr;
     FootIK* foot_ik_ = nullptr;
-    coopa::anim::Animator* animator_ = nullptr;
-    coopa::anim::ChainIK* spine_ = nullptr;
+    coopa::rig::SkeletalAnimator* animator_ = nullptr;
+    coopa::rig::ChainIK* spine_ = nullptr;
     Limb legs_[2];
     Limb arms_[2];
     float t_ = 0.0f;

@@ -1,28 +1,36 @@
 /**
  * @file ragdoll.h
- * @brief Ragdoll -- turns an animated rig into jointed physics bodies and back: bones follow the
- *        Animator as kinematic bodies (so hits register), go limp under physics on activate(),
- *        and blend from wherever they fell back into an animation state on deactivate().
+ * @brief Ragdoll -- turns an animated rig into jointed physics bodies and back: bones follow
+ *        their SkeletalAnimator pose as kinematic bodies (so hits register), go limp under
+ *        physics on activate(), and blend from wherever they fell back into an animation state
+ *        on deactivate().
  *
- * Put it on the rig ROOT (the object with the Animator). Each entry of `bones` names a bone by
- * path from the root and gives it a collision shape, a mass and a joint to the nearest ANCESTOR
- * bone in the list (the first, top-most bone -- usually the pelvis -- has none). start() adds a
- * RigidbodyComponent and a Capsule/Box/SphereCollider to each bone object; the joints are created
- * straight in the physics world once those bodies exist, from the rig's BIND pose (the pose the
- * bones have at start(), before any animation), so limits are measured from the authored rest
- * pose no matter which animation is playing when the ragdoll activates.
+ * Put it on the rig ROOT (the object carrying the Rig and SkeletalAnimator). Each entry of
+ * `bones` names a bone of that rig and gives it a collision shape, a mass and a joint to the
+ * nearest ANCESTOR bone in the list (the first, top-most bone -- usually the pelvis -- has
+ * none). Since a bone is not itself a SceneObject, start() creates one flat physics PROXY
+ * object per listed bone (a child of the Ragdoll's own object, named "_ragdoll_<bone>"), each
+ * carrying a BoneAttachment (so it rides the bone while animated), a RigidbodyComponent and a
+ * Capsule/Box/SphereCollider. The joints are created straight in the physics world once those
+ * bodies exist, from the rig's REST pose (coopa::rig::Rig::rest_model_matrix -- unaffected by
+ * whatever clip is playing), so limits are measured the same way no matter when the ragdoll
+ * activates.
  *
  * Modes:
- *   - Animated: bones are kinematic and follow their Transforms (the Animator, IK). Physics sees
- *     them -- a raycast hits an arm, a ball bounces off a leg -- but cannot move them.
- *   - Ragdoll: bones are dynamic, the Animator is cleared (Animator::clear(), so nothing
- *     re-applies a pose over the physics), IK under the rig is suspended, and physics writes the
- *     bone Transforms (PhysicsSystem's hierarchical write-back). Once the body has finished
- *     moving it is put to sleep (`rest_travel`); a later blow, or anything touching it, takes
- *     it up again.
- *   - Blending (after deactivate()): bones are kinematic again and the Animator plays the
- *     recovery state; each frame every bone's world pose is blended from where the ragdoll left
- *     it to the freshly animated pose over `blend_time`, then the mode returns to Animated.
+ *   - Animated: a bone's proxy is kinematic, carried by its BoneAttachment (which itself reads
+ *     the SkeletalAnimator's pose through the Rig). Physics sees it -- a raycast hits an arm, a
+ *     ball bounces off a leg -- but cannot move it.
+ *   - Ragdoll: proxies are dynamic, the SkeletalAnimator is cleared (SkeletalAnimator::clear(),
+ *     so nothing re-applies a pose over the physics), IK under the rig is suspended, and physics
+ *     writes the proxies' Transforms directly (PhysicsSystem's write-back) -- the BoneAttachments
+ *     are left in place but idle, since nothing drives the Rig's pose while limp so there is
+ *     nothing for them to apply. Once the body has finished moving it is put to sleep
+ *     (`rest_travel`); a later blow, or anything touching it, takes it up again.
+ *   - Blending (after deactivate()): proxies are kinematic again and the SkeletalAnimator plays
+ *     the recovery state; each frame every bone's world pose is blended from where the ragdoll
+ *     left it to the freshly animated pose and written directly into the Rig's pose channels
+ *     (so the skinned mesh follows) and onto each proxy's Transform (so its collider follows
+ *     too), over `blend_time`, then the mode returns to Animated.
  *
  * With a CharacterController on the root (and `link_character`), activation suspends it (its
  * capsule stops colliding, it stops moving) and recovery teleports it under the pelvis, facing
@@ -32,13 +40,14 @@
  *
  * Three system stages drive it (install_ragdoll_system()): order 90, before Physics (100) --
  * joint creation, mode changes, impulses; order 290, before Animation (300) -- during a blend,
- * puts the bones back to their bind pose so the Animator's output is a complete target pose; and
- * order 330, after Animation and IK (320) -- writes the blended pose.
+ * clears the ragdoll's own bones' pose channels to identity (the rest pose) so the
+ * SkeletalAnimator's output is a complete target pose; and order 330, after Animation and IK
+ * (320) -- writes the blended pose.
  *
- * `auto_generate: true` (with no `bones`) builds the list itself: every empty descendant (an
- * object with nothing but a Transform -- the joints of an object-hierarchy or skinned rig) is a
- * bone, with a capsule from its pivot to its child bone (or, for a leaf, half its parent's
- * length onward), mass split by volume, and a cone-twist joint to its parent bone.
+ * `auto_generate: true` (with no `bones`) builds the list itself: every bone of the rig becomes
+ * a ragdoll bone, with a capsule along its own rest head-to-tail axis (local +Y, by the rig's
+ * own convention) or, for a bone too short to carry one, a small sphere; mass split by volume,
+ * and a cone-twist joint to its parent bone.
  *
  * Example YAML (see assets/objects/characters/mannequin_ragdoll.yaml for a full humanoid):
  * @code
@@ -48,7 +57,7 @@
  *   recover_state: idle
  *   bones:                    # angles in degrees; the joint keys describe the joint to the parent bone
  *     - {bone: pelvis, shape: capsule, radius: 0.12, height: 0.36, direction: x, mass: 12}
- *     - bone: pelvis/thigh_l
+ *     - bone: thigh_l
  *       shape: capsule
  *       radius: 0.08
  *       height: 0.43
@@ -59,7 +68,7 @@
  *       swing: 60
  *       twist_min: -30
  *       twist_max: 30
- *     - {bone: pelvis/thigh_l/shin_l, joint: hinge, axis: {x: 1, y: 0, z: 0}, limit_min: -140, limit_max: 0}
+ *     - {bone: shin_l, joint: hinge, axis: {x: 1, y: 0, z: 0}, limit_min: -140, limit_max: 0}
  * @endcode
  */
 
@@ -82,8 +91,9 @@
 #include <string>
 #include <vector>
 
-#include <coopa/animation/animator.h>
-
+#include <coopa/rig/bone_attachment.h>
+#include <coopa/rig/rig_component.h>
+#include <coopa/rig/skeletal_animator.h>
 
 #include <toyengine/scene/character_controller.h>
 
@@ -98,7 +108,7 @@ struct RagdollBone {
     enum class Shape { Capsule, Box, Sphere };
     enum class Joint { ConeTwist, Hinge, Ball };
 
-    std::string bone;               ///< Path from the Ragdoll's object (e.g. "pelvis/thigh_l").
+    std::string bone;               ///< Bone name within the rig (e.g. "thigh_l").
 
     Shape shape = Shape::Capsule;
     float radius = 0.08f;           ///< Capsule / sphere.
@@ -198,6 +208,12 @@ public:
     float blend_elapsed() const { return blend_t_; }
     size_t bone_count() const { return rt_.size(); }
     coopa::scene::SceneObject* bone_object(size_t i) const { return i < rt_.size() ? rt_[i].obj : nullptr; }
+    /** @brief The bone name bone `i` (as listed in `bones`) addresses -- NOT bone_object(i)'s own
+     *         name, which is its physics proxy's ("_ragdoll_<name>"). */
+    const std::string& bone_name(size_t i) const {
+        static const std::string empty;
+        return i < rt_.size() ? bones[rt_[i].spec].bone : empty;
+    }
     coopa::physx::dynamics::BodyId bone_body(size_t i) const {
         return i < rt_.size() && rt_[i].rb ? rt_[i].rb->body_id() : coopa::physx::dynamics::BodyId{};
     }
@@ -248,13 +264,12 @@ private:
     };
 
     struct BoneRt {
-        coopa::scene::SceneObject* obj = nullptr;
+        coopa::scene::SceneObject* obj = nullptr;  ///< The bone's physics proxy object (see the file doc).
         coopa::physx::components::RigidbodyComponent* rb = nullptr;
+        int bone_idx = -1;                     ///< Index into the rig's bones.
         int parent = -1;                       ///< Index into rt_.
         size_t spec = 0;                       ///< Index into bones.
-        glm::vec3 bind_local_pos{0.0f};
-        glm::quat bind_local_rot{1.0f, 0.0f, 0.0f, 0.0f};
-        Pose bind_world;
+        Pose bind_world;                       ///< The bone's REST pose, world space.
         glm::vec3 scale{1.0f};                 ///< World scale at bind.
         glm::vec3 com{0.0f};                   ///< Body centre from the pivot, bone frame, scaled.
         coopa::physx::dynamics::JointId joint;
@@ -263,18 +278,18 @@ private:
 
     static Pose world_pose_(const coopa::scene::SceneObject* obj);
 
-    static int depth_(const coopa::scene::SceneObject* o);
+    /** @brief Sets bone i's pose channel so its resolved WORLD pose becomes exactly (pos, rot),
+     *         by composing a delta onto whatever it currently resolves to -- see
+     *         coopa/rig/rig_pose_math.h's apply_world_rotation_delta/apply_world_translation_delta.
+     *         Must be called parent-before-child (rt_ is kept in that order) so a child's "current
+     *         world pose" already reflects its parent's just-written target. */
+    void set_bone_world_pose_(int bone_idx, const glm::vec3& pos, const glm::quat& rot);
 
-    static bool only_transform_(const coopa::scene::SceneObject& o) {
-        return o.components().size() == 1 && o.get_transform() != nullptr;
-    }
+    /** @brief Finds or creates bone `spec`'s physics proxy object (a flat child of owner, see
+     *         the file doc), with a BoneAttachment bound to it. */
+    coopa::scene::SceneObject* proxy_object_(const RagdollBone& spec);
 
-    /** @brief Resolves `path` (slash-separated child names) under the owner. */
-    coopa::scene::SceneObject* resolve_(const std::string& path) const;
-
-    std::string path_of_(const coopa::scene::SceneObject* o) const;
-
-    /** @brief auto_generate: empties under the root are bones; capsules fitted between them. */
+    /** @brief auto_generate: every rig bone becomes a ragdoll bone (see the file doc). */
     void auto_generate_();
 
     static float shape_volume_(const RagdollBone& b);
@@ -290,13 +305,24 @@ private:
         return (link_character && owner) ? owner->get_component<CharacterController>() : nullptr;
     }
 
-    coopa::anim::Animator* animator_() const {
-        return owner ? owner->get_component<coopa::anim::Animator>() : nullptr;
+    coopa::rig::SkeletalAnimator* animator_() const {
+        return owner ? owner->get_component<coopa::rig::SkeletalAnimator>() : nullptr;
     }
 
     /** @brief IK under the rig off (FootIK suspended, TwoBoneIK / LookAtIK weights zeroed) or
      *         back on (weights restored). */
     void set_ik_suspended_(bool suspended);
+
+    /**
+     * @brief Suspends (or resumes) every bone's proxy BoneAttachment. Limp, physics owns the
+     *        proxies' Transforms exclusively -- BoneAttachment must not also keep re-deriving
+     *        them from the rig's now-frozen pose each frame (see BoneAttachment::suspended's
+     *        own doc for what goes wrong if it does). Resumed once a recovery blend ends and
+     *        the mode is Animated again; stays suspended through Blending too, since
+     *        write_world_poses_() is itself keeping the Rig's pose and the proxies' Transforms
+     *        in agreement for that whole span.
+     */
+    void set_bones_suspended_(bool suspended);
 
     void go_limp_(coopa::physx::system::PhysicsSystem& physics);
 
@@ -312,13 +338,15 @@ private:
     void begin_recovery_(coopa::physx::system::PhysicsSystem& physics);
 
     /**
-     * @brief Writes each bone's LOCAL pose so its world pose is `world[i]` -- parents first,
-     *        each bone's new parent matrix derived from its nearest bone ancestor's target (the
-     *        same `ancestor_new * inverse(ancestor_old) * parent_old` composition as
-     *        PhysicsSystem's write-back, so non-bone objects between two bones are covered).
+     * @brief Writes each bone's pose so its world pose is `world[i]`: into the Rig's pose
+     *        channel (so the skinned mesh follows) and onto its physics proxy's Transform (so
+     *        its collider follows too) -- parent bones first (rt_'s order), so a child bone's
+     *        delta composes onto its parent's already-written target. See
+     *        set_bone_world_pose_()'s doc for the pose-channel algebra.
      */
     void write_world_poses_(const std::vector<Pose>& world);
 
+    coopa::rig::Rig* rig_ = nullptr;
     std::vector<BoneRt> rt_;
     Mode mode_ = Mode::Animated;
     bool ready_ = false;

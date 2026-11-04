@@ -16,11 +16,12 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 
-#include <coopa/animation/animation_system.h>
-#include <coopa/animation/animation_yaml.h>
-#include <coopa/animation/animator.h>
-#include <coopa/animation/ik_system.h>
 #include <coopa/asset/asset_manager.h>
+#include <coopa/rig/bone_attachment_system.h>
+#include <coopa/rig/ik_system.h>
+#include <coopa/rig/rig_system.h>
+#include <coopa/rig/rig_yaml.h>
+#include <coopa/rig/skeletal_animation_system.h>
 #include <coopa/scene/components/transform_component.h>
 #include <coopa/scene/scene.h>
 #include <coopa/scene/scene_loader.h>
@@ -37,20 +38,17 @@
 #include <toyengine/scene/mount.h>
 #include <toyengine/scene/register.h>
 #include <toyengine/scene/rider.h>
+#include <toyengine/scene/rig_ik_driver.h>
 
 namespace toy::test {
 
-/** @brief `obj` (an object-asset node) without its render parts and Animator. */
+/** @brief `obj` (an object-asset node) with every MeshRenderer-carrying subtree (a shape child)
+ *         dropped -- these tests need the Rig/SkeletalAnimator/physics/IK components, not the
+ *         render parts riding the bones via BoneAttachment. */
 inline fkyaml::node strip_render_parts(const fkyaml::node& obj) {
     fkyaml::node out = fkyaml::node::mapping();
     out["name"] = obj["name"];
-    fkyaml::node comps = fkyaml::node::sequence();
-    for (const auto& c : obj["components"]) {
-        const std::string type = c["type"].get_value<std::string>();
-        if (type == "Animator" || type == "MeshRenderer") continue;
-        comps.get_value_ref<fkyaml::node::sequence_type&>().push_back(c);
-    }
-    out["components"] = comps;
+    out["components"] = obj["components"];
     fkyaml::node kids = fkyaml::node::sequence();
     if (obj.contains("children") && obj["children"].is_sequence()) {
         for (const auto& child : obj["children"]) {
@@ -69,6 +67,7 @@ inline fkyaml::node read_yaml_file(const std::string& path) {
 }
 
 struct HorseRig {
+    coopa::asset::AssetManager assets;   // owns the Rig/SkeletalClip slots; must outlive their components
     coopa::scene::Scene scene{"horse_test"};
     coopa::scene::SceneObject* horse = nullptr;
     coopa::scene::SceneObject* player = nullptr;
@@ -81,11 +80,11 @@ struct HorseRig {
 
     /** @brief The horse at `horse_at` facing `yaw_deg`, and (with_player) the player at `player_at`. */
     HorseRig(const glm::vec3& horse_at, float yaw_deg, bool with_player, const glm::vec3& player_at = glm::vec3(0.0f)) {
-        static coopa::asset::AssetManager assets;   // parsers capture it; must outlive them
-        coopa::physx::register_physics_components(assets);
-        coopa::anim::register_animation_components(assets);
-        toy::scene::register_scene_components();
         const std::string root_dir = ROOT_DIR;
+        assets.add_search_root(root_dir + "/assets");
+        coopa::physx::register_physics_components(assets);
+        coopa::rig::register_rig_components(assets);
+        toy::scene::register_scene_components();
 
         auto place = [](fkyaml::node& n, const glm::vec3& p, float yaw) {
             n["components"][0]["position"]["x"] = fkyaml::node(p.x);
@@ -119,31 +118,24 @@ struct HorseRig {
             comps.push_back(fkyaml::node::deserialize(std::string("{type: Rider}")));
             roots.push_back(p);
         }
-        scene = coopa::scene::SceneLoader::load_from_node(doc, (coopa::test::scratch_dir() / "horse_test.yaml").string());
+        // Unstarted: the real "Rig"/"SkeletalAnimator" parsers load their assets via
+        // load_async(), and some components (Ragdoll) bind eagerly in start(), not lazily on
+        // their first real tick -- start() must not run before the drain below finishes.
+        scene = coopa::scene::SceneLoader::load_from_node(
+            doc, (coopa::test::scratch_dir() / "horse_test.yaml").string(), {.start = false});
+        while (assets.pending_load_count() > 0) assets.update(0.0f);
 
         horse = scene.find_object("horse");
         if (horse) {
             mount = horse->get_component<toy::scene::Mount>();
             horse_cc = horse->get_component<toy::scene::CharacterController>();
             hooves = horse->get_component<toy::scene::FootIK>();
-            add_animator(horse, "horse", {"idle", "walk", "trot", "gallop"});
         }
         player = scene.find_object("player");
         if (player) {
             rider = player->get_component<toy::scene::Rider>();
             player_cc = player->get_component<toy::scene::CharacterController>();
-            add_animator(player, "mannequin_ik", {"idle", "ride"});
         }
-    }
-
-    static void add_animator(coopa::scene::SceneObject* obj, const std::string& dir, const std::vector<std::string>& clips) {
-        const std::string root_dir = ROOT_DIR;
-        auto* a = obj->add_component<coopa::anim::Animator>();
-        for (const std::string& c : clips) {
-            a->add_state(c, std::make_shared<coopa::anim::AnimationClip>(coopa::anim::parse_clip(
-                                read_yaml_file(root_dir + "/assets/animations/" + dir + "/" + c + ".yaml"))));
-        }
-        a->auto_play = clips.front();
     }
 
     /** @brief A static box (before start()). */
@@ -161,8 +153,11 @@ struct HorseRig {
         scene.start();
         toy::scene::install_kinematic_control_system(scene);
         physics = coopa::physx::system::install_physics_system(scene);
-        coopa::anim::install_animation_system(scene);
-        coopa::anim::install_ik_system(scene);
+        coopa::rig::install_skeletal_animation_system(scene);
+        coopa::rig::install_ik_system(scene);
+        toy::scene::install_rig_ik_driver_system(scene);
+        coopa::rig::install_rig_pose_system(scene);
+        coopa::rig::install_bone_attachment_system(scene);
         coopa::scene::install_transform_system(scene);
     }
 
@@ -187,9 +182,6 @@ struct HorseRig {
 
     static glm::vec3 world(coopa::scene::SceneObject* o) { return glm::vec3(o->get_transform()->get_world_matrix()[3]); }
     glm::vec3 socket(const std::string& path) const { return world(mount->socket(path)); }
-    coopa::scene::SceneObject* bone(coopa::scene::SceneObject* root, const std::string& name) const {
-        return root->find_descendant(name);
-    }
 
     /** @brief Teleports the player next to the horse's left mount point, presses interact, and
      *         steps until the climb is over. */

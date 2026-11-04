@@ -1,0 +1,70 @@
+rig:
+  name: mannequin
+  bones:
+    - name: pelvis
+      head: { x: 0.0, y: 0.0, z: 0.95 }
+      tail: { x: 0.0, y: 0.1, z: 0.95 }
+    - name: spine
+      head: { x: 0.0, y: 0.0, z: 1.05 }
+      parent: pelvis
+      tail: { x: 0.0, y: 0.0, z: 1.25 }
+    - name: chest
+      head: { x: 0.0, y: 0.0, z: 1.25 }
+      parent: spine
+      tail: { x: 0.0, y: 0.0, z: 1.49 }
+    - name: neck
+      head: { x: 0.0, y: 0.0, z: 1.49 }
+      parent: chest
+      tail: { x: 0.0, y: 0.0, z: 1.54 }
+    - name: head
+      head: { x: 0.0, y: 0.0, z: 1.54 }
+      parent: neck
+      tail: { x: 0.0, y: 0.0, z: 1.66 }
+    - name: upper_arm_l
+      head: { x: -0.21, y: 0.0, z: 1.42 }
+      parent: chest
+      tail: { x: -0.21, y: 0.0, z: 1.14 }
+    - name: lower_arm_l
+      head: { x: -0.21, y: 0.0, z: 1.14 }
+      parent: upper_arm_l
+      tail: { x: -0.21, y: 0.0, z: 0.89 }
+    - name: hand_l
+      head: { x: -0.21, y: 0.0, z: 0.89 }
+      parent: lower_arm_l
+      tail: { x: -0.21, y: 0.0, z: 0.82 }
+    - name: upper_arm_r
+      head: { x: 0.21, y: 0.0, z: 1.42 }
+      parent: chest
+      tail: { x: 0.21, y: 0.0, z: 1.14 }
+    - name: lower_arm_r
+      head: { x: 0.21, y: 0.0, z: 1.14 }
+      parent: upper_arm_r
+      tail: { x: 0.21, y: 0.0, z: 0.89 }
+    - name: hand_r
+      head: { x: 0.21, y: 0.0, z: 0.89 }
+      parent: lower_arm_r
+      tail: { x: 0.21, y: 0.0, z: 0.82 }
+    - name: thigh_l
+      head: { x: -0.1, y: 0.0, z: 0.9 }
+      parent: pelvis
+      tail: { x: -0.1, y: 0.0, z: 0.47 }
+    - name: shin_l
+      head: { x: -0.1, y: 0.0, z: 0.47 }
+      parent: thigh_l
+      tail: { x: -0.1, y: 0.0, z: 0.06 }
+    - name: foot_l
+      head: { x: -0.1, y: 0.0, z: 0.06 }
+      parent: shin_l
+      tail: { x: -0.1, y: 0.15, z: 0.06 }
+    - name: thigh_r
+      head: { x: 0.1, y: 0.0, z: 0.9 }
+      parent: pelvis
+      tail: { x: 0.1, y: 0.0, z: 0.47 }
+    - name: shin_r
+      head: { x: 0.1, y: 0.0, z: 0.47 }
+      parent: thigh_r
+      tail: { x: 0.1, y: 0.0, z: 0.06 }
+    - name: foot_r
+      head: { x: 0.1, y: 0.0, z: 0.06 }
+      parent: shin_r
+      tail: { x: 0.1, y: 0.15, z: 0.06 }

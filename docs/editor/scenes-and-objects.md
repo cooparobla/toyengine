@@ -161,7 +161,7 @@ Physics components (Rigidbody, the colliders, the joints and Ragdoll) have their
 | Audio | AudioSource, AudioListener, VolumeBinding (see [Sounds](#add-sound)) |
 | Gameplay | CameraController, CharacterController, CharacterAnimDriver, SceneLink, SaveId, KinematicMover, FreeMover, KinematicController |
 | World | Terrain |
-| Animation | Animator, TwoBoneIK, LookAtIK, FootIK (see [Animation](animation.md#make-an-object-animatable)) |
+| Animation | Animator, Rig, SkeletalAnimator, BoneAttachment, TwoBoneIK, ChainIK, LookAtIK, FootIK (see [Animation](animation.md#make-an-object-animatable)) |
 | UI groups | The game UI components (see [UI designer](ui-designer.md#element-settings)) |
 
 An object can have more than one PointLight, SpotLight, ReflectionProbe, SdfShape or collider,

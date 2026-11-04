@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
-#include <coopa/animation/ik_components.h>
+#include <coopa/animation/ik_components.h> // resolve_ik_path()
 #include <coopa/scene/scene.h>
 #include <coopa/scene/scene_object.h>
 #include <toyengine/scene/rider.h>
@@ -20,8 +20,8 @@ float wrap_deg(float deg) {
     return deg - 180.0f;
 }
 
-coopa::anim::Animator* find_animator(coopa::scene::SceneObject* obj) {
-    if (auto* a = obj->get_component<coopa::anim::Animator>()) return a;
+coopa::rig::SkeletalAnimator* find_animator(coopa::scene::SceneObject* obj) {
+    if (auto* a = obj->get_component<coopa::rig::SkeletalAnimator>()) return a;
     for (const auto& child : obj->children())
         if (auto* a = find_animator(child.get())) return a;
     return nullptr;
@@ -34,7 +34,7 @@ CharacterController* Mount::controller() {
     return controller_;
 }
 
-coopa::anim::Animator* Mount::animator_() {
+coopa::rig::SkeletalAnimator* Mount::animator_() {
     if (!animator_cached_ && owner) animator_cached_ = find_animator(owner);
     return animator_cached_;
 }
@@ -105,7 +105,7 @@ void Mount::steer(float dt) {
 
 void Mount::update(float) {
     CharacterController* cc = controller();
-    coopa::anim::Animator* anim = animator_();
+    coopa::rig::SkeletalAnimator* anim = animator_();
     if (!cc || !anim) return;
     const glm::vec3 v = cc->velocity();
     const float speed = glm::length(glm::vec2(v.x, v.y));

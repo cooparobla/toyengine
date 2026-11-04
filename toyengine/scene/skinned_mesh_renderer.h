@@ -1,6 +1,6 @@
 /**
  * @file skinned_mesh_renderer.h
- * @brief Skins a bind-pose SkinnedMeshSource against animated bone SceneObjects every frame
+ * @brief Skins a bind-pose SkinnedMeshSource against a coopa::rig::Rig's pose every frame
  *        into a sibling MeshRenderer's dynamic GPU mesh -- on the GPU (a compute pre-skin pass,
  *        render/passes/skinning_pass.h) or, as the fallback, on the CPU.
  *
@@ -13,24 +13,24 @@
  * There are no bone-matrix vertex attributes: skinning is a pre-pass, and the result
  * mirrors ClothRenderer's already-proven pattern exactly: a sibling MeshRenderer supplies
  * the material and the draw, this component supplies the mesh, and Engine::upload_dynamic_meshes_()
- * calls upload() once per frame, after Scene::late_update() (so animated bone Transforms are
- * current) and before the frame's command buffer is recorded.
+ * calls upload() once per frame, after Scene::late_update() (so a coopa::rig::RigPoseSystem's
+ * resolved model matrices are current) and before the frame's command buffer is recorded.
  *
- * A skinned mesh's bones are ordinary SceneObjects -- a rig is just an object hierarchy, its
- * bones animated by Transform tracks of an Animator on the rig root (coopa::anim; there is no
- * separate skeletal system). Bones are resolved against the RIG: the `rig:` path if given,
- * else the nearest ancestor (or the owner itself) carrying an Animator, else the owner's
- * topmost ancestor. A bone entry is a path below the rig root ("Hips/Spine") or a bare name
- * found anywhere under it, with a scene-wide path lookup as the fallback.
+ * A skinned mesh's bones are entries of a coopa::rig::Rig, not SceneObjects -- the rig is the
+ * `rig:` path if given, else the nearest ancestor (or the owner itself) carrying a Rig
+ * component. A bone entry is a bone NAME in that rig's RigAsset, looked up once per name
+ * (there is no path-walking: a Rig has no hierarchy below it for a bone name to walk through).
  *
  * The palette comes from either source:
  *  - `bones:` in the mesh's `joints:` / `inverse_bind_matrices:` order (an exporter's), or
  *  - with no `bones:` and a mesh whose vertex groups name the bones (`weights:` -- Blender's
  *    export, and the toyeditor's Weight Paint), the groups themselves: group "Forearm" binds
- *    to the rig object named "Forearm".
- * Inverse bind matrices come from the file when it has them; otherwise from the REST pose --
- * every rig object's world matrix as authored, snapshotted in start() before any animation
- * has moved it -- so a mesh painted in the editor needs no export step at all.
+ *    to the rig bone named "Forearm".
+ * Inverse bind matrices come from the file when it has them; otherwise from
+ * `Rig::inverse_bind()`, derived from the rig asset's own rest pose -- so a mesh painted in
+ * the editor needs no export step at all, and binding no longer depends on scene-load order
+ * (there is nothing left to snapshot: the rig's rest pose is asset data, not a transform
+ * captured the moment start() happened to run).
  *
  * `preserve_volume` picks how the bones are blended, Blender's option of the same name. Off
  * (the default), the skin matrices are averaged directly -- linear blend skinning: one matrix
@@ -52,12 +52,13 @@
 #include <limits>
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 
 #include <gfxcoopa/engine/components/mesh_renderer.h>
 #include <gfxcoopa/engine/data/skinned_mesh_source.h>
+
+#include <coopa/rig/rig_component.h>
 
 #include "toyengine/render/passes/skinning_pass.h"
 
@@ -78,8 +79,8 @@ namespace scene {
  *   material: { albedo: { r: 0.8, g: 0.8, b: 0.8 }, roughness: 0.6 }
  * - type: SkinnedMeshRenderer
  *   mesh_path: character_body
- *   bones: [Hips, Hips/Spine, Hips/Spine/Chest]   # or omit: the mesh's vertex groups name them
- *   rig: Character                                # optional; default: the nearest Animator
+ *   bones: [pelvis, spine, chest]   # or omit: the mesh's vertex groups name them
+ *   rig: Character                  # optional; default: the nearest ancestor with a Rig
  * @endcode
  */
 class SkinnedMeshRenderer : public coopa::scene::Component {
@@ -107,27 +108,25 @@ public:
     /** @brief Sets the loaded (still possibly in-flight) bind-pose source. Called by the parser. */
     void set_source(coopa::asset::AssetHandle<SkinnedMeshSource> source) { source_ = std::move(source); }
 
-    /** @brief Sets the bone palette: paths under the rig, in mesh joint-index order (empty: the mesh's vertex groups). */
+    /** @brief Sets the bone palette: names in the rig's RigAsset, in mesh joint-index order (empty: the mesh's vertex groups). */
     void set_bones(std::vector<std::string> bones) { bone_paths_ = std::move(bones); }
-    /** @brief Names the rig root explicitly (a scene path); empty = the nearest Animator ancestor. */
+    /** @brief Names the rig root explicitly (a scene path); empty = the nearest ancestor carrying a Rig component. */
     void set_rig(std::string rig) { rig_path_ = std::move(rig); }
     /** @brief Blends the bones as dual quaternions instead of matrices -- see this file's doc. */
     void set_preserve_volume(bool on) { preserve_volume_ = on; }
     bool preserve_volume() const { return preserve_volume_; }
 
     /**
-     * @brief Finds the sibling MeshRenderer and the rig root, and snapshots the REST pose:
-     *        the world matrix of the owner and of every object under the rig, before any
-     *        animation runs (the bind pose for meshes whose file has no inverse binds).
-     *        Bones themselves are resolved once the mesh source has loaded (ensure_mesh_()),
-     *        since with no `bones:` they are named by the mesh's vertex groups.
+     * @brief Finds the sibling MeshRenderer and the Rig this mesh skins against. Bones
+     *        themselves are resolved once the mesh source has loaded (ensure_mesh_()), since
+     *        with no `bones:` they are named by the mesh's vertex groups.
      */
     void start() override;
 
-    /** @brief The rig root bones are resolved under (after start()). */
-    coopa::scene::SceneObject* rig() const { return rig_; }
-    /** @brief The resolved palette (after the mesh loaded); entries may be null. */
-    const std::vector<coopa::scene::SceneObject*>& bones() const { return bones_; }
+    /** @brief The Rig bones are resolved against (after start()), or null if none was found. */
+    coopa::rig::Rig* rig() const { return rig_; }
+    /** @brief The resolved palette (after the mesh loaded): an index into rig()'s bones per mesh joint slot, or -1. */
+    const std::vector<int>& bone_indices() const { return bone_indices_; }
 
     /**
      * @brief Skins `src`'s bind-pose vertices with one matrix per palette entry into `out`
@@ -261,15 +260,10 @@ private:
     /** @brief The compute path's per-mesh data: bind-pose SSBO, palette ring, one set per slot. */
     void build_gpu_(toy::render::passes::SkinningPass& pass, const SkinnedMeshSource& src);
 
-    /** @brief The rig root: `rig:`, else the nearest Animator up the hierarchy, else the topmost ancestor. */
-    coopa::scene::SceneObject* find_rig_() const;
+    /** @brief The rig this mesh skins against: `rig:` if given, else the nearest ancestor (or the owner) carrying a Rig. */
+    coopa::rig::Rig* find_rig_() const;
 
-    void snapshot_rest_(coopa::scene::SceneObject* o);
-
-    /** @brief A bone path under the rig: "A/B" walks down from the rig root; a bare name may sit at any depth. */
-    coopa::scene::SceneObject* find_bone_(const std::string& path) const;
-
-    /** @brief Resolves the palette and its inverse bind matrices (file, else rest pose). */
+    /** @brief Resolves the palette (bone indices into rig_'s RigAsset) and its inverse bind matrices (file, else Rig::inverse_bind()). */
     void resolve_bones_(const SkinnedMeshSource& src);
 
     coopa::gfx::core::Device&      device_;
@@ -280,11 +274,9 @@ private:
     coopa::asset::AssetHandle<SkinnedMeshSource> source_;
     std::vector<std::string> bone_paths_;
     std::string rig_path_;
-    coopa::scene::SceneObject* rig_ = nullptr;
-    std::vector<coopa::scene::SceneObject*> bones_; // resolved when the source loads; may contain nullptr
-    std::vector<glm::mat4> inverse_bind_;           // parallel to bones_
-    std::unordered_map<const coopa::scene::SceneObject*, glm::mat4> rest_world_;   // start()'s snapshot
-    glm::mat4 owner_rest_world_{1.0f};
+    coopa::rig::Rig* rig_ = nullptr;
+    std::vector<int> bone_indices_;       // resolved when the source loads; -1 = unresolved
+    std::vector<glm::mat4> inverse_bind_; // parallel to bone_indices_
 
     struct GpuSkin {
         coopa::gfx::memory::Buffer                      bind_pose;

@@ -66,15 +66,18 @@ void CharacterAnimDriver::update(float dt) {
     if (!owner) return;
     if (!controller_) controller_ = owner->get_component<CharacterController>();
     if (!animator_) animator_ = find_animator_(owner);
-    if (!controller_ || !animator_) return;
+    if (!skeletal_animator_) skeletal_animator_ = find_skeletal_animator_(owner);
+    if (!controller_ || (!animator_ && !skeletal_animator_)) return;
     // A suspended controller (a Ragdoll has the body) is not walking: drive nothing, and
-    // afterwards pick up from whatever state the Animator was handed back in.
+    // afterwards pick up from whatever state the Animator/SkeletalAnimator was handed back in.
     if (controller_->is_suspended()) {
         resync_ = true;
         return;
     }
     if (resync_) {
-        current_ = animator_->current_state();
+        // The SkeletalAnimator is the one actually posing the rig (a Ragdoll's recover_state
+        // plays through it), so it is the authoritative source when both are bound.
+        current_ = skeletal_animator_ ? skeletal_animator_->current_state() : animator_->current_state();
         air_time_ = 0.0f;
         resync_ = false;
     }
@@ -95,17 +98,36 @@ void CharacterAnimDriver::update(float dt) {
     else if (speed > run_speed) want = run_state;
     else if (speed > walk_speed) want = walk_state;
 
-    if (want != current_ && animator_->find_state(want)) {
+    if (want == current_) return;
+    // Drive whichever of the two is bound and actually declares `want` -- a fully-IK rig
+    // (mannequin_ik) has both, kept in lockstep; most rigs have only a SkeletalAnimator, and a
+    // non-skeletal character only an Animator.
+    bool changed = false;
+    if (animator_ && animator_->find_state(want)) {
         if (current_.empty()) animator_->play(want);
         else animator_->crossfade(want, crossfade);
-        current_ = want;
+        changed = true;
     }
+    if (skeletal_animator_ && skeletal_animator_->find_state(want)) {
+        if (current_.empty()) skeletal_animator_->play(want);
+        else skeletal_animator_->crossfade(want, crossfade);
+        changed = true;
+    }
+    if (changed) current_ = want;
 }
 
 coopa::anim::Animator* CharacterAnimDriver::find_animator_(coopa::scene::SceneObject* obj) {
     if (auto* a = obj->get_component<coopa::anim::Animator>()) return a;
     for (const auto& child : obj->children()) {
         if (auto* a = find_animator_(child.get())) return a;
+    }
+    return nullptr;
+}
+
+coopa::rig::SkeletalAnimator* CharacterAnimDriver::find_skeletal_animator_(coopa::scene::SceneObject* obj) {
+    if (auto* a = obj->get_component<coopa::rig::SkeletalAnimator>()) return a;
+    for (const auto& child : obj->children()) {
+        if (auto* a = find_skeletal_animator_(child.get())) return a;
     }
     return nullptr;
 }

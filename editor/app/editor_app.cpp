@@ -330,6 +330,10 @@ ObjectId EditorApp::place_object_asset(const std::string& object_rel, std::optio
 void EditorApp::rename_animation_clip(const std::string& to) { timeline_panel_->rename_animation_clip(to); }
 void EditorApp::rename_selected_animation_event(const std::string& name) { timeline_panel_->rename_selected_animation_event(name); }
 void EditorApp::select_all_keys() { timeline_panel_->select_all_keys(); }
+void EditorApp::select_all_bone_keys() { timeline_panel_->select_all_bone_keys(); }
+void EditorApp::delete_selected_bone_keys() { timeline_panel_->delete_selected_bone_keys(); }
+void EditorApp::set_selected_bone_key_interpolation(const std::string& ease) { timeline_panel_->set_selected_bone_key_interpolation(ease); }
+std::vector<float> EditorApp::bone_clip_key_times() const { return timeline_panel_->bone_clip_key_times(); }
 void EditorApp::select_animation_event(int index) { timeline_panel_->select_animation_event(index); }
 int EditorApp::selected_animation_event() const { return timeline_panel_->selected_animation_event(); }
 void EditorApp::set_animation_record(bool on) { timeline_panel_->set_animation_record(on); }
@@ -1493,6 +1497,7 @@ void EditorApp::pre_render_(float dt) {
     tile_mode_panel_->tile_frame_();
     paint_panel_->paint_frame_();
     timeline_panel_->timeline_frame_(dt);
+    rig_edit_frame_(dt);
     // X-Ray: surfaces turn translucent over the backdrop (Solid / Material Preview; paint
     // modes look through the surface they paint on, so they stay opaque).
     engine_.render_config().editor_xray_alpha = xray_surfaces_() ? xray_alpha_ : 1.0f;
@@ -2476,6 +2481,10 @@ void EditorApp::handle_viewport_input_(imm::Context& ctx, bool mesh_edit) {
         run_modal_(ctx, *vp, ctrl, shift);
         return;
     }
+    if (bone_modal_.active()) {
+        run_bone_modal_(ctx, *vp, ctrl, shift);
+        return;
+    }
     if (pending_extrude_ && mesh_edit) {
         pending_extrude_ = false;
         extrude_interactive_(*vp, ctx.is_hovered(viewport_box_) ? m : viewport_box_.center());
@@ -2595,7 +2604,14 @@ void EditorApp::handle_viewport_input_(imm::Context& ctx, bool mesh_edit) {
     }
     if (select_pending_ && in.down[0] && glm::distance(m, select_press_) > 5.0f) box_selecting_ = true;
     if (select_pending_ && in.released[0]) {
-        if (box_selecting_) box_select_(mesh_edit, select_press_, m, shift, ctrl);
+        if (!mesh_edit && rig_pose_mode_()) {
+            if (box_selecting_) rig_pose_box_select_(select_press_, m, shift, ctrl);
+            else rig_pose_click_select_(m, shift);
+        }
+        else if (!mesh_edit && rig_edit_mode_()) {
+            rig_edit_click_select_(*vp, m);   // single-select only -- see rig_edit_pick_'s doc
+        }
+        else if (box_selecting_) box_select_(mesh_edit, select_press_, m, shift, ctrl);
         else if (mesh_edit) mesh_tools_panel_->pick_mesh_element_(m, shift);
         else {
             const ObjectId id = click_pick_(m);   // cycles past the selection on a repeat click
@@ -2623,7 +2639,9 @@ void EditorApp::handle_viewport_input_(imm::Context& ctx, bool mesh_edit) {
 void EditorApp::viewport_keymap_(imm::Context& ctx, const ViewProj& vp, bool mesh_edit, bool can_edit) {
     const glm::vec2 m = ctx.mouse();
     // Blender's I in Object Mode: key the selected rig objects on the Timeline's clip.
-    if (!mesh_edit && can_edit && !paint_panel_->in_brush_mode_() && anim_rig_ && ctx.shortcut(Key::I)) timeline_panel_->anim_insert_keys_();
+    if (!mesh_edit && can_edit && !paint_panel_->in_brush_mode_() && anim_rig_ && !rig_pose_mode_() && !rig_edit_mode_() && ctx.shortcut(Key::I)) {
+        timeline_panel_->anim_insert_keys_();
+    }
     // --- views (any mode) ---
     if (ctx.shortcut(Key::Kp1)) camera_.axis_view('f', false);
     if (ctx.shortcut(Key::Kp1, Mods::Control)) camera_.axis_view('f', true);
@@ -2646,7 +2664,12 @@ void EditorApp::viewport_keymap_(imm::Context& ctx, const ViewProj& vp, bool mes
     if (!mesh_edit && !paint_panel_->in_brush_mode_() && ctx.shortcut(Key::F)) frame_selected();
     if (ctx.shortcut(Key::Home)) frame_all();
     if (ctx.shortcut(Key::GraveAccent)) ctx.open_popup("vp_view_menu", m);
-    if (ctx.shortcut(Key::Z)) ctx.open_popup("vp_shading_menu", m);
+    // Not while RigEdit's modal is running: Z also constrains its Grab/Rotate to the world Z
+    // axis, and this binding (unlike the mode-specific ones below) is unconditional -- opening
+    // the shading popup here steals every later frame's viewport_keymap_ call (a popup makes the
+    // viewport read as un-hovered), silently stranding the modal with whatever delta it had the
+    // instant Z was pressed, with no error and no further key (typed digits, Enter) ever reaching it.
+    if (!rig_edit_modal_.active() && ctx.shortcut(Key::Z)) ctx.open_popup("vp_shading_menu", m);
     if (ctx.shortcut(Key::Z, Mods::Alt)) {
         xray_ = !xray_;
         log_info(xray_ ? "X-Ray on (Alt Z toggles)" : "X-Ray off");
@@ -2662,6 +2685,15 @@ void EditorApp::viewport_keymap_(imm::Context& ctx, const ViewProj& vp, bool mes
     if (ctx.shortcut(Key::Space, Mods::Shift)) ctx.open_popup("vp_tool_menu", m);
     if (ctx.shortcut(Key::Tab, Mods::Control)) ctx.open_popup("mode_menu_vp", m);   // Blender's mode pie
     if (!can_edit) return;
+
+    if (!mesh_edit && rig_pose_mode_()) {
+        rig_pose_keymap_(ctx, vp, m);
+        return;
+    }
+    if (!mesh_edit && rig_edit_mode_()) {
+        rig_edit_keymap_(ctx, vp, m);
+        return;
+    }
 
     if (mesh_edit) {
         auto& md = mesh_;
@@ -3055,6 +3087,555 @@ void EditorApp::invert_mesh_selection_() {
     s = inv;
 }
 
+// --- rig pose mode (coopa::rig::Rig bones) ---
+
+int EditorApp::pick_bone_(glm::vec2 px) {
+    coopa::rig::Rig* rig = pose_rig_component_();
+    const auto vp = view_proj_();
+    if (!rig || !vp) return -1;
+    std::vector<toy::editor::rig_pick::BoneSegment> segs;
+    segs.reserve(rig->bone_count());
+    for (std::size_t i = 0; i < rig->bone_count(); ++i) {
+        const glm::mat4 w = rig->world_matrix(i);
+        toy::editor::rig_pick::BoneSegment seg;
+        seg.head = glm::vec3(w[3]);
+        seg.tail = glm::vec3(w * glm::vec4(0.0f, rig->bone_length(i), 0.0f, 1.0f));
+        seg.x_hint = glm::normalize(glm::vec3(w[0]));
+        seg.z_hint = glm::normalize(glm::vec3(w[2]));
+        segs.push_back(seg);
+    }
+    return toy::editor::rig_pick::pick_closest_bone(*vp, segs, px);
+}
+
+void EditorApp::rig_pose_click_select_(glm::vec2 px, bool shift) {
+    const int bone = pick_bone_(px);
+    if (bone < 0) {
+        if (!shift) pose_bones_selected_.clear();
+        return;
+    }
+    auto it = std::find(pose_bones_selected_.begin(), pose_bones_selected_.end(), bone);
+    if (shift) {
+        if (it != pose_bones_selected_.end()) pose_bones_selected_.erase(it);
+        else pose_bones_selected_.push_back(bone);
+    } else {
+        pose_bones_selected_.assign(1, bone);
+    }
+}
+
+void EditorApp::rig_pose_box_select_(glm::vec2 a, glm::vec2 b, bool additive, bool subtract) {
+    coopa::rig::Rig* rig = pose_rig_component_();
+    const auto vp = view_proj_();
+    if (!rig || !vp) return;
+    const imm::Box r{std::min(a.x, b.x), std::min(a.y, b.y), std::abs(b.x - a.x), std::abs(b.y - a.y)};
+    if (!additive && !subtract) pose_bones_selected_.clear();
+    for (std::size_t i = 0; i < rig->bone_count(); ++i) {
+        const auto px = vp->project(glm::vec3(rig->world_matrix(i)[3]));
+        if (!px || !r.contains(*px)) continue;
+        auto it = std::find(pose_bones_selected_.begin(), pose_bones_selected_.end(), static_cast<int>(i));
+        if (subtract) {
+            if (it != pose_bones_selected_.end()) pose_bones_selected_.erase(it);
+        } else if (it == pose_bones_selected_.end()) {
+            pose_bones_selected_.push_back(static_cast<int>(i));
+        }
+    }
+}
+
+void EditorApp::rig_pose_keymap_(imm::Context& ctx, const ViewProj& vp, glm::vec2 m) {
+    coopa::rig::Rig* rig = pose_rig_component_();
+    if (!rig) return;
+    if (ctx.shortcut(Key::A)) {
+        pose_bones_selected_.clear();
+        for (std::size_t i = 0; i < rig->bone_count(); ++i) pose_bones_selected_.push_back(static_cast<int>(i));
+    }
+    if (ctx.shortcut(Key::A, Mods::Alt)) pose_bones_selected_.clear();
+    if (ctx.shortcut(Key::C, Mods::Control)) copy_bone_pose_();
+    if (ctx.shortcut(Key::V, Mods::Control)) paste_bone_pose_();
+    if (pose_bones_selected_.empty()) return;
+    if (ctx.shortcut(Key::G)) start_bone_modal_(ModalKind::Grab, vp, m);
+    if (ctx.shortcut(Key::R)) start_bone_modal_(ModalKind::Rotate, vp, m);
+    if (ctx.shortcut(Key::S)) start_bone_modal_(ModalKind::Scale, vp, m);
+    if (ctx.shortcut(Key::G, Mods::Alt)) clear_bone_transform_(0);
+    if (ctx.shortcut(Key::R, Mods::Alt)) clear_bone_transform_(1);
+    if (ctx.shortcut(Key::S, Mods::Alt)) clear_bone_transform_(2);
+    if (ctx.shortcut(Key::M, Mods::Control)) mirror_selected_bones_pose_();
+    if (ctx.shortcut(Key::I)) rig_pose_insert_keys_();
+}
+
+void EditorApp::copy_bone_pose_() {
+    coopa::rig::Rig* rig = pose_rig_component_();
+    if (!rig || pose_bones_selected_.empty()) return;
+    std::vector<std::size_t> idx;
+    for (int i : pose_bones_selected_) if (i >= 0 && static_cast<std::size_t>(i) < rig->bone_count()) idx.push_back(static_cast<std::size_t>(i));
+    bone_pose_clipboard_ = toy::editor::rig_pose_edit::copy_pose(*rig, idx);
+    log_info("Copied pose: " + std::to_string(idx.size()) + " bone(s)");
+}
+
+void EditorApp::paste_bone_pose_() {
+    coopa::rig::Rig* rig = pose_rig_component_();
+    if (!rig) return;
+    const std::size_t n = toy::editor::rig_pose_edit::paste_pose(*rig, bone_pose_clipboard_);
+    if (n) log_info("Pasted pose onto " + std::to_string(n) + " bone(s)");
+}
+
+void EditorApp::mirror_selected_bones_pose_() {
+    coopa::rig::Rig* rig = pose_rig_component_();
+    if (!rig) return;
+    for (int i : pose_bones_selected_) {
+        if (i < 0 || static_cast<std::size_t>(i) >= rig->bone_count()) continue;
+        const std::string& name = rig->bone_name(static_cast<std::size_t>(i));
+        std::string mirrored;
+        if (name.size() > 2 && name.substr(name.size() - 2) == "_l") mirrored = name.substr(0, name.size() - 2) + "_r";
+        else if (name.size() > 2 && name.substr(name.size() - 2) == "_r") mirrored = name.substr(0, name.size() - 2) + "_l";
+        else continue;
+        const int j = rig->find_bone(mirrored);
+        if (j >= 0) toy::editor::rig_pose_edit::mirror_pose(*rig, static_cast<std::size_t>(i), static_cast<std::size_t>(j));
+    }
+}
+
+const Node* EditorApp::rig_pose_states_node_() const {
+    const Node* raw = doc_.find(pose_rig_);
+    if (!raw) return nullptr;
+    const Node& obj = instances_panel_->effective_(*raw);   // doc_.find() alone misses an inherited (unoverridden) SkeletalAnimator
+    if (!obj.contains("components") || !obj.at("components").is_sequence()) return nullptr;
+    for (const Node& c : obj.at("components").as_seq()) {
+        if (component_type(c) == "SkeletalAnimator" && c.contains("states") && c.at("states").is_sequence()) return &c.at("states");
+    }
+    return nullptr;
+}
+
+std::vector<std::string> EditorApp::rig_pose_states_() const {
+    std::vector<std::string> out;
+    if (const Node* states = rig_pose_states_node_()) {
+        for (const Node& s : states->as_seq()) out.push_back(get_string(s, "name"));
+    }
+    return out;
+}
+
+void EditorApp::rig_pose_open_clip_(const std::string& state) {
+    rig_pose_clip_ = BoneClipDocument{};
+    const Node* states = rig_pose_states_node_();
+    if (!states) return;
+    for (const Node& s : states->as_seq()) {
+        if (get_string(s, "name") != state) continue;
+        const fs::path p = timeline_panel_->anim_resolve_clip_(get_string(s, "clip"));
+        rig_pose_clip_.state = state;
+        rig_pose_clip_.path = p;
+        try {
+            if (coopa::yaml::document_exists(p)) rig_pose_clip_.model = BoneClipModel::from_node(coopa::yaml::load_document(p));
+            else rig_pose_clip_.model.name = state;
+        } catch (const std::exception& e) {
+            log_error("Pose Mode: " + std::string(e.what()));
+        }
+        rig_pose_sel_keys_.clear();
+        rig_pose_sel_event_ = -1;
+        rig_pose_runtime_rev_ = 0;
+        rig_pose_view_ = {};
+        return;
+    }
+}
+
+void EditorApp::rig_pose_insert_keys_() {
+    coopa::rig::Rig* rig = pose_rig_component_();
+    if (!rig || pose_bones_selected_.empty()) return;
+    if (!rig_pose_clip_.open()) {
+        auto* live = sync_.live(pose_rig_);
+        auto* animator = live ? live->get_component<coopa::rig::SkeletalAnimator>() : nullptr;
+        std::string state = animator ? animator->current_state() : std::string();
+        if (state.empty()) {
+            const Node* raw = doc_.find(pose_rig_);
+            const Node* obj = raw ? &instances_panel_->effective_(*raw) : nullptr;
+            if (obj && obj->contains("components") && obj->at("components").is_sequence()) {
+                for (const Node& c : obj->at("components").as_seq()) {
+                    if (component_type(c) != "SkeletalAnimator" || !c.contains("states") || !c.at("states").is_sequence() ||
+                        c.at("states").as_seq().empty()) {
+                        continue;
+                    }
+                    state = get_string(c.at("states").as_seq().front(), "name");
+                    break;
+                }
+            }
+        }
+        if (state.empty()) {
+            log_info("Pose Mode: no SkeletalAnimator state to key into -- add one first");
+            return;
+        }
+        rig_pose_open_clip_(state);
+        if (!rig_pose_clip_.open()) return;
+    }
+    const float t = anim_time_;
+    for (int i : pose_bones_selected_) {
+        if (i < 0 || static_cast<std::size_t>(i) >= rig->bone_count()) continue;
+        const auto& pc = rig->pose(static_cast<std::size_t>(i));
+        const std::string& name = rig->bone_name(static_cast<std::size_t>(i));
+        rig_pose_clip_.model.set_key(name, "location", t, glm::vec4(pc.location, 0.0f));
+        rig_pose_clip_.model.set_key(name, "rotation", t, glm::vec4(pc.rotation.x, pc.rotation.y, pc.rotation.z, pc.rotation.w));
+        rig_pose_clip_.model.set_key(name, "scale", t, glm::vec4(pc.scale, 0.0f));
+    }
+    if (t > rig_pose_clip_.model.length) rig_pose_clip_.model.length = t;
+    ++rig_pose_clip_.revision;
+    try {
+        fs::create_directories(rig_pose_clip_.path.parent_path());
+        coopa::yaml::save_document(rig_pose_clip_.path, rig_pose_clip_.model.to_node());
+        log_info("Pose Mode: keyed " + std::to_string(pose_bones_selected_.size()) + " bone(s) at t=" + std::to_string(t) +
+                 " into " + rig_pose_clip_.path.filename().string());
+    } catch (const std::exception& e) {
+        log_error("Pose Mode: could not save " + rig_pose_clip_.path.string() + ": " + e.what());
+    }
+}
+
+// --- rig edit mode (authoring a RigModel's rest skeleton) ---
+
+bool EditorApp::enter_rig_edit_mode_(ObjectId id) {
+    if (!id || playing()) return false;
+    if (rig_edit_object_ == id) return true;
+    exit_mesh_mode_();
+    exit_pose_mode_();
+    rig_edit_object_ = id;
+    rig_edit_ = RigDocument{};
+    rig_edit_selected_bone_ = -1;
+    rig_edit_endpoint_selected_ = false;
+    rig_edit_modal_.cancel();
+    rig_edit_rename_buf_.clear();
+    auto* live = sync_.live(id);
+    coopa::rig::Rig* rig = live ? live->get_component<coopa::rig::Rig>() : nullptr;
+    if (rig && !rig->rig_path.empty()) {
+        const fs::path dir = (doc_.path().empty() ? sync_.fallback_path : doc_.path()).parent_path();
+        const fs::path p = coopa::yaml::resolve_variant(engine_.assets().source().resolve(rig->rig_path, dir.string()));
+        try {
+            if (coopa::yaml::document_exists(p)) {
+                rig_edit_.model = RigModel::from_node(coopa::yaml::load_document(p));
+                rig_edit_.path = p;
+            }
+        } catch (const std::exception& e) {
+            log_error("Rig Edit: " + std::string(e.what()));
+        }
+    }
+    log_info("Rig Edit: " + timeline_panel_->anim_name_of_(id, "object") +
+             (rig_edit_.open() ? " (editing " + rig_edit_.path.filename().string() + ")" : " (new rig)"));
+    return true;
+}
+
+void EditorApp::exit_rig_edit_mode_() {
+    if (!rig_edit_object_) return;
+    if (rig_edit_.dirty) rig_edit_save_();
+    rig_edit_object_ = 0;
+    rig_edit_selected_bone_ = -1;
+    rig_edit_endpoint_selected_ = false;
+    rig_edit_modal_.cancel();
+    rig_edit_ = RigDocument{};
+}
+
+glm::mat4 EditorApp::rig_edit_owner_world_() const {
+    auto* live = sync_.live(rig_edit_object_);
+    auto* tc = live ? live->get_transform() : nullptr;
+    return tc ? tc->get_world_matrix() : glm::mat4(1.0f);
+}
+
+int EditorApp::rig_edit_pick_(const ViewProj& vp, glm::vec2 px, bool* endpoint_out, toy::editor::rig_pick::BoneEndpoint* which_out) {
+    *endpoint_out = false;
+    const glm::mat4 world = rig_edit_owner_world_();
+    std::vector<toy::editor::rig_pick::BoneSegment> segs;
+    segs.reserve(rig_edit_.model.bones.size());
+    for (size_t i = 0; i < rig_edit_.model.bones.size(); ++i) {
+        const RigModelBone& b = rig_edit_.model.bones[i];
+        toy::editor::rig_pick::BoneSegment seg;
+        seg.head = glm::vec3(world * glm::vec4(b.head, 1.0f));
+        seg.tail = glm::vec3(world * glm::vec4(b.tail, 1.0f));
+        const glm::mat4 rest = world * rig_edit_.model.world_rest_matrix(static_cast<int>(i));
+        seg.x_hint = glm::normalize(glm::vec3(rest[0]));
+        seg.z_hint = glm::normalize(glm::vec3(rest[2]));
+        segs.push_back(seg);
+    }
+    // Endpoints pick first, at a tighter radius: a click meant for dragging a joint must not
+    // fall through to "select the whole bone" just because it also lands inside the wider body.
+    if (auto ep = toy::editor::rig_pick::pick_closest_endpoint(vp, segs, px, 8.0f)) {
+        *endpoint_out = true;
+        *which_out = ep->second;
+        return ep->first;
+    }
+    return toy::editor::rig_pick::pick_closest_bone(vp, segs, px);
+}
+
+void EditorApp::rig_edit_click_select_(const ViewProj& vp, glm::vec2 px) {
+    bool is_ep = false;
+    toy::editor::rig_pick::BoneEndpoint which = toy::editor::rig_pick::BoneEndpoint::Head;
+    const int bone = rig_edit_pick_(vp, px, &is_ep, &which);
+    rig_edit_selected_bone_ = bone;
+    rig_edit_endpoint_selected_ = bone >= 0 && is_ep;
+    rig_edit_selected_end_ = which;
+}
+
+void EditorApp::rig_edit_model_edit_(const std::string& label, const std::function<void(RigModel&)>& fn) {
+    RigModel before = rig_edit_.model;
+    fn(rig_edit_.model);
+    if (rig_edit_.model == before) return;
+    rig_edit_.undo.push(label, std::move(before), rig_edit_.model);
+    ++rig_edit_.revision;
+    rig_edit_.dirty = true;
+}
+
+void EditorApp::start_rig_edit_modal_(ModalKind kind, const ViewProj& vp, glm::vec2 mouse) {
+    if (playing() || rig_edit_selected_bone_ < 0 || static_cast<size_t>(rig_edit_selected_bone_) >= rig_edit_.model.bones.size()) return;
+    if (kind == ModalKind::Grab && !rig_edit_endpoint_selected_) return;   // see rig_edit_keymap_'s doc: G needs a specific endpoint
+    const RigModelBone& b = rig_edit_.model.bones[static_cast<size_t>(rig_edit_selected_bone_)];
+    rig_edit_drag_start_ = {b.head, b.tail, b.roll};
+    const glm::mat4 world = rig_edit_owner_world_();
+    const glm::vec3 pivot_rig = rig_edit_endpoint_selected_
+                                     ? (rig_edit_selected_end_ == toy::editor::rig_pick::BoneEndpoint::Head ? b.head : b.tail)
+                                     : b.head;
+    const glm::vec3 pivot_world = glm::vec3(world * glm::vec4(pivot_rig, 1.0f));
+    glm::mat3 basis(world);
+    for (int c = 0; c < 3; ++c) basis[c] = glm::normalize(basis[c]);
+    rig_edit_modal_.begin(kind, vp, pivot_world, basis, mouse, std::nullopt, "local", false);
+}
+
+void EditorApp::run_rig_edit_modal_(imm::Context& ctx, const ViewProj& vp, bool ctrl, bool shift) {
+    const auto& in = ctx.input();
+    const ModalKind kind = rig_edit_modal_.kind();
+    rig_edit_modal_.snap_step = snap_adaptive_ ? grid_step_() : gizmo_.translate_snap;
+    const auto outcome = rig_edit_modal_.update(vp, ctx.mouse(), in.keys, in.pressed[0], in.pressed[1], ctrl != snap_on_, shift, in.down[2],
+                                                in.pressed[2]);
+    ctx.consume_keyboard();
+    if (outcome == ModalTransform::Outcome::Cancelled) {
+        apply_rig_edit_modal_(kind, ModalTransform::Result{});
+        return;
+    }
+    apply_rig_edit_modal_(kind, rig_edit_modal_.result());
+}
+
+void EditorApp::apply_rig_edit_modal_(ModalKind kind, const ModalTransform::Result& r) {
+    if (rig_edit_selected_bone_ < 0 || static_cast<size_t>(rig_edit_selected_bone_) >= rig_edit_.model.bones.size()) return;
+    const int i = rig_edit_selected_bone_;
+    const glm::mat3 inv_rot = glm::inverse(glm::mat3(rig_edit_owner_world_()));
+    rig_edit_model_edit_(kind == ModalKind::Grab ? "Move Bone" : "Roll Bone", [&](RigModel& m) {
+        if (kind == ModalKind::Grab) {
+            const glm::vec3 rig_delta = inv_rot * r.translate;
+            if (rig_edit_selected_end_ == toy::editor::rig_pick::BoneEndpoint::Head) m.set_head(i, rig_edit_drag_start_.head + rig_delta);
+            else m.set_tail(i, rig_edit_drag_start_.tail + rig_delta);
+        } else if (kind == ModalKind::Rotate) {
+            m.set_roll(i, rig_edit_drag_start_.roll + r.rotate_deg);
+        }
+    });
+}
+
+void EditorApp::rig_edit_add_or_extrude_(bool extrude) {
+    if (extrude && (rig_edit_selected_bone_ < 0 || static_cast<size_t>(rig_edit_selected_bone_) >= rig_edit_.model.bones.size())) {
+        log_info("Rig Edit: select a bone first -- E extrudes a new child FROM it");
+        return;
+    }
+    const int from = rig_edit_selected_bone_;
+    std::string name = "bone";
+    for (int n = 1; rig_edit_.model.find_bone(name) >= 0; ++n) name = "bone_" + std::to_string(n);
+    int new_i = -1;
+    rig_edit_model_edit_(extrude ? "Extrude Bone" : "Add Bone", [&](RigModel& m) {
+        if (extrude) {
+            const RigModelBone& fb = m.bones[static_cast<size_t>(from)];
+            const glm::vec3 dir_len = fb.tail - fb.head;
+            const glm::vec3 dir = glm::length(dir_len) > 1e-6f ? glm::normalize(dir_len) : glm::vec3(0.0f, 0.0f, 1.0f);
+            const float len = std::max(m.bone_length(from), 0.2f);
+            new_i = m.extrude_bone(from, name, fb.tail + dir * len);
+        } else {
+            new_i = m.add_bone(name, -1, glm::vec3(0.0f), glm::vec3(0.0f, 0.0f, 0.2f));
+        }
+    });
+    rig_edit_selected_bone_ = new_i;
+    rig_edit_endpoint_selected_ = false;
+}
+
+void EditorApp::rig_edit_delete_selected_() {
+    if (rig_edit_selected_bone_ < 0 || static_cast<size_t>(rig_edit_selected_bone_) >= rig_edit_.model.bones.size()) return;
+    const int i = rig_edit_selected_bone_;
+    rig_edit_model_edit_("Delete Bone", [&](RigModel& m) { m.delete_bone(i); });
+    rig_edit_selected_bone_ = -1;
+    rig_edit_endpoint_selected_ = false;
+}
+
+void EditorApp::rig_edit_set_roll_(float degrees) {
+    if (rig_edit_selected_bone_ < 0 || static_cast<size_t>(rig_edit_selected_bone_) >= rig_edit_.model.bones.size()) return;
+    const int i = rig_edit_selected_bone_;
+    rig_edit_model_edit_("Set Roll", [&](RigModel& m) { m.set_roll(i, degrees); });
+}
+
+void EditorApp::rig_edit_rename_selected_(const std::string& to) {
+    if (rig_edit_selected_bone_ < 0 || static_cast<size_t>(rig_edit_selected_bone_) >= rig_edit_.model.bones.size()) return;
+    const int i = rig_edit_selected_bone_;
+    const std::string from = rig_edit_.model.bones[static_cast<size_t>(i)].name;
+    if (from == to) return;
+    bool ok = false;
+    rig_edit_model_edit_("Rename Bone", [&](RigModel& m) { ok = m.rename_bone(i, to); });
+    if (!ok) {
+        log_info("Rig Edit: can't rename '" + from + "' to '" + to + "' -- empty, or already taken by another bone");
+        return;
+    }
+    if (rig_edit_.path.empty()) {
+        log_info("Rig Edit: renamed '" + from + "' to '" + to + "' (not yet saved -- nothing could reference it by path yet)");
+        return;
+    }
+    const int changed = project_.rename_rig_bone_everywhere(project_.relative(rig_edit_.path), from, to);
+    log_info("Rig Edit: renamed '" + from + "' to '" + to + "'" +
+             (changed > 0 ? ", updated " + std::to_string(changed) + " referring file(s)" : std::string()));
+}
+
+void EditorApp::rig_edit_reparent_selected_(int new_parent) {
+    if (new_parent == -2 || rig_edit_selected_bone_ < 0 || static_cast<size_t>(rig_edit_selected_bone_) >= rig_edit_.model.bones.size()) return;
+    const int i = rig_edit_selected_bone_;
+    bool ok = false;
+    rig_edit_model_edit_("Reparent Bone", [&](RigModel& m) { ok = m.reparent_bone(i, new_parent); });
+    if (!ok) log_info("Rig Edit: can't reparent -- the target must be an EARLIER bone in the list, and not create a cycle");
+}
+
+void EditorApp::rig_edit_set_connected_(bool on) {
+    if (rig_edit_selected_bone_ < 0 || static_cast<size_t>(rig_edit_selected_bone_) >= rig_edit_.model.bones.size()) return;
+    const int i = rig_edit_selected_bone_;
+    rig_edit_model_edit_("Toggle Connected", [&](RigModel& m) { m.set_connected(i, on); });
+}
+
+void EditorApp::rig_edit_save_() {
+    rig_edit_.dirty = false;
+    if (rig_edit_.path.empty()) {
+        const std::string base = timeline_panel_->anim_name_of_(rig_edit_object_, "rig");
+        std::string name = base;
+        fs::path candidate = project_.assets() / "rigs" / (name + ".yaml");
+        for (int i = 1; coopa::yaml::document_exists(candidate); ++i) {
+            char buf[16];
+            std::snprintf(buf, sizeof(buf), "_%03d", i);
+            candidate = project_.assets() / "rigs" / (base + buf + ".yaml");
+        }
+        rig_edit_.path = candidate;
+        if (rig_edit_.model.name.empty() || rig_edit_.model.name == "rig") rig_edit_.model.name = base;
+    }
+    try {
+        fs::create_directories(rig_edit_.path.parent_path());
+        coopa::yaml::save_document(rig_edit_.path, rig_edit_.model.to_node());
+    } catch (const std::exception& e) {
+        log_error("Rig Edit: could not save " + rig_edit_.path.string() + ": " + e.what());
+        return;
+    }
+    ++rig_edit_.revision;
+    const int ci = doc_.find_component(rig_edit_object_, "Rig");
+    if (ci < 0) {
+        Node comp = Node::mapping();
+        comp["type"] = Node(std::string("Rig"));
+        comp["rig"] = Node(project_.relative(rig_edit_.path));
+        apply_(doc_.add_component(rig_edit_object_, comp));
+    }
+}
+
+void EditorApp::rig_edit_frame_(float dt) {
+    (void)dt;
+    if (!rig_edit_object_) return;
+    if (rig_edit_.dirty) rig_edit_save_();
+    if (!ui().input().down[0]) rig_edit_.undo.end_merge();
+}
+
+void EditorApp::rig_edit_keymap_(imm::Context& ctx, const ViewProj& vp, glm::vec2 m) {
+    if (playing()) return;
+    const auto& in = ctx.input();
+    if (rig_edit_modal_.active()) {
+        run_rig_edit_modal_(ctx, vp, has(in.mods, Mods::Control) != snap_on_, has(in.mods, Mods::Shift));
+        return;
+    }
+    if (ctx.wants_keyboard()) return;
+    // G needs a specifically-picked endpoint (not just a selected bone): dragging "the bone"
+    // as a rigid whole is deliberately not supported -- see rig_model.h's doc on `connected`
+    // cascading, which already fully defines what moving an endpoint does.
+    if (rig_edit_endpoint_selected_ && ctx.shortcut(Key::G)) { start_rig_edit_modal_(ModalKind::Grab, vp, m); return; }
+    if (rig_edit_selected_bone_ >= 0 && ctx.shortcut(Key::R)) { start_rig_edit_modal_(ModalKind::Rotate, vp, m); return; }
+    if (rig_edit_selected_bone_ >= 0 && ctx.shortcut(Key::E)) { rig_edit_add_or_extrude_(true); return; }
+    if (ctx.shortcut(Key::A, Mods::Shift)) { rig_edit_add_or_extrude_(false); return; }
+    if (ctx.shortcut(Key::X) || ctx.shortcut(Key::Delete)) { rig_edit_delete_selected_(); return; }
+}
+
+void EditorApp::begin_bone_transform_() {
+    bone_drag_starts_.clear();
+    coopa::rig::Rig* rig = pose_rig_component_();
+    if (!rig) return;
+    for (int i : pose_bones_selected_) {
+        if (i < 0 || static_cast<std::size_t>(i) >= rig->bone_count()) continue;
+        const auto& pc = rig->pose(static_cast<std::size_t>(i));
+        bone_drag_starts_[i] = BonePoseDragStart{pc.location, pc.rotation, pc.scale};
+    }
+}
+
+void EditorApp::start_bone_modal_(ModalKind kind, const ViewProj& vp, glm::vec2 mouse) {
+    if (playing() || pose_bones_selected_.empty()) return;
+    coopa::rig::Rig* rig = pose_rig_component_();
+    if (!rig) return;
+    // Pivot: centroid of the selected bones' world heads. Basis for the "local" second-axis
+    // press: a single selected bone's own world rotation (Blender's pose-mode default), or the
+    // rig owner's world rotation with several selected -- no one bone's axes would read as
+    // "the" local frame then.
+    glm::vec3 pivot(0.0f);
+    int n = 0;
+    for (int i : pose_bones_selected_) {
+        if (i < 0 || static_cast<std::size_t>(i) >= rig->bone_count()) continue;
+        pivot += glm::vec3(rig->world_matrix(static_cast<std::size_t>(i))[3]);
+        ++n;
+    }
+    if (n == 0) return;
+    pivot /= static_cast<float>(n);
+    glm::mat3 basis(1.0f);
+    const glm::mat4& basis_src = pose_bones_selected_.size() == 1 && static_cast<std::size_t>(pose_bones_selected_[0]) < rig->bone_count()
+                                      ? rig->world_matrix(static_cast<std::size_t>(pose_bones_selected_[0]))
+                                      : (rig->owner && rig->owner->get_transform() ? rig->owner->get_transform()->get_world_matrix()
+                                                                                   : glm::mat4(1.0f));
+    basis = glm::mat3(basis_src);
+    for (int c = 0; c < 3; ++c) basis[c] = glm::normalize(basis[c]);
+    begin_bone_transform_();
+    bone_modal_.begin(kind, vp, pivot, basis, mouse, std::nullopt, "local", false);
+}
+
+void EditorApp::run_bone_modal_(imm::Context& ctx, const ViewProj& vp, bool ctrl, bool shift) {
+    const auto& in = ctx.input();
+    const ModalKind kind = bone_modal_.kind();
+    bone_modal_.snap_step = snap_adaptive_ ? grid_step_() : gizmo_.translate_snap;
+    const auto outcome = bone_modal_.update(vp, ctx.mouse(), in.keys, in.pressed[0], in.pressed[1], ctrl != snap_on_, shift,
+                                            in.down[2], in.pressed[2]);
+    ctx.consume_keyboard();
+    if (outcome == ModalTransform::Outcome::Cancelled) {
+        apply_bone_modal_(kind, ModalTransform::Result{});
+        return;
+    }
+    apply_bone_modal_(kind, bone_modal_.result());
+    for (const auto& [axis_v, primary] : bone_modal_.guide_axes()) {
+        const glm::vec3 p = bone_modal_.pivot();
+        auto a = vp.project(p - axis_v * 1000.0f), b = vp.project(p + axis_v * 1000.0f);
+        auto c = vp.project(p);
+        if (!c) continue;
+        if (!a) a = c;
+        if (!b) b = c;
+        const glm::vec4 col = imm::with_alpha(ctx.style.accent, primary ? 0.9f : 0.4f);
+        ctx.line(*a, *b, col, primary ? 1.3f : 1.0f);
+    }
+}
+
+void EditorApp::apply_bone_modal_(ModalKind kind, const ModalTransform::Result& r) {
+    coopa::rig::Rig* rig = pose_rig_component_();
+    if (!rig) return;
+    const int k = kind == ModalKind::Grab ? 0 : kind == ModalKind::Rotate ? 1 : 2;
+    for (const auto& [i, start] : bone_drag_starts_) {
+        if (static_cast<std::size_t>(i) >= rig->bone_count()) continue;
+        auto& pc = rig->pose(static_cast<std::size_t>(i));
+        pc.location = start.location;
+        pc.rotation = start.rotation;
+        pc.scale = start.scale;
+        if (k == 0) toy::editor::rig_pose_edit::apply_translate_delta(*rig, static_cast<std::size_t>(i), r.translate);
+        else if (k == 1) toy::editor::rig_pose_edit::apply_rotate_delta(*rig, static_cast<std::size_t>(i), r.rotate_axis, r.rotate_deg);
+        else toy::editor::rig_pose_edit::apply_scale_delta(*rig, static_cast<std::size_t>(i), r.scale);
+    }
+}
+
+void EditorApp::clear_bone_transform_(int what) {
+    coopa::rig::Rig* rig = pose_rig_component_();
+    if (!rig) return;
+    for (int i : pose_bones_selected_) {
+        if (i < 0 || static_cast<std::size_t>(i) >= rig->bone_count()) continue;
+        if (what == 0) toy::editor::rig_pose_edit::clear_location(*rig, static_cast<std::size_t>(i));
+        else if (what == 1) toy::editor::rig_pose_edit::clear_rotation(*rig, static_cast<std::size_t>(i));
+        else toy::editor::rig_pose_edit::clear_scale(*rig, static_cast<std::size_t>(i));
+    }
+}
+
 std::vector<ObjectId> EditorApp::visible_ids_() const {
     std::vector<ObjectId> out;
     for (ObjectId id : doc_.all_ids()) if (!hidden_.count(id)) out.push_back(id);
@@ -3412,8 +3993,10 @@ bool EditorApp::set_interaction_mode(InteractionMode m) {
     // the mode menu, Tab, and anything else that switches mode. Leaving it open behind another
     // mode means clicks keep drawing curve points with nothing on screen saying why.
     if (m != InteractionMode::Pen && curve_pen_panel_->in_pen_mode_()) curve_pen_panel_->end_pen_();
-    if (m == InteractionMode::Pose) return enter_pose_mode_(timeline_panel_->rig_of_(doc_.primary()));
+    if (m == InteractionMode::Pose) return enter_pose_mode_(pose_target_of_(doc_.primary()));
     exit_pose_mode_();   // every other mode works on the document, not on a pose
+    if (m == InteractionMode::RigEdit) return enter_rig_edit_mode_(doc_.primary());
+    exit_rig_edit_mode_();
     if (m == InteractionMode::Object) { exit_mesh_mode_(); return true; }
     return enter_mesh_mode_(m);
 }
@@ -3424,7 +4007,15 @@ bool EditorApp::enter_pose_mode_(ObjectId rig) {
     exit_mesh_mode_();
     pose_rig_ = rig;
     anim_rig_ = rig;
-    // The pose starts where the clip leaves it at the playhead; with no clip, at rest.
+    pose_bones_selected_.clear();
+    bone_drag_starts_.clear();
+    bone_modal_.cancel();
+    rig_pose_clip_ = BoneClipDocument{};
+    // The pose starts where the clip leaves it at the playhead; with no clip, at rest. For a
+    // coopa::rig::Rig, this is a no-op (rig_objects_() walks the document by ancestry, not by
+    // Animator, but there is nothing for it to restore without an Animator's own stored tracks)
+    // -- the pose already showing is whatever its SkeletalAnimator/IK last wrote, which is
+    // exactly the rig's own equivalent of "the clip's pose at the playhead".
     timeline_panel_->anim_restore_rest_pose_();
     anim_posed_ = true;
     anim_pose_time_ = -1.0f;
@@ -3435,9 +4026,27 @@ bool EditorApp::enter_pose_mode_(ObjectId rig) {
 void EditorApp::exit_pose_mode_() {
     if (!pose_rig_) return;
     pose_rig_ = 0;
+    pose_bones_selected_.clear();
+    bone_drag_starts_.clear();
+    bone_modal_.cancel();
+    rig_pose_clip_ = BoneClipDocument{};
     timeline_panel_->anim_restore_rest_pose_();
     anim_posed_ = false;
     anim_pose_time_ = -1.0f;
+}
+
+coopa::rig::Rig* EditorApp::pose_rig_component_() const {
+    if (!pose_rig_) return nullptr;
+    auto* live = sync_.live(pose_rig_);
+    return live ? live->get_component<coopa::rig::Rig>() : nullptr;
+}
+
+ObjectId EditorApp::pose_target_of_(ObjectId id) const {
+    if (const ObjectId anim = timeline_panel_->rig_of_(id)) return anim;
+    for (auto* o = sync_.live(id); o; o = o->parent()) {
+        if (o->get_component<coopa::rig::Rig>()) return sync_.id_of_live(o);
+    }
+    return 0;
 }
 
 void EditorApp::push_mesh_to_scene_() {
@@ -3558,13 +4167,6 @@ bool EditorApp::gizmo_target_(bool mesh_edit, glm::vec3& pivot, glm::mat3& basis
     return true;
 }
 
-float EditorApp::bone_length_(ObjectId id) const {
-    const Node* obj = doc_.find(id);
-    const int ci = doc_.find_component(id, "Transform");
-    if (!obj || ci < 0) return 0.0f;
-    return std::max(0.0f, get_float(obj->at("components").as_seq()[static_cast<size_t>(ci)], "bone_length", 0.0f));
-}
-
 const Node* EditorApp::inherited_transform_key_(ObjectId id, const char* key) const {
     // Up the parent chain, so setting a rig's root dresses every bone under it.
     for (ObjectId at = id; at;) {
@@ -3580,38 +4182,14 @@ const Node* EditorApp::inherited_transform_key_(ObjectId id, const char* key) co
     return nullptr;
 }
 
-bool EditorApp::has_animator_(ObjectId id) const {
-    const Node* node = doc_.find(id);
-    if (!node) return false;
-    const Node& eff = instances_panel_->effective_(*node);
-    if (!eff.contains("components") || !eff.at("components").is_sequence()) return false;
-    for (const auto& c : eff.at("components").as_seq()) {
-        if (component_type(c) == "Animator") return true;
-    }
-    return false;
-}
-
-ObjectId EditorApp::rig_root_of_(ObjectId id) const {
-    for (std::optional<ObjectId> cur = id; cur && *cur != 0; cur = doc_.parent_of(*cur)) {
-        if (has_animator_(*cur)) return *cur;
-    }
-    return 0;
-}
-
 OriginStyle EditorApp::origin_style_for_(ObjectId id) const {
-    // Bones are a rig's display: an Animator at or above this object, and nothing else. Reads
-    // the EFFECTIVE Animator (rig_root_of_), not just an override -- unlike Pose mode's rig
-    // detection (TimelinePanel::rig_of_), a scene-placed instance must read as a skeleton too.
-    const bool in_rig = rig_root_of_(id) != 0;
     const Node* n = inherited_transform_key_(id, "origin_style");
     if (n && n->is_string()) {
         const std::string v = n->get_value<std::string>();
         if (v == "Orb") return OriginStyle::Orb;
         if (v == "Axes") return OriginStyle::Axes;
-        if (v == "Bone" && in_rig) return OriginStyle::Bone;
     }
-    if (in_rig) return OriginStyle::Bone;   // a rig reads as a skeleton unless told otherwise
-    return default_origin_style();          // Preferences > Viewport
+    return default_origin_style();   // Preferences > Viewport
 }
 
 float EditorApp::origin_size_for_(ObjectId id) const {
@@ -3639,7 +4217,7 @@ void EditorApp::set_selection_transform_key_(const char* key, const Node* value,
 
 void EditorApp::set_selection_origin_style(std::optional<OriginStyle> style) {
     if (!style) { set_selection_transform_key_("origin_style", nullptr, "Origin Style"); return; }
-    static const char* kNames[] = {"Axes", "Orb", "Bone"};
+    static const char* kNames[] = {"Axes", "Orb"};
     const Node v = Node(std::string(kNames[static_cast<int>(*style)]));   // parens: braces build a sequence
     set_selection_transform_key_("origin_style", &v, "Origin Style");
 }
@@ -3648,46 +4226,6 @@ void EditorApp::set_selection_origin_size(float metres) {
     if (metres <= 1e-4f) { set_selection_transform_key_("origin_size", nullptr, "Origin Size"); return; }
     const Node v = make_float(std::min(metres, 0.5f));
     set_selection_transform_key_("origin_size", &v, "Origin Size");
-}
-
-bool EditorApp::is_joint_object_(ObjectId id) {
-    const Node* node = doc_.find(id);
-    if (!node) return false;
-    // The same test the glyph loop uses to decide an object draws an origin at all.
-    if (!object_mesh_key_(instances_panel_->effective_(*node)).empty() && mesh_for_object_(*node)) return false;
-    const Node& eff = instances_panel_->effective_(*node);
-    if (!eff.contains("components") || !eff.at("components").is_sequence()) return true;
-    for (const auto& c : eff.at("components").as_seq()) {
-        const std::string t = component_type(c);
-        if (t == "Camera" || t == "DirectionalLight" || t == "PointLight" || t == "SpotLight") return false;
-    }
-    return true;
-}
-
-float EditorApp::bone_length_guess_(ObjectId id) {
-    const auto* live = sync_.live(id);
-    if (!live || !live->get_transform()) return 0.0f;
-    const coopa::util::Transform& t = live->get_transform()->transform();
-    const glm::vec3 head(t.get_world_matrix()[3]);
-    float sum_d = 0.0f;
-    int n = 0;
-    for (const auto& child : live->children()) {
-        if (!child || !child->get_transform()) continue;
-        const ObjectId cid = sync_.id_of_live(child.get());
-        if (!cid || !is_joint_object_(cid)) continue;   // a prop or a light is not a joint
-        sum_d += glm::distance(glm::vec3(child->get_transform()->transform().get_world_matrix()[3]), head);
-        ++n;
-    }
-    if (n > 0) {
-        const float d = sum_d / static_cast<float>(n);
-        if (d > 1e-4f) return d;
-    }
-    // A leaf has no child joint to reach for: half of the span it hangs off, as rigs are built.
-    if (const coopa::util::Transform* parent = t.parent()) {
-        const float d = glm::distance(glm::vec3(parent->get_world_matrix()[3]), head);
-        if (d > 1e-4f) return d * 0.5f;
-    }
-    return 0.0f;
 }
 
 std::vector<glm::vec3> EditorApp::bone_tails_(ObjectId id, float fallback_length) {
@@ -3706,52 +4244,33 @@ std::vector<glm::vec3> EditorApp::bone_tails_(ObjectId id, float fallback_length
         const glm::vec3 p(child->get_transform()->transform().get_world_matrix()[3]);
         if (glm::distance(p, head) > 1e-4f) joints.push_back(p);
     }
-    // Which way a single bone runs: the children on average, else on from the parent, else the
-    // object's own +Y (Blender's bone axis), which is all a lone object can offer.
-    auto direction = [&]() -> glm::vec3 {
-        glm::vec3 sum(0.0f);
-        for (const glm::vec3& j : joints) sum += glm::normalize(j - head);
-        if (glm::length(sum) > 1e-5f) return glm::normalize(sum);
-        if (const coopa::util::Transform* parent = t.parent()) {
-            const glm::vec3 pp(parent->get_world_matrix()[3]);
-            if (glm::distance(pp, head) > 1e-4f) return glm::normalize(head - pp);
-        }
-        const glm::vec3 y(w[1]);
-        return glm::length(y) > 1e-6f ? glm::normalize(y) : glm::vec3(0.0f, 1.0f, 0.0f);
-    };
-
-    const float stored = bone_length_(id);
-    if (stored > 0.0f) {
-        out.push_back(head + direction() * stored);
-        return out;
-    }
     if (!joints.empty()) return joints;   // the rig itself: one bone to every child joint
     // A leaf: carry on the way the parent points, for half that span, so a chain ends in a
     // bone instead of stopping short.
+    glm::vec3 dir(0.0f, 1.0f, 0.0f);
     float len = fallback_length;
     if (const coopa::util::Transform* parent = t.parent()) {
-        const float d = glm::distance(glm::vec3(parent->get_world_matrix()[3]), head);
-        if (d > 1e-4f) len = d * 0.5f;
+        const glm::vec3 pp(parent->get_world_matrix()[3]);
+        const float d = glm::distance(pp, head);
+        if (d > 1e-4f) { dir = glm::normalize(head - pp); len = d * 0.5f; }
     }
-    out.push_back(head + direction() * len);
+    out.push_back(head + dir * len);
     return out;
 }
 
-float EditorApp::effective_bone_length_(ObjectId id) {
-    const float stored = bone_length_(id);
-    return stored > 0.0f ? stored : bone_length_guess_(id);
+bool EditorApp::is_joint_object_(ObjectId id) {
+    const Node* node = doc_.find(id);
+    if (!node) return false;
+    // The same test the glyph loop uses to decide an object draws an origin at all.
+    if (!object_mesh_key_(instances_panel_->effective_(*node)).empty() && mesh_for_object_(*node)) return false;
+    const Node& eff = instances_panel_->effective_(*node);
+    if (!eff.contains("components") || !eff.at("components").is_sequence()) return true;
+    for (const auto& c : eff.at("components").as_seq()) {
+        const std::string t = component_type(c);
+        if (t == "Camera" || t == "DirectionalLight" || t == "PointLight" || t == "SpotLight") return false;
+    }
+    return true;
 }
-
-void EditorApp::set_bone_length_(ObjectId id, float metres) {
-    Node* obj = doc_.find(id);
-    const int ci = doc_.find_component(id, "Transform");
-    if (!obj || ci < 0) return;
-    Node comp = obj->at("components").as_seq()[static_cast<size_t>(ci)];
-    if (metres > 1e-6f) comp["bone_length"] = make_float(metres);
-    else if (comp.contains("bone_length")) comp.as_map().erase("bone_length");
-    apply_(doc_.set_component(id, ci, std::move(comp), "Bone Length", "bone_length"));
-}
-
 
 float EditorApp::proportional_radius_px_(const ViewProj& vp, const glm::vec3& at) const {
     const glm::vec3 right = glm::normalize(glm::vec3(glm::inverse(vp.view)[0]));
@@ -3964,6 +4483,18 @@ void EditorApp::draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, c
                 if (doc_.is_selected(id)) col = doc_.primary() == id ? active_col : accent;
                 viewport_chrome_panel_->draw_object_glyph_(ctx, *vp, id, *node, live->get_transform()->transform().get_world_matrix(), col);
             }
+        }
+        // A coopa::rig::Rig's bones: Pose mode's own display, not an overlay the user turns
+        // off (same convention as the OLD-style joint bones drawn above, inside
+        // draw_object_glyph_) -- drawn regardless of show_overlays_/show_glyphs_/show_origins_.
+        if (coopa::rig::Rig* pose_rig = pose_rig_component_()) {
+            viewport_chrome_panel_->draw_rig_bones_(ctx, *vp, *pose_rig, accent, active_col);
+        }
+        // RigEdit mode's own display: the REST skeleton being authored, straight from
+        // rig_edit_.model -- same "not an overlay" convention as Pose mode's bones above.
+        if (rig_edit_mode_()) {
+            viewport_chrome_panel_->draw_rig_edit_bones_(ctx, *vp, rig_edit_.model, rig_edit_owner_world_(), rig_edit_selected_bone_,
+                                                         rig_edit_endpoint_selected_, rig_edit_selected_end_, accent, active_col);
         }
         // Any Curve that is selected or asks to always show, so a path is visible without
         // entering the Pen tool to see it. A curve is an overlay, so the gizmo and overlay

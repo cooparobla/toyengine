@@ -4,8 +4,10 @@
 #include <cmath>
 #include <iostream>
 
-#include <coopa/animation/animator.h>
 #include <coopa/animation/ik.h>
+#include <coopa/rig/bone_attachment.h>
+#include <coopa/rig/ik_components.h>
+#include <coopa/rig/skeletal_animator.h>
 #include <coopa/scene/scene.h>
 #include <coopa/scene/scene_object.h>
 #include <physxcoopa/components/rigidbody.h>
@@ -27,14 +29,30 @@ float smooth01(float x) {
     return x * x * (3.0f - 2.0f * x);
 }
 
-coopa::anim::Animator* find_animator(coopa::scene::SceneObject* obj) {
-    if (auto* a = obj->get_component<coopa::anim::Animator>()) return a;
+coopa::rig::SkeletalAnimator* find_animator(coopa::scene::SceneObject* obj) {
+    if (auto* a = obj->get_component<coopa::rig::SkeletalAnimator>()) return a;
     for (const auto& child : obj->children())
         if (auto* a = find_animator(child.get())) return a;
     return nullptr;
 }
 
 glm::vec3 world_pos(coopa::scene::SceneObject* o) { return coopa::anim::ik_world_position(o); }
+
+/**
+ * @brief This frame's world matrix of a Mount socket -- the saddle, a stirrup, a rein --
+ *        preferring a BoneAttachment's live current_world_matrix() over its (possibly
+ *        last-frame-stale) Transform. Mount sockets ride a horse bone via BoneAttachment
+ *        (BoneAttachmentSystem, order 345), which runs AFTER Rider's own placement (order
+ *        ~319); reading the Transform directly would see last frame's bone pose.
+ */
+glm::mat4 socket_world_matrix(coopa::scene::SceneObject* o) {
+    if (!o) return glm::mat4(1.0f);
+    if (auto* att = o->get_component<coopa::rig::BoneAttachment>()) return att->current_world_matrix();
+    auto* tc = o->get_transform();
+    return tc ? tc->get_world_matrix() : glm::mat4(1.0f);
+}
+
+glm::vec3 socket_pos(coopa::scene::SceneObject* o) { return glm::vec3(socket_world_matrix(o)[3]); }
 
 /** @brief True when `o` is `root` or one of its descendants. */
 bool under(const coopa::scene::SceneObject* o, const coopa::scene::SceneObject* root) {
@@ -60,18 +78,16 @@ void Rider::bind_() {
     arms_[1].end = "hand_r";
     owner->for_each_recursive([this](const coopa::scene::SceneObject& o) {
         for (const auto& comp : o.components()) {
-            if (auto* chain = dynamic_cast<coopa::anim::ChainIK*>(comp.get())) {
-                if (!spine_) spine_ = chain;
+            if (auto* chain = dynamic_cast<coopa::rig::ChainIK*>(comp.get())) {
+                if (!spine_) { spine_ = chain; spine_->bind(); }
                 continue;
             }
-            auto* ik = dynamic_cast<coopa::anim::TwoBoneIK*>(comp.get());
+            auto* ik = dynamic_cast<coopa::rig::TwoBoneIK*>(comp.get());
             if (!ik) continue;
             ik->bind();
-            coopa::scene::SceneObject* end = ik->end_bone();
-            if (!end) continue;
             for (Limb* group : {legs_, arms_})
                 for (int i = 0; i < 2; ++i)
-                    if (end->name() == group[i].end) group[i].ik = ik;
+                    if (ik->end == group[i].end) group[i].ik = ik;
         }
     });
     if (!legs_[0].ik || !legs_[1].ik || !arms_[0].ik || !arms_[1].ik) {
@@ -188,12 +204,10 @@ void Rider::hand_over_(bool to_mount) {
 }
 
 void Rider::release_limbs_() {
+    // coopa::rig::TwoBoneIK::clear_target_override() drops the pole override too.
     for (Limb* group : {legs_, arms_})
         for (int i = 0; i < 2; ++i)
-            if (group[i].ik) {
-                group[i].ik->clear_target_override();
-                group[i].ik->clear_pole_override();
-            }
+            if (group[i].ik) group[i].ik->clear_target_override();
     if (spine_) spine_->clear_target_override();
 }
 
@@ -274,9 +288,8 @@ void Rider::update(float dt) {
 
 bool Rider::seat_pose_(glm::vec3& pos, glm::quat& rot) {
     coopa::scene::SceneObject* saddle = mount_ ? mount_->socket(mount_->saddle) : nullptr;
-    auto* tc = saddle ? saddle->get_transform() : nullptr;
-    if (!tc) return false;
-    const glm::mat4 m = tc->get_world_matrix();
+    if (!saddle || !saddle->get_transform()) return false;
+    const glm::mat4 m = socket_world_matrix(saddle);
     rot = glm::normalize(coopa::anim::ik::rotation_of(m));
     pos = glm::vec3(m[3]) + rot * seat_offset;
     return true;
@@ -320,26 +333,26 @@ void Rider::ik_pre_solve(float) {
     const std::string* reins[2] = {&mount_->rein_l, &mount_->rein_r};
     for (int i = 0; i < 2; ++i) {
         const float side = i == 0 ? -1.0f : 1.0f;
-        if (coopa::anim::TwoBoneIK* ik = legs_[i].ik) {
+        if (coopa::rig::TwoBoneIK* ik = legs_[i].ik) {
             coopa::scene::SceneObject* st = mount_->socket(*stirrups[i]);
             coopa::scene::SceneObject* clip_t = ik->target_object();
             if (st && clip_t) {
                 const float lw = w * std::clamp(leg_weight, 0.0f, 1.0f);
-                ik->set_target_position(glm::mix(world_pos(clip_t), world_pos(st), lw));
+                ik->set_target_position(glm::mix(world_pos(clip_t), socket_pos(st), lw));
                 coopa::scene::SceneObject* clip_pole = ik->pole.empty() ? nullptr : coopa::anim::resolve_ik_path(owner, scene, ik->pole);
-                const glm::vec3 hip = world_pos(ik->upper_bone());
+                const glm::vec3 hip = ik->upper_world_position();
                 const glm::vec3 pole = hip + right * (side * knee_spread) + fwd * 0.6f;
                 ik->set_pole_position(clip_pole ? glm::mix(world_pos(clip_pole), pole, lw) : pole);
             }
         }
-        if (coopa::anim::TwoBoneIK* ik = arms_[i].ik) {
+        if (coopa::rig::TwoBoneIK* ik = arms_[i].ik) {
             coopa::scene::SceneObject* rein = mount_->socket(*reins[i]);
             coopa::scene::SceneObject* clip_t = ik->target_object();
-            if (rein && clip_t) ik->set_target_position(glm::mix(world_pos(clip_t), world_pos(rein), w * std::clamp(arm_weight, 0.0f, 1.0f)));
+            if (rein && clip_t) ik->set_target_position(glm::mix(world_pos(clip_t), socket_pos(rein), w * std::clamp(arm_weight, 0.0f, 1.0f)));
         }
     }
-    if (spine_ && !spine_->target.empty()) {
-        if (coopa::scene::SceneObject* st = coopa::anim::resolve_ik_path(owner, scene, spine_->target)) {
+    if (spine_) {
+        if (coopa::scene::SceneObject* st = spine_->target_object()) {
             const float g = mount_->gallop_speed > 0.0f ? std::clamp(mount_->speed() / mount_->gallop_speed, 0.0f, 1.0f) : 0.0f;
             spine_->set_target_position(world_pos(st) + fwd * (lean * g * w));
         }

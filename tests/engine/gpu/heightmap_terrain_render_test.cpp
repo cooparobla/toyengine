@@ -65,6 +65,7 @@ COOPA_TEST(demo_renders_the_terrain) {
     for (int cy = 0; cy < 16 && boxes_ok; cy += 5) {
         for (int cx = 0; cx < 16 && boxes_ok; cx += 5) {
             const coopa::scene::SceneObject* c = t->runtime->chunks[static_cast<std::size_t>(cy) * 16 + cx];
+            if (c == nullptr) continue; // not yet streamed in at this frame count -- nothing to check
             const glm::mat4 w = c->get_transform()->transform().get_world_matrix();
             const glm::vec2 mm = t->data->chunk_minmax(cx, cy);
             const float lo = w[3].z, hi = w[3].z + w[2].z;

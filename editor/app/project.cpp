@@ -291,6 +291,176 @@ void Project::build_clip_referrers_() {
     }
 }
 
+namespace {
+
+bool component_has_rig(const Node& c, const std::string& rig_rel) {
+    return c.contains("rig") && c.at("rig").is_string() && c.at("rig").get_value<std::string>() == rig_rel;
+}
+
+/** @brief Does `obj`'s OWN components include a Rig pointing at `rig_rel`? */
+bool object_has_matching_rig(const Node& obj, const std::string& rig_rel) {
+    if (!obj.contains("components") || !obj.at("components").is_sequence()) return false;
+    for (const Node& c : obj.at("components").as_seq()) {
+        if (component_type(c) == "Rig" && component_has_rig(c, rig_rel)) return true;
+    }
+    return false;
+}
+
+bool rename_str_field(Node& c, const char* key, const std::string& from, const std::string& to) {
+    if (!c.contains(key) || !c.at(key).is_string() || c.at(key).get_value<std::string>() != from) return false;
+    c[key] = Node(to);
+    return true;
+}
+
+/** @brief FootIK's Leg: [thigh, shin, foot] or {thigh, shin, foot, pole, front}. */
+int rename_leg(Node& n, const std::string& from, const std::string& to) {
+    int changed = 0;
+    if (n.is_sequence()) {
+        for (size_t i = 0; i < n.size() && i < 3; ++i) {
+            if (n[i].is_string() && n[i].get_value<std::string>() == from) { n[i] = Node(to); ++changed; }
+        }
+    } else if (n.is_mapping()) {
+        for (const char* k : {"thigh", "shin", "foot"}) changed += rename_str_field(n, k, from, to) ? 1 : 0;
+    }
+    return changed;
+}
+
+/**
+ * @brief Rewrites one component's bone-name field(s) for the six rig-aware types. Each may
+ * carry its OWN `rig:` field (TwoBoneIK/ChainIK/LookAtIK/BoneAttachment can live on a different
+ * object than the Rig they drive) -- honoured exactly when present; when absent, resolved like
+ * the runtime resolves it, via the nearest ANCESTOR Rig (`ancestor_rig_matches`, true exactly
+ * when some ancestor -- or this object itself -- carries a matching Rig component). FootIK and
+ * Ragdoll have no `rig:` field at all today, so they are always ancestor-resolved.
+ */
+int rename_in_component(Node& c, const std::string& rig_rel, const std::string& from, const std::string& to, bool ancestor_rig_matches) {
+    const std::string type = component_type(c);
+    const bool has_own_rig = c.contains("rig") && c.at("rig").is_string();
+    const bool rig_matches = has_own_rig ? component_has_rig(c, rig_rel) : ancestor_rig_matches;
+    if (!rig_matches) return 0;
+    if (type == "TwoBoneIK") {
+        return rename_str_field(c, "upper", from, to) + rename_str_field(c, "lower", from, to) + rename_str_field(c, "end", from, to);
+    }
+    if (type == "ChainIK") return rename_str_field(c, "root", from, to) + rename_str_field(c, "tip", from, to);
+    if (type == "LookAtIK" || type == "BoneAttachment") return rename_str_field(c, "bone", from, to) ? 1 : 0;
+    if (type == "FootIK") {
+        int changed = rename_str_field(c, "pelvis", from, to) ? 1 : 0;
+        for (const char* key : {"left", "right"}) if (c.contains(key)) changed += rename_leg(c[key], from, to);
+        if (c.contains("legs") && c.at("legs").is_sequence()) for (Node& leg : c["legs"].as_seq()) changed += rename_leg(leg, from, to);
+        return changed;
+    }
+    if (type == "Ragdoll") {
+        if (!c.contains("bones") || !c.at("bones").is_sequence()) return 0;
+        int changed = 0;
+        for (Node& bn : c["bones"].as_seq()) changed += rename_str_field(bn, "bone", from, to) ? 1 : 0;
+        return changed;
+    }
+    return 0;
+}
+
+/**
+ * @brief Walks one object node (and its children), rewriting every bone-name field that
+ * addresses `rig_rel`, and collecting every SkeletalAnimator state's clip path on an object
+ * whose Rig matches (rewritten separately, one clip file at a time -- see the caller).
+ */
+void walk_object(Node& obj, const std::string& rig_rel, const std::string& from, const std::string& to, int& changed,
+                 std::vector<std::string>& clip_refs, bool ancestor_rig_matches) {
+    if (!obj.is_mapping()) return;
+    const bool rig_here = ancestor_rig_matches || object_has_matching_rig(obj, rig_rel);
+    if (obj.contains("components") && obj.at("components").is_sequence()) {
+        for (Node& c : obj["components"].as_seq()) {
+            changed += rename_in_component(c, rig_rel, from, to, rig_here);
+            if (rig_here && component_type(c) == "SkeletalAnimator" && c.contains("states") && c.at("states").is_sequence()) {
+                for (const Node& st : c.at("states").as_seq()) {
+                    if (st.contains("clip") && st.at("clip").is_string()) clip_refs.push_back(st.at("clip").get_value<std::string>());
+                }
+            }
+        }
+    }
+    if (obj.contains("children") && obj.at("children").is_sequence()) {
+        for (Node& ch : obj["children"].as_seq()) walk_object(ch, rig_rel, from, to, changed, clip_refs, rig_here);
+    }
+}
+
+/** @brief Every bone track named `from` in a SkeletalClip-shaped YAML document, renamed to `to`. */
+int rename_bone_in_clip(Node& root, const std::string& from, const std::string& to) {
+    if (!root.contains("clip") || !root.at("clip").contains("bones") || !root.at("clip").at("bones").is_sequence()) return 0;
+    int changed = 0;
+    for (Node& bn : root["clip"]["bones"].as_seq()) {
+        if (bn.contains("bone") && bn.at("bone").is_string() && bn.at("bone").get_value<std::string>() == from) {
+            bn["bone"] = Node(to);
+            ++changed;
+        }
+    }
+    const Node& rm = root.contains("clip") ? root.at("clip") : root;
+    if (rm.contains("root_motion") && rm.at("root_motion").contains("bone") && rm.at("root_motion").at("bone").is_string() &&
+        rm.at("root_motion").at("bone").get_value<std::string>() == from) {
+        root["clip"]["root_motion"]["bone"] = Node(to);
+        ++changed;
+    }
+    return changed;
+}
+
+} // namespace
+
+int Project::rename_rig_bone_everywhere(const std::string& rig_rel_path, const std::string& from, const std::string& to) {
+    int files_changed = 0;
+    std::set<std::string> clip_refs_rel;   // deduped: several states/rigs can share one clip file
+    std::error_code ec;
+    for (auto e = fs::recursive_directory_iterator(assets(), ec); e != fs::recursive_directory_iterator(); e.increment(ec)) {
+        if (ec) break;
+        if (!e->is_regular_file() || e->path().extension() != ".yaml") continue;
+        std::string text;
+        {
+            std::ifstream in(e->path(), std::ios::binary);
+            text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        // Only a document mentioning the bone name, OR the rig's own path, could possibly
+        // reference it -- skips the asset tree's bulk (meshes, textures, materials) without
+        // parsing it. The rig-path half matters because a scene/object file's ONLY connection
+        // to the bone can be indirect: it names the RIG (so its SkeletalAnimator's clip paths
+        // get collected below), while the bone name itself lives only in the separate clip file.
+        if (text.find(from) == std::string::npos && text.find(rig_rel_path) == std::string::npos) continue;
+        Node doc;
+        try {
+            doc = coopa::yaml::load_document(e->path());
+        } catch (...) {
+            continue;   // an unparsable file is left alone; the engine can't load it either
+        }
+        int changed = 0;
+        std::vector<std::string> refs;
+        if (doc.contains("scene") && doc.at("scene").contains("root_objects") && doc.at("scene").at("root_objects").is_sequence()) {
+            for (Node& obj : doc["scene"]["root_objects"].as_seq()) walk_object(obj, rig_rel_path, from, to, changed, refs, false);
+        } else if (doc.contains("object")) {
+            walk_object(doc["object"], rig_rel_path, from, to, changed, refs, false);
+        }
+        for (const std::string& r : refs) clip_refs_rel.insert(resolve_clip_ref(e->path(), r).string());
+        if (changed > 0) {
+            try {
+                coopa::yaml::save_document(e->path(), doc);
+                ++files_changed;
+            } catch (...) {
+                // Leave the in-memory rewrite unsaved rather than risk a half-written file.
+            }
+        }
+    }
+    for (const std::string& clip_path_str : clip_refs_rel) {
+        const fs::path clip_path(clip_path_str);
+        if (!coopa::yaml::document_exists(clip_path)) continue;
+        try {
+            Node clip_doc = coopa::yaml::load_document(clip_path);
+            if (rename_bone_in_clip(clip_doc, from, to) > 0) {
+                coopa::yaml::save_document(clip_path, clip_doc);
+                ++files_changed;
+            }
+        } catch (...) {
+            // Same: an unparsable or unwritable clip is left alone.
+        }
+    }
+    refresh();
+    return files_changed;
+}
+
 std::vector<std::string> Project::repoint_clip_refs(const std::vector<std::string>& docs,
                                                     const std::string& from, const std::string& to) {
     std::vector<std::string> changed;

@@ -1,7 +1,8 @@
 /**
  * @file character_anim_driver.h
- * @brief A tiny gameplay-side demo: crossfades a character's Animator between idle, walk, run
- *        and jump states from its CharacterController's speed and grounded state.
+ * @brief A tiny gameplay-side demo: crossfades a character's Animator and/or sibling
+ *        SkeletalAnimator between idle, walk, run and jump states from its CharacterController's
+ *        speed and grounded state.
  *
  * With the controller's `use_root_motion` on, the state is picked from the REQUESTED speed
  * (move_input x move_speed, sprint included) rather than the measured one, since the clip's own
@@ -18,7 +19,8 @@
  * tread. Claims stack, and the stack is what makes overlapping actions safe: see
  * push_states()'s doc.
  *
- * Example YAML (next to a CharacterController; the Animator may be on this object or under it):
+ * Example YAML (next to a CharacterController; the Animator/SkeletalAnimator may be on this
+ * object or under it; a fully-IK rig like mannequin_ik carries both and both get driven):
  * @code
  * - type: CharacterAnimDriver
  *   idle_state: idle
@@ -42,6 +44,7 @@
 #include <vector>
 
 #include <coopa/animation/animator.h>
+#include <coopa/rig/skeletal_animator.h>
 
 #include <toyengine/scene/character_controller.h>
 
@@ -51,7 +54,8 @@ namespace scene {
 /**
  * @class CharacterAnimDriver
  * @brief Picks idle / walk / run / jump from the sibling CharacterController each frame and
- *        crossfades the Animator to it.
+ *        crossfades the owner's Animator and/or SkeletalAnimator (searched for among the
+ *        owner's descendants, either or both) to it.
  */
 class CharacterAnimDriver : public coopa::scene::Component {
 public:
@@ -126,13 +130,18 @@ private:
     };
 
     static coopa::anim::Animator* find_animator_(coopa::scene::SceneObject* obj);
+    static coopa::rig::SkeletalAnimator* find_skeletal_animator_(coopa::scene::SceneObject* obj);
 
     /** @brief Writes the top claim's names into the four fields, or the driver's own when the
      *         stack is empty. */
     void apply_claims_();
 
     CharacterController* controller_ = nullptr;
+    /** @brief Either, both, or neither may be bound -- a rig character typically has only a
+     *         SkeletalAnimator, a property-animated one only an Animator, and a fully-IK rig
+     *         (mannequin_ik) carries both (see update()'s doc). */
     coopa::anim::Animator* animator_ = nullptr;
+    coopa::rig::SkeletalAnimator* skeletal_animator_ = nullptr;
     std::string current_;
     float air_time_ = 0.0f;
     bool resync_ = false;

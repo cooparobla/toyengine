@@ -15,10 +15,13 @@
 #include <vector>
 
 #include <glm/glm.hpp>
-#include <coopa/animation/animation_system.h>
-#include <coopa/animation/animation_yaml.h>
-#include <coopa/animation/ik_system.h>
 #include <coopa/asset/asset_manager.h>
+#include <coopa/rig/bone_attachment_system.h>
+#include <coopa/rig/ik_system.h>
+#include <coopa/rig/rig_system.h>
+#include <coopa/rig/rig_yaml.h>
+#include <coopa/rig/skeletal_animation_system.h>
+#include <coopa/rig/skeletal_animator.h>
 #include <coopa/scene/scene_loader.h>
 #include <coopa/scene/systems/transform_system.h>
 #include <physxcoopa/components/box_collider.h>
@@ -30,6 +33,7 @@
 #include <toyengine/scene/kinematic_control_system.h>
 #include <toyengine/scene/ragdoll.h>
 #include <toyengine/scene/register.h>
+#include <toyengine/scene/rig_ik_driver.h>
 
 #include "engine/support/checks.h"
 
@@ -40,18 +44,13 @@ using coopa::scene::TransformComponent;
 
 namespace ragdoll_test {
 
-/** @brief `obj` (an object-asset node) without its render parts and Animator: only Transforms,
- *         the Ragdoll and whatever else headless parsers know. */
+/** @brief `obj` (an object-asset node) with every MeshRenderer-carrying shape child dropped:
+ *         the Rig, SkeletalAnimator and Ragdoll survive -- there are no bone SceneObjects left
+ *         to strip. */
 fkyaml::node strip_rig(const fkyaml::node& obj) {
     fkyaml::node out = fkyaml::node::mapping();
     out["name"] = obj["name"];
-    fkyaml::node comps = fkyaml::node::sequence();
-    for (const auto& c : obj["components"]) {
-        const std::string type = c["type"].get_value<std::string>();
-        if (type == "Animator" || type == "MeshRenderer") continue;
-        comps.get_value_ref<fkyaml::node::sequence_type&>().push_back(c);
-    }
-    out["components"] = comps;
+    out["components"] = obj["components"];
     fkyaml::node kids = fkyaml::node::sequence();
     if (obj.contains("children") && obj["children"].is_sequence()) {
         for (const auto& child : obj["children"]) {
@@ -65,23 +64,25 @@ fkyaml::node strip_rig(const fkyaml::node& obj) {
 }
 
 /**
- * @brief The generated mannequin_ragdoll prefab (its real Ragdoll config, parsed by the real
- *        "Ragdoll" parser) on a ground slab, with the idle clip on an Animator, an optional
- *        CharacterController, and every system the engine installs around a ragdoll.
+ * @brief The generated mannequin_ragdoll prefab (its real Rig/SkeletalAnimator/Ragdoll config,
+ *        parsed by the real parsers) on a ground slab, with an optional CharacterController, and
+ *        every system the engine installs around a ragdoll.
  */
 struct Rig {
+    coopa::asset::AssetManager assets;   // owns the Rig/SkeletalClip slots; must outlive their components
     coopa::scene::Scene scene{"ragdoll_test"};
     SceneObject* root = nullptr;
     toy::scene::Ragdoll* ragdoll = nullptr;
-    coopa::anim::Animator* animator = nullptr;
+    coopa::rig::SkeletalAnimator* animator = nullptr;
     toy::scene::CharacterController* cc = nullptr;
     coopa::physx::system::PhysicsSystem* physics = nullptr;
 
     explicit Rig(bool with_character, const glm::vec3& at = glm::vec3(0.0f)) {
-        static coopa::asset::AssetManager assets;   // parsers capture it; must outlive them
-        coopa::physx::register_physics_components(assets);
-        toy::scene::register_scene_components();
         const std::string root_dir = ROOT_DIR;
+        assets.add_search_root(root_dir + "/assets");
+        coopa::physx::register_physics_components(assets);
+        coopa::rig::register_rig_components(assets);
+        toy::scene::register_scene_components();
         std::ifstream in(root_dir + "/assets/objects/characters/mannequin_ragdoll.yaml");
         fkyaml::node prefab = fkyaml::node::deserialize(in);
         fkyaml::node rig = strip_rig(prefab["object"]);
@@ -99,24 +100,28 @@ struct Rig {
         doc["scene"]["root_objects"] = fkyaml::node::sequence();
         doc["scene"]["root_objects"].get_value_ref<fkyaml::node::sequence_type&>().push_back(ground);
         doc["scene"]["root_objects"].get_value_ref<fkyaml::node::sequence_type&>().push_back(rig);
-        scene = coopa::scene::SceneLoader::load_from_node(doc, (coopa::test::scratch_dir() / "ragdoll_test.yaml").string());
+        // Unstarted: Ragdoll::start() binds its bones eagerly (not lazily, on its first real
+        // tick, the way FootIK/TwoBoneIK do) -- it must not run before the "Rig"/
+        // "SkeletalAnimator" parsers' load_async() calls below have actually finished.
+        scene = coopa::scene::SceneLoader::load_from_node(
+            doc, (coopa::test::scratch_dir() / "ragdoll_test.yaml").string(), {.start = false});
+        while (assets.pending_load_count() > 0) assets.update(0.0f);
 
         root = scene.find_object("mannequin_ragdoll");
         if (!root) return;
         ragdoll = root->get_component<toy::scene::Ragdoll>();
-        std::ifstream clip_in(root_dir + "/assets/animations/mannequin/idle.yaml");
-        animator = root->add_component<coopa::anim::Animator>();
-        animator->add_state("idle", std::make_shared<coopa::anim::AnimationClip>(
-                                        coopa::anim::parse_clip(fkyaml::node::deserialize(clip_in))));
-        animator->auto_play = "idle";
+        animator = root->get_component<coopa::rig::SkeletalAnimator>();
         if (with_character) cc = root->add_component<toy::scene::CharacterController>();
 
         scene.start();
         toy::scene::install_kinematic_control_system(scene);
         physics = coopa::physx::system::install_physics_system(scene);
-        coopa::anim::install_animation_system(scene);
-        coopa::anim::install_ik_system(scene);
+        coopa::rig::install_skeletal_animation_system(scene);
+        coopa::rig::install_ik_system(scene);
+        toy::scene::install_rig_ik_driver_system(scene);
         toy::scene::install_ragdoll_system(scene);
+        coopa::rig::install_rig_pose_system(scene);
+        coopa::rig::install_bone_attachment_system(scene);
         coopa::scene::install_transform_system(scene);
     }
 
@@ -164,7 +169,7 @@ struct Rig {
 
     int find_bone(const std::string& name) const {
         for (size_t i = 0; i < ragdoll->bone_count(); ++i)
-            if (ragdoll->bone_object(i)->name() == name) return static_cast<int>(i);
+            if (ragdoll->bone_name(i) == name) return static_cast<int>(i);
         return -1;
     }
 };
@@ -204,7 +209,7 @@ COOPA_TEST(settles_without_exploding) {
     expect(pelvis.z > 0.0f && pelvis.z < 0.45f, "ragdoll: the pelvis lies on the ground (z " + std::to_string(pelvis.z) + ")");
     expect(glm::length(glm::vec2(pelvis)) < 1.5f, "ragdoll: the body crumpled where it fell");
     for (size_t i = 0; i < rig.ragdoll->bone_count(); ++i) {
-        expect(rig.world(i).z > -0.05f, "ragdoll: no bone sank through the ground (" + rig.ragdoll->bone_object(i)->name() + ")");
+        expect(rig.world(i).z > -0.05f, "ragdoll: no bone sank through the ground (" + rig.ragdoll->bone_name(i) + ")");
     }
 }
 
@@ -259,7 +264,8 @@ COOPA_TEST(sleeping_body_is_pushed_by_a_ram_not_blown_apart) {
     if (!rig.ragdoll || rig.ragdoll->bone_count() == 0) { expect(false, "ragdoll ram: rig built"); return; }
     rig.step(2);
     rig.ragdoll->activate();
-    rig.step(300);   // collapse and fall asleep (Ragdoll's rest assist)
+    rig.step(900);   // collapse, articulate and fall asleep (Ragdoll's rest assist) -- a real,
+                      // un-pinned 14-bone fall takes longer than the settle test's simpler drop.
     bool asleep = true;
     for (size_t i = 0; i < rig.ragdoll->bone_count(); ++i) asleep = asleep && !rig.body(i)->awake;
     expect(asleep, "ragdoll ram: the collapsed body fell asleep");
@@ -315,7 +321,7 @@ COOPA_TEST(animated_to_ragdoll_and_back_round_trips) {
         ray.max_distance = 4.0f;
         coopa::physx::system::PhysicsSystem::RaycastHit hit;
         const bool got = rig.physics->raycast(ray, hit, filter);
-        expect(got && hit.collider && hit.collider->owner->name() == "head", "ragdoll round trip: a ray hits the animated head");
+        expect(got && hit.collider && hit.collider->owner->name() == "_ragdoll_head", "ragdoll round trip: a ray hits the animated head");
     }
 
     rig.ragdoll->activate(glm::vec3(0.0f, 150.0f, 0.0f));

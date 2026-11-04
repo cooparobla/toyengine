@@ -27,6 +27,11 @@
 #include <coopa/animation/animation_system.h>
 #include <coopa/animation/animation_yaml.h>
 #include <coopa/animation/ik_system.h>
+#include <coopa/rig/bone_attachment_system.h>
+#include <coopa/rig/ik_system.h>
+#include <coopa/rig/rig_system.h>
+#include <coopa/rig/rig_yaml.h>
+#include <coopa/rig/skeletal_animation_system.h>
 #include <coopa/scene/systems/transform_system.h>
 #include <physxcoopa/physx_yaml.h>
 #include <physxcoopa/debug/debug_draw.h>
@@ -218,11 +223,21 @@ Engine::Engine(AppConfig config, EngineOptions options)
     // `fonts/inter_regular.ttf` and get the engine's shared face. See FontDefaults::search_dirs.
     coopa::ui::FontDefaults::search_dirs = asset_roots();
     init_ui_icons_();
-    // Registers the AnimationClip asset loader and the "Animator" component parser --
-    // blendy exports skeletal/object animation as baked Transform keyframe tracks (there is
-    // no vertex skinning in this engine), referenced from a scene's `Animator` component.
-    // Must precede load_scene(), like every other parser registration above.
+    // Registers the AnimationClip asset loader and the "Animator" component parser -- generic
+    // keyframed/procedural PROPERTY animation (any component field, including a plain
+    // Transform), referenced from a scene's `Animator` component. Must precede load_scene(),
+    // like every other parser registration above.
     coopa::anim::register_animation_components(assets_);
+    // Registers the RigAsset/SkeletalClip loaders and the "Rig"/"SkeletalAnimator"/
+    // "BoneAttachment" component parsers -- a skeleton is a bone hierarchy owned by a Rig
+    // component, not a hierarchy of ordinary scene transforms. See coopa/rig/README.md.
+    //
+    // This ALSO re-registers "TwoBoneIK"/"ChainIK"/"LookAtIK", replacing the scene-object-space
+    // versions register_animation_components() just installed: this engine's only IK is
+    // rig-space (coopa/rig/ik_components.h) now, so every asset addresses bones by name in a
+    // Rig, never by scene-object path. register_component_parser() is last-registration-wins
+    // (see scene_loader.h), which is what makes this override -- it is deliberate, not a race.
+    coopa::rig::register_rig_components(assets_);
     init_user_settings_();
     init_audio_();
     init_saves_();
@@ -670,12 +685,30 @@ void Engine::prepare_scene_(coopa::scene::Scene& scene, bool drain_assets) {
     // orders installed systems by phase regardless of install call order, so this only needs
     // to exist before the scene starts ticking, same as install_transform_system() above.
     coopa::anim::install_animation_system(scene);
-    // Order 320: TwoBoneIK / LookAtIK / FootIK over the animated pose, before TransformResolve
+    // Also UpdatePhase::Animation (300): drives every SkeletalAnimator's Rig pose, independent
+    // of the property Animator system above -- see coopa/rig/skeletal_animation_system.h.
+    coopa::rig::install_skeletal_animation_system(scene);
+    // Order 320: TwoBoneIK / LookAtIK / IkDriver over the animated pose, before TransformResolve
     // (350) -- see coopa/animation/ik_system.h. A scene with no IK pays one component sweep.
     coopa::anim::install_ik_system(scene);
+    // Also order 320: the rig-space TwoBoneIK / ChainIK / LookAtIK over a SkeletalAnimator's
+    // pose -- see coopa/rig/ik_system.h. Independent of the system above: this one poses Rig
+    // bones, not scene Transforms.
+    coopa::rig::install_ik_system(scene);
+    // Orders 319 / 321: brackets the rig-space IK system above for drivers that need physics or
+    // a CharacterController (FootIK, Rider) and so cannot live in coopa::rig -- see
+    // toyengine/scene/rig_ik_driver.h.
+    scene::install_rig_ik_driver_system(scene);
     // Orders 90 / 290 / 330: Ragdoll mode changes before Physics, and the recovery blend
     // around the Animator and IK -- see toyengine/scene/ragdoll.h.
     scene::install_ragdoll_system(scene);
+    // Order 340: resolves every Rig's pose channels into model matrices, after anything that
+    // might have posed one this frame (a SkeletalAnimator, rig-space IK, a ragdoll) and before
+    // BoneAttachment/TransformResolve (345/350) -- see coopa/rig/rig_system.h.
+    coopa::rig::install_rig_pose_system(scene);
+    // Order 345: carries every BoneAttachment along its bone, after the Rig poses it rides are
+    // resolved and before TransformResolve (350) -- see coopa/rig/bone_attachment_system.h.
+    coopa::rig::install_bone_attachment_system(scene);
     // An async load skips the drain: its build already waited for the scene's own assets,
     // and whatever a system starts loading here streams in over the next frames.
     if (drain_assets) drain_pending_assets_();

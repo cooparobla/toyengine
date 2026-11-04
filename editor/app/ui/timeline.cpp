@@ -5,6 +5,7 @@
 #include "editor/app/editor_app.h"
 
 #include <coopa/animation/animation_yaml.h>   // parse_clip
+#include <coopa/rig/skeletal_clip_loader.h>   // parse_skeletal_clip
 
 namespace toy {
 namespace editor {
@@ -300,6 +301,28 @@ void TimelinePanel::anim_save_clip_() {
     ++app_.anim_clip_.revision;
 }
 
+void TimelinePanel::rig_pose_clip_edit_(const std::string& label, const std::function<void(BoneClipModel&)>& fn,
+                                        const std::string& merge_key) {
+    if (!app_.rig_pose_clip_.open()) return;
+    BoneClipModel before = app_.rig_pose_clip_.model;
+    fn(app_.rig_pose_clip_.model);
+    if (app_.rig_pose_clip_.model == before) return;
+    app_.rig_pose_clip_.undo.push(label, std::move(before), app_.rig_pose_clip_.model, merge_key);
+    ++app_.rig_pose_clip_.revision;
+    app_.rig_pose_clip_dirty_ = true;
+}
+
+void TimelinePanel::rig_pose_save_clip_() {
+    app_.rig_pose_clip_dirty_ = false;
+    try {
+        fs::create_directories(app_.rig_pose_clip_.path.parent_path());
+        coopa::yaml::save_document(app_.rig_pose_clip_.path, app_.rig_pose_clip_.model.to_node());
+    } catch (const std::exception& e) {
+        app_.log_error("Timeline: could not save " + app_.rig_pose_clip_.path.string() + ": " + e.what());
+    }
+    ++app_.rig_pose_clip_.revision;
+}
+
 void TimelinePanel::anim_add_animator_(ObjectId id) {
     Node comp = Node::mapping();
     comp["type"] = Node(std::string("Animator"));
@@ -474,6 +497,25 @@ void TimelinePanel::timeline_frame_(float dt) {
     // Clip edits are written once a frame; an auto-key drag is one undo step until the mouse lets go.
     if (app_.anim_clip_dirty_ && app_.anim_clip_.open()) { anim_save_clip_(); app_.anim_clip_dirty_ = false; }
     if (!app_.ui().input().down[0]) app_.anim_clip_.undo.end_merge();
+    // The bone-addressed sibling of the above, for the Timeline's bone dope sheet over
+    // rig_pose_clip_ (Pose Mode on a coopa::rig::Rig) -- independent of anim_clip_'s bookkeeping
+    // since the two dope sheets are mutually exclusive but each keep their own state.
+    if (app_.rig_pose_clip_dirty_ && app_.rig_pose_clip_.open()) { rig_pose_save_clip_(); app_.rig_pose_clip_dirty_ = false; }
+    if (!app_.ui().input().down[0]) app_.rig_pose_clip_.undo.end_merge();
+    // Preview: sample rig_pose_clip_ at the playhead onto the live rig, skipped while a bone
+    // modal (G/R/S) is in flight so a hand-edit in progress is never stomped by the clip's keys.
+    if (coopa::rig::Rig* pr = app_.pose_rig_component_(); pr && app_.rig_pose_clip_.open() && !app_.bone_modal_.active()) {
+        if (app_.rig_pose_runtime_rev_ != app_.rig_pose_clip_.revision || !app_.rig_pose_runtime_) {
+            app_.rig_pose_runtime_ =
+                std::make_shared<coopa::rig::SkeletalClip>(coopa::rig::parse_skeletal_clip(app_.rig_pose_clip_.model.to_node()));
+            app_.rig_pose_runtime_rev_ = app_.rig_pose_clip_.revision;
+            app_.rig_pose_sample_time_ = -1.0f;
+        }
+        if (app_.rig_pose_sample_time_ != app_.anim_time_) {
+            apply_bone_pose(*app_.rig_pose_runtime_, app_.anim_time_, pr);
+            app_.rig_pose_sample_time_ = app_.anim_time_;
+        }
+    }
     // Another document (scene / object asset): ids restart there, so nothing carries over.
     const fs::path doc_path = app_.doc_.path();
     if (doc_path != app_.anim_doc_path_) {
@@ -762,6 +804,12 @@ void TimelinePanel::draw_timeline_(imm::Context& ctx, const imm::Box& hb, const 
     using I = imm::Icon;
     const float bh = hb.h - 6;
     app_.timeline_hovered_ = ctx.is_hovered(body) || ctx.is_hovered(hb);
+    // Pose Mode on a coopa::rig::Rig: the Timeline shows rig_pose_clip_'s bone dope sheet
+    // instead of an Animator's property one -- the two are mutually exclusive per frame.
+    if (app_.pose_rig_component_()) {
+        draw_bone_timeline_(ctx, hb, body, x);
+        return;
+    }
     if (!app_.anim_rig_) {
         const ObjectId sel = app_.doc_.primary();
         // A placed object asset: its rig and clips live in the asset -- animate it there.
@@ -894,7 +942,7 @@ void TimelinePanel::draw_timeline_(imm::Context& ctx, const imm::Box& hb, const 
 }
 
 std::string TimelinePanel::anim_channel_label_(const std::string& property) {
-    if (property == "position") return "Position";
+    if (property == "position" || property == "location") return "Position";   // "location": a bone channel's own name
     if (property == "rotation_quat" || property == "rotation") return "Rotation";
     if (property == "scale") return "Scale";
     return property;
@@ -1218,6 +1266,409 @@ void TimelinePanel::draw_dope_sheet_(imm::Context& ctx, const imm::Box& body) {
     }
 }
 
+void TimelinePanel::draw_bone_timeline_(imm::Context& ctx, const imm::Box& hb, const imm::Box& body, float x) {
+    using I = imm::Icon;
+    const float bh = hb.h - 6;
+    const std::string rig_name = anim_name_of_(app_.pose_rig_, "Rig");
+    const std::string clip_label = app_.rig_pose_clip_.open() ? app_.rig_pose_clip_.state : std::string("No Clip");
+    const float cw = std::max(110.0f, ctx.text_width(clip_label) + bh + 20);
+    {
+        const imm::Box b{x, hb.y + 3, cw, bh};
+        bool hov = false, held = false;
+        if (ctx.invisible_button("rig_clip_dd", b, &hov, &held)) ctx.open_popup("rig_clip_menu", glm::vec2(b.x, b.bottom() + 2));
+        ctx.fill_rounded(b, hov ? ctx.style.button_hover : ctx.style.button);
+        ctx.icon(I::Play, {b.x + 3, b.y + 2, bh - 4, bh - 4}, ctx.style.text_dim);
+        ctx.text_in({b.x + bh + 2, b.y, cw - bh - 16, bh}, clip_label, ctx.style.text, 0.0f);
+        ctx.arrow({b.right() - 14, b.y + 4, 10, bh - 8}, true, ctx.style.text_dim);
+        ctx.tooltip("Clip\n" + rig_name + "'s SkeletalAnimator states." +
+                    (app_.rig_pose_clip_.open() ? "\nOpen: " + app_.project_.relative(app_.rig_pose_clip_.path) : std::string()));
+        if (ctx.begin_popup("rig_clip_menu", 200)) {
+            for (const std::string& st : app_.rig_pose_states_()) {
+                bool on = st == app_.rig_pose_clip_.state;
+                if (ctx.menu_item(st, "", &on)) { app_.rig_pose_open_clip_(st); app_.anim_time_ = 0.0f; }
+            }
+            ctx.end_popup();
+        }
+        x += cw + 6;
+    }
+    if (!app_.rig_pose_clip_.open()) {
+        ctx.text_in({x, hb.y, 340, hb.h}, "Pose " + rig_name + ": select a bone and press I to key its pose", ctx.style.text_dim, 0.0f);
+        return;
+    }
+    auto icon_btn = [&](const char* id, I ic, const char* tip, bool on) {
+        const bool r = ctx.icon_button(id, ic, tip, on, bh, imm::Context::kAll, imm::Box{x, hb.y + 3, bh, bh});
+        x += bh + 3;
+        return r;
+    };
+    if (icon_btn("rtl_start", I::Undo, "Jump to Start\nHome", false)) app_.anim_time_ = 0.0f;
+    if (icon_btn("rtl_play", app_.anim_playing_ ? I::Pause : I::Play, "Play / Pause\nSpace (while the Timeline is open)", app_.anim_playing_)) {
+        app_.anim_playing_ = !app_.anim_playing_;
+    }
+    x += 4;
+    float frame = std::round(app_.anim_time_ * kAnimFps);
+    ctx.drag_float_box("rtl_frame", {x, hb.y + 3, 56, bh}, &frame, 0.2f, 0.0f, 100000.0f, "%.0f");
+    ctx.tooltip("Frame\nThe playhead (30 frames a second)");
+    app_.anim_time_ = frame / kAnimFps;
+    x += 62;
+    if (icon_btn("rtl_key", I::Plus, "Insert Keyframe\nI: key the selected bones' location, rotation and scale", false)) {
+        app_.rig_pose_insert_keys_();
+    }
+    if (icon_btn("rtl_all", I::Collection, "All Bones\nList every bone of the rig (off: the animated and selected ones)",
+                 app_.rig_pose_show_all_)) {
+        app_.rig_pose_show_all_ = !app_.rig_pose_show_all_;
+    }
+    x += 6;
+    ctx.text_in({x, hb.y, 44, hb.h}, "Length", ctx.style.text_dim, 0.0f);
+    x += 44;
+    float len_frames = std::round(app_.rig_pose_clip_.model.length * kAnimFps);
+    if (ctx.drag_float_box("rtl_len", {x, hb.y + 3, 52, bh}, &len_frames, 0.2f, 1.0f, 100000.0f, "%.0f")) {
+        const float l = len_frames / kAnimFps;
+        rig_pose_clip_edit_("Clip Length", [l](BoneClipModel& m) { m.length = l; });
+    }
+    ctx.tooltip("Length\nThe clip's length in frames");
+    x += 58;
+    {
+        static const char* kWraps[] = {"loop", "once", "pingpong"};
+        int w = 0;
+        for (int i = 0; i < 3; ++i) if (app_.rig_pose_clip_.model.wrap == kWraps[i]) w = i;
+        const imm::Box b{x, hb.y + 3, 78, bh};
+        bool hov = false, held = false;
+        if (ctx.invisible_button("rtl_wrap", b, &hov, &held)) {
+            const std::string nw = kWraps[(w + 1) % 3];
+            rig_pose_clip_edit_("Clip Wrap", [nw](BoneClipModel& m) { m.wrap = nw; });
+        }
+        ctx.fill_rounded(b, hov ? ctx.style.button_hover : ctx.style.button);
+        ctx.text_in(b, kWraps[w], ctx.style.text, 0.0f, true);
+        ctx.tooltip("Wrap\nLoop / play once and hold / ping-pong (click cycles)");
+        x += 84;
+    }
+    draw_bone_dope_sheet_(ctx, body);
+}
+
+void TimelinePanel::draw_bone_dope_sheet_(imm::Context& ctx, const imm::Box& body) {
+    const auto& in = ctx.input();
+    const float name_w = 190.0f, ruler_h = 20.0f, row_h = 20.0f;
+    const imm::Box names{body.x, body.y, name_w, body.h};
+    const imm::Box track{body.x + name_w, body.y, body.w - name_w, body.h};
+    ctx.fill(body, ctx.style.panel_bg);
+    ctx.fill(names, ctx.style.panel_alt);
+    const float len = std::max(app_.rig_pose_clip_.model.length, 1.0f / kAnimFps);
+    if (app_.rig_pose_view_.end <= app_.rig_pose_view_.start) app_.rig_pose_view_ = {0.0f, len * 1.04f + 2.0f / kAnimFps};
+    const float x0 = track.x + 12, x1 = track.right() - 12;
+    const float pps = (x1 - x0) / std::max(app_.rig_pose_view_.end - app_.rig_pose_view_.start, 1e-3f);
+    auto x_of = [&](float t) { return x0 + (t - app_.rig_pose_view_.start) * pps; };
+    auto t_of = [&](float x) { return app_.rig_pose_view_.start + (x - x0) / pps; };
+    const glm::vec2 m = ctx.mouse();
+
+    if (ctx.is_hovered(names) && in.scroll.y != 0.0f && !ctx.any_popup_open()) app_.rig_pose_row_scroll_ -= static_cast<int>(in.scroll.y);
+    if (ctx.is_hovered(track) && !ctx.any_popup_open()) {
+        if (in.scroll.y != 0.0f && !has(in.mods, Mods::Shift)) {
+            const float at = t_of(m.x);
+            const float k = std::pow(0.85f, in.scroll.y);
+            app_.rig_pose_view_.start = at - (at - app_.rig_pose_view_.start) * k;
+            app_.rig_pose_view_.end = at + (app_.rig_pose_view_.end - at) * k;
+        } else if (in.scroll.y != 0.0f || in.scroll.x != 0.0f) {
+            const float d = -(in.scroll.y + in.scroll.x) * 30.0f / pps;
+            app_.rig_pose_view_.start += d;
+            app_.rig_pose_view_.end += d;
+        }
+        if (in.down[2] && in.mouse_delta.x != 0.0f) {
+            app_.rig_pose_view_.start -= in.mouse_delta.x / pps;
+            app_.rig_pose_view_.end -= in.mouse_delta.x / pps;
+        }
+    }
+
+    const imm::Box ruler{track.x, track.y, track.w, ruler_h};
+    ctx.fill(ruler, ctx.style.header);
+    ctx.push_clip(track);
+    int label_every = 1;
+    while (label_every * pps / kAnimFps < 34.0f) label_every *= (label_every == 1 ? 5 : 2);
+    const int f0 = static_cast<int>(std::floor(app_.rig_pose_view_.start * kAnimFps)),
+              f1 = static_cast<int>(std::ceil(app_.rig_pose_view_.end * kAnimFps));
+    for (int f = std::max(f0, -1000000); f <= f1; ++f) {
+        const float x = x_of(f / kAnimFps);
+        const bool major = f % label_every == 0;
+        if (!major && pps / kAnimFps < 5.0f) continue;
+        ctx.line({x, ruler.bottom() - (major ? 7.0f : 3.0f)}, {x, ruler.bottom()}, ctx.style.text_dim, 1.0f);
+        if (major) {
+            const std::string label = std::to_string(f);
+            ctx.draw_text({x - ctx.text.width(label, 10.0f) * 0.5f, ruler.y + 2}, label, ctx.style.text_dim, 10.0f);
+        }
+        if (major) ctx.line({x, ruler.bottom()}, {x, track.bottom()}, imm::with_alpha(ctx.style.text_dim, 0.12f), 1.0f);
+    }
+    if (x_of(0.0f) > track.x) ctx.fill({track.x, ruler.bottom(), x_of(0.0f) - track.x, track.h - ruler_h}, glm::vec4(0, 0, 0, 0.18f));
+    if (x_of(len) < track.right()) ctx.fill({x_of(len), ruler.bottom(), track.right() - x_of(len), track.h - ruler_h}, glm::vec4(0, 0, 0, 0.18f));
+    ctx.line({x_of(len), track.y}, {x_of(len), track.bottom()}, imm::with_alpha(ctx.style.accent, 0.6f), 1.0f);
+    ctx.pop_clip();
+
+    coopa::rig::Rig* rig = app_.pose_rig_component_();
+    struct Row { std::string label; std::string bone; std::string channel; bool summary; int bone_idx; int depth; bool events = false; };
+    std::vector<Row> rows{{"Summary", "", "", true, -1, 0}, {"Events", "", "", false, -1, 0, true}};
+    if (rig) {
+        std::set<std::string> animated;
+        for (const auto& t : app_.rig_pose_clip_.model.bones) animated.insert(t.bone);
+        const std::set<int> sel(app_.pose_bones_selected_.begin(), app_.pose_bones_selected_.end());
+        std::vector<int> depth(rig->bone_count(), 0);
+        for (std::size_t i = 0; i < rig->bone_count(); ++i) {
+            const int p = rig->bone_parent(i);
+            depth[i] = p >= 0 ? depth[static_cast<std::size_t>(p)] + 1 : 0;
+        }
+        for (std::size_t i = 0; i < rig->bone_count(); ++i) {
+            const std::string& name = rig->bone_name(i);
+            if (!app_.rig_pose_show_all_ && i != 0 && !animated.count(name) && !sel.count(static_cast<int>(i))) continue;
+            rows.push_back({name, name, "", false, static_cast<int>(i), app_.rig_pose_show_all_ ? depth[i] : (i == 0 ? 0 : 1)});
+            if (!app_.rig_pose_expanded_.count(name)) continue;
+            const BoneClipTrack* btr = app_.rig_pose_clip_.model.find_bone_track(name);
+            if (!btr) continue;
+            const int cd = (app_.rig_pose_show_all_ ? depth[i] : 1) + 1;
+            if (!btr->location.keys.empty()) rows.push_back({anim_channel_label_("location"), name, "location", false, static_cast<int>(i), cd});
+            if (!btr->rotation.keys.empty()) rows.push_back({anim_channel_label_("rotation"), name, "rotation", false, static_cast<int>(i), cd});
+            if (!btr->scale.keys.empty()) rows.push_back({anim_channel_label_("scale"), name, "scale", false, static_cast<int>(i), cd});
+        }
+    }
+    auto row_times = [&](const Row& r) {
+        if (r.events) return std::vector<float>{};
+        if (r.summary) return app_.rig_pose_clip_.model.key_times();
+        if (!r.channel.empty()) return app_.rig_pose_clip_.model.key_times(r.bone, r.channel);
+        return app_.rig_pose_clip_.model.key_times(r.bone);
+    };
+    auto cells_of = [&](const Row& r, float t) {
+        std::set<BoneClipModel::BoneKeyRef> cells;
+        if (r.summary) {
+            for (const auto& rw : rows) {
+                if (rw.summary || rw.events || !rw.channel.empty()) continue;
+                for (float kt : app_.rig_pose_clip_.model.key_times(rw.bone)) {
+                    if (std::abs(kt - t) <= BoneClipModel::kTimeEps) cells.insert({rw.bone, kt, ""});
+                }
+            }
+        } else {
+            cells.insert({r.bone, t, r.channel});
+        }
+        return cells;
+    };
+    auto is_selected = [&](const Row& r, float t) {
+        for (const auto& k : app_.rig_pose_sel_keys_) {
+            if (std::abs(k.time - t) > BoneClipModel::kTimeEps) continue;
+            if (r.summary) return true;
+            if (k.bone == r.bone && (k.channel.empty() || k.channel == r.channel)) return true;
+        }
+        return false;
+    };
+    const bool in_track = ctx.is_hovered(track) && m.y > ruler.bottom();
+    constexpr int kPinned = 2;
+    const int visible = std::max(1, static_cast<int>((body.h - ruler_h) / row_h) - kPinned);
+    app_.rig_pose_row_scroll_ = std::clamp(app_.rig_pose_row_scroll_, 0, std::max(0, static_cast<int>(rows.size()) - kPinned - visible));
+    if (app_.rig_pose_row_scroll_ > 0) rows.erase(rows.begin() + kPinned, rows.begin() + kPinned + app_.rig_pose_row_scroll_);
+    if (static_cast<int>(rows.size()) - kPinned > visible || app_.rig_pose_row_scroll_ > 0) {
+        const float total = static_cast<float>(rows.size() - kPinned + app_.rig_pose_row_scroll_);
+        const float h = body.h - ruler_h;
+        ctx.fill_rounded({names.right() - 4, body.y + ruler_h + h * app_.rig_pose_row_scroll_ / total, 3, h * visible / total},
+                         imm::with_alpha(ctx.style.text_dim, 0.5f), 1.5f);
+    }
+    bool on_key = false;
+    ctx.push_clip(body);
+    for (size_t r = 0; r < rows.size(); ++r) {
+        const float y = body.y + ruler_h + r * row_h;
+        if (y > body.bottom()) break;
+        const Row& row = rows[r];
+        const imm::Box rb{body.x, y, body.w, row_h};
+        if (r % 2) ctx.fill(rb, glm::vec4(1, 1, 1, 0.025f));
+        const bool selected = !row.summary && row.channel.empty() && row.bone_idx >= 0 &&
+                              std::find(app_.pose_bones_selected_.begin(), app_.pose_bones_selected_.end(), row.bone_idx) !=
+                                  app_.pose_bones_selected_.end();
+        if (selected) ctx.fill({names.x, y, names.w, row_h}, imm::with_alpha(ctx.style.selection, 0.6f));
+        float tx = names.x + 6 + row.depth * 12.0f;
+        if (!row.summary && row.channel.empty()) {
+            const BoneClipTrack* btr = app_.rig_pose_clip_.model.find_bone_track(row.bone);
+            const bool has_tracks = btr && (!btr->location.keys.empty() || !btr->rotation.keys.empty() || !btr->scale.keys.empty());
+            if (has_tracks) {
+                const imm::Box ab{tx, y + 4, 12, row_h - 8};
+                const bool open = app_.rig_pose_expanded_.count(row.bone) > 0;
+                ctx.arrow(ab, open, ctx.style.text_dim);
+                if (ctx.is_hovered(ab) && in.pressed[0]) {
+                    if (open) app_.rig_pose_expanded_.erase(row.bone); else app_.rig_pose_expanded_.insert(row.bone);
+                }
+            }
+            tx += 14;
+        }
+        const glm::vec4 label_col = row.summary || row.events ? ctx.style.text_dim : !row.channel.empty() ? ctx.style.text_dim : ctx.style.text;
+        ctx.text_in({tx, y, names.right() - tx - 4, row_h}, row.label, label_col, 0.0f);
+        if (row.events) {
+            draw_bone_events_lane_(ctx, track, y, row_h, x_of, t_of, pps, in_track, on_key);
+            continue;
+        }
+        if (!row.summary && row.channel.empty() && ctx.is_hovered({tx, y, names.right() - tx, row_h}) && in.pressed[0]) {
+            if (has(in.mods, Mods::Shift)) {
+                auto it = std::find(app_.pose_bones_selected_.begin(), app_.pose_bones_selected_.end(), row.bone_idx);
+                if (it != app_.pose_bones_selected_.end()) app_.pose_bones_selected_.erase(it);
+                else app_.pose_bones_selected_.push_back(row.bone_idx);
+            } else {
+                app_.pose_bones_selected_.assign(1, row.bone_idx);
+            }
+        }
+        ctx.push_clip(track);
+        for (float t : row_times(row)) {
+            const bool sel_key = is_selected(row, t);
+            const glm::vec2 c{x_of(t) + (app_.rig_pose_key_drag_.active && sel_key ? app_.rig_pose_key_drag_.dt * pps : 0.0f),
+                             y + row_h * 0.5f};
+            const float rr = row.summary ? 5.5f : !row.channel.empty() ? 4.0f : 4.5f;
+            const glm::vec4 fillc = sel_key ? glm::vec4(1.0f, 0.62f, 0.18f, 1) : row.summary ? glm::vec4(0.95f, 0.95f, 0.95f, 1)
+                                                                                : glm::vec4(0.78f, 0.78f, 0.78f, 1);
+            ctx.triangle({c.x, c.y - rr}, {c.x + rr, c.y}, {c.x, c.y + rr}, fillc);
+            ctx.triangle({c.x, c.y - rr}, {c.x, c.y + rr}, {c.x - rr, c.y}, fillc);
+            if (!in_track || on_key || glm::distance(m, c) > rr + 2.0f) continue;
+            if (in.pressed[0]) {
+                on_key = true;
+                app_.rig_pose_sel_event_ = -1;
+                const auto cells = cells_of(row, t);
+                if (has(in.mods, Mods::Shift)) {
+                    for (const auto& c2 : cells) {
+                        if (app_.rig_pose_sel_keys_.count(c2)) app_.rig_pose_sel_keys_.erase(c2);
+                        else app_.rig_pose_sel_keys_.insert(c2);
+                    }
+                } else if (!sel_key) {
+                    app_.rig_pose_sel_keys_ = cells;
+                }
+                app_.rig_pose_key_drag_ = {true, m.x, 0.0f};
+            } else if (in.pressed[1]) {
+                on_key = true;
+                if (!sel_key) app_.rig_pose_sel_keys_ = cells_of(row, t);
+                app_.rig_pose_menu_time_ = t;
+                ctx.open_popup("rig_key_menu", m);
+            }
+        }
+        ctx.pop_clip();
+    }
+    ctx.pop_clip();
+
+    if (app_.rig_pose_key_drag_.active) {
+        if (in.down[0]) {
+            app_.rig_pose_key_drag_.dt = std::round((m.x - app_.rig_pose_key_drag_.start_x) / pps * kAnimFps) / kAnimFps;
+        } else {
+            const float d = app_.rig_pose_key_drag_.dt;
+            app_.rig_pose_key_drag_.active = false;
+            if (std::abs(d) > 1e-6f) {
+                const auto refs = app_.rig_pose_sel_keys_;
+                std::set<BoneClipModel::BoneKeyRef> moved;
+                rig_pose_clip_edit_("Move Keyframes", [&](BoneClipModel& mm) { moved = mm.move_keys(refs, d); });
+                app_.rig_pose_sel_keys_ = moved;
+            }
+        }
+    } else if (in_track && !on_key) {
+        if (in.pressed[0]) { app_.rig_pose_sel_keys_.clear(); app_.rig_pose_sel_event_ = -1; }
+        if (in.pressed[1]) {
+            app_.rig_pose_menu_time_ = anim_snap_(t_of(m.x));
+            ctx.open_popup("rig_track_menu", m);
+        }
+    }
+
+    if (app_.rig_pose_event_drag_.active) {
+        if (in.down[0]) {
+            app_.rig_pose_event_drag_.dt = std::round((m.x - app_.rig_pose_event_drag_.start_x) / pps * kAnimFps) / kAnimFps;
+        } else {
+            const float d = app_.rig_pose_event_drag_.dt;
+            app_.rig_pose_event_drag_.active = false;
+            if (std::abs(d) > 1e-6f && app_.rig_pose_sel_event_ >= 0 &&
+                app_.rig_pose_sel_event_ < static_cast<int>(app_.rig_pose_clip_.model.events.size())) {
+                const size_t idx = static_cast<size_t>(app_.rig_pose_sel_event_);
+                const float to = anim_snap_(app_.rig_pose_clip_.model.events[idx].time + d);
+                int moved = app_.rig_pose_sel_event_;
+                rig_pose_clip_edit_("Move Event", [&](BoneClipModel& mm) { moved = mm.move_event(idx, to); });
+                app_.rig_pose_sel_event_ = moved;
+            }
+        }
+    }
+
+    if (ctx.begin_popup("rig_events_lane_menu", 190)) {
+        if (ctx.menu_item("Add Event Here", "", nullptr, true, imm::Icon::Plus)) {
+            const float t = app_.rig_pose_menu_time_;
+            size_t idx = 0;
+            rig_pose_clip_edit_("Add Event", [&](BoneClipModel& mm) { idx = mm.add_event(t, "event"); });
+            app_.rig_pose_sel_event_ = static_cast<int>(idx);
+        }
+        ctx.end_popup();
+    }
+    if (ctx.begin_popup("rig_event_menu", 230)) {
+        if (app_.rig_pose_sel_event_ >= 0 && app_.rig_pose_sel_event_ < static_cast<int>(app_.rig_pose_clip_.model.events.size())) {
+            const size_t idx = static_cast<size_t>(app_.rig_pose_sel_event_);
+            const BoneClipEvent ev = app_.rig_pose_clip_.model.events[idx];
+            ctx.label_dim("Event at frame " + std::to_string(static_cast<int>(std::round(ev.time * kAnimFps))));
+            std::string nm = ev.name;
+            if (ctx.input_text("Name", &nm) && !nm.empty()) {
+                rig_pose_clip_edit_("Rename Event", [&](BoneClipModel& mm) { mm.events[idx].name = nm; });
+            }
+            ctx.tooltip("Name\nWhat listeners match on (SkeletalAnimator::on_event, the \"anim_event\" signal's name)");
+            std::string sv = ev.string_value;
+            if (ctx.input_text("String", &sv)) {
+                rig_pose_clip_edit_("Event String", [&](BoneClipModel& mm) { mm.events[idx].string_value = sv; });
+            }
+            ctx.tooltip("String\nAn optional text payload (e.g. left / right for a footstep)");
+            float fv = ev.float_value;
+            if (ctx.drag_float("Float", &fv, 0.01f)) {
+                rig_pose_clip_edit_("Event Float", [&](BoneClipModel& mm) { mm.events[idx].float_value = fv; }, "rig_event_float");
+            }
+            ctx.menu_separator();
+            if (ctx.menu_item("Jump to Event", "")) app_.anim_time_ = ev.time;
+            if (ctx.menu_item("Delete Event", "X", nullptr, true, imm::Icon::Trash)) rig_pose_delete_selected_event_();
+        }
+        ctx.end_popup();
+    }
+    if (ctx.begin_popup("rig_key_menu", 190)) {
+        const std::string cur = app_.rig_pose_clip_.model.easing_of(app_.rig_pose_sel_keys_);
+        ctx.label_dim("Interpolation");
+        static const char* kEase[][2] = {{"linear", "Linear"}, {"step", "Constant (Step)"}, {"ease_in", "Ease In"},
+                                         {"ease_out", "Ease Out"}, {"ease_in_out", "Ease In-Out"}};
+        for (const auto& e : kEase) {
+            bool on = cur == e[0];
+            if (ctx.menu_item(e[1], "", &on)) {
+                const auto refs = app_.rig_pose_sel_keys_;
+                const std::string ease = e[0];
+                rig_pose_clip_edit_("Interpolation", [&](BoneClipModel& mm) { mm.set_easing(refs, ease); });
+            }
+        }
+        ctx.menu_separator();
+        if (ctx.menu_item("Jump to Key", "")) app_.anim_time_ = app_.rig_pose_menu_time_;
+        if (ctx.menu_item("Delete Keyframes", "X", nullptr, true, imm::Icon::Trash)) rig_pose_delete_selected_keys_();
+        ctx.end_popup();
+    }
+    if (ctx.begin_popup("rig_track_menu", 190)) {
+        if (ctx.menu_item("Select All Keys", "A")) rig_pose_select_all_keys_();
+        if (ctx.menu_item("Frame All", "Home")) app_.rig_pose_view_ = {};
+        ctx.end_popup();
+    }
+
+    if ((ctx.is_hovered(ruler) && in.pressed[0]) || app_.anim_scrubbing_) {
+        app_.anim_scrubbing_ = in.down[0];
+        const float t = std::max(0.0f, t_of(m.x));
+        app_.anim_time_ = has(in.mods, Mods::Shift) ? t : anim_snap_(t);
+    }
+    ctx.push_clip(track);
+    const float px = x_of(app_.anim_time_);
+    ctx.line({px, track.y}, {px, track.bottom()}, glm::vec4(0.32f, 0.55f, 0.95f, 1), 2.0f);
+    const imm::Box tag{px - 15, ruler.y + 1, 30, ruler_h - 2};
+    ctx.fill_rounded(tag, glm::vec4(0.32f, 0.55f, 0.95f, 1), 3);
+    ctx.text_in(tag, std::to_string(static_cast<int>(std::round(app_.anim_time_ * kAnimFps))), glm::vec4(1), 0.0f, true);
+    ctx.pop_clip();
+
+    const bool space_pans = app_.active_type_ == AssetType::UI && app_.viewport_hovered_;
+    if (!ctx.wants_keyboard() && !ctx.any_popup_open() && !app_.playing() && !space_pans && ctx.shortcut(Key::Space)) {
+        app_.anim_playing_ = !app_.anim_playing_;
+    }
+    if (app_.timeline_hovered_ && !ctx.wants_keyboard() && !ctx.any_popup_open()) {
+        if (ctx.shortcut(Key::I)) app_.rig_pose_insert_keys_();
+        if (ctx.shortcut(Key::X) || ctx.shortcut(Key::Delete)) {
+            if (app_.rig_pose_sel_event_ >= 0) rig_pose_delete_selected_event_();
+            else rig_pose_delete_selected_keys_();
+        }
+        if (ctx.shortcut(Key::A)) rig_pose_select_all_keys_();
+        if (ctx.shortcut(Key::Right)) app_.anim_time_ = anim_snap_(app_.anim_time_ + 1.0f / kAnimFps);
+        if (ctx.shortcut(Key::Left)) app_.anim_time_ = anim_snap_(app_.anim_time_ - 1.0f / kAnimFps);
+        if (ctx.shortcut(Key::Up)) app_.anim_time_ = app_.rig_pose_clip_.model.neighbour_key(app_.anim_time_, +1);
+        if (ctx.shortcut(Key::Down)) app_.anim_time_ = app_.rig_pose_clip_.model.neighbour_key(app_.anim_time_, -1);
+        if (ctx.shortcut(Key::Home)) { app_.anim_time_ = 0.0f; app_.rig_pose_view_ = {}; }
+    }
+}
+
 void TimelinePanel::anim_add_event_(float time, const std::string& name) {
     if (!app_.anim_clip_.open()) return;
     size_t at = 0;
@@ -1242,12 +1693,84 @@ void TimelinePanel::anim_select_all_keys_() {
     for (const auto& t : app_.anim_clip_.model.tracks) for (const auto& k : t.keys) app_.anim_sel_keys_.insert({t.object, k.time, ""});
 }
 
+void TimelinePanel::rig_pose_delete_selected_keys_() {
+    if (app_.rig_pose_sel_keys_.empty()) return;
+    const auto refs = app_.rig_pose_sel_keys_;
+    rig_pose_clip_edit_("Delete Keyframes", [&](BoneClipModel& m) { m.delete_keys(refs); });
+    app_.rig_pose_sel_keys_.clear();
+}
+
+void TimelinePanel::rig_pose_delete_selected_event_() {
+    if (app_.rig_pose_sel_event_ < 0) return;
+    const size_t idx = static_cast<size_t>(app_.rig_pose_sel_event_);
+    rig_pose_clip_edit_("Delete Event", [&](BoneClipModel& m) { m.delete_event(idx); });
+    app_.rig_pose_sel_event_ = -1;
+}
+
+template<typename XOf, typename TOf>
+void TimelinePanel::draw_bone_events_lane_(imm::Context& ctx, const imm::Box& track, float y, float row_h, const XOf& x_of, const TOf& t_of,
+                                           float pps, bool in_track, bool& on_key) {
+    const auto& in = ctx.input();
+    const glm::vec2 m = ctx.mouse();
+    const auto& evs = app_.rig_pose_clip_.model.events;
+    if (app_.rig_pose_sel_event_ >= static_cast<int>(evs.size())) app_.rig_pose_sel_event_ = -1;
+    ctx.push_clip(track);
+    for (size_t i = 0; i < evs.size(); ++i) {
+        const bool sel = static_cast<int>(i) == app_.rig_pose_sel_event_;
+        const float ex = x_of(evs[i].time) + (app_.rig_pose_event_drag_.active && sel ? app_.rig_pose_event_drag_.dt * pps : 0.0f);
+        const glm::vec4 col = sel ? glm::vec4(1.0f, 0.62f, 0.18f, 1) : glm::vec4(0.55f, 0.8f, 0.95f, 1);
+        ctx.line({ex, y + 3}, {ex, y + row_h - 3}, col, 1.5f);
+        ctx.triangle({ex, y + 3}, {ex + 9, y + 6.5f}, {ex, y + 10}, col);
+        const imm::Box hit{ex - 4, y, 15, row_h};
+        if (!ctx.is_hovered(hit) || on_key) continue;
+        ctx.text_in({ex + 11, y, 160, row_h}, evs[i].name + (evs[i].string_value.empty() ? "" : " (" + evs[i].string_value + ")"),
+                    ctx.style.text, 0.0f);
+        if (in.pressed[0]) {
+            on_key = true;
+            app_.rig_pose_sel_event_ = static_cast<int>(i);
+            app_.rig_pose_sel_keys_.clear();
+            app_.rig_pose_event_drag_ = {true, m.x, 0.0f};
+        } else if (in.pressed[1]) {
+            on_key = true;
+            app_.rig_pose_sel_event_ = static_cast<int>(i);
+            ctx.open_popup("rig_event_menu", m);
+        }
+    }
+    ctx.pop_clip();
+    const imm::Box lane{track.x, y, track.w, row_h};
+    if (in_track && !on_key && ctx.is_hovered(lane)) {
+        if (in.pressed[0]) { app_.rig_pose_sel_event_ = -1; app_.rig_pose_sel_keys_.clear(); on_key = true; }
+        if (in.pressed[1]) {
+            on_key = true;
+            app_.rig_pose_menu_time_ = anim_snap_(t_of(m.x));
+            ctx.open_popup("rig_events_lane_menu", m);
+        }
+    }
+}
+
+void TimelinePanel::rig_pose_select_all_keys_() {
+    app_.rig_pose_sel_keys_.clear();
+    app_.rig_pose_sel_event_ = -1;
+    for (const auto& t : app_.rig_pose_clip_.model.bones) {
+        for (const auto& k : t.location.keys) app_.rig_pose_sel_keys_.insert({t.bone, k.time, ""});
+        for (const auto& k : t.rotation.keys) app_.rig_pose_sel_keys_.insert({t.bone, k.time, ""});
+        for (const auto& k : t.scale.keys) app_.rig_pose_sel_keys_.insert({t.bone, k.time, ""});
+    }
+}
+
 void TimelinePanel::show_timeline() { app_.show_bottom_ = true; app_.bottom_view_ = 1; }
 
 void TimelinePanel::set_selected_key_interpolation(const std::string& ease) {
     const auto refs = app_.anim_sel_keys_;
     anim_clip_edit_("Interpolation", [&](ClipModel& m) { m.set_easing(refs, ease); });
 }
+
+void TimelinePanel::set_selected_bone_key_interpolation(const std::string& ease) {
+    const auto refs = app_.rig_pose_sel_keys_;
+    rig_pose_clip_edit_("Interpolation", [&](BoneClipModel& m) { m.set_easing(refs, ease); });
+}
+
+std::vector<float> TimelinePanel::bone_clip_key_times() const { return app_.rig_pose_clip_.model.key_times(); }
 
 void TimelinePanel::move_selected_animation_event(float to_time) {
     if (app_.anim_sel_event_ < 0 || app_.anim_sel_event_ >= static_cast<int>(app_.anim_clip_.model.events.size())) return;

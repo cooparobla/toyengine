@@ -1,7 +1,7 @@
 #include <toyengine/scene/skinned_mesh_renderer.h>
 
-#include <coopa/animation/animator.h>
 #include <coopa/asset/asset_manager.h>
+#include <coopa/rig/rig_component.h>
 #include <coopa/scene/component.h>
 #include <coopa/scene/components/transform_component.h>
 #include <coopa/scene/scene.h>
@@ -34,9 +34,6 @@ void SkinnedMeshRenderer::start() {
     if (!owner) return;
     renderer_ = owner->get_component<MeshRenderer>();
     rig_ = find_rig_();
-    rest_world_.clear();
-    if (auto* tc = owner->get_transform()) owner_rest_world_ = tc->get_world_matrix();
-    if (rig_) snapshot_rest_(rig_);
 }
 
 void SkinnedMeshRenderer::compute_dq_palette(const std::vector<glm::mat4>& skin_matrices, std::vector<glm::mat4>& out) {
@@ -232,22 +229,22 @@ bool SkinnedMeshRenderer::ensure_mesh_(toy::render::passes::SkinningPass* gpu) {
 void SkinnedMeshRenderer::update_palette_() {
     auto* tc = owner ? owner->get_transform() : nullptr;
     const glm::mat4 owner_world = tc ? tc->get_world_matrix() : glm::mat4(1.0f);
-    bone_worlds_.assign(bones_.size(), glm::mat4(1.0f));
-    bone_valid_.assign(bones_.size(), 0);
-    for (size_t i = 0; i < bones_.size(); ++i) {
-        if (!bones_[i]) continue; // unresolved bone -- stays identity, see resolve_bones_()
-        auto* bone_tc = bones_[i]->get_transform();
-        if (!bone_tc) continue;
-        bone_worlds_[i] = bone_tc->get_world_matrix();
-        bone_valid_[i] = 1;
+    bone_worlds_.assign(bone_indices_.size(), glm::mat4(1.0f));
+    bone_valid_.assign(bone_indices_.size(), 0);
+    if (rig_) {
+        for (size_t i = 0; i < bone_indices_.size(); ++i) {
+            if (bone_indices_[i] < 0) continue; // unresolved bone -- stays identity, see resolve_bones_()
+            bone_worlds_[i] = rig_->world_matrix(static_cast<size_t>(bone_indices_[i]));
+            bone_valid_[i] = 1;
+        }
     }
     compute_palette(owner_world, bone_worlds_, bone_valid_, inverse_bind_, skin_matrices_);
 }
 
 void SkinnedMeshRenderer::build_bone_boxes_(const SkinnedMeshSource& src) {
     const glm::vec3 empty_min(std::numeric_limits<float>::max()), empty_max(std::numeric_limits<float>::lowest());
-    bone_min_.assign(bones_.size(), empty_min);
-    bone_max_.assign(bones_.size(), empty_max);
+    bone_min_.assign(bone_indices_.size(), empty_min);
+    bone_max_.assign(bone_indices_.size(), empty_max);
     static_min_ = empty_min;
     static_max_ = empty_max;
     for (size_t i = 0; i < src.vertices.size(); ++i) {
@@ -256,7 +253,7 @@ void SkinnedMeshRenderer::build_bone_boxes_(const SkinnedMeshSource& src) {
         const glm::vec3& p = src.vertices[i].position;
         bool any = false;
         for (int c = 0; c < 4; ++c) {
-            if (j[c] < 0 || w[c] <= 0.0f || static_cast<size_t>(j[c]) >= bones_.size()) continue;
+            if (j[c] < 0 || w[c] <= 0.0f || static_cast<size_t>(j[c]) >= bone_indices_.size()) continue;
             bone_min_[j[c]] = glm::min(bone_min_[j[c]], p);
             bone_max_[j[c]] = glm::max(bone_max_[j[c]], p);
             any = true;
@@ -278,14 +275,14 @@ void SkinnedMeshRenderer::build_gpu_(toy::render::passes::SkinningPass& pass, co
         bind[i].weights = (i < src.weights.size()) ? src.weights[i] : glm::vec4(0.0f);
     }
     const uint64_t bind_bytes = sizeof(BindVertex) * bind.size();
-    const uint64_t pal_bytes  = sizeof(glm::mat4) * std::max<size_t>(bones_.size(), 1);
+    const uint64_t pal_bytes  = sizeof(glm::mat4) * std::max<size_t>(bone_indices_.size(), 1);
     auto g = std::make_unique<GpuSkin>(
         memory::make_storage_buffer(device_, allocator_, bind_bytes, BufferUsage::None, MemoryResidency::CpuToGpu),
         memory::StorageBufferRing(device_, allocator_, pal_bytes, frames_in_flight_, BufferUsage::None,
                                   MemoryResidency::CpuToGpu),
         pipeline::DescriptorPoolBuilder().add_sets(pass.layout(), frames_in_flight_).build(device_));
     g->bind_pose.upload(bind.data(), bind_bytes);
-    const std::vector<glm::mat4> identity(std::max<size_t>(bones_.size(), 1), glm::mat4(1.0f));
+    const std::vector<glm::mat4> identity(std::max<size_t>(bone_indices_.size(), 1), glm::mat4(1.0f));
     for (uint32_t s = 0; s < frames_in_flight_; ++s) {
         g->palette.upload(s, identity.data(), pal_bytes);
         g->sets.emplace_back(device_, g->pool, pass.layout());
@@ -296,60 +293,32 @@ void SkinnedMeshRenderer::build_gpu_(toy::render::passes::SkinningPass& pass, co
     gpu_ = std::move(g);
 }
 
-coopa::scene::SceneObject* SkinnedMeshRenderer::find_rig_() const {
+coopa::rig::Rig* SkinnedMeshRenderer::find_rig_() const {
     if (!rig_path_.empty() && scene) {
-        if (auto* r = scene->find_object_by_path(rig_path_)) return r;
+        if (auto* r = scene->find_object_by_path(rig_path_)) {
+            if (auto* rig = r->get_component<coopa::rig::Rig>()) return rig;
+        }
     }
     for (coopa::scene::SceneObject* o = owner; o; o = o->parent()) {
-        if (o->get_component<coopa::anim::Animator>()) return o;
+        if (auto* rig = o->get_component<coopa::rig::Rig>()) return rig;
     }
-    coopa::scene::SceneObject* top = owner;
-    while (top && top->parent()) top = top->parent();
-    return top;
-}
-
-void SkinnedMeshRenderer::snapshot_rest_(coopa::scene::SceneObject* o) {
-    if (auto* tc = o->get_transform()) rest_world_[o] = tc->get_world_matrix();
-    for (const auto& c : o->children()) snapshot_rest_(c.get());
-}
-
-coopa::scene::SceneObject* SkinnedMeshRenderer::find_bone_(const std::string& path) const {
-    if (rig_) {
-        if (path == rig_->name()) return rig_;
-        coopa::scene::SceneObject* cur = rig_;
-        size_t start = 0;
-        bool first = true;
-        while (cur && start <= path.size()) {
-            const size_t slash = path.find('/', start);
-            const std::string seg = path.substr(start, slash == std::string::npos ? std::string::npos : slash - start);
-            cur = first ? cur->find_descendant(seg) : cur->find_child(seg);
-            first = false;
-            if (slash == std::string::npos) break;
-            start = slash + 1;
-        }
-        if (cur) return cur;
-    }
-    return scene ? scene->find_object_by_path(path) : nullptr;   // the scene-wide form
+    return nullptr;
 }
 
 void SkinnedMeshRenderer::resolve_bones_(const SkinnedMeshSource& src) {
     const std::vector<std::string>& names = !bone_paths_.empty() ? bone_paths_ : src.groups;
-    bones_.clear();
-    inverse_bind_.clear();
+    bone_indices_.assign(names.size(), -1);
+    inverse_bind_.assign(names.size(), glm::mat4(1.0f));
     for (size_t i = 0; i < names.size(); ++i) {
-        coopa::scene::SceneObject* b = find_bone_(names[i]);
-        bones_.push_back(b);
-        glm::mat4 inv_bind(1.0f);
+        const int bi = rig_ ? rig_->find_bone(names[i]) : -1;
+        bone_indices_[i] = bi;
         if (i < src.inverse_bind_matrices.size()) {
-            inv_bind = src.inverse_bind_matrices[i];
-        } else if (b) {
-            // Rest pose: identity skinning at the authored pose. bone_world_rest^-1 * owner_world_rest.
-            auto it = rest_world_.find(b);
-            const glm::mat4 bone_rest = it != rest_world_.end() ? it->second
-                                      : (b->get_transform() ? b->get_transform()->get_world_matrix() : glm::mat4(1.0f));
-            inv_bind = glm::inverse(bone_rest) * owner_rest_world_;
+            inverse_bind_[i] = src.inverse_bind_matrices[i];
+        } else if (bi >= 0) {
+            // RigAsset's own rest pose: identity skinning at the authored pose, derived from
+            // asset data rather than a scene-graph snapshot -- see this file's doc.
+            inverse_bind_[i] = rig_->inverse_bind(static_cast<size_t>(bi));
         }
-        inverse_bind_.push_back(inv_bind);
     }
 }
 

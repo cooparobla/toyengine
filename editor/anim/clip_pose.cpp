@@ -80,5 +80,47 @@ int apply_clip_pose(const coopa::anim::AnimationClip& clip, float t, coopa::scen
     return applied;
 }
 
+int apply_bone_pose(const coopa::rig::SkeletalClip& clip, float t, coopa::rig::Rig* rig) {
+    if (!rig) return 0;
+    const uint8_t root_channels = clip.root_motion.translation == coopa::anim::RootMotionTranslation::XYZ ? 0x07
+                                 : clip.root_motion.translation == coopa::anim::RootMotionTranslation::XY  ? 0x03 : 0x00;
+    int applied = 0;
+    for (const auto& track : clip.bones) {
+        const int bi = rig->find_bone(track.bone);
+        if (bi < 0) continue;
+        auto& out = rig->pose(static_cast<size_t>(bi));
+        const bool is_root = clip.root_motion.enabled() && clip.root_motion.bone == track.bone;
+        if (!track.location.empty()) {
+            float v[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+            track.location.sample(t, 3, v);
+            if (is_root && root_channels) {
+                float start[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+                track.location.sample(0.0f, 3, start);
+                for (int c = 0; c < 3; ++c) if ((root_channels >> c) & 1) v[c] = start[c];
+            }
+            out.location = glm::vec3(v[0], v[1], v[2]);
+        }
+        if (!track.rotation.empty()) {
+            glm::quat q = coopa::rig::sample_rotation(track.rotation, t);
+            if (is_root && clip.root_motion.yaw) {
+                const glm::quat q0 = coopa::rig::sample_rotation(track.rotation, 0.0f);
+                const auto yaw_of = [](const glm::quat& r) {
+                    return glm::degrees(std::atan2(2.0f * (r.w * r.z + r.x * r.y), r.w * r.w + r.x * r.x - r.y * r.y - r.z * r.z));
+                };
+                const float dyaw = glm::radians(yaw_of(q0) - yaw_of(q));
+                q = glm::normalize(glm::angleAxis(dyaw, glm::vec3(0.0f, 0.0f, 1.0f)) * q);
+            }
+            out.rotation = q;
+        }
+        if (!track.scale.empty()) {
+            float v[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+            track.scale.sample(t, 3, v);
+            out.scale = glm::vec3(v[0], v[1], v[2]);
+        }
+        ++applied;
+    }
+    return applied;
+}
+
 } // namespace editor
 } // namespace toy

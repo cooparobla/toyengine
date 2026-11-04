@@ -20,6 +20,7 @@
 #include <glm/glm.hpp>
 
 // Types the shared structs below hold by value.
+#include "editor/anim/bone_clip_model.h"
 #include "editor/anim/clip_model.h"
 #include "editor/mesh/edit_mesh.h"
 #include "editor/mesh/mesh_ops.h"
@@ -27,6 +28,7 @@
 #include "editor/mesh/paint.h"
 #include "editor/mesh/primitives.h"
 #include "editor/mesh/sculpt.h"
+#include "editor/rig/rig_model.h"
 #include <coopa/animation/animation_clip.h>
 
 #include <filesystem>
@@ -56,8 +58,11 @@ enum class BindWeights { Automatic = 0, Envelope, EmptyGroups };
  *        type decides what the viewer shows and what the Properties editor offers.
  */
 enum class AssetType { None = 0, Scene, Object, Mesh, Material, Texture, UI, Theme, Audio, NodeGraph };
-/** @brief Blender's interaction modes for a mesh object (the viewport header's mode dropdown). */
-enum class InteractionMode { Object = 0, Edit, Sculpt, VertexPaint, WeightPaint, Pose, Pen };
+/** @brief Blender's interaction modes for a mesh object (the viewport header's mode dropdown).
+ *         RigEdit authors a coopa::rig::Rig's REST skeleton (a RigDocument); Pose poses its
+ *         pose buffer -- the same split Blender draws between Edit Mode and Pose Mode on an
+ *         armature. */
+enum class InteractionMode { Object = 0, Edit, Sculpt, VertexPaint, WeightPaint, Pose, Pen, RigEdit };
 /** @brief Viewport shading, Blender's four buttons. */
 enum class Shading { Wireframe = 0, Solid = 1, MaterialPreview = 2, Full = 3 };
 
@@ -65,12 +70,11 @@ enum class Shading { Wireframe = 0, Solid = 1, MaterialPreview = 2, Full = 3 };
  * @brief How an object's origin is drawn in the viewport (Blender's "empty" display).
  *
  * Only objects with no mesh of their own get one -- a rig's joints, markers, group parents.
- * Bone is reachable only on an object at or under an Animator, where it is the default.
+ * A rig's actual bones are coopa::rig::Rig bones, not objects, and are never styled this way.
  */
 enum class OriginStyle {
     Axes = 0,   ///< Three lines through the origin, one per local axis. The default.
     Orb,        ///< A small ball at the origin, with a tick along each axis.
-    Bone,       ///< An octahedral bone toward each child joint. Only under an Animator.
 };
 /** @brief The origin glyph's size in metres when neither the object nor an ancestor sets one. */
 inline constexpr float kDefaultOriginSize = 0.5f;
@@ -88,6 +92,32 @@ struct ClipDocument {
     UndoStack<ClipModel> undo{200};
     uint64_t revision = 1;    ///< Bumps on every change (the preview re-parses).
     bool open() const { return !path.empty(); }
+};
+
+/** @brief The bone-addressed sibling of ClipDocument -- a SkeletalAnimator state's open clip,
+ *         for Pose Mode's "I" on a coopa::rig::Rig character. No visual dope-sheet editing yet
+ *         (see bone_clip_model.h's doc): a change is saved to disk immediately rather than held
+ *         dirty for a Timeline save button, since no such button exists for this model yet. */
+struct BoneClipDocument {
+    std::string state;        ///< The SkeletalAnimator state naming it.
+    fs::path path;
+    BoneClipModel model;
+    UndoStack<BoneClipModel> undo{200};
+    uint64_t revision = 1;
+    bool open() const { return !path.empty(); }
+};
+
+/** @brief The open rig asset file being authored in RigEdit mode -- ClipDocument's sibling for
+ *         REST data rather than a clip. `path` is empty when RigEdit mode is authoring a BRAND
+ *         NEW rig that has never been saved; the first edit picks a path (see
+ *         EditorApp::rig_edit_new_rig_()'s doc). */
+struct RigDocument {
+    fs::path path;
+    RigModel model;
+    UndoStack<RigModel> undo{200};
+    uint64_t revision = 1;
+    bool dirty = false;        ///< Written once a frame (rig_edit_frame_()), not per edit.
+    bool open() const { return !model.bones.empty() || !path.empty(); }
 };
 
 struct EditVisibility {

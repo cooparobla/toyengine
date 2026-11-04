@@ -16,6 +16,7 @@
 #include <glm/glm.hpp>
 #include <toyengine/core/engine.h>
 #include <coopa/animation/animation_system.h>
+#include <coopa/rig/skeletal_animator.h>
 #include <coopa/scene/scene_loader.h>
 #include <toyengine/scene/character_controller.h>
 #include <toyengine/scene/scene_link.h>
@@ -296,9 +297,13 @@ COOPA_TEST(scene_link_shows_loading_screen_and_lands_on_spawn) {
            "scene link: the heavy scene replaced the hub");
 
     // Animators in a scene activated later run with no manual refresh: a dancer's pose changes.
+    // The heavy scene's mannequins carry a coopa::rig::SkeletalAnimator (a Rig, not a plain
+    // Animator), so both component types are counted -- see coopa::rig::SkeletalAnimator's doc.
     auto* anim = dynamic_cast<coopa::anim::AnimationSystem*>(heavy.find_system("Animation"));
-    expect(anim && anim->animator_count() >= 13, "scene link: the heavy scene's animators are gathered (" +
-           std::to_string(anim ? anim->animator_count() : 0) + ")");
+    const size_t skeletal_count = heavy.get_components<coopa::rig::SkeletalAnimator>().size();
+    const size_t total_animators = (anim ? anim->animator_count() : 0) + skeletal_count;
+    expect(anim && total_animators >= 13, "scene link: the heavy scene's animators are gathered (" +
+           std::to_string(total_animators) + ")");
     auto pose = [&]() {
         std::vector<glm::vec3> out;
         if (auto* d = heavy.find_object("dancer_0")) {

@@ -456,6 +456,45 @@ COOPA_TEST(every_tile_the_map_calls_wet_renders_wet_on_a_heightmap_too) {
     expect(mismatched == 0,
            "wet parity: tile-mode wet " + std::to_string(tile_wet) + ", heightmap-mode wet " +
            std::to_string(heightmap_wet) + ", mismatched " + std::to_string(mismatched));
+
+    // ...and on the heightmap the bed genuinely clears the water standing on it. Every height
+    // sample whose tiles are ALL wet is interior to a channel or a basin -- no dry ground shares
+    // it, and the water surface over it sits exactly at the lowest of those tiles' levels
+    // (terrain_water_mesh.cpp's corner_at), so a sample above that level is terrain coming
+    // through the surface. This is the invariant the demo's rivers broke on steep ground, where
+    // grade_water_shore()'s centre-only first pass cannot see a tile's uphill samples.
+    const TerraData* hd = tb.field.data();
+    require(hd != nullptr && hd->has_heights(), "bed clearance: the heightmap bake has a height plane");
+    const int sub = std::max(1, hd->geometry().height_sub);
+    const float clearance = tb.params.shore_clearance;
+    std::size_t interior = 0, proud = 0;
+    // The world's outermost ring of samples is skipped: its tiles run off the grid, so "every
+    // tile sharing this sample is wet" has no answer there.
+    for (int j = 1; j + 1 < hd->height_ny(); ++j) {
+        for (int i = 1; i + 1 < hd->height_nx(); ++i) {
+            // A sample belongs to the tile below-left of it, and to the one above-right as well
+            // when it lands exactly on a tile boundary.
+            int tx[2] = {i / sub, i / sub}, ty[2] = {j / sub, j / sub};
+            if (i % sub == 0) tx[1] = i / sub - 1;
+            if (j % sub == 0) ty[1] = j / sub - 1;
+            float lowest = std::numeric_limits<float>::infinity();
+            bool all_wet = true;
+            for (int a = 0; a < 2 && all_wet; ++a) {
+                for (int b = 0; b < 2; ++b) {
+                    const WaterCell w = tb.field.water_at(glm::ivec2(tx[a], ty[b]));
+                    if (!w.wet()) { all_wet = false; break; }
+                    lowest = std::min(lowest, w.level);
+                }
+            }
+            if (!all_wet) continue;
+            ++interior;
+            if (hd->height_at(i, j) > lowest - clearance + 1e-3f) ++proud;
+        }
+    }
+    require(interior > 10000, "bed clearance: the world has channel interiors to check");
+    expect(proud == 0,
+           "bed clearance: " + std::to_string(proud) + " of " + std::to_string(interior) +
+           " interior samples stand above the water over them");
 }
 
 /**

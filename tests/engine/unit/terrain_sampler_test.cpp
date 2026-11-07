@@ -185,3 +185,97 @@ COOPA_TEST(the_floor_under_water_has_relief_and_grades_by_depth) {
               << "% level with their neighbour, deepest " << deepest << " steps, "
               << bed_kinds.size() << " bed surfaces\n";
 }
+
+/**
+ * @brief A field with a height plane bakes each wet tile's level at mapcoopa's exact surface,
+ *        where a terraced field rounds it to a whole step.
+ *
+ * mapcoopa guarantees a river's banked surface stays under both banks of the CONTINUOUS ground.
+ * A terraced world can round that surface to a step and still look right -- its shoreline hides
+ * inside a bank's wall either way -- but a height plane cannot: there the water is a flat sheet
+ * against ground that keeps falling, so half a step of lift is half a step of water standing
+ * proud of the bank, which is what `unified_terrain_demo`'s heightmap flavour showed along every
+ * river. The two bakes are taken from one sampler here, so the only thing that can differ
+ * between them is the rounding under test.
+ */
+COOPA_TEST(a_height_plane_bakes_water_levels_unrounded) {
+    using namespace toy::world;
+
+    QuietLogger logger;
+    coopa::maps::MapConfig config = toy::mapgen::default_generator();
+    config.seed      = 31;
+    config.grid_size = 24;
+    config = coopa::maps::derived_config(config);
+    coopa::maps::MapGenerator generator(config, logger);
+    generator.generate();
+
+    TerrainParams params = make_test_params(16);
+    params.height_scale = 32.0f;
+    params.world_tiles  = config.grid_size * 8;
+    TerrainSampler sampler;
+    sampler.build(config, std::move(generator.graph()), params);
+
+    TerraData terraced;                     // no height plane: what the two tile flavours bake
+    sampler.bake(terraced);
+    TerraGeometry smooth_geometry;          // height_sub 2: a real, continuous height plane
+    smooth_geometry.height_sub = 2;
+    TerraData smooth(smooth_geometry);
+    sampler.bake(smooth);
+    require(!terraced.has_heights(), "levels: the terraced bake really has no height plane");
+    require(smooth.has_heights(), "levels: the smooth bake really has one");
+
+    const float step = terraced.geometry().height_step;
+    const auto on_a_step = [step](float level) {
+        return std::abs(level - std::round(level / step) * step) <= 1e-3f;
+    };
+
+    std::size_t terraced_wet = 0, terraced_off_step = 0;
+    for (std::int32_t y = 0; y < terraced.geometry().tiles_y; ++y) {
+        for (std::int32_t x = 0; x < terraced.geometry().tiles_x; ++x) {
+            const TileCell& t = terraced.at(x, y);
+            if (!t.wet()) continue;
+            ++terraced_wet;
+            if (!on_a_step(t.water_level)) ++terraced_off_step;
+        }
+    }
+    require(terraced_wet > 200, "levels: the terraced world has water to measure");
+    expect(terraced_off_step == 0, "levels: a terraced world keeps every level on a whole step");
+
+    std::size_t wet = 0, mismatched = 0, river = 0, river_between_steps = 0;
+    float worst_shift = 0.0f;
+    for (std::int32_t y = 0; y < smooth.geometry().tiles_y; ++y) {
+        for (std::int32_t x = 0; x < smooth.geometry().tiles_x; ++x) {
+            const TileCell& t = smooth.at(x, y);
+            if (!t.wet()) continue;
+            ++wet;
+            // record_() samples a tile at its CENTRE, so that is where the continuous surface is
+            // read back from -- the same call, so an exact match is the claim, not a near one.
+            const float exact = sampler.sample_surface(static_cast<double>(x) + 0.5, static_cast<double>(y) + 0.5).water_surface;
+            if (std::abs(t.water_level - exact) > 1e-3f) ++mismatched;
+            // Only where both bakes kept the tile wet: settle_water_rounding() may have dried a
+            // marginal tile on the terraced side, and that is a different difference.
+            if (terraced.at(x, y).wet()) {
+                worst_shift = std::max(worst_shift, std::abs(t.water_level - terraced.at(x, y).water_level));
+            }
+            if (static_cast<WaterKind>(t.water_kind) != WaterKind::River) continue;
+            ++river;
+            if (!on_a_step(t.water_level)) ++river_between_steps;
+        }
+    }
+    require(wet > 200, "levels: the smooth world has water to measure");
+    expect(mismatched == 0,
+           "levels: every smooth level is mapcoopa's own surface, to the millimetre (" +
+           std::to_string(mismatched) + " of " + std::to_string(wet) + " disagreed)");
+    // A river is where this matters and where it shows: its surface is banked along its own
+    // course, so it lands wherever the ground took it. (A sea or a lake is one flat level, which
+    // can perfectly well sit on a step -- this map's sea does, so counting every wet tile here
+    // would measure the ocean's single coincidence rather than the rounding under test.)
+    require(river > 50, "levels: the map placed rivers to measure (" + std::to_string(river) + ")");
+    expect(river_between_steps * 2 > river,
+           "levels: most river levels fall between steps, where a terrace cannot (" +
+           std::to_string(river_between_steps) + " of " + std::to_string(river) + ")");
+    // And the rounding that is gone was never more than the half step it could ever have been.
+    expect(worst_shift <= 0.5f * step + 1e-3f,
+           "levels: the smooth bake differs from the terraced one by at most half a step (" +
+           std::to_string(worst_shift) + ")");
+}

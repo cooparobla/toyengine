@@ -434,3 +434,119 @@ COOPA_TEST(skirt_tiles_from_metres_keeps_the_same_physical_reach) {
     expect(skirt_tiles_from_metres(4.0f, 0.5f) == 8, "skirt-metres: 4 m at 0.5 m tiles is 8 tiles");
     expect(skirt_tiles_from_metres(0.1f, 2.0f) == 1, "skirt-metres: never rounds below one tile");
 }
+
+/**
+ * @brief A river whose level falls continuously down a slope makes a surface that falls with it,
+ *        staying over its own bed the whole way.
+ *
+ * `unified_terrain_demo`'s heightmap flavour showed river water cutting through steep ground
+ * because the bake rounded every level to a whole terrace: a flat sheet per step, over ground
+ * that keeps falling, buries its uphill edge and floats its downhill one. The mesher was always
+ * able to follow a falling level -- this is the lock on that, so the surface is only ever as
+ * stepped as the levels handed to it.
+ */
+COOPA_TEST(a_river_falling_down_a_slope_keeps_its_surface_over_its_bed) {
+    TerrainField f = smooth();
+    // Ground falling half a metre per metre of x, with a metre-deep channel cut along y = [6, 10)
+    // and the river's surface 0.4 m under the bank beside it -- the shape mapcoopa bakes, read at
+    // whatever fraction of a step it lands on rather than rounded to one.
+    const auto bank_at = [](float x_m) { return 12.0f - 0.5f * x_m; };
+    const auto level_at = [&](int tx) { return bank_at(static_cast<float>(tx) + 0.5f) - 0.4f; };
+    for (int j = 0; j < f.data()->height_ny(); ++j) {
+        for (int i = 0; i < f.data()->height_nx(); ++i) {
+            const float x_m = static_cast<float>(i) / static_cast<float>(k_sub);
+            const float y_m = static_cast<float>(j) / static_cast<float>(k_sub);
+            const bool in_channel = y_m >= 6.0f && y_m <= 10.0f;
+            f.data()->height_at(i, j) = bank_at(x_m) - (in_channel ? 1.0f : 0.0f);
+        }
+    }
+    for (int y = 6; y < 10; ++y) {
+        for (int x = 2; x < 14; ++x) {
+            f.set_water(glm::ivec2(x, y), WaterCell{WaterKind::River, level_at(x), 3});
+        }
+    }
+    f.mark_all_dirty();
+
+    ChunkWaterData still, flowing;
+    build_smooth_chunk_water(f, glm::ivec2(0, 0), 16, 0.25f, 1, still, flowing);
+    require(!flowing.empty(), "river-slope: the river meshed");
+
+    // Corners with a wet tile on every side: the open channel, where the surface is the level and
+    // nothing has been tucked under a bank.
+    int interior = 0;
+    for (std::size_t i = 0; i < flowing.positions.size(); ++i) {
+        const glm::vec3& p = flowing.positions[i];
+        const int cx = static_cast<int>(std::lround(p.x)), cy = static_cast<int>(std::lround(p.y));
+        if (cx < 3 || cx > 13 || cy < 7 || cy > 9) continue;
+        ++interior;
+        // The lowest level over a corner is the downstream tile's, cx -- the mesher's own rule.
+        expect_near(p.z, level_at(cx), 1e-4f, "river-slope: the surface stands at its own level");
+        const float bed = bank_at(p.x) - 1.0f;
+        expect(p.z > bed, "river-slope: the surface stays over the bed it runs in");
+        expect_near(flowing.depths[i], level_at(cx) - bed, 1e-3f,
+                    "river-slope: depth is the level over the bed at that exact corner");
+    }
+    expect(interior > 20, "river-slope: the open channel really was sampled (" + std::to_string(interior) + ")");
+
+    // And it genuinely falls, by the half metre per tile the levels describe -- not in terraces.
+    const auto heights = vertex_heights(flowing, glm::vec2(0.0f, 0.0f));
+    float lo = 1e9f, hi = -1e9f;
+    for (const auto& [key, height] : heights) { lo = std::min(lo, height); hi = std::max(hi, height); }
+    expect(hi - lo > 4.0f, "river-slope: the surface falls across the run, rather than sitting flat");
+}
+
+/**
+ * @brief The apron stops where the ground falls away beneath the water instead of running up to
+ *        meet it -- `unified_terrain_demo`'s heightmap rivers draping sheets down a hillside.
+ *
+ * The widening gate asks whether a tile's ground is still under the water's level. A shelf
+ * running into a lake satisfies that; so does a cliff under water perched above it, and there
+ * the apron has left the body's basin. A render of the demo with the apron cut to one tile is
+ * what identified this: the shards on its mountainsides went with it.
+ */
+COOPA_TEST(the_apron_stops_where_the_ground_falls_out_of_the_basin) {
+    TerrainField f = smooth();
+    // A 2-tile-wide body at 4 m with a bed at 2 m, and ground that FALLS steeply away on its +x
+    // side -- every tile over there is "under the level", and none of it is the body's basin.
+    flood(f, 4, 4, 6, 8, 4.0f, WaterKind::Lake);
+    for (int j = 0; j < f.data()->height_ny(); ++j) {
+        for (int i = 0; i < f.data()->height_nx(); ++i) {
+            const float x_m = static_cast<float>(i) / static_cast<float>(k_sub);
+            if (x_m > 6.0f) f.data()->height_at(i, j) = 2.0f - 3.0f * (x_m - 6.0f);
+        }
+    }
+    f.mark_all_dirty();
+
+    ChunkWaterData still, flowing;
+    build_smooth_chunk_water(f, glm::ivec2(0, 0), 16, 0.25f, 4, still, flowing);
+    require(!still.empty(), "basin: a mesh was built");
+
+    float max_x = -1e9f;
+    for (const glm::vec3& p : still.positions) max_x = std::max(max_x, p.x);
+    // The wet tiles end at x = 6; one ring of apron covers the quantised waterline, and the
+    // fall-away stops the rest -- not the four tiles `skirt_tiles` would otherwise allow.
+    expect_near(max_x, 7.0f, 1e-4f,
+                "basin: the apron stops one tile past the water, not four, over ground falling away");
+}
+
+/**
+ * @brief A channel's apron reaches one tile however wide the authored one is; still water on the
+ *        same bed still gets its full reach.
+ */
+COOPA_TEST(a_flowing_body_keeps_a_short_apron) {
+    const auto reach_x = [](WaterKind kind) {
+        TerrainField f = smooth();
+        flood(f, 4, 4, 6, 6, 4.0f, kind, kind == WaterKind::River ? 1 : 0);
+        gentle_bed(f);   // a shelf that genuinely stays under the level for several rings
+        ChunkWaterData still, flowing;
+        build_smooth_chunk_water(f, glm::ivec2(0, 0), 16, 0.25f, 3, still, flowing);
+        const ChunkWaterData& w = kind == WaterKind::River ? flowing : still;
+        float hi = -1e9f;
+        for (const glm::vec3& p : w.positions) hi = std::max(hi, p.x);
+        return hi;
+    };
+    // The wet tiles end at x = 6 either way; only the apron past that differs.
+    expect_near(reach_x(WaterKind::River), 7.0f, 1e-4f, "flow-apron: a river reaches one tile past its bank");
+    expect(reach_x(WaterKind::Lake) > 7.0f + 1e-4f,
+           "flow-apron: still water on the same gentle bed still reaches further");
+}

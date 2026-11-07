@@ -196,8 +196,15 @@ public:
      * where, and how high) the cell is flooded to the water's terrace; a frozen lake is ground
      * of ice at that terrace instead. bake() then reconciles each tile with its neighbours --
      * a lone tile cannot know that the water beside it needs a bank.
+     *
+     * @param tile_x Tile column.
+     * @param tile_y Tile row.
+     * @param continuous_water_level Keeps `water_level` at mapcoopa's exact surface instead of
+     *        rounding it to a terrace -- for a field whose ground is a continuous height plane
+     *        rather than steps. See record_().
      */
-    TileCell sample_cell(std::int32_t tile_x, std::int32_t tile_y) const {
+    TileCell sample_cell(std::int32_t tile_x, std::int32_t tile_y,
+                         bool continuous_water_level = false) const {
         TileCell r;
         if (!built_) return r;
 
@@ -206,7 +213,7 @@ public:
         const double gy = (static_cast<double>(tile_y) + 0.5) / per_unit;
         const coopa::maps::MapCenter& cell = cell_at(gx, gy);
         return record_(cell, coopa::maps::MapPoint{gx, gy}, per_unit, glm::dvec3(1.0, 0.0, 0.0),
-                       glm::dvec3(0.0, 1.0, 0.0));
+                       glm::dvec3(0.0, 1.0, 0.0), continuous_water_level);
     }
 
     /**
@@ -289,9 +296,19 @@ private:
      * @brief A tile's record from the cell under it and its point on the map (`p`: 2D on a plane,
      *        on the globe for a planet). `across` and `along` are the tile grid's x and y in the
      *        map's frame, which a river's flow is measured against.
+     *
+     * `continuous_water_level` keeps `water_level` at mapcoopa's exact surface. mapcoopa
+     * guarantees that surface stays under both banks of the CONTINUOUS ground; rounding it to a
+     * terrace moves it by up to half a step either way, which a terraced world absorbs (the
+     * shoreline hides inside a bank's wall) and a height plane does not -- there the water is a
+     * flat sheet against ground that keeps falling, so half a step of lift is half a step of
+     * water standing proud of the bank. The terraced readings this function also emits (`steps`,
+     * `bed_kind_for`) keep using the rounded level either way: they describe a column, which is
+     * terraced by definition.
      */
     TileCell record_(const coopa::maps::MapCenter& cell, const coopa::maps::MapPoint& p, double per_unit,
-                     const glm::dvec3& across, const glm::dvec3& along) const {
+                     const glm::dvec3& across, const glm::dvec3& along,
+                     bool continuous_water_level = false) const {
         TileCell r;
         r.biome       = static_cast<std::uint8_t>(cell.biome);
         r.temperature = TileCell::quantise01(cell.temperature);
@@ -322,7 +339,9 @@ private:
             r.water_kind = static_cast<std::uint8_t>(water.kind == coopa::maps::WaterKind::Sea
                                                           ? WaterKind::Ocean
                                                           : (flowing ? WaterKind::River : WaterKind::Lake));
-            r.water_level = static_cast<float>(level_steps) * params_.height_step;
+            r.water_level = continuous_water_level
+                                ? static_cast<float>(water.surface * params_.height_scale)
+                                : static_cast<float>(level_steps) * params_.height_step;
             if (flowing) {
                 const glm::dvec3 f(water.flow.x, water.flow.y, water.flow.z);
                 r.flow = flow_octant(glm::dot(f, across), glm::dot(f, along));
@@ -402,7 +421,10 @@ public:
      *
      * A field WITH a height plane instead shapes the plane itself (grade_water_shore()): its
      * shoreline is simply where the continuous ground crosses the water's level, so there is no
-     * terrace to round toward.
+     * terrace to round toward -- and for the same reason its water levels are baked at
+     * mapcoopa's exact surface rather than rounded to one (record_()'s
+     * `continuous_water_level`), so a river keeps falling with the ground it runs over instead
+     * of standing in flat terraces across it.
      *
      * Layer (splat) weights are NOT filled here -- they need the terrain's own layer-name mapping
      * (`MapGeneratorComponent::layers`), which this sampler has no idea exists.
@@ -416,11 +438,12 @@ public:
         TerraGeometry g = out.geometry();
         g.tiles_x = g.tiles_y = n;
         out.reset(g);
+        const bool continuous = out.has_heights();
         for (std::int32_t y = 0; y < n; ++y)
-            for (std::int32_t x = 0; x < n; ++x) out.at(x, y) = sample_cell(x, y);
+            for (std::int32_t x = 0; x < n; ++x) out.at(x, y) = sample_cell(x, y, continuous);
 
         TerrainField field = borrow(out);
-        if (out.has_heights()) {
+        if (continuous) {
             const int sub = std::max(1, g.height_sub);
             for (int j = 0; j < out.height_ny(); ++j) {
                 for (int i = 0; i < out.height_nx(); ++i) {

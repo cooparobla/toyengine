@@ -28,6 +28,30 @@ constexpr float k_smooth_skirt_clearance = 0.2f;
  */
 constexpr float k_smooth_skirt_max_drop = 2.0f;
 
+/**
+ * @brief Tiles a FLOWING body's apron may reach, whatever `water_skirt_tiles` asks for.
+ *
+ * The apron exists to cover the gap between the tile-quantised wet mask and the real waterline,
+ * so its useful reach is however far that waterline can plausibly sit from the last wet tile.
+ * On a shallow shelf running into a lake that is genuinely several tiles. A channel's waterline
+ * is its own bank -- a river is metres wide, and the default four-metre apron is wider than the
+ * river it surrounds. Reaching further only drapes the channel's flat surface over whatever the
+ * ground does next, which on a hillside is a sheet of water standing off the slope.
+ */
+constexpr int k_flow_skirt_tiles = 1;
+
+/**
+ * @brief Metres an apron tile's ground may sit below the bed of the body it continues.
+ *
+ * The widening gate below asks whether the ground is still under the water's level. That is true
+ * of a shelf running down into a lake -- and equally true of a slope falling away beneath water
+ * perched above it, where the apron has left the body's basin altogether. Ground that has dropped
+ * below the body's OWN bed is that second case, so it ends the apron. The tolerance only has to
+ * absorb the lowest-corner-vs-centre sampling offset over ground gentle enough to still be a
+ * shelf; anything steeper is what this is meant to stop.
+ */
+constexpr float k_apron_basin_drop = 0.5f;
+
 /** @brief The ground at one GLOBAL corner, in local metres -- exact on a texel boundary for any
  *        `height_sub`, since the bilinear weights there degenerate to that one texel. */
 float ground_at_corner(const TerrainField& field, glm::ivec2 corner) {
@@ -62,11 +86,13 @@ std::uint64_t tile_key(glm::ivec2 tile) {
  *
  * One tile unconditionally (the wet mask is tile-quantised, the waterline it approximates is
  * not), and further only where this tile's ground still has a corner under the neighbour's level
- * -- a steep bank gets no apron past the first tile, a gentle one gets a real one, and the whole
- * tile the waterline actually crosses is always covered (the gate reads the tile's lowest
- * CORNER, not its centre, so a tile whose centre has cleared the level but whose far edge has not
- * is not dropped early). 8-connected (Chebyshev distance), so a diagonal shoreline keeps its
- * corner tiles instead of losing them to a 4-connected dilation.
+ * AND has not dropped out of that body's basin (`k_apron_basin_drop`) -- a steep bank gets no
+ * apron past the first tile, nor does a slope falling away beneath the water, while a gentle
+ * shelf gets a real one. The whole tile the waterline actually crosses is always covered (the
+ * level gate reads the tile's lowest CORNER, not its centre, so a tile whose centre has cleared
+ * the level but whose far edge has not is not dropped early). Flowing water is capped at
+ * `k_flow_skirt_tiles` regardless. 8-connected (Chebyshev distance), so a diagonal shoreline
+ * keeps its corner tiles instead of losing them to a 4-connected dilation.
  *
  * A pure function of the GLOBAL tile, never of which chunk is asking, and its scan order (fixed
  * dy-then-dx, nearest ring first, still water preferred over a river at an equal distance) is
@@ -89,11 +115,19 @@ WaterCell shore_of_uncached(const TerrainField& field, glm::ivec2 tile, int skir
             if (!field.contains(n)) continue;
             const WaterCell w = field.water_at(n);
             if (!w.wet()) continue;
-            // Past the first ring, the apron only continues over ground that is genuinely still
-            // under this neighbour's water -- a bank that clears it gets no apron beyond the tile
-            // that hides the mask's own quantisation.
-            if (d > 1 && lo_ground >= w.level) continue;
             const bool is_river = w.kind == WaterKind::River;
+            // A channel reaches one tile and no further, however wide the authored apron is.
+            if (is_river && d > k_flow_skirt_tiles) continue;
+            // Past the first ring, the apron only continues over ground that is genuinely still
+            // under this neighbour's water AND still inside its basin -- a bank that clears the
+            // level gets no apron beyond the tile that hides the mask's own quantisation, and
+            // ground that has fallen below the body's own bed is a slope leaving the body, not a
+            // shelf within it. Without the second test a river perched on a hillside drapes its
+            // flat surface right down the slope, since every tile below it is "under the level".
+            if (d > 1 && (lo_ground >= w.level ||
+                          lo_ground < field.ground_at_tile(n) - k_apron_basin_drop)) {
+                continue;
+            }
             if (d < best_d || (d == best_d && best_is_river && !is_river)) {
                 best = w;
                 best_d = d;

@@ -393,3 +393,62 @@ COOPA_TEST(a_borrowed_grid_speaks_in_exact_metres) {
                "borrowed: the level is kept exact, in metres -- not quantised to a terrace");
     expect(!d.at(3, 4).wet(), "borrowed: the bank beside it stays dry");
 }
+
+/**
+ * @brief A ridge standing inside the channel is sunk under the water; the same ridge on a sample
+ *        a dry tile shares is left alone, because that one is a bank.
+ *
+ * Pass 1 only guarantees a wet tile's CENTRE -- the bilinear value `set_water()`'s dryness test
+ * reads -- and a centre is a mean, so three corners on the bed hide a fourth standing proud of
+ * the water. The surface sits exactly at the level, so that fourth sample is terrain poking
+ * through it. Pass 2 is what closes that, and it has to close it without touching the shoreline:
+ * a sample any dry tile shares still describes dry ground, and lowering it would cut a notch in
+ * the bank instead.
+ */
+COOPA_TEST(grade_water_shore_sinks_a_ridge_inside_the_channel) {
+    constexpr int n = 9;   // 8 x 8 tiles
+    std::vector<WaterCell> water;
+    std::vector<float> h = flat_plane_with_lake(n, 2.0f, 4.0f, water, 2, 2, 6, 6);
+    h[4 * static_cast<std::size_t>(n) + 4] = 5.0f;   // every tile touching it is wet: the interior
+    h[2 * static_cast<std::size_t>(n) + 2] = 5.0f;   // only one of its four tiles is wet: a bank
+
+    // Both ridges are invisible to pass 1: each of their tiles keeps three corners on the 2 m bed,
+    // so every centre reads 2.75 -- a metre clear of the 4 m level -- and reports nothing to fix.
+    for (int y = 2; y < 6; ++y) {
+        for (int x = 2; x < 6; ++x) {
+            require(tile_mean(h, n, x, y) <= 4.0f - 0.03f,
+                    "interior: pass 1 sees nothing wrong with this bed, so pass 2 is what acts");
+        }
+    }
+
+    grade_water_shore(h, n, n, water, n - 1, n - 1, ShoreGrade{0.03f, 0.0f, 4.0f});
+
+    expect(h[4 * static_cast<std::size_t>(n) + 4] <= 4.0f - 0.03f + 1e-5f,
+           "interior: a ridge whose every tile is wet is sunk under the water standing over it");
+    expect_near(h[2 * static_cast<std::size_t>(n) + 2], 5.0f, 1e-6f,
+                "interior: the same ridge where a dry tile shares the sample is left alone -- a bank");
+}
+
+/**
+ * @brief Pass 2 holds the interior under the LOWEST level over it, where two bodies meet.
+ *
+ * The same rule the mesh builder's corners follow (terrain_water_mesh.cpp's corner_at): a sample
+ * under two bodies at different levels has to clear the lower one, or the lower body's own
+ * surface is the one the bed comes through.
+ */
+COOPA_TEST(grade_water_shore_interior_clears_the_lower_of_two_levels) {
+    constexpr int n = 9;
+    std::vector<WaterCell> water;
+    std::vector<float> h = flat_plane_with_lake(n, 2.0f, 6.0f, water, 2, 2, 6, 6);
+    // The high-x half of the lake is a second, lower body at 4 m: the sample column x = 4 is
+    // interior to both.
+    for (int y = 2; y < 6; ++y) {
+        for (int x = 4; x < 6; ++x) water[static_cast<std::size_t>(y) * (n - 1) + x] = WaterCell{WaterKind::Lake, 4.0f, 0};
+    }
+    h[4 * static_cast<std::size_t>(n) + 4] = 5.0f;   // under the 6 m body, over the 4 m one
+
+    grade_water_shore(h, n, n, water, n - 1, n - 1, ShoreGrade{0.03f, 0.0f, 4.0f});
+
+    expect(h[4 * static_cast<std::size_t>(n) + 4] <= 4.0f - 0.03f + 1e-5f,
+           "interior: a sample under two bodies clears the lower level, not the higher one");
+}

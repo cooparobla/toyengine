@@ -153,7 +153,7 @@ struct ShoreGrade {
  *        crosses the level and the water shader's edge fade and foam band are measured in metres
  *        of depth there.
  *
- * Two independent passes, each a plain ceiling on a height sample -- so running it twice changes
+ * Three independent passes, each a plain ceiling on a height sample -- so running it twice changes
  * nothing the second time, and it can never raise a sample, so it can never flood land no tile in
  * `water` called wet:
  *   1. Lowers a wet tile's whole corner block uniformly until the value at its exact CENTRE sits
@@ -165,7 +165,14 @@ struct ShoreGrade {
  *      still the minimal fix for a wet tile whose corners sample a hair above its own surface, and
  *      it leaves whatever grading the ground already had (a mapcoopa lake bed, a sculpted shelf)
  *      otherwise alone.
- *   2. Only with `grade.depth > 0`: an additional per-corner ceiling that reaches `grade.depth`
+ *   2. Holds every sample whose containing tiles are ALL wet -- the channel's interior, which no
+ *      dry ground depends on -- `clearance` under the lowest level standing over it. Pass 1's
+ *      centre-only guarantee is not enough where the bed is steep: a uniform block drop leaves a
+ *      wet tile's uphill samples above that tile's own level, and the water surface, which sits
+ *      exactly at the level, cuts through them. A sample shared with any dry tile is untouched,
+ *      so the bank and the waterline keep their shape and this stays strictly gentler on them
+ *      than pass 1's whole-block drop.
+ *   3. Only with `grade.depth > 0`: an additional per-corner ceiling that reaches `grade.depth`
  *      deeper by `grade.band` tiles in from the shoreline (chamfer distance over the wet mask),
  *      for authors who want a guaranteed drop-off on an otherwise flat bed. Guarded to a no-op at
  *      the shoreline tile itself, so it only digs further in than pass 1 already did and never

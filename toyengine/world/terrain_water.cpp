@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <deque>
 #include <limits>
 
@@ -340,10 +341,37 @@ void grade_water_shore(std::vector<float>& heights, int nx, int ny, const std::v
     }
     for (std::size_t i = 0; i < heights.size(); ++i) heights[i] -= drop[i];
 
-    // Pass 2: an optional basin ramp, off by default (grade.depth == 0). A per-corner CEILING,
+    // Pass 2: a sample whose every containing tile is wet is interior to the channel -- no dry
+    // ground depends on it -- so hold it `clearance` under the lowest level standing over it.
+    // Pass 1 only guarantees the tile's CENTRE, and a uniform block drop leaves the uphill
+    // samples of a wet tile on a steep bank above that tile's own level; the water quad sits
+    // exactly at the level, so it then cuts through them. A sample shared with any dry tile is
+    // left alone, so the bank and the waterline itself keep whatever shape they had.
+    {
+        std::vector<float> interior(heights.size(), std::numeric_limits<float>::infinity());
+        std::vector<std::uint8_t> touches_dry(heights.size(), 0);
+        for (int ty = 0; ty < water_h; ++ty) {
+            for (int tx = 0; tx < water_w; ++tx) {
+                const WaterCell& c = water[static_cast<std::size_t>(ty) * water_w + tx];
+                for (int dy = 0; dy <= 1; ++dy) {
+                    for (int dx = 0; dx <= 1; ++dx) {
+                        const glm::ivec2 p = corner(tx + dx, ty + dy);
+                        const std::size_t i = static_cast<std::size_t>(p.y) * nx + p.x;
+                        if (c.wet()) interior[i] = std::min(interior[i], c.level - grade.clearance);
+                        else touches_dry[i] = 1;
+                    }
+                }
+            }
+        }
+        for (std::size_t i = 0; i < heights.size(); ++i) {
+            if (!touches_dry[i] && interior[i] < heights[i]) heights[i] = interior[i];
+        }
+    }
+
+    // Pass 3: an optional basin ramp, off by default (grade.depth == 0). A per-corner CEILING,
     // not a mean, and guarded to a no-op at the shoreline tile itself (ramp == 0 there) so it only
     // reaches further in than pass 1 already did -- it digs toward the middle of a flat-bottomed
-    // body, never flattens the beach pass 1 preserved.
+    // body, never flattens the beach passes 1 and 2 preserved.
     if (grade.depth > 0.0f && grade.band > 0.0f) {
         const std::vector<float> dist = dry_distance_(water, water_w, water_h);
         std::vector<float> ceiling(heights.size(), std::numeric_limits<float>::infinity());
@@ -435,6 +463,38 @@ IRect grade_water_shore(TerrainField& field, const IRect& rect, const ShoreGrade
         }
     }
     for (std::size_t i = 0; i < heights.size(); ++i) heights[i] -= drop[i];
+
+    // Pass 2: the channel's interior -- every sample all of whose containing tiles are wet -- is
+    // held `clearance` under the lowest level over it. See the vector overload above for why the
+    // centre-only guarantee of pass 1 is not enough on a steep bank. The tile ring one past the
+    // window is read too: a sample on the window's own edge is shared with the tile outside it,
+    // and that tile being dry is what decides the sample is a bank's and not the channel's.
+    {
+        std::vector<float> interior(heights.size(), std::numeric_limits<float>::infinity());
+        std::vector<std::uint8_t> touches_dry(heights.size(), 0);
+        for (int ty = window.y0 - 1; ty <= window.y1; ++ty) {
+            for (int tx = window.x0 - 1; tx <= window.x1; ++tx) {
+                const glm::ivec2 t(tx, ty);
+                if (!field.contains(t)) continue;
+                const WaterCell c = field.water_at(t);
+                const float ceil_t = c.level - grade.clearance;
+                for (int dy = 0; dy <= sub; ++dy) {
+                    const int ly = ty * sub + dy - hy0;
+                    if (ly < 0 || ly >= hny) continue;
+                    for (int dx = 0; dx <= sub; ++dx) {
+                        const int lx = tx * sub + dx - hx0;
+                        if (lx < 0 || lx >= hnx) continue;
+                        const std::size_t i = static_cast<std::size_t>(ly) * hnx + lx;
+                        if (c.wet()) interior[i] = std::min(interior[i], ceil_t);
+                        else touches_dry[i] = 1;
+                    }
+                }
+            }
+        }
+        for (std::size_t i = 0; i < heights.size(); ++i) {
+            if (!touches_dry[i] && interior[i] < heights[i]) heights[i] = interior[i];
+        }
+    }
 
     if (grade.depth > 0.0f && grade.band > 0.0f) {
         const std::vector<float> dist = dry_distance_(water, ww, wh);

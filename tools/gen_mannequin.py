@@ -734,11 +734,7 @@ def idle():
         tracks.append(rot_track(f"foot_{side}", cycle(length, n, lambda p: (2, 0, 0))))
         tracks.append(rot_track(f"upper_arm_{side}", cycle(length, n, lambda p, g=sgn: (2 * breathe(p), g * (7 + 1.5 * breathe(p)), 0)), "ease_in_out"))
         tracks.append(rot_track(f"lower_arm_{side}", cycle(length, n, lambda p: (12 + 2 * breathe(p), 0, 0)), "ease_in_out"))
-    # The skeletal clip omits upper_arm_r/lower_arm_r (unlike every other clip here, which is
-    # fully symmetric) -- a quirk of the shipped asset this generator reproduces rather than
-    # "fixes"; bake_ik_clip() still needs the full symmetric data above for the mannequin_ik's
-    # hand_target_r to swing with the breathing motion, so only the YAML OUTPUT skips them.
-    write_clip("idle", length, tracks, skip_bones={"upper_arm_r", "lower_arm_r"})
+    write_clip("idle", length, tracks)
 
 
 def jump():

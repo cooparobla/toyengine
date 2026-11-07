@@ -1275,11 +1275,14 @@ struct ToyRenderConfig {
      * "taa" jitters the camera projection every frame, which is in inherent tension with
      * camera_pixel_snap's whole-texel snapping above -- not a bug to fix. The TAA resolve
      * reprojects its accumulation history through the camera's frame-to-frame motion (from
-     * the depth buffer and the previous unjittered view-projection; camera-only, there are
-     * no per-object motion vectors) and variance-clips it in YCoCg against the current 3x3
-     * neighbourhood, so dynamic objects shed ghosts through the clip rather than through
-     * true velocities. Accumulation is age-weighted: a still camera converges as a true
-     * running average of the jitter cycle rather than orbiting an exponential blend.
+     * the depth buffer and the previous unjittered view-projection), overridden per pixel by
+     * the G-buffer's velocity attachment (G4) where a surface wrote one -- a rigid mesh always
+     * does, and a vertex-animated one (wind-swayed foliage, hair) does when its shader opts
+     * into re-evaluating its displacement at last frame's time (see
+     * gfx/surface/gbuffer_vs.glsl's GFX_SURFACE_PREV_POSE). A surface with neither is still
+     * variance-clipped in YCoCg against the current 3x3 neighbourhood as a backstop.
+     * Accumulation is age-weighted: a still camera converges as a true running average of the
+     * jitter cycle rather than orbiting an exponential blend.
      */
     std::string aa_mode = "off"; /**< "off" | "fxaa" | "smaa" | "taa". */
     float fxaa_subpixel           = 0.75f;   /**< Blend weight of FXAA's subpixel-aliasing term. */

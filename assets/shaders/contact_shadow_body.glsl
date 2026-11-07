@@ -102,6 +102,30 @@ float toy_contact_shadow(vec3 P, vec3 N, vec3 Ng, vec3 L, vec3 dpdx, vec3 dpdy) 
         proj_march[2][1] = 0.0;
     }
 
+    // Clip the march segment to the frustum ONCE, instead of letting the per-step break below
+    // truncate it: the segment origin+L*(bias+t), t in [0, ray_len], is affine in t, so each of
+    // the five frustum planes (w > 0, and NDC x/y in [-1, 1]) crosses it at most once. t_visible
+    // is the longest prefix that stays on screen. A pixel near the border then spends every
+    // sample on the part of the ray that is actually testable, rather than losing samples to a
+    // mid-march break -- that sample starvation, not a fade, is what should fall off toward the
+    // edge, and only on the side the ray marches toward.
+    vec3  p_near  = origin + L * bias;
+    vec3  p_far   = origin + L * (bias + ray_len);
+    vec4  c_near  = proj_march * vec4(p_near, 1.0);
+    vec4  c_far   = proj_march * vec4(p_far, 1.0);
+    float a_near[5] = float[5](c_near.w - 1e-4, c_near.w - c_near.x, c_near.w + c_near.x,
+                                c_near.w - c_near.y, c_near.w + c_near.y);
+    float a_far[5]  = float[5](c_far.w - 1e-4, c_far.w - c_far.x, c_far.w + c_far.x,
+                                c_far.w - c_far.y, c_far.w + c_far.y);
+    float u_hi = 1.0;
+    for (int i = 0; i < 5; ++i) {
+        // origin is this pixel's own on-screen surface, so a_near[i] is >= 0 in every ordinary
+        // case; the < 0 branch only guards a razor-thin near-plane crossing from `bias`.
+        if (a_near[i] < 0.0) { u_hi = 0.0; break; }
+        if (a_far[i] < 0.0) u_hi = min(u_hi, a_near[i] / (a_near[i] - a_far[i]));
+    }
+    float t_visible = ray_len * u_hi;
+
     // Per-pixel step phase: interleaved gradient noise, rotated by the golden ratio each frame
     // (contact_soft_params.y) so the temporal resolve integrates the comb into a smooth result.
     // The CPU holds that rotation at 0 when the resolve is off: with nothing to average it, a
@@ -122,10 +146,14 @@ float toy_contact_shadow(vec3 P, vec3 N, vec3 Ng, vec3 L, vec3 dpdx, vec3 dpdy) 
     for (int s = 0; s < steps; ++s) {
         // Quadratic spacing concentrates samples near the contact point, where this effect
         // lives, and spends least on the far end, where screen-space data is least reliable.
+        // Spaced over t_visible (the on-screen prefix), not the full ray_len, so a clipped ray
+        // still places every sample where the depth buffer can actually answer it.
         float f = (float(s) + phase) / float(steps);
-        float t = ray_len * f * f;
+        float t = t_visible * f * f;
         vec3  p_view = origin + L * (t + bias);
 
+        // Safety net only: the frustum clip above already bounds t to t_visible, so this should
+        // not trigger outside float-precision edge cases.
         vec4 clip = proj_march * vec4(p_view, 1.0);
         if (clip.w <= 0.0) break;
         vec2 uv = ssr_ndc_to_uv(clip.xy / clip.w);
@@ -146,10 +174,12 @@ float toy_contact_shadow(vec3 P, vec3 N, vec3 Ng, vec3 L, vec3 dpdx, vec3 dpdy) 
         // a window of [eps, thickness] would then accept nothing at all.
         float tol   = depth_eps + max(thickness, 2.0 * dz);
         if (delta > depth_eps && delta < tol) {
-            // Fade with distance along the ray and toward the screen edge (where the depth the
-            // sample read may belong to a surface that only partly reaches into frame).
-            vec2  e   = smoothstep(vec2(0.0), vec2(0.08), uv) * smoothstep(vec2(1.0), vec2(0.92), uv);
-            float hit = (1.0 - smoothstep(0.6, 1.0, f)) * e.x * e.y * (1.0 - soft * f);
+            // Fade with distance along the FULL ray (not just its on-screen prefix, so a
+            // clipped ray doesn't fade its blockers at a shorter world distance than an
+            // unclipped one would). A blocker found far along the ray covers less of the sun's
+            // disk than one touching the receiver (the PCSS relation, in one ray).
+            float f_phys = t / max(ray_len, 1e-6);
+            float hit = (1.0 - smoothstep(0.6, 1.0, f_phys)) * (1.0 - soft * f_phys);
             occ = max(occ, hit);
         }
     }

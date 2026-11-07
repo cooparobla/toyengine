@@ -3,32 +3,10 @@ clip:
   name: walk
   wrap: loop
   length: 0.9
-  root_motion: {object: pelvis, translation: xy, rotation: none}
   events:
     - {time: 0.2333, name: footstep, string: left}
     - {time: 0.6667, name: footstep, string: right}
   tracks:
-    - object: pelvis
-      property: position.z
-      keys:
-        - {time: 0, value: 0.92}
-        - {time: 0.0667, value: 0.93}
-        - {time: 0.1333, value: 0.95}
-        - {time: 0.2333, value: 0.96}
-        - {time: 0.3, value: 0.95}
-        - {time: 0.3667, value: 0.93}
-        - {time: 0.4667, value: 0.92}
-        - {time: 0.5333, value: 0.93}
-        - {time: 0.6, value: 0.95}
-        - {time: 0.6667, value: 0.96}
-        - {time: 0.7333, value: 0.95}
-        - {time: 0.8333, value: 0.93}
-        - {time: 0.9, value: 0.92}
-    - object: pelvis
-      property: position.y
-      keys:
-        - {time: 0, value: 0}
-        - {time: 0.9, value: 1.45}
     - object: foot_target_l
       property: position
       keys:

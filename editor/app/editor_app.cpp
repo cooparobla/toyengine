@@ -33,9 +33,8 @@
 #include "editor/app/ui/curve_pen.h"
 #include "editor/app/editor_context.h"
 
-#include <toyengine/world/heightmap_store.h>
+#include <toyengine/world/terra_store.h>
 #include <toyengine/instance/instance_set.h>
-#include <toyengine/world/tile_map_data.h>
 #include <toyengine/render/toy_render_pipeline.h>
 #include <toyengine/scene/skinned_mesh_renderer.h>
 #include <toyengine/scene/runtime_object.h>
@@ -283,7 +282,7 @@ void EditorApp::edit_instance_component(const std::string& label, const std::fun
 std::size_t EditorApp::instance_selection_size() const { return instance_paint_panel_->selection_.size(); }
 void EditorApp::turn_instance_selection(float radians) { instance_paint_panel_->turn_selection_(radians); }
 void EditorApp::delete_instance_selection() { instance_paint_panel_->delete_selection_(); }
-void EditorApp::tile_edit_selection(const std::string& label, const std::function<void(toy::world::TileRecord&)>& edit) { tile_mode_panel_->tile_edit_selection(label, edit); }
+void EditorApp::tile_edit_selection(const std::string& label, const std::function<void(toy::world::TileCell&)>& edit) { tile_mode_panel_->tile_edit_selection(label, edit); }
 TileSelection& EditorApp::tile_selection() { return tile_mode_panel_->tile_selection(); }
 const std::vector<std::string>& EditorApp::tile_set_assets() { return tile_terrain_panel_->tile_set_assets(); }
 
@@ -451,12 +450,11 @@ bool EditorApp::open_scene(const fs::path& path) {
     // previous visit), and their history goes with them.
     terrain_panel_->exit_terrain_mode_();
     terrain_panel_->terrain_undo_.clear();
-    toy::world::HeightmapStore::instance().clear();
     tile_mode_panel_->exit_tile_mode_();
     tile_mode_panel_->tile_undo_.clear();
     instance_paint_panel_->instance_undo_.clear();
     tile_mode_panel_->tile_regen_data_.reset();
-    toy::world::TileMapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
     // Painted instances are shared through their own store, keyed by file, for the same reason
     // the two above are: the editor re-parses components constantly and must not lose records.
     toy::instance::InstanceSetStore::instance().clear();
@@ -554,6 +552,30 @@ ObjectId EditorApp::create_planet() {
     return id;
 }
 
+ObjectId EditorApp::create_armature() {
+    Node obj = doc_.make_object(doc_.unique_name("armature", 0));
+    set_object_position_(obj, spawn_point_());
+    const ObjectId id = doc_.add_object(obj, 0, -1, "Create Armature");
+    after_structure_change_(id);
+    // Open the mode by HAND rather than through enter_rig_edit_mode_: that reloads the document
+    // from the object's Rig component, which does not exist in the LIVE scene until the next
+    // rebuild -- so re-entering here would throw away the bone we are about to seed. Instead the
+    // mode is opened directly on a fresh one-bone model, and rig_edit_save_ writes both the
+    // rigs/<name>.yaml and the Rig component that makes the object editable from then on.
+    exit_mesh_mode_();
+    exit_pose_mode_();
+    exit_rig_edit_mode_();
+    rig_edit_object_ = id;
+    rig_edit_ = RigDocument{};   // rig_edit_save_ names the model after the object itself
+    rig_edit_sel_ = toy::editor::rig_sel::RigSelection{};
+    rig_edit_modal_.cancel();
+    rig_edit_.model.add_bone("bone", -1, glm::vec3(0.0f), glm::vec3(0.0f, 0.0f, 0.3f));
+    rig_edit_.dirty = true;
+    rig_edit_save_();
+    select_rig_bone(0);
+    return id;
+}
+
 std::vector<ObjectId> EditorApp::own_selection_() {
     std::vector<ObjectId> out;
     for (ObjectId id : doc_.selection()) if (!doc_.is_inherited(id)) out.push_back(id);
@@ -577,6 +599,9 @@ void EditorApp::duplicate_selected() {
 }
 
 EditorApp::UndoTarget EditorApp::undo_target_() const {
+    // First: Rig Edit owns the whole viewport while it is open, and without this Ctrl+Z falls
+    // through to the SCENE -- which can delete the very object being edited out from under it.
+    if (rig_edit_mode_() && rig_edit_.open()) return UndoTarget::RigEdit;
     if ((mesh_edit_view_() || paint_panel_->in_brush_mode_()) && mesh_.open()) return UndoTarget::Mesh;
     // The Timeline's clip: while the panel is under the mouse, or while recording keys.
     if (anim_clip_.open() && show_bottom_ && bottom_view_ == 1 && (timeline_hovered_ || anim_record_)) return UndoTarget::Clip;
@@ -601,6 +626,7 @@ void EditorApp::undo() {
         case UndoTarget::Clip:
             if (const ClipModel* m = anim_clip_.undo.undo()) { anim_clip_.model = *m; timeline_panel_->anim_save_clip_(); anim_sel_keys_.clear(); anim_sel_event_ = -1; }
             break;
+        case UndoTarget::RigEdit: rig_edit_.do_undo(); rig_edit_validate_selection_(); break;
     }
 }
 
@@ -615,6 +641,7 @@ void EditorApp::redo() {
         case UndoTarget::Clip:
             if (const ClipModel* m = anim_clip_.undo.redo()) { anim_clip_.model = *m; timeline_panel_->anim_save_clip_(); anim_sel_keys_.clear(); anim_sel_event_ = -1; }
             break;
+        case UndoTarget::RigEdit: rig_edit_.do_redo(); rig_edit_validate_selection_(); break;
     }
 }
 
@@ -1169,10 +1196,10 @@ std::vector<ObjectId> EditorApp::pick_candidates_(glm::vec2 px) {
                 }
             }
             if (nearest < 1e29f) hits.push_back({id, nearest, false});
-        } else if (const auto* ht = live->get_component<toy::world::HeightmapTerrain>(); ht && ht->data) {
+        } else if (const auto* ht = live->get_component<toy::world::HeightmapTerrain>(); ht && ht->field.data()) {
             // A heightmap terrain has no edit mesh: ray-march its grid.
             float ht_t = 0.0f;
-            if (ht->data->raycast(o - ht->origin(), d, 1e5f, ht_t)) hits.push_back({id, ht_t, false});
+            if (ht->field.data()->raycast_surface(o - ht->origin(), d, 1e5f, ht_t)) hits.push_back({id, ht_t, false});
         } else {
             // No mesh: pick by the glyph it draws -- the whole bone or axis line, not just a
             // dot on its origin.
@@ -1181,9 +1208,9 @@ std::vector<ObjectId> EditorApp::pick_candidates_(glm::vec2 px) {
         }
     }
     // Geometry a ProceduralGraph baked is NOT in the document -- it is a runtime subtree under
-    // the owner -- so the loop above skips it and clicking a baked post used to hit nothing.
-    // Raycast those subtrees here and report the OWNER, which is what the user means by
-    // "select the railing": the object carrying the component, the only thing they can edit.
+    // the owner -- so the loop above skips it. Raycast those subtrees here and report the
+    // OWNER, which is what the user means by "select the railing": the object carrying the
+    // component, the only thing they can edit.
     for (const auto& [id, live] : sync_.live_objects()) {
         if (!doc_.find(id) || !live) continue;
         if (live->get_component<toy::procgraph::ProceduralGraph>() == nullptr) continue;
@@ -1940,19 +1967,19 @@ bool EditorApp::object_bounds_(ObjectId id, glm::vec3& lo, glm::vec3& hi, bool m
         return true;
     }
     // A heightmap terrain: its grid's box (it has no edit mesh).
-    if (const auto* ht = live->get_component<toy::world::HeightmapTerrain>(); ht && ht->data) {
+    if (const auto* ht = live->get_component<toy::world::HeightmapTerrain>(); ht && ht->field.data()) {
         const glm::vec3 o = ht->origin();
-        const glm::vec2 range = ht->data->height_range();
+        const glm::vec2 range = ht->field.data()->height_range();
         lo = glm::min(lo, o + glm::vec3(0.0f, 0.0f, range.x));
-        hi = glm::max(hi, o + glm::vec3(ht->data->geometry().size, range.y));
+        hi = glm::max(hi, o + glm::vec3(ht->field.geometry().size(), range.y));
         return true;
     }
     // A tile terrain: its tile grid's box, up to its tallest column.
-    if (const auto* tt = live->get_component<toy::world::TerrainComponent>(); tt && tt->tiles && !tt->tiles->empty()) {
+    if (const auto* tt = live->get_component<toy::world::TerrainComponent>(); tt && !tt->field.empty()) {
         int top = 1;
-        for (const auto& r : tt->tiles->records()) top = std::max<int>(top, r.steps);
-        const glm::vec3 extent(static_cast<float>(tt->tiles->width()) * tt->params.tile_size,
-                               static_cast<float>(tt->tiles->height()) * tt->params.tile_size,
+        for (const auto& r : tt->field.data()->tiles()) top = std::max<int>(top, r.steps);
+        const glm::vec3 extent(static_cast<float>(tt->field.geometry().tiles_x) * tt->params.tile_size,
+                               static_cast<float>(tt->field.geometry().tiles_y) * tt->params.tile_size,
                                static_cast<float>(top) * tt->params.height_step);
         for (int i = 0; i < 8; ++i) {
             const glm::vec3 c((i & 1) ? extent.x : 0.0f, (i & 2) ? extent.y : 0.0f, (i & 4) ? extent.z : 0.0f);
@@ -2485,6 +2512,10 @@ void EditorApp::handle_viewport_input_(imm::Context& ctx, bool mesh_edit) {
         run_bone_modal_(ctx, *vp, ctrl, shift);
         return;
     }
+    if (rig_edit_modal_.active()) {
+        run_rig_edit_modal_(ctx, *vp, ctrl, shift);
+        return;
+    }
     if (pending_extrude_ && mesh_edit) {
         pending_extrude_ = false;
         extrude_interactive_(*vp, ctx.is_hovered(viewport_box_) ? m : viewport_box_.center());
@@ -2590,7 +2621,7 @@ void EditorApp::handle_viewport_input_(imm::Context& ctx, bool mesh_edit) {
     // --- 3D cursor (Shift+RMB) and context menu (RMB) ---
     if (hovered && in.pressed[1]) {
         if (shift) cursor3d_ = surface_point_(m);
-        else ctx.open_popup(mesh_edit ? "vp_mesh_ctx" : "vp_obj_ctx", m);
+        else ctx.open_popup(mesh_edit ? "vp_mesh_ctx" : rig_edit_mode_() ? "vp_rig_ctx" : "vp_obj_ctx", m);
     }
 
     // --- click / box select ---
@@ -2609,7 +2640,8 @@ void EditorApp::handle_viewport_input_(imm::Context& ctx, bool mesh_edit) {
             else rig_pose_click_select_(m, shift);
         }
         else if (!mesh_edit && rig_edit_mode_()) {
-            rig_edit_click_select_(*vp, m);   // single-select only -- see rig_edit_pick_'s doc
+            if (box_selecting_) rig_edit_box_select_(*vp, select_press_, m, shift, ctrl);
+            else rig_edit_click_select_(*vp, m, shift);
         }
         else if (box_selecting_) box_select_(mesh_edit, select_press_, m, shift, ctrl);
         else if (mesh_edit) mesh_tools_panel_->pick_mesh_element_(m, shift);
@@ -2664,12 +2696,7 @@ void EditorApp::viewport_keymap_(imm::Context& ctx, const ViewProj& vp, bool mes
     if (!mesh_edit && !paint_panel_->in_brush_mode_() && ctx.shortcut(Key::F)) frame_selected();
     if (ctx.shortcut(Key::Home)) frame_all();
     if (ctx.shortcut(Key::GraveAccent)) ctx.open_popup("vp_view_menu", m);
-    // Not while RigEdit's modal is running: Z also constrains its Grab/Rotate to the world Z
-    // axis, and this binding (unlike the mode-specific ones below) is unconditional -- opening
-    // the shading popup here steals every later frame's viewport_keymap_ call (a popup makes the
-    // viewport read as un-hovered), silently stranding the modal with whatever delta it had the
-    // instant Z was pressed, with no error and no further key (typed digits, Enter) ever reaching it.
-    if (!rig_edit_modal_.active() && ctx.shortcut(Key::Z)) ctx.open_popup("vp_shading_menu", m);
+    if (ctx.shortcut(Key::Z)) ctx.open_popup("vp_shading_menu", m);
     if (ctx.shortcut(Key::Z, Mods::Alt)) {
         xray_ = !xray_;
         log_info(xray_ ? "X-Ray on (Alt Z toggles)" : "X-Ray off");
@@ -2685,6 +2712,11 @@ void EditorApp::viewport_keymap_(imm::Context& ctx, const ViewProj& vp, bool mes
     if (ctx.shortcut(Key::Space, Mods::Shift)) ctx.open_popup("vp_tool_menu", m);
     if (ctx.shortcut(Key::Tab, Mods::Control)) ctx.open_popup("mode_menu_vp", m);   // Blender's mode pie
     if (!can_edit) return;
+
+    // Tab belongs ABOVE the per-mode dispatch below: Pose and Rig Edit each `return` out of it,
+    // so a binding placed after them is unreachable from those modes and Tab becomes a one-way
+    // trip into them. It is the mode key in every mode, so it is bound once, here.
+    if (ctx.shortcut(Key::Tab)) { toggle_edit_mode_(); return; }
 
     if (!mesh_edit && rig_pose_mode_()) {
         rig_pose_keymap_(ctx, vp, m);
@@ -2731,10 +2763,8 @@ void EditorApp::viewport_keymap_(imm::Context& ctx, const ViewProj& vp, bool mes
         if (ctx.shortcut(Key::M, Mods::Control)) ctx.open_popup("vp_mesh_mirror", m);
         if (ctx.shortcut(Key::U)) ctx.open_popup("vp_mesh_uv", m);
         if (ctx.shortcut(Key::N, Mods::Alt)) ctx.open_popup("vp_mesh_normals", m);
-        if (ctx.shortcut(Key::Tab)) toggle_edit_mode_();
         return;
     }
-    if (active_type_ == AssetType::Mesh && ctx.shortcut(Key::Tab)) toggle_edit_mode_();
     if (asset_view_()) return;
     if (ctx.shortcut(Key::A)) { doc_.clear_selection(); for (ObjectId id : visible_ids_()) doc_.select(id, true); }
     if (ctx.shortcut(Key::A, Mods::Alt)) doc_.clear_selection();
@@ -2766,7 +2796,6 @@ void EditorApp::viewport_keymap_(imm::Context& ctx, const ViewProj& vp, bool mes
     if (ctx.shortcut(Key::H, Mods::Alt)) unhide_all_();
     if (ctx.shortcut(Key::P, Mods::Control)) parent_selection_to_active_();
     if (ctx.shortcut(Key::P, Mods::Alt)) ctx.open_popup("vp_clear_parent", m);
-    if (ctx.shortcut(Key::Tab)) toggle_edit_mode_();
 }
 
 void EditorApp::draw_viewport_popups_(imm::Context& ctx, bool mesh_edit) {
@@ -2865,6 +2894,47 @@ void EditorApp::draw_viewport_popups_(imm::Context& ctx, bool mesh_edit) {
         if (ctx.menu_item("Unhide All", "Alt H")) unhide_all_();
         if (ctx.menu_item("Frame Selected", "F / .", nullptr, any)) frame_selected();
         if (ctx.menu_item("Set 3D Cursor Here", "Shift RMB")) cursor3d_ = surface_point_(ctx_popup_origin_(m));
+        ctx.end_popup();
+    }
+    // Rig Edit's armature menu (W, or RMB) -- Blender's Armature menu, minus what is already a key.
+    if (ctx.begin_popup("vp_rig_ctx", 240)) {
+        if (ctx.menu_item("Extrude", "E")) rig_edit_add_or_extrude_(true);
+        if (ctx.menu_item("Duplicate", "Shift D")) rig_edit_duplicate_selected_();
+        if (ctx.menu_item("Subdivide")) rig_edit_subdivide_(1);
+        if (ctx.menu_item("Subdivide x3")) rig_edit_subdivide_(3);
+        if (ctx.menu_item("Fill Between Joints", "F")) rig_edit_fill_();
+        if (ctx.menu_item("Merge Within Chain", "Alt M")) rig_edit_merge_();
+        ctx.menu_separator();
+        if (ctx.menu_item("Symmetrize")) rig_edit_symmetrize_();
+        ctx.tooltip("Symmetrize\nCopies every fully-selected _l / _r bone onto its opposite-side partner, "
+                    "mirrored across the rig's X axis -- creating the partner if it does not exist yet.");
+        bool xm = rig_edit_x_mirror_;
+        if (ctx.menu_item("X-Axis Mirror", "", &xm)) rig_edit_x_mirror_ = !rig_edit_x_mirror_;
+        ctx.tooltip("X-Axis Mirror\nWhile on, moving a bone moves its _l / _r partner the mirrored way at the "
+                    "same time, as one undoable step.");
+        ctx.menu_separator();
+        if (ctx.begin_menu("Recalculate Roll")) {
+            if (ctx.menu_item("Global +Z Up", "Ctrl N")) rig_edit_recalc_roll_(0);
+            if (ctx.menu_item("Global -Z Up")) rig_edit_recalc_roll_(1);
+            if (ctx.menu_item("Global +X Up")) rig_edit_recalc_roll_(2);
+            if (ctx.menu_item("To 3D Cursor")) rig_edit_recalc_roll_(3);
+            if (ctx.menu_item("To Active Bone")) rig_edit_recalc_roll_(4);
+            ctx.end_menu();
+        }
+        if (ctx.menu_item("Align to Active", "Ctrl Alt A")) rig_edit_align_to_active_();
+        ctx.menu_separator();
+        if (ctx.menu_item("Parent to Active", "Ctrl P")) rig_edit_parent_to_active_();
+        if (ctx.menu_item("Clear Parent", "Alt P")) rig_edit_clear_parent_();
+        ctx.menu_separator();
+        if (ctx.menu_item("Delete Bones", "X", nullptr, true, imm::Icon::Trash)) rig_edit_delete_selected_();
+        ctx.end_popup();
+    }
+    if (ctx.begin_popup("vp_rig_roll_menu", 200)) {
+        if (ctx.menu_item("Global +Z Up")) rig_edit_recalc_roll_(0);
+        if (ctx.menu_item("Global -Z Up")) rig_edit_recalc_roll_(1);
+        if (ctx.menu_item("Global +X Up")) rig_edit_recalc_roll_(2);
+        if (ctx.menu_item("To 3D Cursor")) rig_edit_recalc_roll_(3);
+        if (ctx.menu_item("To Active Bone")) rig_edit_recalc_roll_(4);
         ctx.end_popup();
     }
     auto mesh_op = [&](const char* label, auto&& fn) { mesh_.edit(label, fn); };
@@ -3183,11 +3253,9 @@ void EditorApp::mirror_selected_bones_pose_() {
     for (int i : pose_bones_selected_) {
         if (i < 0 || static_cast<std::size_t>(i) >= rig->bone_count()) continue;
         const std::string& name = rig->bone_name(static_cast<std::size_t>(i));
-        std::string mirrored;
-        if (name.size() > 2 && name.substr(name.size() - 2) == "_l") mirrored = name.substr(0, name.size() - 2) + "_r";
-        else if (name.size() > 2 && name.substr(name.size() - 2) == "_r") mirrored = name.substr(0, name.size() - 2) + "_l";
-        else continue;
-        const int j = rig->find_bone(mirrored);
+        const auto mirrored = mirrored_bone_name(name);   // the shared side-flip (bone_names.h)
+        if (!mirrored) continue;
+        const int j = rig->find_bone(*mirrored);
         if (j >= 0) toy::editor::rig_pose_edit::mirror_pose(*rig, static_cast<std::size_t>(i), static_cast<std::size_t>(j));
     }
 }
@@ -3286,14 +3354,18 @@ void EditorApp::rig_pose_insert_keys_() {
 // --- rig edit mode (authoring a RigModel's rest skeleton) ---
 
 bool EditorApp::enter_rig_edit_mode_(ObjectId id) {
-    if (!id || playing()) return false;
+    if (playing()) return false;
+    // The object must carry the Rig itself -- a mesh part parented under a character edits its
+    // own mesh, not the skeleton. No Rig means there is nothing to edit here, and Add > Armature
+    // is how a rig comes into being.
+    id = rig_edit_target_of_(id);
+    if (!id) return false;
     if (rig_edit_object_ == id) return true;
     exit_mesh_mode_();
     exit_pose_mode_();
     rig_edit_object_ = id;
     rig_edit_ = RigDocument{};
-    rig_edit_selected_bone_ = -1;
-    rig_edit_endpoint_selected_ = false;
+    rig_edit_sel_ = toy::editor::rig_sel::RigSelection{};
     rig_edit_modal_.cancel();
     rig_edit_rename_buf_.clear();
     auto* live = sync_.live(id);
@@ -3301,13 +3373,20 @@ bool EditorApp::enter_rig_edit_mode_(ObjectId id) {
     if (rig && !rig->rig_path.empty()) {
         const fs::path dir = (doc_.path().empty() ? sync_.fallback_path : doc_.path()).parent_path();
         const fs::path p = coopa::yaml::resolve_variant(engine_.assets().source().resolve(rig->rig_path, dir.string()));
-        try {
-            if (coopa::yaml::document_exists(p)) {
-                rig_edit_.model = RigModel::from_node(coopa::yaml::load_document(p));
-                rig_edit_.path = p;
+        // Re-entering the rig we were last editing picks its UNDO HISTORY back up: Tab out and
+        // straight back in is a navigation step, not a reason to lose every step before it.
+        if (parked_rig_.path == p && !parked_rig_.path.empty()) {
+            rig_edit_ = std::move(parked_rig_);
+            parked_rig_ = RigDocument{};
+        } else {
+            try {
+                if (coopa::yaml::document_exists(p)) {
+                    rig_edit_.model = RigModel::from_node(coopa::yaml::load_document(p));
+                    rig_edit_.path = p;
+                }
+            } catch (const std::exception& e) {
+                log_error("Rig Edit: " + std::string(e.what()));
             }
-        } catch (const std::exception& e) {
-            log_error("Rig Edit: " + std::string(e.what()));
         }
     }
     log_info("Rig Edit: " + timeline_panel_->anim_name_of_(id, "object") +
@@ -3319,10 +3398,15 @@ void EditorApp::exit_rig_edit_mode_() {
     if (!rig_edit_object_) return;
     if (rig_edit_.dirty) rig_edit_save_();
     rig_edit_object_ = 0;
-    rig_edit_selected_bone_ = -1;
-    rig_edit_endpoint_selected_ = false;
+    rig_edit_sel_ = toy::editor::rig_sel::RigSelection{};
     rig_edit_modal_.cancel();
+    rig_edit_.undo.end_merge();
+    parked_rig_ = std::move(rig_edit_);   // keeps the undo history for a re-entry (see enter_)
     rig_edit_ = RigDocument{};
+}
+
+void EditorApp::rig_edit_validate_selection_() {
+    toy::editor::rig_sel::validate(rig_edit_sel_, rig_edit_.model);
 }
 
 glm::mat4 EditorApp::rig_edit_owner_world_() const {
@@ -3331,67 +3415,72 @@ glm::mat4 EditorApp::rig_edit_owner_world_() const {
     return tc ? tc->get_world_matrix() : glm::mat4(1.0f);
 }
 
-int EditorApp::rig_edit_pick_(const ViewProj& vp, glm::vec2 px, bool* endpoint_out, toy::editor::rig_pick::BoneEndpoint* which_out) {
-    *endpoint_out = false;
-    const glm::mat4 world = rig_edit_owner_world_();
-    std::vector<toy::editor::rig_pick::BoneSegment> segs;
-    segs.reserve(rig_edit_.model.bones.size());
-    for (size_t i = 0; i < rig_edit_.model.bones.size(); ++i) {
-        const RigModelBone& b = rig_edit_.model.bones[i];
-        toy::editor::rig_pick::BoneSegment seg;
-        seg.head = glm::vec3(world * glm::vec4(b.head, 1.0f));
-        seg.tail = glm::vec3(world * glm::vec4(b.tail, 1.0f));
-        const glm::mat4 rest = world * rig_edit_.model.world_rest_matrix(static_cast<int>(i));
-        seg.x_hint = glm::normalize(glm::vec3(rest[0]));
-        seg.z_hint = glm::normalize(glm::vec3(rest[2]));
-        segs.push_back(seg);
-    }
-    // Endpoints pick first, at a tighter radius: a click meant for dragging a joint must not
-    // fall through to "select the whole bone" just because it also lands inside the wider body.
-    if (auto ep = toy::editor::rig_pick::pick_closest_endpoint(vp, segs, px, 8.0f)) {
-        *endpoint_out = true;
-        *which_out = ep->second;
-        return ep->first;
-    }
-    return toy::editor::rig_pick::pick_closest_bone(vp, segs, px);
+std::vector<toy::editor::rig_pick::BoneSegment> EditorApp::rig_edit_segments_() const {
+    return toy::editor::rig_sel::bone_segments(rig_edit_.model, rig_edit_owner_world_());
 }
 
-void EditorApp::rig_edit_click_select_(const ViewProj& vp, glm::vec2 px) {
-    bool is_ep = false;
-    toy::editor::rig_pick::BoneEndpoint which = toy::editor::rig_pick::BoneEndpoint::Head;
-    const int bone = rig_edit_pick_(vp, px, &is_ep, &which);
-    rig_edit_selected_bone_ = bone;
-    rig_edit_endpoint_selected_ = bone >= 0 && is_ep;
-    rig_edit_selected_end_ = which;
+toy::editor::rig_pick::BonePickResult EditorApp::rig_edit_pick_(const ViewProj& vp, glm::vec2 px) const {
+    return toy::editor::rig_pick::pick_bone_or_endpoint(vp, rig_edit_segments_(), px);
 }
 
-void EditorApp::rig_edit_model_edit_(const std::string& label, const std::function<void(RigModel&)>& fn) {
+void EditorApp::rig_edit_click_select_(const ViewProj& vp, glm::vec2 px, bool shift) {
+    toy::editor::rig_sel::validate(rig_edit_sel_, rig_edit_.model);
+    toy::editor::rig_sel::click_select(rig_edit_sel_, rig_edit_pick_(vp, px), shift);
+}
+
+void EditorApp::rig_edit_box_select_(const ViewProj& vp, glm::vec2 a, glm::vec2 b, bool additive, bool subtract) {
+    toy::editor::rig_sel::validate(rig_edit_sel_, rig_edit_.model);
+    const auto pts = toy::editor::rig_sel::project_endpoints(vp, rig_edit_segments_());
+    toy::editor::rig_sel::box_select(rig_edit_sel_, pts, a, b, additive, subtract);
+}
+
+void EditorApp::rig_edit_model_edit_(const std::string& label, const std::function<void(RigModel&)>& fn,
+                                     const std::string& merge_key) {
     RigModel before = rig_edit_.model;
     fn(rig_edit_.model);
     if (rig_edit_.model == before) return;
-    rig_edit_.undo.push(label, std::move(before), rig_edit_.model);
+    rig_edit_.undo.push(label, std::move(before), rig_edit_.model, merge_key);
     ++rig_edit_.revision;
     rig_edit_.dirty = true;
+    // The one choke point every model change flows through, so clamping here is what keeps the
+    // selection in range across add / extrude / delete / subdivide without each op remembering.
+    rig_edit_validate_selection_();
 }
 
 void EditorApp::start_rig_edit_modal_(ModalKind kind, const ViewProj& vp, glm::vec2 mouse) {
-    if (playing() || rig_edit_selected_bone_ < 0 || static_cast<size_t>(rig_edit_selected_bone_) >= rig_edit_.model.bones.size()) return;
-    if (kind == ModalKind::Grab && !rig_edit_endpoint_selected_) return;   // see rig_edit_keymap_'s doc: G needs a specific endpoint
-    const RigModelBone& b = rig_edit_.model.bones[static_cast<size_t>(rig_edit_selected_bone_)];
-    rig_edit_drag_start_ = {b.head, b.tail, b.roll};
+    namespace rs = toy::editor::rig_sel;
+    if (playing()) return;
+    rig_edit_validate_selection_();
+    const bool roll = kind == ModalKind::Rotate && rig_edit_roll_modal_;
+    if (roll ? rig_edit_active_bone_() < 0 : rs::empty(rig_edit_sel_)) return;
+    rig_edit_drag_base_ = rig_edit_.model;
+    rig_edit_mirror_map_ = rig_edit_x_mirror_ ? toy::editor::rig_ops::build_rig_mirror_map(rig_edit_.model, rig_edit_sel_, 0)
+                                              : toy::editor::rig_ops::RigMirrorMap{};
     const glm::mat4 world = rig_edit_owner_world_();
-    const glm::vec3 pivot_rig = rig_edit_endpoint_selected_
-                                     ? (rig_edit_selected_end_ == toy::editor::rig_pick::BoneEndpoint::Head ? b.head : b.tail)
-                                     : b.head;
-    const glm::vec3 pivot_world = glm::vec3(world * glm::vec4(pivot_rig, 1.0f));
-    glm::mat3 basis(world);
+    // Blender's Median Point: the mean of the SELECTED ENDPOINTS, not one picked handle -- so
+    // rotating two bones swings them about their shared centre rather than about either one.
+    rig_edit_pivot_world_ = glm::vec3(world * glm::vec4(rs::selection_median(rig_edit_.model, rig_edit_sel_), 1.0f));
+    // The second-axis ("normal") frame is the ACTIVE bone's own rest basis, as in Blender's
+    // edit mode -- pressing X twice then means "along this bone", not "along the rig owner".
+    const int active = rig_edit_active_bone_();
+    const glm::mat4 src = active >= 0 ? world * rig_edit_.model.world_rest_matrix(active) : world;
+    glm::mat3 basis(src);
     for (int c = 0; c < 3; ++c) basis[c] = glm::normalize(basis[c]);
-    rig_edit_modal_.begin(kind, vp, pivot_world, basis, mouse, std::nullopt, "local", false);
+    // Roll constrains to the bone's own axis, which is what turns ModalTransform's angle into a
+    // signed twist -- and brings its numeric entry, 5-degree snap and precision along for free.
+    std::optional<glm::vec3> axis;
+    if (roll && active >= 0) axis = glm::normalize(glm::vec3((world * rig_edit_.model.world_rest_matrix(active))[1]));
+    rig_edit_modal_.begin(kind, vp, rig_edit_pivot_world_, basis, mouse, axis, active >= 0 ? "normal" : "local", false);
 }
 
 void EditorApp::run_rig_edit_modal_(imm::Context& ctx, const ViewProj& vp, bool ctrl, bool shift) {
     const auto& in = ctx.input();
     const ModalKind kind = rig_edit_modal_.kind();
+    // The operator owns the mouse while it runs: a click confirms it rather than starting a
+    // selection, and MMB is its auto-constraint rather than a camera orbit (run_modal_'s own
+    // two lines, for the same reasons).
+    select_pending_ = box_selecting_ = false;
+    nav_active_ = false;
     rig_edit_modal_.snap_step = snap_adaptive_ ? grid_step_() : gizmo_.translate_snap;
     const auto outcome = rig_edit_modal_.update(vp, ctx.mouse(), in.keys, in.pressed[0], in.pressed[1], ctrl != snap_on_, shift, in.down[2],
                                                 in.pressed[2]);
@@ -3404,61 +3493,232 @@ void EditorApp::run_rig_edit_modal_(imm::Context& ctx, const ViewProj& vp, bool 
 }
 
 void EditorApp::apply_rig_edit_modal_(ModalKind kind, const ModalTransform::Result& r) {
-    if (rig_edit_selected_bone_ < 0 || static_cast<size_t>(rig_edit_selected_bone_) >= rig_edit_.model.bones.size()) return;
-    const int i = rig_edit_selected_bone_;
-    const glm::mat3 inv_rot = glm::inverse(glm::mat3(rig_edit_owner_world_()));
-    rig_edit_model_edit_(kind == ModalKind::Grab ? "Move Bone" : "Roll Bone", [&](RigModel& m) {
-        if (kind == ModalKind::Grab) {
-            const glm::vec3 rig_delta = inv_rot * r.translate;
-            if (rig_edit_selected_end_ == toy::editor::rig_pick::BoneEndpoint::Head) m.set_head(i, rig_edit_drag_start_.head + rig_delta);
-            else m.set_tail(i, rig_edit_drag_start_.tail + rig_delta);
-        } else if (kind == ModalKind::Rotate) {
-            m.set_roll(i, rig_edit_drag_start_.roll + r.rotate_deg);
-        }
-    });
+    namespace rs = toy::editor::rig_sel;
+    // Roll is the one operator that edits a bone's twist rather than its points: Blender's
+    // Ctrl+R. Plain R rotates the selected endpoints about the pivot, like any other editor.
+    if (kind == ModalKind::Rotate && rig_edit_roll_modal_) {
+        const int i = rig_edit_active_bone_();
+        if (i < 0 || static_cast<size_t>(i) >= rig_edit_drag_base_.bones.size()) return;
+        const float base_roll = rig_edit_drag_base_.bones[static_cast<size_t>(i)].roll;
+        const auto sel_bones = rs::selected_bones(rig_edit_sel_);
+        rig_edit_model_edit_("Roll Bone", [&](RigModel& m) {
+            for (int b : sel_bones) {
+                if (static_cast<size_t>(b) >= rig_edit_drag_base_.bones.size()) continue;
+                m.set_roll(b, rig_edit_drag_base_.bones[static_cast<size_t>(b)].roll + r.rotate_deg);
+            }
+            if (sel_bones.empty()) m.set_roll(i, base_roll + r.rotate_deg);
+        }, "rig_transform");
+        return;
+    }
+    // One world-space delta, converted into rig space the way the mesh branch does it
+    // (inverse(owner) * delta * owner), so rotation and scale are about the pivot rather than
+    // only translation being expressible.
+    const glm::mat4 w = rig_edit_owner_world_();
+    const glm::mat4 world_delta = delta_matrix(kind == ModalKind::Grab ? r.translate : glm::vec3(0.0f),
+                                               r.rotate_axis,
+                                               kind == ModalKind::Rotate ? r.rotate_deg : 0.0f,
+                                               kind == ModalKind::Scale ? r.scale : glm::vec3(1.0f),
+                                               rig_edit_pivot_world_, r.scale_basis);
+    const glm::mat4 rig_delta = glm::inverse(w) * world_delta * w;
+    const char* label = kind == ModalKind::Grab ? "Move Bones" : kind == ModalKind::Rotate ? "Rotate Bones" : "Scale Bones";
+    rig_edit_model_edit_(label, [&](RigModel& m) {
+        rs::transform_endpoints(m, rig_edit_drag_base_, rig_edit_sel_, rig_delta, glm::mat3(rig_delta));
+        rig_edit_apply_x_mirror_(m);
+    }, "rig_transform");
 }
 
 void EditorApp::rig_edit_add_or_extrude_(bool extrude) {
-    if (extrude && (rig_edit_selected_bone_ < 0 || static_cast<size_t>(rig_edit_selected_bone_) >= rig_edit_.model.bones.size())) {
-        log_info("Rig Edit: select a bone first -- E extrudes a new child FROM it");
+    namespace rs = toy::editor::rig_sel;
+    if (!extrude) {
+        // Add: a free-standing root bone at the 3D cursor, Blender's Shift+A.
+        const glm::vec3 at = rig_edit_cursor_rig_();
+        int new_i = -1;
+        rig_edit_model_edit_("Add Bone", [&](RigModel& m) {
+            new_i = m.add_bone(toy::editor::rig_ops::unique_bone_name(m, "bone"), -1, at, at + glm::vec3(0.0f, 0.0f, 0.2f));
+        });
+        select_rig_bone(new_i);
         return;
     }
-    const int from = rig_edit_selected_bone_;
-    std::string name = "bone";
-    for (int n = 1; rig_edit_.model.find_bone(name) >= 0; ++n) name = "bone_" + std::to_string(n);
-    int new_i = -1;
-    rig_edit_model_edit_(extrude ? "Extrude Bone" : "Add Bone", [&](RigModel& m) {
-        if (extrude) {
+    // Extrude: from EVERY selected tail, as Blender does -- extruding both arms of a selection in
+    // one keystroke is the whole reason to have a multi-selection here.
+    std::vector<int> from_bones;
+    for (int i : rs::selected_bones(rig_edit_sel_)) {
+        if (static_cast<size_t>(i) < rig_edit_sel_.bones.size() && rig_edit_sel_.bones[static_cast<size_t>(i)].tail) from_bones.push_back(i);
+    }
+    if (from_bones.empty()) {
+        const int a = rig_edit_active_bone_();
+        if (a < 0) {
+            log_info("Rig Edit: select a bone (or its tail) first -- E extrudes a new child FROM it");
+            return;
+        }
+        from_bones.push_back(a);
+    }
+    std::vector<std::string> created;
+    rig_edit_model_edit_("Extrude Bones", [&](RigModel& m) {
+        for (int from : from_bones) {
+            if (static_cast<size_t>(from) >= m.bones.size()) continue;
             const RigModelBone& fb = m.bones[static_cast<size_t>(from)];
             const glm::vec3 dir_len = fb.tail - fb.head;
             const glm::vec3 dir = glm::length(dir_len) > 1e-6f ? glm::normalize(dir_len) : glm::vec3(0.0f, 0.0f, 1.0f);
             const float len = std::max(m.bone_length(from), 0.2f);
-            new_i = m.extrude_bone(from, name, fb.tail + dir * len);
-        } else {
-            new_i = m.add_bone(name, -1, glm::vec3(0.0f), glm::vec3(0.0f, 0.0f, 0.2f));
+            const std::string name = toy::editor::rig_ops::unique_bone_name(m, "bone");
+            const int made = m.extrude_bone(from, name, fb.tail + dir * len);
+            if (made >= 0) created.push_back(name);
         }
     });
-    rig_edit_selected_bone_ = new_i;
-    rig_edit_endpoint_selected_ = false;
+    // The new tips end up selected, so the Grab that usually follows an extrude moves them.
+    rs::validate(rig_edit_sel_, rig_edit_.model);
+    rs::select_none(rig_edit_sel_);
+    for (const std::string& n : created) {
+        const int i = rig_edit_.model.find_bone(n);
+        if (i < 0) continue;
+        rig_edit_sel_.bones[static_cast<size_t>(i)].head = true;
+        rig_edit_sel_.bones[static_cast<size_t>(i)].tail = true;
+        rig_edit_sel_.active = i;
+    }
 }
 
 void EditorApp::rig_edit_delete_selected_() {
-    if (rig_edit_selected_bone_ < 0 || static_cast<size_t>(rig_edit_selected_bone_) >= rig_edit_.model.bones.size()) return;
-    const int i = rig_edit_selected_bone_;
-    rig_edit_model_edit_("Delete Bone", [&](RigModel& m) { m.delete_bone(i); });
-    rig_edit_selected_bone_ = -1;
-    rig_edit_endpoint_selected_ = false;
+    namespace rs = toy::editor::rig_sel;
+    auto targets = rs::fully_selected_bones(rig_edit_sel_);
+    if (targets.empty()) {
+        const int a = rig_edit_active_bone_();
+        if (a < 0) return;
+        targets.push_back(a);
+    }
+    rig_edit_model_edit_("Delete Bones", [&](RigModel& m) {
+        // DESCENDING: delete_bone shifts every index above the one it removes, so going up the
+        // list would delete the wrong bones after the first.
+        for (auto it = targets.rbegin(); it != targets.rend(); ++it) m.delete_bone(*it);
+    });
+    rig_edit_sel_ = rs::RigSelection{};
+    rig_edit_validate_selection_();
+}
+
+void EditorApp::rig_edit_duplicate_selected_() {
+    namespace rs = toy::editor::rig_sel;
+    const auto targets = rs::fully_selected_bones(rig_edit_sel_);
+    if (targets.empty()) return;
+    std::vector<std::string> created;
+    rig_edit_model_edit_("Duplicate Bones", [&](RigModel& m) {
+        for (int i : targets) {
+            if (static_cast<size_t>(i) >= m.bones.size()) continue;
+            RigModelBone b = m.bones[static_cast<size_t>(i)];
+            b.name = toy::editor::rig_ops::unique_bone_name(m, b.name);
+            b.connected = false;   // a copy is free-standing until the user parents it
+            m.bones.push_back(b);
+            created.push_back(b.name);
+        }
+        m.sort_parent_first();
+    });
+    rs::validate(rig_edit_sel_, rig_edit_.model);
+    rs::select_none(rig_edit_sel_);
+    for (const std::string& n : created) {
+        const int i = rig_edit_.model.find_bone(n);
+        if (i < 0) continue;
+        rig_edit_sel_.bones[static_cast<size_t>(i)].head = true;
+        rig_edit_sel_.bones[static_cast<size_t>(i)].tail = true;
+        rig_edit_sel_.active = i;
+    }
+}
+
+void EditorApp::rig_edit_parent_to_active_() {
+    namespace rs = toy::editor::rig_sel;
+    const int active = rig_edit_active_bone_();
+    if (active < 0) return;
+    const auto targets = rs::fully_selected_bones(rig_edit_sel_);
+    rig_edit_model_edit_("Parent Bones", [&](RigModel& m) {
+        for (int i : targets) {
+            if (i == active) continue;
+            m.reparent_bone(i, active);
+        }
+        m.sort_parent_first();
+    });
+    rig_edit_validate_selection_();
+}
+
+void EditorApp::rig_edit_clear_parent_() {
+    namespace rs = toy::editor::rig_sel;
+    const auto targets = rs::fully_selected_bones(rig_edit_sel_);
+    if (targets.empty()) return;
+    rig_edit_model_edit_("Clear Parent", [&](RigModel& m) {
+        for (int i : targets) m.reparent_bone(i, -1);
+        m.sort_parent_first();
+    });
+    rig_edit_validate_selection_();
+}
+
+void EditorApp::rig_edit_fill_() {
+    int made = -1;
+    rig_edit_model_edit_("Fill Between Joints", [&](RigModel& m) {
+        made = toy::editor::rig_ops::fill_between_joints(m, rig_edit_sel_, "bone");
+    });
+    if (made < 0) log_info("Rig Edit: F needs exactly TWO selected endpoints to span");
+}
+
+void EditorApp::rig_edit_merge_() {
+    int removed = 0;
+    rig_edit_model_edit_("Merge Bones", [&](RigModel& m) {
+        removed = toy::editor::rig_ops::merge_selected_chains(m, rig_edit_sel_);
+    });
+    if (removed == 0) log_info("Rig Edit: Alt+M merges a CONNECTED parent/child run -- select the whole chain");
+}
+
+void EditorApp::rig_edit_subdivide_(int cuts) {
+    rig_edit_model_edit_("Subdivide Bones", [&](RigModel& m) {
+        toy::editor::rig_ops::subdivide_selected(m, rig_edit_sel_, cuts);
+    });
+}
+
+void EditorApp::rig_edit_recalc_roll_(int mode) {
+    using toy::editor::rig_ops::RollTarget;
+    RollTarget t;
+    switch (mode) {
+        case 1: t.vector = glm::vec3(0, 0, -1); break;
+        case 2: t.vector = glm::vec3(1, 0, 0); break;
+        case 3: t.kind = RollTarget::Kind::Point; t.vector = rig_edit_cursor_rig_(); break;
+        case 4: t.kind = RollTarget::Kind::ActiveBone; break;
+        default: t.vector = glm::vec3(0, 0, 1); break;
+    }
+    rig_edit_model_edit_("Recalculate Roll", [&](RigModel& m) { toy::editor::rig_ops::recalculate_roll(m, rig_edit_sel_, t); });
+}
+
+void EditorApp::rig_edit_align_to_active_() {
+    rig_edit_model_edit_("Align Bones", [&](RigModel& m) { toy::editor::rig_ops::align_to_active(m, rig_edit_sel_); });
+}
+
+void EditorApp::rig_edit_symmetrize_() {
+    std::vector<std::string> skipped;
+    int touched = 0;
+    rig_edit_model_edit_("Symmetrize", [&](RigModel& m) {
+        touched = toy::editor::rig_ops::symmetrize(m, rig_edit_sel_, toy::editor::rig_ops::SymmetrizeDirection::PositiveToNegative,
+                                                   0, &skipped);
+    });
+    if (!skipped.empty()) {
+        log_info("Rig Edit: Symmetrize skipped " + std::to_string(skipped.size()) +
+                 " bone(s) with no _l/_r side in the name (e.g. '" + skipped.front() + "')");
+    }
+    if (touched == 0 && skipped.empty()) log_info("Rig Edit: Symmetrize needs fully-selected _l/_r bones");
+}
+
+glm::vec3 EditorApp::rig_edit_cursor_rig_() const {
+    return glm::vec3(glm::inverse(rig_edit_owner_world_()) * glm::vec4(cursor3d_, 1.0f));
+}
+
+void EditorApp::rig_edit_apply_x_mirror_(RigModel& m) {
+    if (!rig_edit_x_mirror_ || rig_edit_mirror_map_.empty()) return;
+    toy::editor::rig_ops::apply_rig_mirror_map(m, rig_edit_drag_base_, rig_edit_sel_, rig_edit_mirror_map_, 0);
 }
 
 void EditorApp::rig_edit_set_roll_(float degrees) {
-    if (rig_edit_selected_bone_ < 0 || static_cast<size_t>(rig_edit_selected_bone_) >= rig_edit_.model.bones.size()) return;
-    const int i = rig_edit_selected_bone_;
+    const int i = rig_edit_active_bone_();
+    if (i < 0) return;
     rig_edit_model_edit_("Set Roll", [&](RigModel& m) { m.set_roll(i, degrees); });
 }
 
 void EditorApp::rig_edit_rename_selected_(const std::string& to) {
-    if (rig_edit_selected_bone_ < 0 || static_cast<size_t>(rig_edit_selected_bone_) >= rig_edit_.model.bones.size()) return;
-    const int i = rig_edit_selected_bone_;
+    const int i = rig_edit_active_bone_();
+    if (i < 0) return;
     const std::string from = rig_edit_.model.bones[static_cast<size_t>(i)].name;
     if (from == to) return;
     bool ok = false;
@@ -3477,16 +3737,16 @@ void EditorApp::rig_edit_rename_selected_(const std::string& to) {
 }
 
 void EditorApp::rig_edit_reparent_selected_(int new_parent) {
-    if (new_parent == -2 || rig_edit_selected_bone_ < 0 || static_cast<size_t>(rig_edit_selected_bone_) >= rig_edit_.model.bones.size()) return;
-    const int i = rig_edit_selected_bone_;
+    const int i = rig_edit_active_bone_();
+    if (new_parent == -2 || i < 0) return;
     bool ok = false;
     rig_edit_model_edit_("Reparent Bone", [&](RigModel& m) { ok = m.reparent_bone(i, new_parent); });
     if (!ok) log_info("Rig Edit: can't reparent -- the target must be an EARLIER bone in the list, and not create a cycle");
 }
 
 void EditorApp::rig_edit_set_connected_(bool on) {
-    if (rig_edit_selected_bone_ < 0 || static_cast<size_t>(rig_edit_selected_bone_) >= rig_edit_.model.bones.size()) return;
-    const int i = rig_edit_selected_bone_;
+    const int i = rig_edit_active_bone_();
+    if (i < 0) return;
     rig_edit_model_edit_("Toggle Connected", [&](RigModel& m) { m.set_connected(i, on); });
 }
 
@@ -3524,25 +3784,41 @@ void EditorApp::rig_edit_save_() {
 void EditorApp::rig_edit_frame_(float dt) {
     (void)dt;
     if (!rig_edit_object_) return;
-    if (rig_edit_.dirty) rig_edit_save_();
+    // Not mid-drag: a modal re-applies its cumulative result every frame, so saving during one
+    // would rewrite the YAML once per frame for the whole gesture. The save lands on confirm.
+    if (rig_edit_.dirty && !rig_edit_modal_.active()) rig_edit_save_();
     if (!ui().input().down[0]) rig_edit_.undo.end_merge();
 }
 
 void EditorApp::rig_edit_keymap_(imm::Context& ctx, const ViewProj& vp, glm::vec2 m) {
-    if (playing()) return;
-    const auto& in = ctx.input();
-    if (rig_edit_modal_.active()) {
-        run_rig_edit_modal_(ctx, vp, has(in.mods, Mods::Control) != snap_on_, has(in.mods, Mods::Shift));
-        return;
-    }
-    if (ctx.wants_keyboard()) return;
-    // G needs a specifically-picked endpoint (not just a selected bone): dragging "the bone"
-    // as a rigid whole is deliberately not supported -- see rig_model.h's doc on `connected`
-    // cascading, which already fully defines what moving an endpoint does.
-    if (rig_edit_endpoint_selected_ && ctx.shortcut(Key::G)) { start_rig_edit_modal_(ModalKind::Grab, vp, m); return; }
-    if (rig_edit_selected_bone_ >= 0 && ctx.shortcut(Key::R)) { start_rig_edit_modal_(ModalKind::Rotate, vp, m); return; }
-    if (rig_edit_selected_bone_ >= 0 && ctx.shortcut(Key::E)) { rig_edit_add_or_extrude_(true); return; }
+    // A running modal is driven from handle_viewport_input_'s shared ownership block, beside
+    // modal_ and bone_modal_ -- not from here. Here is only reached when the viewport is hovered
+    // and no popup is open, so a modal run from this function could be stranded by any binding
+    // that opens a popup (Z, Shift+S, Ctrl+Tab...).
+    namespace rs = toy::editor::rig_sel;
+    if (playing() || ctx.wants_keyboard()) return;
+    // Selection first: these work with nothing selected, so they cannot sit behind the guard.
+    if (ctx.shortcut(Key::A)) { rs::select_all(rig_edit_sel_, rig_edit_.model); return; }
+    if (ctx.shortcut(Key::A, Mods::Alt)) { rs::select_none(rig_edit_sel_); return; }
+    if (ctx.shortcut(Key::I, Mods::Control)) { rs::invert_selection(rig_edit_sel_); return; }
     if (ctx.shortcut(Key::A, Mods::Shift)) { rig_edit_add_or_extrude_(false); return; }
+    if (ctx.shortcut(Key::W)) { ctx.open_popup("vp_rig_ctx", m); return; }
+
+    // Ctrl+R is Roll (the bone's twist); plain R rotates the selected endpoints, as everywhere
+    // else in the editor. rig_edit_roll_modal_ is what tells apply_ which of the two this is.
+    if (ctx.shortcut(Key::R, Mods::Control)) { rig_edit_roll_modal_ = true; start_rig_edit_modal_(ModalKind::Rotate, vp, m); return; }
+    if (rs::empty(rig_edit_sel_)) return;   // everything below acts on the selection
+    if (ctx.shortcut(Key::G)) { rig_edit_roll_modal_ = false; start_rig_edit_modal_(ModalKind::Grab, vp, m); return; }
+    if (ctx.shortcut(Key::R)) { rig_edit_roll_modal_ = false; start_rig_edit_modal_(ModalKind::Rotate, vp, m); return; }
+    if (ctx.shortcut(Key::S)) { rig_edit_roll_modal_ = false; start_rig_edit_modal_(ModalKind::Scale, vp, m); return; }
+    if (ctx.shortcut(Key::E)) { rig_edit_add_or_extrude_(true); return; }
+    if (ctx.shortcut(Key::D, Mods::Shift)) { rig_edit_duplicate_selected_(); return; }
+    if (ctx.shortcut(Key::P, Mods::Control)) { rig_edit_parent_to_active_(); return; }
+    if (ctx.shortcut(Key::P, Mods::Alt)) { rig_edit_clear_parent_(); return; }
+    if (ctx.shortcut(Key::F)) { rig_edit_fill_(); return; }
+    if (ctx.shortcut(Key::M, Mods::Alt)) { rig_edit_merge_(); return; }
+    if (ctx.shortcut(Key::N, Mods::Control)) { ctx.open_popup("vp_rig_roll_menu", m); return; }
+    if (ctx.shortcut(Key::A, Mods::Control | Mods::Alt)) { rig_edit_align_to_active_(); return; }
     if (ctx.shortcut(Key::X) || ctx.shortcut(Key::Delete)) { rig_edit_delete_selected_(); return; }
 }
 
@@ -3762,8 +4038,26 @@ void EditorApp::toggle_edit_mode_() {
         return;
     }
     if (asset_view_()) return;
-    if (edit_object_) { exit_mesh_mode_(); return; }
-    enter_mesh_mode_(InteractionMode::Edit);
+    // Tab cycles Object -> Rig Edit -> Mesh Edit -> Object on an object that has both a rig and
+    // a mesh of its own, and is a plain two-way toggle when it has only one of them. A rigged
+    // character's parts usually hang off BoneAttachment children, so "both" is the uncommon
+    // case (a skinned root) -- but it is the only way to reach the mesh of one without
+    // selecting a child, so Tab has to reach it.
+    const ObjectId sel = doc_.primary();
+    const ObjectId rig = rig_edit_target_of_(sel);
+    const Node* obj = sel ? doc_.find(sel) : nullptr;
+    // effective_(): a placed prefab's own node carries only its overrides, so an inherited
+    // SkinnedMeshRenderer is invisible without the merge (every other object_mesh_key_ caller
+    // does the same).
+    const bool has_mesh = obj && !object_mesh_key_(instances_panel_->effective_(*obj)).empty();
+    if (rig_edit_object_) {                     // Rig Edit -> Mesh Edit, or out
+        exit_rig_edit_mode_();
+        if (has_mesh) enter_mesh_mode_(InteractionMode::Edit);
+        return;
+    }
+    if (edit_object_) { exit_mesh_mode_(); return; }   // Mesh Edit -> Object
+    if (rig) { set_interaction_mode(InteractionMode::RigEdit); return; }   // Object -> Rig Edit
+    enter_mesh_mode_(InteractionMode::Edit);                               // Object -> Mesh Edit
 }
 
 std::string EditorApp::object_mesh_key_(const Node& obj) {
@@ -3993,10 +4287,16 @@ bool EditorApp::set_interaction_mode(InteractionMode m) {
     // the mode menu, Tab, and anything else that switches mode. Leaving it open behind another
     // mode means clicks keep drawing curve points with nothing on screen saying why.
     if (m != InteractionMode::Pen && curve_pen_panel_->in_pen_mode_()) curve_pen_panel_->end_pen_();
+    // Edit on a rigged object means its SKELETON, the way Edit on a mesh means its vertices --
+    // so there is no separate "Rig Edit" entry to pick. Tab cycles on to the mesh when the
+    // object has one too (toggle_edit_mode_).
+    if (m == InteractionMode::Edit && rig_edit_target_of_(doc_.primary())) m = InteractionMode::RigEdit;
+    // Leave BOTH of the non-document modes before entering any other one: each early-returns, so
+    // falling into one without exiting the other strands its object (and its unsaved document).
+    if (m != InteractionMode::RigEdit) exit_rig_edit_mode_();
+    if (m != InteractionMode::Pose) exit_pose_mode_();
     if (m == InteractionMode::Pose) return enter_pose_mode_(pose_target_of_(doc_.primary()));
-    exit_pose_mode_();   // every other mode works on the document, not on a pose
     if (m == InteractionMode::RigEdit) return enter_rig_edit_mode_(doc_.primary());
-    exit_rig_edit_mode_();
     if (m == InteractionMode::Object) { exit_mesh_mode_(); return true; }
     return enter_mesh_mode_(m);
 }
@@ -4047,6 +4347,24 @@ ObjectId EditorApp::pose_target_of_(ObjectId id) const {
         if (o->get_component<coopa::rig::Rig>()) return sync_.id_of_live(o);
     }
     return 0;
+}
+
+ObjectId EditorApp::rig_edit_target_of_(ObjectId id) const {
+    if (!id) return 0;
+    // The DOCUMENT first, for `id` itself: a Rig component added this frame (create_armature()'s
+    // first save) is not in the live scene until the next rebuild, and "can I edit this rig"
+    // must not depend on that timing.
+    if (doc_.find_component(id, "Rig") >= 0) return id;
+    // Then the live object, which is where a Rig INHERITED from a prefab instance shows up.
+    //
+    // Deliberately NOT the ancestors. Edit Mode edits the object you SELECTED, so a skinned mesh
+    // parented under a character Tabs into its own mesh, exactly as in Blender -- resolving
+    // upward here made every mesh part of a rigged character uneditable, because Edit routed it
+    // to the skeleton instead (object_assets/an_object_assets_meshes_pick_and_enter_edit_mode
+    // caught it). Pose Mode is the one that resolves upward (pose_target_of_), because posing a
+    // part does mean posing the character it belongs to.
+    auto* o = sync_.live(id);
+    return (o && o->get_component<coopa::rig::Rig>()) ? id : 0;
 }
 
 void EditorApp::push_mesh_to_scene_() {
@@ -4493,8 +4811,8 @@ void EditorApp::draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, c
         // RigEdit mode's own display: the REST skeleton being authored, straight from
         // rig_edit_.model -- same "not an overlay" convention as Pose mode's bones above.
         if (rig_edit_mode_()) {
-            viewport_chrome_panel_->draw_rig_edit_bones_(ctx, *vp, rig_edit_.model, rig_edit_owner_world_(), rig_edit_selected_bone_,
-                                                         rig_edit_endpoint_selected_, rig_edit_selected_end_, accent, active_col);
+            viewport_chrome_panel_->draw_rig_edit_bones_(ctx, *vp, rig_edit_.model, rig_edit_sel_, rig_edit_owner_world_(),
+                                                         et_.viewport.object_wire, accent, active_col);
         }
         // Any Curve that is selected or asks to always show, so a path is visible without
         // entering the Pen tool to see it. A curve is an overlay, so the gizmo and overlay
@@ -4523,9 +4841,8 @@ void EditorApp::draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, c
             if (show_gizmo_ && show_overlays_) {
                 outline(id, *node);
                 // Geometry a ProceduralGraph baked is a RUNTIME subtree with no document node,
-                // so the recursion above never reaches it and a selected graph used to
-                // highlight nothing at all. Selecting the component means selecting everything
-                // it made.
+                // so the recursion above never reaches it -- outline it here instead. Selecting
+                // the component means selecting everything it made.
                 if (live->get_component<toy::procgraph::ProceduralGraph>() != nullptr) {
                     std::size_t budget = 4000;
                     for (const auto& child : live->children()) {
@@ -4803,6 +5120,8 @@ std::string EditorApp::current_undo_label_(bool undo) {
         case UndoTarget::Theme: return pick(game_theme_.undo.undo_label(), game_theme_.undo.redo_label());
         case UndoTarget::Config: return pick(config_.undo.undo_label(), config_.undo.redo_label());
         case UndoTarget::NodeGraph: return pick(graph_doc_.undo.undo_label(), graph_doc_.undo.redo_label());
+        case UndoTarget::Clip: return pick(anim_clip_.undo.undo_label(), anim_clip_.undo.redo_label());
+        case UndoTarget::RigEdit: return pick(rig_edit_.undo.undo_label(), rig_edit_.undo.redo_label());
     }
     return {};
 }

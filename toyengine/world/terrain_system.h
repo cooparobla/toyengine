@@ -76,8 +76,7 @@
  * after it drops out of `streamed_` entirely, since nothing else will ask `advance_retiring_()`
  * to run on it once the terrain itself is no longer ticked. Without this, a scene that switches
  * between terrain flavours (unified_terrain_demo) would carry every flavour's chunks, meshes and
- * colliders for as long as it runs -- deactivating a terrain was previously invisible to this
- * system entirely.
+ * colliders for as long as it runs.
  */
 
 #ifndef TOYENGINE_WORLD_TERRAIN_SYSTEM_H
@@ -146,6 +145,23 @@ public:
      */
     std::int32_t wanted_chunks() const { return wanted_chunks_; }
     std::int32_t unfinished_chunks() const { return unfinished_chunks_; }
+
+    /**
+     * @brief Called from TerrainComponent::~TerrainComponent(): drops `terrain` out of
+     *        `streamed_`/`releasing_` before it is freed.
+     *
+     * `streamed_`'s whole design assumes a terrain missing from this frame's gather merely went
+     * INACTIVE, never destroyed -- see this header's "The gather is also the liveness signal".
+     * An editor document rebuild that adds a component beside an existing TileTerrain (the World
+     * Generator's "Generate World", migrating `generator:` onto a new MapGenerator) tears down
+     * and reconstructs the whole SceneObject, destroying the old TerrainComponent while its data
+     * survives elsewhere (TerraStore) -- which breaks that assumption and left a stale pointer in
+     * `streamed_` for the next execute() to dereference. This keeps the invariant true instead.
+     */
+    void forget_terrain(TerrainComponent* terrain) {
+        streamed_.erase(terrain);
+        releasing_.erase(terrain);
+    }
 
     /**
      * @brief Not warm until every wanted chunk is drawing -- a streamed world's ground.

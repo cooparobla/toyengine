@@ -96,7 +96,7 @@ private:
     std::map<std::pair<int, int>, Chunk> chunks_;
     TerrainScatterParams params_;
     std::uint64_t data_uid_ = 0;
-    world::TerrainFieldGeometry geometry_;
+    world::TerraGeometry geometry_;
     glm::vec3 origin_{0.0f};
 };
 

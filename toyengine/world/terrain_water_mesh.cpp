@@ -132,15 +132,19 @@ struct Corner {
  *        never by which chunk or quad is asking, which is what makes two chunks write the same
  *        value for the edge between them.
  *
- * - A corner touching a genuinely wet tile keeps the MEAN level of the wet tiles touching it,
- *   unchanged by anything below: the visible surface never moves.
+ * - A corner touching a genuinely wet tile keeps the LOWEST level among the wet tiles touching
+ *   it, unchanged by anything below: the visible surface never moves. Lowest, not a mean -- two
+ *   different bodies at different levels can share a corner (a river stepping down to a lake, a
+ *   lagoon beside the open sea), and only the lower one's level keeps the invariant every water
+ *   operation in this file promises, that water never stands above dry ground beside it; a mean
+ *   of the two would stand above the lower body's own shore.
  * - A corner touching no wet tile but at least one emitted one (the apron's interior, or its rim)
- *   inherits the level of the body that apron continues, then -- ONLY where the ground AT THAT
- *   EXACT CORNER has risen to meet or pass the level -- is tucked `k_smooth_skirt_clearance` under
- *   that ground, capped at `k_smooth_skirt_max_drop` below the level. A corner whose own ground is
- *   still below the level is left exactly at the level: the terrain already draws over it there,
- *   so dropping it toward that ground would only carve a visible ramp through open water the
- *   surface was already hidden behind.
+ *   inherits the lowest level among the bodies that apron continues, the same way, then -- ONLY
+ *   where the ground AT THAT EXACT CORNER has risen to meet or pass the level -- is tucked
+ *   `k_smooth_skirt_clearance` under that ground, capped at `k_smooth_skirt_max_drop` below the
+ *   level. A corner whose own ground is still below the level is left exactly at the level: the
+ *   terrain already draws over it there, so dropping it toward that ground would only carve a
+ *   visible ramp through open water the surface was already hidden behind.
  *
  * Depth (the wave attenuation input) is the level less the ground AT THIS CORNER -- exact, and
  * zero precisely at the waterline, rather than a mean over the tiles touching it.
@@ -150,7 +154,8 @@ Corner corner_at(const TerrainField& field, int cx, int cy, int skirt_tiles, flo
     Corner out;
     const glm::ivec2 touch[4] = {{cx - 1, cy - 1}, {cx, cy - 1}, {cx - 1, cy}, {cx, cy}};
 
-    float level_sum = 0.0f, wave_sum = 0.0f;
+    float lowest_level = std::numeric_limits<float>::infinity();
+    float lowest_wave = 1.0f;
     int wet_n = 0;
     bool any_emitted = false;
 
@@ -158,8 +163,10 @@ Corner corner_at(const TerrainField& field, int cx, int cy, int skirt_tiles, flo
         if (field.contains(t)) {
             const WaterCell own = field.water_at(t);
             if (own.wet()) {
-                level_sum += own.level;
-                wave_sum += own.kind == WaterKind::River ? wave_scale_river : 1.0f;
+                if (own.level < lowest_level) {
+                    lowest_level = own.level;
+                    lowest_wave = own.kind == WaterKind::River ? wave_scale_river : 1.0f;
+                }
                 ++wet_n;
             }
         }
@@ -171,24 +178,25 @@ Corner corner_at(const TerrainField& field, int cx, int cy, int skirt_tiles, flo
 
     float level;
     if (wet_n > 0) {
-        level = level_sum / static_cast<float>(wet_n);
-        out.wave = wave_sum / static_cast<float>(wet_n);
+        level = lowest_level;
+        out.wave = lowest_wave;
     } else {
         // The apron's interior: no touching tile is truly wet, but at least one is emitted, so it
         // continues a body found by widening the search exactly as the tile itself did.
-        float lvl_sum = 0.0f, w_sum = 0.0f;
-        int lvl_n = 0;
+        float lvl = std::numeric_limits<float>::infinity();
+        float w = 1.0f;
         for (const glm::ivec2& t : touch) {
             if (!field.contains(t)) continue;
             const WaterCell borrowed = shore_of(field, t, skirt_tiles, cache);
             if (!borrowed.wet()) continue;
-            lvl_sum += borrowed.level;
-            w_sum += borrowed.kind == WaterKind::River ? wave_scale_river : 1.0f;
-            ++lvl_n;
+            if (borrowed.level < lvl) {
+                lvl = borrowed.level;
+                w = borrowed.kind == WaterKind::River ? wave_scale_river : 1.0f;
+            }
         }
-        if (lvl_n == 0) return Corner{};   // every in-bounds touching tile is itself unemitted
-        level = lvl_sum / static_cast<float>(lvl_n);
-        out.wave = w_sum / static_cast<float>(lvl_n);
+        if (lvl == std::numeric_limits<float>::infinity()) return Corner{};   // every in-bounds touching tile is itself unemitted
+        level = lvl;
+        out.wave = w;
     }
 
     const float ground = ground_at_corner(field, glm::ivec2(cx, cy));

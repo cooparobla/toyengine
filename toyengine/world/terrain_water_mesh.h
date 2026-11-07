@@ -38,6 +38,9 @@
 #ifndef TOYENGINE_WORLD_TERRAIN_WATER_MESH_H
 #define TOYENGINE_WORLD_TERRAIN_WATER_MESH_H
 
+#include <algorithm>
+#include <cmath>
+
 #include <glm/glm.hpp>
 
 #include <toyengine/world/terrain_chunk.h>
@@ -45,6 +48,20 @@
 
 namespace toy {
 namespace world {
+
+/**
+ * @brief Converts `TerrainParams::water_skirt_tiles` (metres) to the tile-count radius
+ *        `build_smooth_chunk_water()` actually widens by, at `tile_size` metres per tile.
+ *
+ * A bare tile count would double the apron's real-world reach wherever `tile_size` doubles --
+ * `height_sub 2` on a 1 m source grid gives 2 m tiles, which is what grew
+ * `unified_terrain_demo`'s heightmap apron into a visible overlap past the real shoreline. At
+ * least 1, so a skirt is never asked to widen by nothing.
+ */
+inline int skirt_tiles_from_metres(float metres, float tile_size) {
+    const float safe_tile_size = tile_size > 0.0001f ? tile_size : 0.0001f;
+    return std::max(1, static_cast<int>(std::lround(metres / safe_tile_size)));
+}
 
 /**
  * @brief Builds a smooth terrain chunk's water surfaces, chunk-local, ready for
@@ -56,8 +73,9 @@ namespace world {
  * @param chunk_tiles  Tiles per chunk edge.
  * @param wave_scale_river Wave height multiplier over a river (TerrainParams::river_wave_scale);
  *                     still water is always 1.
- * @param skirt_tiles  How far past the wet tiles the surface runs (TerrainParams::water_skirt_tiles);
- *                     at least 1.
+ * @param skirt_tiles  How far past the wet tiles the surface runs, in TILES (at least 1) -- the
+ *                     caller converts TerrainParams::water_skirt_tiles, which is metres, at this
+ *                     field's own tile_size so the apron's physical reach does not change with it.
  * @param still        Receives the sea and lakes.
  * @param flowing      Receives the rivers.
  */

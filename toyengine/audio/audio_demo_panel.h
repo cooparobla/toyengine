@@ -55,8 +55,8 @@ public:
     };
 
     // The panel's tables, exposed so a test can check every object it drives actually exists
-    // in the demo scene. A dead button used to be caught by matching reactor names against
-    // the authored UI; with the panel in code, this is what replaces that guarantee.
+    // in the demo scene -- the guarantee against a dead button, now that the panel is code
+    // rather than authored UI a name-matching check could walk.
 
     /** @brief Spatial sources the Spatial page toggles, by scene object name. */
     static const std::vector<Entry>& sources();

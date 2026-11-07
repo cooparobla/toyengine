@@ -585,7 +585,7 @@ void WorldGeneratorPanel::draw_world_generator_modal_(imm::Context& ctx) {
     // Footer.
     ctx.set_cursor_y(top.y + body_h + 6);
     const toy::world::TerrainComponent* live = app_.tile_terrain_panel_->live_tile_terrain_(wgen_object_);
-    if (live && live->tiles && !live->tiles->empty()) {
+    if (live && !live->field.empty()) {
         ctx.label("Generate World replaces the terrain's tiles -- your tile edits included. It can be undone.", &dim);
     } else {
         ctx.label(" ", &dim);

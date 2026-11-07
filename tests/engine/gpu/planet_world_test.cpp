@@ -21,8 +21,8 @@
 #include <toyengine/water/buoyancy.h>
 #include <toyengine/water/water_body.h>
 #include <toyengine/world/planet.h>
+#include <toyengine/world/terra_store.h>
 #include <toyengine/world/terrain_component.h>
-#include <toyengine/world/tile_map_data.h>
 #include <physxcoopa/components/box_collider.h>
 #include <physxcoopa/components/rigidbody.h>
 #include <physxcoopa/components/sphere_collider.h>
@@ -49,7 +49,7 @@ namespace {
  * player the walking test drives. Its falling bodies are each test's own.
  */
 std::string small_planet() {
-    toy::world::TileMapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
     std::string path = scene_variant("assets/scenes/terrain/planet_demo/scene.yaml", "small_planet", [](fkyaml::node& doc) {
         if (fkyaml::node* t = scene_component(doc, "planet", "Terrain")) {
             (*t)["face_tiles"] = fkyaml::node(32);
@@ -71,8 +71,8 @@ std::string small_planet() {
             "  - { type: Transform, position: { x: 0.0, y: 0.0, z: 60.0 } }\n"
             "  - { type: CharacterController, height: 1.8, radius: 0.3, move_speed: 3.0, step_height: 1.1 }\n")));
     });
-    // The whole `terrain/` directory, not one filename: a stored tile map is named after its
-    // object (a planet's is `planet.tiles`), and one left from another face_tiles would be
+    // The whole `terrain/` directory, not one filename: a stored `.terra` file is named after
+    // its object (a planet's is `planet.terra`), and one left from another face_tiles would be
     // loaded instead of this variant's map ever being baked.
     std::error_code ec;
     std::filesystem::remove_all(std::filesystem::path(path).parent_path() / "terrain", ec);
@@ -101,11 +101,11 @@ Planet bring_up(toy::core::Engine& engine) {
 template <typename Want>
 glm::vec3 find_tile(const toy::world::TerrainComponent& terrain, const glm::vec3& toward, Want want) {
     const toy::world::PlanetLayout layout = terrain.params.layout();
-    const toy::world::TileMapData& tiles = *terrain.tiles;
+    const toy::world::TerraData& tiles = *terrain.field.data();
     float best = -2.0f;
     glm::vec3 dir(0.0f);
-    for (int y = 0; y < tiles.height(); ++y) {
-        for (int x = 0; x < tiles.width(); ++x) {
+    for (int y = 0; y < tiles.geometry().tiles_y; ++y) {
+        for (int x = 0; x < tiles.geometry().tiles_x; ++x) {
             if (!want(tiles, x, y)) continue;
             const glm::vec3 d(layout.tile_direction(x, y));
             if (glm::dot(d, toward) > best) {
@@ -195,7 +195,7 @@ COOPA_TEST(the_sea_floats_a_crate) {
     ScopedEnv no_input("NO_INPUT", "1");
     toy::core::Engine engine(make_test_config(small_planet(), 320, 180, 160, 90));
     Planet p = bring_up(engine);
-    require(p.terrain != nullptr && p.terrain->tiles != nullptr, "sea: the planet baked");
+    require(p.terrain != nullptr && !p.terrain->field.empty(), "sea: the planet baked");
 
     int frame_bodies = 0;
     for (const auto* body : p.scene->get_components<toy::water::WaterBody>()) frame_bodies += body->local_frame ? 1 : 0;
@@ -203,21 +203,25 @@ COOPA_TEST(the_sea_floats_a_crate) {
 
     // Deep, open sea: still water all round, at least two steps deep.
     const toy::world::PlanetLayout layout = p.terrain->params.layout();
-    const glm::vec3 dir = find_tile(*p.terrain, glm::vec3(0, 0, 1), [&](const toy::world::TileMapData& t, int x, int y) {
-        const toy::world::TileRecord& r = t.at(x, y);
-        if (!r.has(toy::world::TileRecord::Ocean) || r.water_depth < 2) return false;
+    const float height_step = p.terrain->params.height_step;
+    const glm::vec3 dir = find_tile(*p.terrain, glm::vec3(0, 0, 1), [&](const toy::world::TerraData& t, int x, int y) {
+        const toy::world::TileCell& r = t.at(x, y);
+        if (static_cast<toy::world::WaterKind>(r.water_kind) != toy::world::WaterKind::Ocean) return false;
+        const int water_steps = static_cast<int>(std::lround(r.water_level / height_step));
+        if (water_steps - r.steps < 2) return false;
         for (int dy = -1; dy <= 1; ++dy)
             for (int dx = -1; dx <= 1; ++dx) {
                 const glm::ivec2 nb = layout.neighbour(x, y, dx, dy);
-                if (!t.at(nb.x, nb.y).water() || t.at(nb.x, nb.y).has(toy::world::TileRecord::Flowing)) return false;
+                const toy::world::TileCell& nc = t.at(nb.x, nb.y);
+                if (!nc.wet() || static_cast<toy::world::WaterKind>(nc.water_kind) == toy::world::WaterKind::River) return false;
             }
         return true;
     });
     require(glm::length(dir) > 0.5f, "sea: the planet has open sea");
     const glm::ivec2 tile = layout.tile_of(glm::dvec3(dir));
-    const toy::world::TileRecord& r = p.terrain->tiles->at(tile.x, tile.y);
-    const float surface = layout.radius() + (static_cast<float>(r.water_level()) - p.terrain->params.water_inset) * p.terrain->params.height_step;
-    const float bed = layout.radius() + static_cast<float>(r.steps) * p.terrain->params.height_step;
+    const toy::world::TileCell& r = p.terrain->field.data()->at(tile.x, tile.y);
+    const float surface = layout.radius() + r.water_level - p.terrain->params.water_inset * height_step;
+    const float bed = layout.radius() + static_cast<float>(r.steps) * height_step;
 
     auto crate = std::make_unique<coopa::scene::SceneObject>("float_crate");
     crate->add_component<coopa::scene::TransformComponent>()->transform().set_position(dir * (surface + 2.0f));
@@ -244,20 +248,20 @@ COOPA_TEST(a_character_walks_on_the_planet) {
     ScopedEnv no_input("NO_INPUT", "1");
     toy::core::Engine engine(make_test_config(small_planet(), 320, 180, 160, 90));
     Planet p = bring_up(engine);
-    require(p.terrain != nullptr && p.terrain->tiles != nullptr, "walk: the planet baked");
+    require(p.terrain != nullptr && !p.terrain->field.empty(), "walk: the planet baked");
     auto* player = p.scene->find_first_component<toy::scene::CharacterController>();
     require(player != nullptr && player->owner != nullptr, "walk: the scene has a player");
 
     // Dry, fairly level land: the tile and its neighbours within a step of one another.
     const toy::world::PlanetLayout layout = p.terrain->params.layout();
-    const glm::vec3 dir = find_tile(*p.terrain, glm::vec3(0, 0, 1), [&](const toy::world::TileMapData& t, int x, int y) {
-        const toy::world::TileRecord& r = t.at(x, y);
-        if (r.water()) return false;
+    const glm::vec3 dir = find_tile(*p.terrain, glm::vec3(0, 0, 1), [&](const toy::world::TerraData& t, int x, int y) {
+        const toy::world::TileCell& r = t.at(x, y);
+        if (r.wet()) return false;
         for (int dy = -2; dy <= 2; ++dy)
             for (int dx = -2; dx <= 2; ++dx) {
                 const glm::ivec2 nb = layout.neighbour(x, y, dx, dy);
-                const toy::world::TileRecord& o = t.at(nb.x, nb.y);
-                if (o.water() || std::abs(static_cast<int>(o.steps) - static_cast<int>(r.steps)) > 1) return false;
+                const toy::world::TileCell& o = t.at(nb.x, nb.y);
+                if (o.wet() || std::abs(static_cast<int>(o.steps) - static_cast<int>(r.steps)) > 1) return false;
             }
         return true;
     });

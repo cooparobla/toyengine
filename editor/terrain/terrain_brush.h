@@ -1,6 +1,6 @@
 /**
  * @file terrain_brush.h
- * @brief The heightmap terrain tools, as pure functions on a HeightmapData: raise / lower,
+ * @brief The heightmap terrain tools, as pure functions on a TerraData: raise / lower,
  *        smooth, flatten, set height, noise, erode and paint -- one dab at a time, each returning
  *        the texels it changed -- plus the undo patch a stroke records. No GPU, no app: the
  *        editor's Terrain mode (editor/app/ui/terrain.cpp) drives these, and tests call them.
@@ -19,7 +19,7 @@
 
 #include <glm/glm.hpp>
 
-#include <toyengine/world/heightmap_data.h>
+#include <toyengine/world/terra_data.h>
 #include <toyengine/world/terrain_field.h>
 #include <toyengine/world/terrain_water.h>
 
@@ -55,14 +55,14 @@ struct TerrainBrushSettings {
  * stopping at the brush. So the brush only chooses the SEEDS, and the flood decides the extent --
  * which is why the rect this returns is routinely much larger than the circle that started it.
  *
- * On a Heightmap field, a flood also grades the bed under what it just flooded
+ * On a field with a height plane, a flood also grades the bed under what it just flooded
  * (toy::world::grade_water_shore()), so a hand-painted lake gets the same shoreline a generated
- * one does -- without it, the newly wet tiles would read exactly as dry-looking as the trench the
- * generator's own bake used to carve. `graded_rect`, if given, receives the height texels that
- * moved, so the caller can fold them into the stroke's undo patch alongside the water.
+ * one does -- without it, the newly wet tiles would read exactly as dry-looking as the trench a
+ * generator bake carves. `graded_rect`, if given, receives the height texels that moved, so the
+ * caller can fold them into the stroke's undo patch alongside the water.
  *
  * @param invert Drain the body under the brush instead of flooding.
- * @param grade  How the bed is graded; a draining or Tiles-mode dab ignores it.
+ * @param grade  How the bed is graded; a draining or no-height-plane dab ignores it.
  * @param graded_rect Receives the height texels grade_water_shore() moved, if any.
  * @return The tiles changed, for undo and for the chunks to rebuild their surfaces from.
  */
@@ -80,21 +80,21 @@ float terrain_falloff(float d01, float falloff);
 /**
  * @brief One dab of `s.tool` at local xy `centre`. `invert` lowers (Raise), digs (Noise) or
  *        erases (Paint); `flatten_to` is Flatten's target height (m).
- * @return The height texels (or splat texels, for Paint) the dab changed.
+ * @return The height texels (or layer texels, for Paint) the dab changed.
  */
-toy::world::IRect terrain_dab(toy::world::HeightmapData& data, const TerrainBrushSettings& s, glm::vec2 centre, bool invert,
+toy::world::IRect terrain_dab(toy::world::TerraData& data, const TerrainBrushSettings& s, glm::vec2 centre, bool invert,
                               float flatten_to = 0.0f, std::uint32_t seed = 1);
 
 /**
  * @struct TerrainPatch
- * @brief A rectangle of a terrain's heights and/or splats, before or after an edit -- what one
+ * @brief A rectangle of a terrain's heights and/or layers, before or after an edit -- what one
  *        undo step restores. Holds the data weakly: a terrain removed since is skipped.
  */
 struct TerrainPatch {
-    std::weak_ptr<toy::world::HeightmapData> data;
+    std::weak_ptr<toy::world::TerraData> data;
     toy::world::IRect height_rect;   ///< Empty: no height texels in this patch.
     std::vector<float> heights;
-    toy::world::IRect splat_rect;    ///< Empty: no splat texels.
+    toy::world::IRect splat_rect;    ///< Empty: no layer texels.
     std::vector<std::uint8_t> splat0, splat1;
     /**
      * @brief The water over a rectangle of TILES, row-major; empty rect means no water in it.
@@ -113,11 +113,11 @@ struct TerrainPatch {
 };
 
 /** @brief Copies `height_rect` / `splat_rect` of `data` into a patch. */
-TerrainPatch capture_patch(const std::shared_ptr<toy::world::HeightmapData>& data, const toy::world::IRect& height_rect,
+TerrainPatch capture_patch(const std::shared_ptr<toy::world::TerraData>& data, const toy::world::IRect& height_rect,
                            const toy::world::IRect& splat_rect);
 
 /** @brief Copies the same rectangles out of saved full copies (a stroke's starting state). */
-TerrainPatch capture_patch_from(const std::shared_ptr<toy::world::HeightmapData>& data, const std::vector<float>& heights,
+TerrainPatch capture_patch_from(const std::shared_ptr<toy::world::TerraData>& data, const std::vector<float>& heights,
                                 const std::vector<std::uint8_t>& splat0, const std::vector<std::uint8_t>& splat1,
                                 const toy::world::IRect& height_rect, const toy::world::IRect& splat_rect);
 

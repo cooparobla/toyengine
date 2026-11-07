@@ -12,7 +12,6 @@
 #include <glm/glm.hpp>
 #include <toyengine/particles/terrain_scatter.h>
 #include <toyengine/world/terrain_field.h>
-#include <toyengine/world/heightmap_data.h>
 
 #include "engine/support/checks.h"
 
@@ -26,23 +25,27 @@ namespace {
 /** @brief 128 m square, 32 m chunks; flat west half, a 45-degree ramp in the east half; layer 1
  *         painted on the north half. */
 toy::world::TerrainField field() {
-    toy::world::TerrainFieldGeometry g;
-    g.mode = toy::world::TerrainMode::Heightmap;
+    toy::world::TerraGeometry g;
     g.tiles_x = g.tiles_y = 128;
-    g.size = glm::vec2(128.0f);
+    g.tile_size = 1.0f;
     g.height = 100.0f;
+    g.height_sub = 2;
     g.chunk_tiles = 32;
     g.layer_sub = 1;        // 128 splat texels a side; the paint below is in halves anyway
     toy::world::TerrainField f;
     f.reset(g);
-    HeightmapData& d = *f.heights();
-    for (int j = 0; j < d.ny(); ++j) {
-        for (int i = 0; i < d.nx(); ++i) d.at(i, j) = i < 64 ? 0.0f : static_cast<float>(i - 64);
+    toy::world::TerraData* d = f.data();
+    const float cell = g.tile_size / static_cast<float>(g.height_sub);
+    for (int j = 0; j < d->height_ny(); ++j) {
+        for (int i = 0; i < d->height_nx(); ++i) {
+            const float x_m = static_cast<float>(i) * cell;
+            d->height_at(i, j) = x_m < 64.0f ? 0.0f : (x_m - 64.0f);
+        }
     }
-    for (int j = d.splat_h() / 2; j < d.splat_h(); ++j) {
-        for (int i = 0; i < d.splat_w() / 2; ++i) {
-            d.splat_at(0, i, j) = 0;
-            d.splat_at(1, i, j) = 255;
+    for (int j = d->layer_ny() / 2; j < d->layer_ny(); ++j) {
+        for (int i = 0; i < d->layer_nx() / 2; ++i) {
+            d->layer_at(0, i, j) = 0;
+            d->layer_at(1, i, j) = 255;
         }
     }
     f.mark_all_dirty();
@@ -57,17 +60,16 @@ toy::world::TerrainField field() {
  * `layers:` means, so a name like "stone" resolves without the scene authoring anything.
  */
 toy::world::TerrainField tiled_field() {
-    toy::world::TerrainFieldGeometry g;
-    g.mode = toy::world::TerrainMode::Tiles;
+    toy::world::TerraGeometry g;
     g.tiles_x = g.tiles_y = 128;
-    g.size = glm::vec2(128.0f);
+    g.tile_size = 1.0f;
     g.height_step = 1.0f;
     g.chunk_tiles = 32;
     toy::world::TerrainField f;
     f.reset(g);
     for (int y = 0; y < 128; ++y) {
         for (int x = 0; x < 128; ++x) {
-            toy::world::TileRecord& r = f.tiles()->at(x, y);
+            toy::world::TileCell& r = f.data()->at(x, y);
             r.steps = x < 64 ? 0 : static_cast<std::int16_t>(x - 64);
             r.set_top_kind(y >= 64 ? toy::world::TileKind::Stone : toy::world::TileKind::Grass);
         }
@@ -144,8 +146,8 @@ COOPA_TEST(streaming_and_rebuilds) {
     expect(cache.chunks().count({0, 0}) == 1 && cache.chunks().count({3, 3}) == 0, "scatter: near built, far not");
     const auto before01 = cache.chunks().at({0, 1}).matrices;
     const auto rev00 = cache.chunks().at({0, 0}).revision;
-    d.heights()->at(5, 5) = 3.0f;
-    d.heights()->mark_height_dirty(IRect{5, 5, 6, 6});
+    d.data()->height_at(5, 5) = 3.0f;
+    d.data()->mark_height_dirty(IRect{5, 5, 6, 6});
     cache.update(v, params(), cam, 40.0f, 1);
     expect(cache.chunks().at({0, 0}).revision != rev00, "scatter: the edited chunk rebuilt");
     expect(cache.chunks().at({0, 1}).matrices == before01, "scatter: an untouched chunk kept");

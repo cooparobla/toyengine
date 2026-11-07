@@ -25,9 +25,9 @@ COOPA_TEST_SUITE("terrain_water_mesh");
 
 using toy::world::build_smooth_chunk_water;
 using toy::world::ChunkWaterData;
+using toy::world::skirt_tiles_from_metres;
+using toy::world::TerraGeometry;
 using toy::world::TerrainField;
-using toy::world::TerrainFieldGeometry;
-using toy::world::TerrainMode;
 using toy::world::WaterCell;
 using toy::world::WaterKind;
 
@@ -37,17 +37,23 @@ namespace {
 // tucked corner is allowed to sit under ground that has risen to meet it.
 constexpr float k_smooth_skirt_clearance_test = 0.2f;
 
+// height_sub 2: the minimum that gives a field an actual height plane at all (1 means a terraced
+// read of `steps`, no plane). Every helper below reads/writes the plane in METRE-space (dividing
+// a sample index by `sub` to recover it) so the tile-space distances and slopes the comments
+// describe stay exactly what they say, independent of this choice.
+constexpr int k_sub = 2;
+
 /** @brief A 16 x 16 one-metre-tile smooth terrain, ground 5 m, chunks of 8 tiles. */
 TerrainField smooth() {
-    TerrainFieldGeometry g;
-    g.mode = TerrainMode::Heightmap;
+    TerraGeometry g;
     g.tiles_x = g.tiles_y = 16;
-    g.size = glm::vec2(16.0f);
+    g.tile_size = 1.0f;
     g.height = 20.0f;
+    g.height_sub = k_sub;
     g.chunk_tiles = 8;
     TerrainField f;
     f.reset(g);
-    for (float& h : f.heights()->heights()) h = 5.0f;
+    for (float& h : f.data()->heights()) h = 5.0f;
     f.mark_all_dirty();
     return f;
 }
@@ -56,13 +62,34 @@ TerrainField smooth() {
 void flood(TerrainField& f, int x0, int y0, int x1, int y1, float level, WaterKind kind,
            std::uint8_t flow = 0) {
     // The ground under the water has to be below it, or the cell drains on the way in.
-    for (int j = 0; j < f.heights()->ny(); ++j) {
-        for (int i = 0; i < f.heights()->nx(); ++i) {
-            if (i >= x0 && i <= x1 && j >= y0 && j <= y1) f.heights()->at(i, j) = level - 2.0f;
+    for (int j = 0; j < f.data()->height_ny(); ++j) {
+        for (int i = 0; i < f.data()->height_nx(); ++i) {
+            if (i >= x0 * k_sub && i <= x1 * k_sub && j >= y0 * k_sub && j <= y1 * k_sub) {
+                f.data()->height_at(i, j) = level - 2.0f;
+            }
         }
     }
     for (int y = y0; y < y1; ++y) {
         for (int x = x0; x < x1; ++x) f.set_water(glm::ivec2(x, y), WaterCell{kind, level, flow});
+    }
+    f.mark_all_dirty();
+}
+
+/**
+ * @brief A gentle bed around the lake's 3x3 corner square [4, 6]: ground climbs 0.3 m per METRE
+ *        of Chebyshev distance from it, staying under the 4 m level for several rings before the
+ *        bulk terrain's 5 m floor would otherwise resume.
+ */
+void gentle_bed(TerrainField& f) {
+    for (int j = 0; j < f.data()->height_ny(); ++j) {
+        for (int i = 0; i < f.data()->height_nx(); ++i) {
+            const float x_m = static_cast<float>(i) / static_cast<float>(k_sub);
+            const float y_m = static_cast<float>(j) / static_cast<float>(k_sub);
+            const float dx = std::max({0.0f, 4.0f - x_m, x_m - 6.0f});
+            const float dy = std::max({0.0f, 4.0f - y_m, y_m - 6.0f});
+            const float dist = std::max(dx, dy);
+            if (dist >= 1.0f) f.data()->height_at(i, j) = 2.0f + 0.3f * dist;
+        }
     }
     f.mark_all_dirty();
 }
@@ -90,10 +117,9 @@ COOPA_TEST(a_dry_terrain_builds_nothing) {
 
 /** @brief A Tiles field builds nothing here -- build_chunk_water() is its path. */
 COOPA_TEST(a_tile_field_is_not_this_builders_job) {
-    TerrainFieldGeometry g;
-    g.mode = TerrainMode::Tiles;
+    TerraGeometry g;
     g.tiles_x = g.tiles_y = 16;
-    g.size = glm::vec2(16.0f);
+    g.tile_size = 1.0f;
     g.chunk_tiles = 8;
     TerrainField f;
     f.reset(g);
@@ -170,19 +196,7 @@ COOPA_TEST(the_surface_reaches_past_the_waterline) {
 COOPA_TEST(the_skirt_widens_only_over_a_gentle_bed) {
     TerrainField f = smooth();
     flood(f, 4, 4, 6, 6, 4.0f, WaterKind::Lake);   // wet tiles x,y in [4, 6)
-
-    // A gentle bed around the lake: ground climbs 0.3 m per tile of Chebyshev distance from the
-    // lake's own 3x3 corner square, staying under the 4 m level for several rings before the
-    // bulk terrain's 5 m floor would otherwise resume.
-    for (int j = 0; j < f.heights()->ny(); ++j) {
-        for (int i = 0; i < f.heights()->nx(); ++i) {
-            const int dx = std::max({0, 4 - i, i - 6});
-            const int dy = std::max({0, 4 - j, j - 6});
-            const int dist = std::max(dx, dy);
-            if (dist >= 1) f.heights()->at(i, j) = 2.0f + 0.3f * static_cast<float>(dist);
-        }
-    }
-    f.mark_all_dirty();
+    gentle_bed(f);
 
     ChunkWaterData wide_still, wide_flow, narrow_still, narrow_flow;
     build_smooth_chunk_water(f, glm::ivec2(0, 0), 8, 0.25f, 3, wide_still, wide_flow);
@@ -205,15 +219,7 @@ COOPA_TEST(the_skirt_widens_only_over_a_gentle_bed) {
 COOPA_TEST(the_skirt_is_tucked_under_the_bank_it_crosses) {
     TerrainField f = smooth();
     flood(f, 4, 4, 6, 6, 4.0f, WaterKind::Lake);
-    for (int j = 0; j < f.heights()->ny(); ++j) {
-        for (int i = 0; i < f.heights()->nx(); ++i) {
-            const int dx = std::max({0, 4 - i, i - 6});
-            const int dy = std::max({0, 4 - j, j - 6});
-            const int dist = std::max(dx, dy);
-            if (dist >= 1) f.heights()->at(i, j) = 2.0f + 0.3f * static_cast<float>(dist);
-        }
-    }
-    f.mark_all_dirty();
+    gentle_bed(f);
 
     ChunkWaterData still, flowing;
     build_smooth_chunk_water(f, glm::ivec2(0, 0), 8, 0.25f, 3, still, flowing);
@@ -243,12 +249,12 @@ COOPA_TEST(a_deep_tile_beside_the_shore_does_not_drag_the_rim_down) {
     // level, so every corner out there should sit flat at the level. One tile further in, dig a
     // deep pocket (tile 8) well below the level -- it must not reach back and drag the shoreline
     // rim corner (around tile 6-7) down with it.
-    for (int j = 0; j < f.heights()->ny(); ++j) {
-        for (int i = 0; i < f.heights()->nx(); ++i) {
-            if (i >= 6 && i <= 9 && j >= 4 && j <= 6) f.heights()->at(i, j) = 4.5f;
+    for (int j = 0; j < f.data()->height_ny(); ++j) {
+        for (int i = 0; i < f.data()->height_nx(); ++i) {
+            if (i >= 6 * k_sub && i <= 9 * k_sub && j >= 4 * k_sub && j <= 6 * k_sub) f.data()->height_at(i, j) = 4.5f;
         }
     }
-    for (int j = 4; j <= 6; ++j) f.heights()->at(8, j) = -10.0f;
+    for (int j = 4 * k_sub; j <= 6 * k_sub; ++j) f.data()->height_at(8 * k_sub, j) = -10.0f;
     f.mark_all_dirty();
 
     ChunkWaterData still, flowing;
@@ -277,9 +283,10 @@ COOPA_TEST(the_apron_reaches_the_waterline_over_a_gentle_bed) {
     flood(f, 4, 4, 6, 6, 4.0f, WaterKind::Lake);   // wet tiles x,y in [4, 6)
     // Ground climbs gently along +x only, crossing the 4 m level partway through tile 9 (at
     // x = 9.5): 2.0 m at the lake's edge (x = 6), +0.3 m per corner step after that.
-    for (int j = 0; j < f.heights()->ny(); ++j) {
-        for (int i = 0; i < f.heights()->nx(); ++i) {
-            if (i >= 6) f.heights()->at(i, j) = 2.0f + 0.3f * static_cast<float>(i - 6);
+    for (int j = 0; j < f.data()->height_ny(); ++j) {
+        for (int i = 0; i < f.data()->height_nx(); ++i) {
+            const float x_m = static_cast<float>(i) / static_cast<float>(k_sub);
+            if (x_m >= 6.0f) f.data()->height_at(i, j) = 2.0f + 0.3f * (x_m - 6.0f);
         }
     }
     f.mark_all_dirty();
@@ -301,15 +308,7 @@ COOPA_TEST(the_apron_reaches_the_waterline_over_a_gentle_bed) {
 COOPA_TEST(a_corner_carries_the_depth_of_the_ground_under_it) {
     TerrainField f = smooth();
     flood(f, 4, 4, 6, 6, 4.0f, WaterKind::Lake);
-    for (int j = 0; j < f.heights()->ny(); ++j) {
-        for (int i = 0; i < f.heights()->nx(); ++i) {
-            const int dx = std::max({0, 4 - i, i - 6});
-            const int dy = std::max({0, 4 - j, j - 6});
-            const int dist = std::max(dx, dy);
-            if (dist >= 1) f.heights()->at(i, j) = 2.0f + 0.3f * static_cast<float>(dist);
-        }
-    }
-    f.mark_all_dirty();
+    gentle_bed(f);
 
     ChunkWaterData still, flowing;
     build_smooth_chunk_water(f, glm::ivec2(0, 0), 8, 0.25f, 3, still, flowing);
@@ -392,4 +391,46 @@ COOPA_TEST(neighbouring_chunks_agree_on_their_shared_edge) {
     float lo = 1e9f, hi = -1e9f;
     for (const auto& [key, height] : a) { lo = std::min(lo, height); hi = std::max(hi, height); }
     expect(hi - lo > 0.1f, "seam: the surface slopes across the chunk, so equal values mean something");
+}
+
+/**
+ * @brief A corner shared by two DIFFERENT water bodies takes the lower body's level, never a
+ *        mean of the two -- `unified_terrain_demo`'s regression: a mean can stand above the
+ *        lower body's own shore, which is exactly the "water lying over the terrain" the scene's
+ *        heightmap flavour showed at its coastline.
+ */
+COOPA_TEST(a_shared_corner_between_two_bodies_takes_the_lower_level_not_the_mean) {
+    TerrainField f = smooth();
+    // Two adjacent still bodies sharing the corner column x = 6: a 6 m body on the low-x side, a
+    // 4 m body on the high-x side. Flooding the lower one SECOND leaves the shared corner's
+    // ground (flood() sets it to level - 2 over its own rect) low enough for both to stay wet.
+    flood(f, 2, 2, 6, 6, 6.0f, WaterKind::Lake);
+    flood(f, 6, 2, 10, 6, 4.0f, WaterKind::Lake);
+
+    ChunkWaterData still, flowing;
+    build_smooth_chunk_water(f, glm::ivec2(0, 0), 16, 0.25f, 1, still, flowing);
+    require(!still.empty(), "mixed-level: a mesh was built");
+
+    int checked = 0;
+    for (const glm::vec3& p : still.positions) {
+        if (std::abs(p.x - 6.0f) > 1e-4f) continue;          // the shared corner column
+        if (p.y < 2.0f - 1e-4f || p.y > 6.0f + 1e-4f) continue;
+        ++checked;
+        expect_near(p.z, 4.0f, 1e-4f,
+                    "mixed-level: the shared corner sits at the lower body's 4 m, not the mean 5 m");
+    }
+    expect(checked > 0, "mixed-level: at least one shared corner was actually on the shared edge");
+}
+
+/**
+ * @brief `skirt_tiles_from_metres()` keeps the apron's physical reach constant across tile sizes
+ *        -- the fix for `unified_terrain_demo`'s heightmap apron silently reaching twice as far
+ *        as intended once its tiles were 2 m instead of the tile flavours' 1 m.
+ */
+COOPA_TEST(skirt_tiles_from_metres_keeps_the_same_physical_reach) {
+    expect(skirt_tiles_from_metres(4.0f, 1.0f) == 4, "skirt-metres: 4 m at 1 m tiles is 4 tiles");
+    expect(skirt_tiles_from_metres(4.0f, 2.0f) == 2,
+           "skirt-metres: 4 m at 2 m tiles is 2 tiles -- half as many, the same physical reach");
+    expect(skirt_tiles_from_metres(4.0f, 0.5f) == 8, "skirt-metres: 4 m at 0.5 m tiles is 8 tiles");
+    expect(skirt_tiles_from_metres(0.1f, 2.0f) == 1, "skirt-metres: never rounds below one tile");
 }

@@ -23,7 +23,7 @@
 #include <coopa/yaml/document.h>
 #include <gfxcoopa/engine/data/skinned_mesh_source.h>
 #include <toyengine/scene/camera_controller.h>
-#include <toyengine/world/heightmap_store.h>
+#include <toyengine/world/terra_store.h>
 #include <toyengine/world/terrain_chunk.h>
 #include <toyengine/world/terrain_component.h>
 #include <toyengine/world/tile_mesh_library.h>
@@ -150,9 +150,9 @@ inline glm::vec3 shrink_terrain_and_centre(toy::world::TerrainComponent& terrain
  *        The demo itself is rounded; this is the variant its header describes.
  */
 inline std::string voxel_terrain_demo() {
-    // A fresh bake per test: the tile store is process-wide, and tests shrink the world -- so
-    // neither a stored grid in the store nor the demo's own .tiles file (copied with its folder).
-    toy::world::TileMapStore::instance().clear();
+    // A fresh bake per test: the store is process-wide, and tests shrink the world -- so
+    // neither a stored grid in the store nor the demo's own .terra file (copied with its folder).
+    toy::world::TerraStore::instance().clear();
     std::string path = scene_variant("assets/scenes/terrain/terrain_demo/scene.yaml", "voxel_terrain", [](fkyaml::node& doc) {
         fkyaml::node* t = scene_component(doc, "terrain", "Terrain");
         if (t == nullptr) return;
@@ -167,7 +167,7 @@ inline std::string voxel_terrain_demo() {
                     roots.end());
     });
     std::error_code ec;
-    std::filesystem::remove(std::filesystem::path(path).parent_path() / "terrain" / "terrain.tiles", ec);
+    std::filesystem::remove(std::filesystem::path(path).parent_path() / "terrain" / "terrain.terra", ec);
     return path;
 }
 
@@ -178,7 +178,7 @@ inline std::string voxel_terrain_demo() {
  *        variant has ever run through a frame-budget test; this is the expensive one.
  */
 inline std::string soft_terrain_demo() {
-    toy::world::TileMapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
     std::string path = scene_variant("assets/scenes/terrain/terrain_demo/scene.yaml", "soft_terrain", [](fkyaml::node& doc) {
         // Same motion-out-of-frame trim as voxel_terrain_demo(); no tile_set override, so this
         // keeps the demo's authored (expensive) tile sets.
@@ -189,7 +189,7 @@ inline std::string soft_terrain_demo() {
                     roots.end());
     });
     std::error_code ec;
-    std::filesystem::remove(std::filesystem::path(path).parent_path() / "terrain" / "terrain.tiles", ec);
+    std::filesystem::remove(std::filesystem::path(path).parent_path() / "terrain" / "terrain.terra", ec);
     return path;
 }
 
@@ -199,15 +199,24 @@ inline std::string soft_terrain_demo() {
  *        demo's 0 keeps the whole 16 x 16 grid live forever, which never exercises
  *        `stream_chunks_()`'s budget), and no CameraController -- the test drives the camera's
  *        own Transform directly instead of fighting an orbit rig that recomputes it every tick.
+ *
+ * Also drops the terrain's foliage scatter children (grass, pine trunks/canopies, bushes,
+ * boulders): density-gated scatter (`terrain: { min_weight: ... }`) rebuilds inline the moment a
+ * chunk streams in, billing its own cost to whatever this test measures. Dropping it isolates
+ * what this test is actually for -- `stream_chunks_()`/`refresh_water_()`'s OWN pacing -- from
+ * foliage's, regardless of how much of the terrain any splat layer happens to cover.
  */
 inline std::string heightmap_frame_test_demo() {
-    toy::world::HeightmapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
     return scene_variant("assets/scenes/terrain/heightmap_terrain_demo/scene.yaml", "heightmap_frame_budget",
                          [](fkyaml::node& doc) {
         if (fkyaml::node* t = scene_component(doc, "terrain", "Terrain")) {
             (*t)["view_distance"] = fkyaml::node(150.0);
         }
         for (auto& obj : doc["scene"]["root_objects"].as_seq()) {
+            if (obj.contains("name") && obj["name"].get_value<std::string>() == "terrain" && obj.contains("children")) {
+                obj["children"].as_seq().clear();
+            }
             if (!obj.contains("name") || obj["name"].get_value<std::string>() != "camera") continue;
             auto& comps = obj["components"].as_seq();
             comps.erase(std::remove_if(comps.begin(), comps.end(), [](const fkyaml::node& c) {

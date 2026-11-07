@@ -33,15 +33,6 @@ std::string get_s(const fkyaml::node& n, const char* key, const std::string& fal
     return n.contains(key) ? n.at(key).get_value<std::string>() : fallback;
 }
 
-/** @brief `rel` resolved for READING when it exists, else where a save would create it. */
-std::string data_path(const coopa::asset::AssetManager& assets, const std::string& rel, const std::string& base_dir) {
-    if (rel.empty()) return {};
-    const std::string found = assets.source().resolve(rel, base_dir);
-    if (std::filesystem::exists(found)) return found;
-    if (std::filesystem::path(rel).is_absolute()) return rel;
-    return (std::filesystem::path(base_dir) / rel).string();
-}
-
 } // namespace
 
 void parse_heightmap_terrain(const fkyaml::node& node, coopa::scene::SceneObject& obj,
@@ -51,43 +42,57 @@ void parse_heightmap_terrain(const fkyaml::node& node, coopa::scene::SceneObject
     // One component type, two modes: this parser authors the heightmap one.
     t->mode = TerrainMode::Heightmap;
 
-    HeightmapGeometry& g = t->geometry;
     if (node.contains("size")) {
         const fkyaml::node& s = node.at("size");
         if (s.is_mapping()) {
-            g.size.x = get_f(s, "x", g.size.x);
-            g.size.y = get_f(s, "y", g.size.y);
+            t->heightmap_size.x = get_f(s, "x", t->heightmap_size.x);
+            t->heightmap_size.y = get_f(s, "y", t->heightmap_size.y);
         } else {
-            g.size = glm::vec2(s.get_value<float>());
+            t->heightmap_size = glm::vec2(s.get_value<float>());
         }
     }
-    g.height = get_f(node, "height", g.height);
-    g.chunk_size = get_f(node, "chunk_size", g.chunk_size);
-    g.resolution = get_i(node, "resolution", g.resolution);
-    g.splat_resolution = get_i(node, "splat_resolution", g.splat_resolution);
-    g = g.sanitized();
+    t->heightmap_height = get_f(node, "height", t->heightmap_height);
+    t->heightmap_chunk_size = get_f(node, "chunk_size", t->heightmap_chunk_size);
+    t->heightmap_resolution = get_i(node, "resolution", t->heightmap_resolution);
+    t->heightmap_splat_resolution = get_i(node, "splat_resolution", t->heightmap_splat_resolution);
+    // Height samples per TILE edge: 1 is a terraced read (no height plane at all), the default 2
+    // is what every scene authored before this key matches. Raising it is the "internal grid"
+    // Coopa wanted a hand-sculpted smooth terrain to be able to have.
+    t->height_sub = std::max(1, get_i(node, "height_sub", t->height_sub));
 
-    if (node.contains("generate") && node.at("generate").is_mapping()) {
-        const fkyaml::node& gn = node.at("generate");
-        HeightmapGenerate& p = t->generate;
-        p.seed = static_cast<std::uint32_t>(get_i(gn, "seed", static_cast<int>(p.seed)));
-        p.octaves = get_i(gn, "octaves", p.octaves);
-        p.feature_size = get_f(gn, "feature_size", p.feature_size);
-        p.ridges = get_f(gn, "ridges", p.ridges);
-        p.base = get_f(gn, "base", p.base);
-        p.amplitude = get_f(gn, "amplitude", p.amplitude);
-        p.island = get_b(gn, "island", p.island);
+    if (node.contains("generate")) {
+        std::cerr << "[HeightmapTerrain] '" << obj.name() << "': `generate:` (a procedural start "
+                     "when the file is missing) is gone -- a fresh terrain now starts flat; use a "
+                     "MapGenerator for procedural content, or sculpt/import instead\n";
     }
 
-    // Default file names come from the object, so two terrains in one scene don't share.
-    const std::string stem = "terrain/" + obj.name();
-    t->heightmap = get_s(node, "heightmap", stem + "_height.png");
-    t->splat0 = get_s(node, "splat0", stem + "_splat0.png");
-    t->splat1 = get_s(node, "splat1", stem + "_splat1.png");
-    const std::string& base = ctx.base_dir();
-    t->files.height = data_path(assets, t->heightmap, base);
-    t->files.splat0 = data_path(assets, t->splat0, base);
-    t->files.splat1 = data_path(assets, t->splat1, base);
+    // The `.terra` file, as both modes now share it; default beside the scene, named for the
+    // object. Strictly beside the scene -- never through the asset search, whose by-name
+    // fallback would hand two scenes' same-named terrains one shared file (or, for a file that
+    // does not exist yet, some other root entirely) -- see register.cpp's Tiles-mode parser,
+    // which this mirrors exactly.
+    const std::string stem = "terrain/" + obj.name() + ".terra";
+    const std::string authored = get_s(node, "data", stem);
+    t->data_file = std::filesystem::path(authored).is_absolute()
+                       ? authored
+                       : (std::filesystem::path(ctx.base_dir()) / authored).lexically_normal().string();
+
+    // A one-shot PNG import (terra_image.h), as privileged as a mapcoopa bake and no more: it
+    // only ever fires on a field that has never been baked/imported/sculpted (sync_field()'s
+    // needs_bake() check) -- never through the asset search, for the same reason data_file above
+    // isn't, and strictly beside the scene even for a file that doesn't exist yet.
+    const auto resolve_import = [&](const char* key) -> std::string {
+        if (!node.contains("import")) return {};
+        const fkyaml::node& imp = node.at("import");
+        const std::string authored_path = get_s(imp, key);
+        if (authored_path.empty()) return {};
+        return std::filesystem::path(authored_path).is_absolute()
+                   ? authored_path
+                   : (std::filesystem::path(ctx.base_dir()) / authored_path).lexically_normal().string();
+    };
+    t->import_height_path = resolve_import("height");
+    t->import_layer0_path = resolve_import("layer0");
+    t->import_layer1_path = resolve_import("layer1");
 
     parse_terrain_layers(node, ctx.base_dir(), assets, *t);
 
@@ -143,9 +148,12 @@ void parse_heightmap_terrain(const fkyaml::node& node, coopa::scene::SceneObject
     params.shore_clearance = get_f(node, "shore_clearance", params.shore_clearance);
     params.shore_grade_depth = get_f(node, "shore_grade_depth", params.shore_grade_depth);
     params.shore_grade_band = get_f(node, "shore_grade_band", params.shore_grade_band);
-    params.water_skirt_tiles = get_i(node, "water_skirt_tiles", params.water_skirt_tiles);
+    params.water_skirt_tiles = get_f(node, "water_skirt_tiles", params.water_skirt_tiles);
+    // sync_field()'s geometry needs a height_step even though nothing here is terraced -- it
+    // sizes the `steps` cache's quantum, read only if this same data is ever meshed terraced.
+    params.height_step = get_f(node, "height_step", params.height_step);
 
-    t->data = HeightmapStore::instance().acquire(t->files, t->geometry, t->generate);
+    t->sync_field();
 }
 
 } // namespace world

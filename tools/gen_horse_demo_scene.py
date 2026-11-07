@@ -192,7 +192,11 @@ def main():
         "          sprint_multiplier: 2.0",
         "          jump_height: 1.2",
         "          use_root_motion: true",
-        "        - type: Animator",
+        # SkeletalAnimator, not Animator: the rider is a rig, and only the bone-addressed
+        # animator can extract a clip's pelvis travel. An `Animator` here resolves nothing
+        # (its root_motion names a bone by OBJECT path, and bones are not SceneObjects), so
+        # the rider would animate in place and only jump would move him.
+        "        - type: SkeletalAnimator",
         "          apply_root_motion: true",
         "        - type: CharacterAnimDriver",
         "          walk_speed: 0.2",

@@ -230,7 +230,10 @@ COOPA_TEST(unified_terrain_demo_keeps_its_three_flavours_interchangeable) {
     expect(num_at(th, "height") == 64.0, "unified: height matches the generator's height_scale");
     const fkyaml::node& sz = th.at("size");
     expect(num_at(sz, "x") == 1024.0 && num_at(sz, "y") == 1024.0, "unified: heightmap size is 1024 x 1024");
-    expect(num_at(th, "resolution") == 1025.0, "unified: resolution 1025 (1024 tiles + 1)");
+    // resolution is corner SAMPLES, not tiles -- it takes height_sub (default 2, a real plane
+    // rather than a terraced read) to recover the 1024-tile invariant: (2049 - 1) / 2 == 1024.
+    expect(num_at(th, "resolution") == 2049.0,
+           "unified: resolution 2049 (1024 tiles * height_sub 2 + 1)");
     expect(num_at(th, "splat_resolution") == 1024.0, "unified: splat_resolution matches world_tiles");
     expect(num_at(th, "chunk_size") == 32.0, "unified: heightmap chunk_tiles matches the tile chunk_size");
     expect(num_at(th, "view_distance") == 320.0, "unified: view_distance matches view_radius x chunk_size");

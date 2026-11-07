@@ -203,11 +203,6 @@ private:
     coopa::job::JobHandle bake_handle_;
     world::TerrainComponent* target_ = nullptr;
     coopa::job::JobEngine* jobs_ = nullptr;
-
-    /// poll_apply()'s budgeted water sweep (heightmap targets only): whether the heights/splats
-    /// half has already landed this bake, and how far through `bake_->water` the sweep has got.
-    bool water_apply_started_ = false;
-    int water_apply_cursor_ = 0;
 };
 
 /** @brief The generator a terrain is driven by: its `target`, or one on the terrain's own object. */

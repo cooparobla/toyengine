@@ -52,9 +52,9 @@
 #include <coopa/maps/water_field.h>
 
 #include <toyengine/world/planet.h>
+#include <toyengine/world/terra_data.h>
 #include <toyengine/world/terrain_params.h>
 #include <toyengine/world/terrain_water.h>
-#include <toyengine/world/tile_map_data.h>
 #include <toyengine/world/tile_types.h>
 
 namespace toy {
@@ -173,7 +173,7 @@ public:
      * The column view of sample_record() -- what the mesher needs.
      */
     TileColumn sample(std::int32_t tile_x, std::int32_t tile_y) const {
-        return sample_record(tile_x, tile_y).column();
+        return tile_column(sample_cell(tile_x, tile_y), static_cast<float>(params_.height_step));
     }
 
     /** @brief mapcoopa's water at a tile's centre -- the continuous answer the bake rounds. */
@@ -185,7 +185,7 @@ public:
     }
 
     /**
-     * @brief Samples everything a baked tile stores (tile_map_data.h's TileRecord), before the
+     * @brief Samples everything a baked tile stores (terra_data.h's TileCell), before the
      *        bake's rounding pass.
      *
      * Sampled at the tile's CENTRE, not its corner, so a column's material and height describe
@@ -193,12 +193,12 @@ public:
      * lower-left neighbour and shift the whole world half a tile.
      *
      * `steps` is the ground rounded to the nearest step. Under water (mapcoopa's WaterField says
-     * where, and how high) the record is flooded to the water's terrace; a frozen lake is ground
+     * where, and how high) the cell is flooded to the water's terrace; a frozen lake is ground
      * of ice at that terrace instead. bake() then reconciles each tile with its neighbours --
      * a lone tile cannot know that the water beside it needs a bank.
      */
-    TileRecord sample_record(std::int32_t tile_x, std::int32_t tile_y) const {
-        TileRecord r;
+    TileCell sample_cell(std::int32_t tile_x, std::int32_t tile_y) const {
+        TileCell r;
         if (!built_) return r;
 
         const double per_unit = tiles_per_cell_();
@@ -227,8 +227,8 @@ public:
         std::uint8_t biome = 0;
         std::uint8_t temperature = 128;
         std::uint8_t moisture = 128;
-        std::uint16_t region = TileRecord::k_no_id;
-        std::uint16_t country = TileRecord::k_no_id;
+        std::uint16_t region = TileCell::k_no_id;
+        std::uint16_t country = TileCell::k_no_id;
         bool coast = false;
         bool river = false;
 
@@ -252,10 +252,10 @@ public:
         const coopa::maps::MapPoint p{gx, gy};
 
         out.biome       = static_cast<std::uint8_t>(cell.biome);
-        out.temperature = TileRecord::quantise01(cell.temperature);
-        out.moisture    = TileRecord::quantise01(cell.moisture);
-        out.region      = cell.region >= 0 && cell.region < 0xFFFF ? static_cast<std::uint16_t>(cell.region) : TileRecord::k_no_id;
-        out.country     = cell.country >= 0 && cell.country < 0xFFFF ? static_cast<std::uint16_t>(cell.country) : TileRecord::k_no_id;
+        out.temperature = TileCell::quantise01(cell.temperature);
+        out.moisture    = TileCell::quantise01(cell.moisture);
+        out.region      = cell.region >= 0 && cell.region < 0xFFFF ? static_cast<std::uint16_t>(cell.region) : TileCell::k_no_id;
+        out.country     = cell.country >= 0 && cell.country < 0xFFFF ? static_cast<std::uint16_t>(cell.country) : TileCell::k_no_id;
         out.coast       = cell.coast;
         out.river       = graph_.channel_cut(cell, p, channels_) > 0.0;
 
@@ -290,16 +290,16 @@ private:
      *        on the globe for a planet). `across` and `along` are the tile grid's x and y in the
      *        map's frame, which a river's flow is measured against.
      */
-    TileRecord record_(const coopa::maps::MapCenter& cell, const coopa::maps::MapPoint& p, double per_unit,
-                       const glm::dvec3& across, const glm::dvec3& along) const {
-        TileRecord r;
+    TileCell record_(const coopa::maps::MapCenter& cell, const coopa::maps::MapPoint& p, double per_unit,
+                     const glm::dvec3& across, const glm::dvec3& along) const {
+        TileCell r;
         r.biome       = static_cast<std::uint8_t>(cell.biome);
-        r.temperature = TileRecord::quantise01(cell.temperature);
-        r.moisture    = TileRecord::quantise01(cell.moisture);
-        r.region      = cell.region >= 0 && cell.region < 0xFFFF ? static_cast<std::uint16_t>(cell.region) : TileRecord::k_no_id;
-        r.country     = cell.country >= 0 && cell.country < 0xFFFF ? static_cast<std::uint16_t>(cell.country) : TileRecord::k_no_id;
-        r.set(TileRecord::Coast, cell.coast);
-        r.set(TileRecord::River, graph_.channel_cut(cell, p, channels_) > 0.0);
+        r.temperature = TileCell::quantise01(cell.temperature);
+        r.moisture    = TileCell::quantise01(cell.moisture);
+        r.region      = cell.region >= 0 && cell.region < 0xFFFF ? static_cast<std::uint16_t>(cell.region) : TileCell::k_no_id;
+        r.country     = cell.country >= 0 && cell.country < 0xFFFF ? static_cast<std::uint16_t>(cell.country) : TileCell::k_no_id;
+        r.set(TileCell::Coast, cell.coast);
+        r.set(TileCell::River, graph_.channel_cut(cell, p, channels_) > 0.0);
 
         // A river narrower than a tile would land on a tile centre only here and there -- a dotted
         // line of pits. Asked at the grid's own resolution, mapcoopa widens it to a continuous run.
@@ -307,24 +307,28 @@ private:
         r.steps = static_cast<std::int16_t>(std::min<std::int32_t>(steps_from_elevation_(water.ground), 32767));
         TileKind top = tile_kind_for_biome(cell.biome);
         if (water.wet()) {
-            const std::int32_t level = std::max(1, steps_from_elevation_(water.surface));
+            const std::int32_t level_steps = std::max(1, steps_from_elevation_(water.surface));
             if (cell.biome == coopa::maps::Biome::Ice && water.kind != coopa::maps::WaterKind::River) {
                 // Frozen: solid ice at the water's terrace.
-                r.steps = static_cast<std::int16_t>(level);
+                r.steps = static_cast<std::int16_t>(level_steps);
                 r.set_top_kind(TileKind::Ice);
                 r.set_side_kind(TileKind::Ice);
                 return r;
             }
             const bool flowing = water.kind == coopa::maps::WaterKind::River;
-            if (flowing) r.set(TileRecord::River, true);
+            if (flowing) r.set(TileCell::River, true);
             // The bed rounds down: at least a step under the water, however shallow mapcoopa's.
-            r.steps = static_cast<std::int16_t>(std::min<std::int32_t>(r.steps, level - 1));
-            r.set_water(level, water.kind == coopa::maps::WaterKind::Sea, flowing);
+            r.steps = static_cast<std::int16_t>(std::min<std::int32_t>(r.steps, level_steps - 1));
+            r.water_kind = static_cast<std::uint8_t>(water.kind == coopa::maps::WaterKind::Sea
+                                                          ? WaterKind::Ocean
+                                                          : (flowing ? WaterKind::River : WaterKind::Lake));
+            r.water_level = static_cast<float>(level_steps) * params_.height_step;
             if (flowing) {
                 const glm::dvec3 f(water.flow.x, water.flow.y, water.flow.z);
                 r.flow = flow_octant(glm::dot(f, across), glm::dot(f, along));
+                r.flow_authored = 1;   // mapcoopa's own flow, not a fallback to derive over later
             }
-            top = bed_kind_for(water.kind, level - r.steps);
+            top = bed_kind_for(water.kind, level_steps - r.steps);
         }
         r.set_top_kind(top);
         r.set_side_kind(side_kind_for(top));
@@ -350,11 +354,14 @@ private:
         return best;
     }
 
-    /** @brief A planet's bake: every tile of the six faces from mapcoopa's globe. */
-    void bake_planet_(TileMapData& out) const {
+    /** @brief A planet's bake: every tile of the six faces from mapcoopa's globe. Tiles mode only. */
+    void bake_planet_(TerraData& out) const {
         const PlanetLayout layout = params_.layout();
         const std::int32_t n = layout.n;
-        out.resize(6 * n, n);
+        TerraGeometry g = out.geometry();
+        g.tiles_x = 6 * n;
+        g.tiles_y = n;
+        out.reset(g);
         const double map_radius = graph_.sphere_radius > 0.0 ? graph_.sphere_radius : 1.0;
         // Tiles per map grid unit along a face (a face spans a quarter of the globe's circumference).
         const double per_unit = static_cast<double>(n) / (map_radius * PlanetLayout::k_pi * 0.5);
@@ -374,32 +381,61 @@ private:
                 }
             }
         }
-        settle_water_rounding(out, IRect{0, 0, 6 * n, n}, &layout);   // tile_water.h
+        TerrainField field = borrow(out);
+        settle_water_rounding(field, IRect{0, 0, 6 * n, n}, &layout);   // terrain_water.h
     }
 
 public:
 
     /**
-     * @brief Fills `out` (resized to the whole world) with every tile, then reconciles the
-     *        rounding so water never stands above dry ground.
+     * @brief Fills `out` (reshaped to the whole world, keeping whatever height_sub/layer_sub/
+     *        tile_size/chunk_tiles it already carries) with every tile -- and, on a field with a
+     *        height plane, the continuous height too -- then reconciles the rounding so water
+     *        never stands above dry ground.
      *
      * mapcoopa's water already never stands over its own ground; rounding both to whole steps
-     * independently could still put a bank a step under the terrace beside it. So the rounding
-     * gives way on the GROUND's side, never the water's:
+     * independently could still put a bank a step under the terrace beside it. So on a field
+     * with no height plane the rounding gives way on the GROUND's side, never the water's:
      *
      * - a dry tile beside water rounds UP to at least that water's terrace -- the bank;
      * - a flooded tile's bed rounds DOWN to at least one step under its terrace -- the bed.
+     *
+     * A field WITH a height plane instead shapes the plane itself (grade_water_shore()): its
+     * shoreline is simply where the continuous ground crosses the water's level, so there is no
+     * terrace to round toward.
+     *
+     * Layer (splat) weights are NOT filled here -- they need the terrain's own layer-name mapping
+     * (`MapGeneratorComponent::layers`), which this sampler has no idea exists.
      */
-    void bake(TileMapData& out) const {
+    void bake(TerraData& out) const {
         if (params_.planet) {
             bake_planet_(out);
             return;
         }
         const std::int32_t n = tiles_per_axis();
-        out.resize(n, n);
+        TerraGeometry g = out.geometry();
+        g.tiles_x = g.tiles_y = n;
+        out.reset(g);
         for (std::int32_t y = 0; y < n; ++y)
-            for (std::int32_t x = 0; x < n; ++x) out.at(x, y) = sample_record(x, y);
-        settle_water_rounding(out, IRect{0, 0, n, n});   // tile_water.h
+            for (std::int32_t x = 0; x < n; ++x) out.at(x, y) = sample_cell(x, y);
+
+        TerrainField field = borrow(out);
+        if (out.has_heights()) {
+            const int sub = std::max(1, g.height_sub);
+            for (int j = 0; j < out.height_ny(); ++j) {
+                for (int i = 0; i < out.height_nx(); ++i) {
+                    const SurfaceSample s = sample_surface(static_cast<double>(i) / sub, static_cast<double>(j) / sub);
+                    out.height_at(i, j) = s.ground;
+                }
+            }
+            // Refreshes `steps` too (TerraData::mark_height_dirty()), so the terraced reading of
+            // this same field (a voxel/soft-tile style switched onto it) agrees with the smooth one.
+            out.mark_height_dirty(IRect{0, 0, out.height_nx(), out.height_ny()});
+            grade_water_shore(field, IRect{0, 0, n, n},
+                              ShoreGrade{params_.shore_clearance, params_.shore_grade_depth, params_.shore_grade_band});
+        } else {
+            settle_water_rounding(field, IRect{0, 0, n, n});   // terrain_water.h
+        }
     }
 
     /**

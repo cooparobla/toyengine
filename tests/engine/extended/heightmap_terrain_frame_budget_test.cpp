@@ -63,7 +63,9 @@ COOPA_TEST(a_flight_costs_no_more_per_frame_than_standing_still) {
 
     // heightmap_frame_test_demo() erased the camera's CameraController, so this directly drives
     // the camera the way the tile test drives its (CameraController-tracked) focus marker.
-    const float chunk = terrain->data != nullptr ? terrain->data->geometry().chunk_size : 64.0f;
+    const float chunk = !terrain->field.empty()
+                             ? static_cast<float>(terrain->field.geometry().chunk_tiles) * terrain->field.geometry().tile_size
+                             : 64.0f;
     const float z      = camera_transform->transform().position().z;
     const auto park = [&](float x, float y) {
         camera_transform->transform().set_position(glm::vec3(x, y, z));

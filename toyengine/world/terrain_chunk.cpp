@@ -32,11 +32,12 @@ void sample_chunk_columns(const TerrainSampler& sampler, const TerrainParams& pa
     }
 }
 
-void sample_chunk_columns(const TileMapData& tiles, const TerrainParams& params, const ChunkCoord& coord,
+void sample_chunk_columns(const TerrainField& field, const TerrainParams& params, const ChunkCoord& coord,
                           ColumnPad& out) {
     out.resize(params.chunk_size);
     const std::int32_t base_x = coord.x * params.chunk_size;
     const std::int32_t base_y = coord.y * params.chunk_size;
+    const float hstep = params.height_step;
     if (params.planet) {
         // The skirt past a face's edge is the neighbouring face's tiles, turned (planet.h).
         const PlanetLayout layout = params.layout();
@@ -45,14 +46,14 @@ void sample_chunk_columns(const TileMapData& tiles, const TerrainParams& params,
         for (std::int32_t ly = -1; ly <= params.chunk_size; ++ly) {
             for (std::int32_t lx = -1; lx <= params.chunk_size; ++lx) {
                 const glm::ivec2 t = layout.wrap(face, face_x + lx, base_y + ly);
-                out.at(lx, ly) = tiles.get(t.x, t.y).column();
+                out.at(lx, ly) = tile_column(*field.record_at(t), hstep);
             }
         }
         return;
     }
     for (std::int32_t ly = -1; ly <= params.chunk_size; ++ly) {
         for (std::int32_t lx = -1; lx <= params.chunk_size; ++lx) {
-            out.at(lx, ly) = tiles.get(base_x + lx, base_y + ly).column();
+            out.at(lx, ly) = tile_column(*field.record_at(glm::ivec2(base_x + lx, base_y + ly)), hstep);
         }
     }
 }

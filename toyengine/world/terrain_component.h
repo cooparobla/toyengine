@@ -5,7 +5,7 @@
  *        runtime state the streaming system drives.
  *
  * One of these on a SceneObject turns that object into the root of a streamed tile world. The
- * world is STORED (`tiles`, a TileMapData in a `.tiles` file): mapcoopa bakes it once from the
+ * world is STORED (`field`, a TerraData in a `.terra` file): mapcoopa bakes it once from the
  * `generator:` settings, and from then on it is edited -- in the editor's Tile Mode, or by
  * gameplay -- and the generator only matters on a Regenerate. It
  * carries no per-frame logic of its own -- toy::world::TerrainSystem owns that (see
@@ -17,7 +17,7 @@
  * @code
  * - type: TileTerrain
  *   tile_set: objects/terrain/tileset_round    # THE template: tileset_voxel for blocks
- *   tiles: terrain/terrain.tiles               # the stored tiles (default terrain/<object>.tiles)
+ *   tiles: terrain/terrain.terra               # the stored data (default terrain/<object>.terra)
  *   kind_tile_sets: { stone: objects/terrain/tileset_rock }   # optional, per surface kind
  *   generator: { seed: 7, sea_level: 0.3 }    # mapcoopa keys; the rest is mapcoopa's standard map
  *   world_tiles: 512                          # the map rasterised to 512 x 512 tiles (0: cells x tiles_per_grid_unit)
@@ -63,10 +63,8 @@
 #include <coopa/maps/map_config.h>   // MapConfig, for the authored `generator:` block above
 
 #include <toyengine/world/terrain_chunk.h>
-#include <toyengine/world/heightmap_store.h>
 #include <toyengine/world/terrain_field.h>
-#include <toyengine/world/tile_map_data.h>
-#include <toyengine/world/tile_water.h>
+#include <toyengine/world/terrain_water.h>
 #include <toyengine/water/water_body.h>
 
 namespace toy {
@@ -77,6 +75,10 @@ struct HeightmapTerrainRuntime;
 /// The per-tile view of an applied map (toyengine/mapgen/terrain_sampler.h). Only named here by
 /// shared_ptr, so a terrain's header stays clear of mapcoopa.
 class TerrainSampler;
+
+/// Only named here by raw pointer (see TerrainComponent::set_streaming_system()), so a terrain's
+/// header stays clear of the streaming policy it is driven by.
+class TerrainSystem;
 
 /**
  * @enum ChunkState
@@ -478,15 +480,39 @@ public:
     // Heightmap mode's authored half (`mode: heightmap`). Inert in Tiles mode.
     // ------------------------------------------------------------------
 
-    /** @brief Size, height, chunk size and sample resolution, in metres and texels. */
-    HeightmapGeometry geometry;
+    /** @brief Metres covered, x and y. */
+    glm::vec2 heightmap_size{64.0f};
+    /** @brief Metres at a normalised height of 1 -- the vertical scale of the height plane. */
+    float heightmap_height = 64.0f;
+    /** @brief Height samples per side (one more than the tile count at `height_sub` 1). */
+    int heightmap_resolution = 129;
+    /** @brief Layer (splat) texels per side. */
+    int heightmap_splat_resolution = 512;
+    /** @brief Metres per chunk edge -- the streaming, drawing and collision unit. */
+    float heightmap_chunk_size = 32.0f;
+    /**
+     * @brief Height samples per TILE edge; 1 means the tile's own `steps` IS the ground (a
+     *        terraced read, no height plane at all) -- Heightmap mode defaults to 2 so it always
+     *        gets one, matching every scene authored before this field existed. Raising it is
+     *        what "sub-resolution determines detail" means for a hand-sculpted smooth world:
+     *        `heightmap_resolution: 129` with `height_sub: 8` is sixteen one-metre-apart tiles,
+     *        eight samples each.
+     */
+    int height_sub = 2;
 
-    /** @brief The procedural start used when the heightmap file is missing. */
-    HeightmapGenerate generate;
-
-    std::string heightmap;   ///< The height PNG, as written in the scene (relative to it).
-    std::string splat0;      ///< Layers 0-3 in RGBA.
-    std::string splat1;      ///< Layers 4-7.
+    /**
+     * @brief A heightmap/splat PNG to import on first bake (`import: { height: ..., layer0:
+     *        ..., layer1: ... }`), one-shot like a mapcoopa bake -- once the import lands and
+     *        the field is saved, a later load reads the `.terra` file and never imports again.
+     *        Empty means no import; `sync_field()` is what actually performs it.
+     *
+     * Any source PNG works regardless of its own resolution (terra_image.h resamples), which is
+     * the point: an exported DEM, a World Machine heightmap, or a hand-painted splat set can all
+     * be dropped in without matching this terrain's grid exactly.
+     */
+    std::string import_height_path;
+    std::string import_layer0_path; /**< @brief Layers 0-3's splat PNG (RGBA8, one channel each). */
+    std::string import_layer1_path; /**< @brief Layers 4-7's splat PNG. */
 
     /**
      * @brief Screen-space tessellation of the shared chunk patch: detail near the camera.
@@ -513,19 +539,11 @@ public:
     bool puddles = true;            ///< Rain gathers in hollows.
     bool cast_shadows = true;
 
-    /** @brief Where the height and splat PNGs are read from and saved to; the parser resolves it. */
-    HeightmapFiles files;
     std::vector<std::string> layer_albedo_paths; ///< Resolved per layer (empty = none).
     std::vector<std::string> layer_normal_paths;
 
-    /** @brief The live height plane (shared, see heightmap_store.h). Null in Tiles mode. */
-    std::shared_ptr<HeightmapData> data;
-
     /** @brief World position of the grid's (0, 0) corner at height 0 (the owner's position). */
     glm::vec3 origin() const;
-
-    /** @brief World-space query handle over the height plane; falsy in Tiles mode. */
-    HeightmapView view() const { return HeightmapView{data.get(), origin()}; }
 
     /** @brief Runtime state HeightmapTerrainSystem attaches; opaque here. */
     std::unique_ptr<HeightmapTerrainRuntime> runtime;
@@ -554,32 +572,29 @@ public:
     // ------------------------------------------------------------------
 
     // ------------------------------------------------------------------
-    // The stored tiles (tile_map_data.h).
+    // The stored data (terra_data.h, terra_store.h).
     // ------------------------------------------------------------------
 
-    /** @brief The `.tiles` file, as authored (`tiles:`); default `terrain/<object>.tiles` beside the scene. */
-    std::string tiles_file;
-
     /**
-     * @brief The terrain's tiles: the terrain itself. Shared through TileMapStore, so re-parsing
-     *        the component keeps the live (possibly unsaved) tiles. Set by the parser.
-     *        Edit it -- write records, then mark_dirty() -- and the touched chunks re-mesh.
+     * @brief The `.terra` file, as authored (`tiles:` in Tiles mode, `data:` in Heightmap mode);
+     *        default `terrain/<object>.terra` beside the scene.
      */
-    std::shared_ptr<TileMapData> tiles;
+    std::string data_file;
 
     /**
-     * @brief The tiles as the unified field (terrain_field.h): shape, layers and water in the
-     *        vocabulary both terrain modes share.
-     *
-     * A view over `tiles`, not a second copy -- the records are the same memory. sync_field()
-     * brings it in step with `params` and `tiles`; TerrainSystem and the scene parser call it.
+     * @brief The terrain itself: shape, layers, water, biome and climate, in the one vocabulary
+     *        every meshing style reads. Shared through TerraStore, so re-parsing the component
+     *        keeps the live (possibly unsaved) data. Attached by the parser and by sync_field();
+     *        edit through it -- write cells, then mark_tiles_dirty() -- and the touched chunks
+     *        re-mesh.
      */
     TerrainField field;
 
     /**
      * @brief Brings `field` in step with this terrain's authored shape, in whichever mode it is.
      *
-     * Idempotent, and cheap when nothing moved.
+     * Idempotent, and cheap when nothing moved: it touches TerraStore only when the computed
+     * geometry has actually drifted from what `field` already carries.
      */
     void sync_field();
 
@@ -602,6 +617,12 @@ public:
     void set_jobs(coopa::job::JobEngine* jobs) { jobs_ = jobs; }
 
     /**
+     * @brief Remembers the TerrainSystem ticking this terrain, so the destructor can tell it to
+     *        forget this pointer before it dangles (see TerrainSystem::forget_terrain()).
+     */
+    void set_streaming_system(TerrainSystem* system) { streaming_system_ = system; }
+
+    /**
      * @brief Advances a bake: builds the sampler from a finished map, runs the bake job, and
      *        hands the result to the tiles.
      *
@@ -621,8 +642,8 @@ public:
     /** @brief Set by the map generator system while it works on this terrain. */
     bool baking_ = false;
 
-    /** @brief True once there are tiles and the tile sets are baked -- i.e. chunks can build. */
-    bool is_ready() const { return tiles && !tiles->empty() && library_.is_baked(); }
+    /** @brief True once there is data and the tile sets are baked -- i.e. chunks can build. */
+    bool is_ready() const { return !field.empty() && library_.is_baked(); }
 
     /** @brief The map sampler from the last bake (built once a bake has run this session). */
     /**
@@ -638,8 +659,8 @@ public:
 
     /** @brief The tile under a world position, or false off the terrain. */
     bool tile_at(const glm::vec3& world, glm::ivec2& tile) const;
-    /** @brief The stored record under a world position (biome, temperature...), or null. */
-    const TileRecord* record_at(const glm::vec3& world) const;
+    /** @brief The stored cell under a world position (biome, temperature...), or null. */
+    const TileCell* record_at(const glm::vec3& world) const;
     /** @brief World height of the ground under a world position (the bed, under water). */
     float height_at(const glm::vec3& world) const;
 
@@ -783,10 +804,6 @@ public:
     void release_retired_collision(std::uint64_t frame, std::uint64_t keep_frames);
 
 private:
-    /// sync_field()'s Heightmap half: the field over `data` plus a record plane for the water,
-    /// biome and climate a smooth terrain now also carries.
-    void sync_heightmap_field_();
-
     /// Bakes every loaded piece and maps kinds onto styles. A piece that failed to load is
     /// reported once and left to TileMeshLibrary::finish_styles()'s fallbacks.
     void bake_styles_();
@@ -798,6 +815,7 @@ private:
 
     coopa::debug::Logger logger_; /**< Named "terrain": the tile sets and the chunk pipeline log through it. */
     coopa::job::JobEngine* jobs_ = nullptr; /**< Non-owning; only for draining jobs in the destructor. */
+    TerrainSystem* streaming_system_ = nullptr; /**< Non-owning; only to forget this pointer in the destructor. */
     bool warned_no_tile_set_ = false; /**< Latches the "tile set failed" message to one line. */
 
     TileMeshLibrary library_;

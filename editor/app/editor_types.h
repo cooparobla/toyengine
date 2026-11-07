@@ -108,16 +108,25 @@ struct BoneClipDocument {
 };
 
 /** @brief The open rig asset file being authored in RigEdit mode -- ClipDocument's sibling for
- *         REST data rather than a clip. `path` is empty when RigEdit mode is authoring a BRAND
- *         NEW rig that has never been saved; the first edit picks a path (see
- *         EditorApp::rig_edit_new_rig_()'s doc). */
+ *         REST data rather than a clip. `path` is empty only for the brief moment between
+ *         EditorApp::create_armature() seeding the model and its first save picking the path. */
 struct RigDocument {
     fs::path path;
     RigModel model;
     UndoStack<RigModel> undo{200};
     uint64_t revision = 1;
-    bool dirty = false;        ///< Written once a frame (rig_edit_frame_()), not per edit.
+    bool dirty = false;        ///< Written on modal confirm / mode exit (rig_edit_frame_()).
     bool open() const { return !model.bones.empty() || !path.empty(); }
+
+    /**
+     * @brief Ctrl+Z / Ctrl+Shift+Z on the rest skeleton.
+     *
+     * `dirty` so the restored model reaches the file the same way an edit does, and the caller
+     * re-validates its selection afterwards -- an undone add/delete changes the bone COUNT, so
+     * indices held outside this struct can point past the end.
+     */
+    void do_undo() { if (const RigModel* m = undo.undo()) { model = *m; ++revision; dirty = true; } }
+    void do_redo() { if (const RigModel* m = undo.redo()) { model = *m; ++revision; dirty = true; } }
 };
 
 struct EditVisibility {

@@ -27,7 +27,6 @@ scene:
           collision: true
           deep_snow: true
           height: 160
-          heightmap: terrain/height.png
           layer_texture_size: 512
           layers:
             - name: grass
@@ -68,11 +67,13 @@ scene:
               normal: textures/terrain/layers/forest_floor_normal.png
               roughness: 0.95
               tiling: 5
+          import:                               # one-shot: only fires while the terrain has no saved .terra yet
+            height: terrain/height.png
+            layer0: terrain/splat0.png
+            layer1: terrain/splat1.png
           puddles: true
           resolution: 1025
           size: { x: 1024, y: 1024 }
-          splat0: terrain/splat0.png
-          splat1: terrain/splat1.png
           splat_resolution: 1024
           tessellation: { edge_pixels: 8 }
           view_distance: 0
@@ -207,7 +208,11 @@ scene:
           sprint_multiplier: 3.0
           step_height: 0.35
           use_root_motion: true
-        - { type: Animator, apply_root_motion: true }
+        # The prefab's SkeletalAnimator is what plays the clips, so it is what must extract
+        # their pelvis travel for CharacterController's use_root_motion above. (An `Animator`
+        # here would be inert: its root_motion addresses a bone by OBJECT path, and bones are
+        # not SceneObjects -- the walk would animate in place and only jump would move.)
+        - { type: SkeletalAnimator, apply_root_motion: true }
         - { type: CharacterAnimDriver, crossfade: 0.2, run_speed: 4.0, walk_speed: 0.2 }
         - { type: FootIK, ray_down: 0.4, ray_up: 0.45 }
         - { type: SnowDeformer, radius: 0.35 }

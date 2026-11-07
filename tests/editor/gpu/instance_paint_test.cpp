@@ -14,7 +14,7 @@
 #include <toyengine/instance/instance_painter.h>
 #include <toyengine/instance/instance_painter_system.h>
 #include <toyengine/instance/instance_set.h>
-#include <toyengine/world/heightmap_store.h>
+#include <toyengine/world/terra_store.h>
 #include <toyengine/world/heightmap_terrain.h>
 
 #include "editor/instance/instance_select.h"
@@ -51,9 +51,9 @@ Bench make_bench(EditorSession& session) {
     b.terrain = app.create_with_component("HeightmapTerrain", "Ground");
     tick(engine, 6);
     auto* t = engine.scene().find_first_component<toy::world::HeightmapTerrain>();
-    if (t == nullptr || t->data == nullptr) return b;
-    b.size = t->data->geometry().size;
-    b.height = t->data->sample_height(b.size * 0.5f);
+    if (t == nullptr || t->field.empty()) return b;
+    b.size = t->field.geometry().size();
+    b.height = t->field.ground_at(b.size * 0.5f);
 
     b.painter = app.create_with_component("InstancePainter", "Scatter");
     tick(engine, 6);
@@ -97,7 +97,7 @@ std::vector<InstanceRecord> snapshot(const std::shared_ptr<InstanceSetData>& d) 
 
 COOPA_TEST(instance_paint_mode_paints_erases_undoes_and_saves) {
     using coopa::input::MouseButton;
-    toy::world::HeightmapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
     InstanceSetStore::instance().clear();
     EditorSession session({.settle_frames = toy::core::Engine::kFillDebounceFrames + 4});
     auto& engine = session.engine;
@@ -200,12 +200,12 @@ COOPA_TEST(instance_paint_mode_paints_erases_undoes_and_saves) {
     tick(engine, 2);
     expect(!app.instance_paint_mode(), "Instance Paint Mode exited");
     InstanceSetStore::instance().clear();
-    toy::world::HeightmapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
 }
 
 COOPA_TEST(place_drops_one_and_snap_puts_it_on_the_grid) {
     using coopa::input::MouseButton;
-    toy::world::HeightmapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
     InstanceSetStore::instance().clear();
     EditorSession session({.settle_frames = toy::core::Engine::kFillDebounceFrames + 4});
     auto& engine = session.engine;
@@ -269,7 +269,7 @@ COOPA_TEST(place_drops_one_and_snap_puts_it_on_the_grid) {
 
     app.set_instance_paint_mode(false);
     InstanceSetStore::instance().clear();
-    toy::world::HeightmapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
 }
 
 /**
@@ -282,7 +282,7 @@ COOPA_TEST(place_drops_one_and_snap_puts_it_on_the_grid) {
  * asks -- which segfaulted on the first frame of dragging any prototype field.
  */
 COOPA_TEST(editing_a_prototype_while_the_scene_runs_does_not_crash) {
-    toy::world::HeightmapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
     InstanceSetStore::instance().clear();
     EditorSession session({.settle_frames = toy::core::Engine::kFillDebounceFrames + 4});
     auto& engine = session.engine;
@@ -372,7 +372,7 @@ COOPA_TEST(editing_a_prototype_while_the_scene_runs_does_not_crash) {
 
     app.set_instance_paint_mode(false);
     InstanceSetStore::instance().clear();
-    toy::world::HeightmapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
 }
 
 /**
@@ -380,7 +380,7 @@ COOPA_TEST(editing_a_prototype_while_the_scene_runs_does_not_crash) {
  */
 COOPA_TEST(select_picks_instances_by_click_and_by_box_then_edits_them) {
     using coopa::input::MouseButton;
-    toy::world::HeightmapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
     InstanceSetStore::instance().clear();
     EditorSession session({.settle_frames = toy::core::Engine::kFillDebounceFrames + 4});
     auto& engine = session.engine;
@@ -488,7 +488,7 @@ COOPA_TEST(select_picks_instances_by_click_and_by_box_then_edits_them) {
 
     app.set_instance_paint_mode(false);
     InstanceSetStore::instance().clear();
-    toy::world::HeightmapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
 }
 
 } // namespace toy::editor::testing

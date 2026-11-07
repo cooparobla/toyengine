@@ -21,7 +21,7 @@
 #include <toyengine/render/toy_render_pipeline.h>
 #include <toyengine/water/water_body.h>
 #include <toyengine/weather/weather_system.h>
-#include <toyengine/world/heightmap_store.h>
+#include <toyengine/world/terra_store.h>
 #include <toyengine/world/heightmap_terrain.h>
 #include <toyengine/world/heightmap_terrain_system.h>
 
@@ -49,12 +49,12 @@ toy::world::HeightmapTerrain* terrain_of(toy::core::Engine& engine) {
 COOPA_TEST(demo_renders_the_terrain) {
     ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
     ScopedEnv no_input("NO_INPUT", "1");
-    toy::world::HeightmapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
     toy::core::Engine engine(make_test_config(demo(), 320, 180, 320, 180));
     tick_frames(engine, 90);
 
     toy::world::HeightmapTerrain* t = terrain_of(engine);
-    require(t != nullptr && t->data != nullptr && t->runtime != nullptr, "heightmap terrain: loaded and running");
+    require(t != nullptr && !t->field.empty() && t->runtime != nullptr, "heightmap terrain: loaded and running");
     expect(t->runtime->chunks.size() == 256, "heightmap terrain: 16 x 16 chunks of 64 m");
     expect(t->runtime->slot == 0, "heightmap terrain: slot 0 of the terrain table");
     const auto& ubo = engine.pipeline().surface_world_ubo();
@@ -67,7 +67,7 @@ COOPA_TEST(demo_renders_the_terrain) {
             const coopa::scene::SceneObject* c = t->runtime->chunks[static_cast<std::size_t>(cy) * 16 + cx];
             if (c == nullptr) continue; // not yet streamed in at this frame count -- nothing to check
             const glm::mat4 w = c->get_transform()->transform().get_world_matrix();
-            const glm::vec2 mm = t->data->chunk_minmax(cx, cy);
+            const glm::vec2 mm = t->field.chunk_height_range(cx, cy);
             const float lo = w[3].z, hi = w[3].z + w[2].z;
             boxes_ok = lo <= mm.x + t->origin().z && hi >= mm.y + t->origin().z;
         }
@@ -86,7 +86,7 @@ COOPA_TEST(demo_renders_the_terrain) {
 COOPA_TEST(heightfield_collider_matches_the_grid) {
     ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
     ScopedEnv no_input("NO_INPUT", "1");
-    toy::world::HeightmapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
     toy::core::Engine engine(make_test_config(demo(), 160, 90, 160, 90));
     tick_frames(engine, 30);
     toy::world::HeightmapTerrain* t = terrain_of(engine);
@@ -101,7 +101,7 @@ COOPA_TEST(heightfield_collider_matches_the_grid) {
         const bool found = physics->raycast(ray, hit);
         expect(found, "heightmap terrain: the ray hits the terrain");
         if (found) {
-            expect_near(hit.point.z, t->view().height(glm::vec3(xy, 0.0f)), 0.05f,
+            expect_near(hit.point.z, t->field_view().height(glm::vec3(xy, 0.0f)), 0.05f,
                         "heightmap terrain: ...at the grid's height");
         }
     }
@@ -111,20 +111,23 @@ COOPA_TEST(heightfield_collider_matches_the_grid) {
 COOPA_TEST(grid_edits_reach_the_image) {
     ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
     ScopedEnv no_input("NO_INPUT", "1");
-    toy::world::HeightmapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
     toy::core::Engine engine(make_test_config(demo(), 320, 180, 320, 180));
     tick_frames(engine, 90);
     toy::world::HeightmapTerrain* t = terrain_of(engine);
     require(t != nullptr, "heightmap terrain: loaded");
     const Frame before = engine.capture_image();
     // A 30 m mound around world (60, -20), in front of the player.
-    toy::world::HeightmapData& d = *t->data;
+    toy::world::TerraData& d = *t->field.data();
+    const int sub = d.geometry().height_sub;
     const glm::vec2 c = glm::vec2(60.0f, -20.0f) - glm::vec2(t->origin());
-    toy::world::IRect r{static_cast<int>(c.x) - 40, static_cast<int>(c.y) - 40, static_cast<int>(c.x) + 40, static_cast<int>(c.y) + 40};
+    toy::world::IRect r{(static_cast<int>(c.x) - 40) * sub, (static_cast<int>(c.y) - 40) * sub,
+                        (static_cast<int>(c.x) + 40) * sub, (static_cast<int>(c.y) + 40) * sub};
     for (int j = r.y0; j < r.y1; ++j) {
         for (int i = r.x0; i < r.x1; ++i) {
-            const float dd = glm::length(glm::vec2(static_cast<float>(i), static_cast<float>(j)) - c) / 40.0f;
-            if (dd < 1.0f) d.at(i, j) += 30.0f * (1.0f - dd * dd);
+            const glm::vec2 p_m(static_cast<float>(i) / static_cast<float>(sub), static_cast<float>(j) / static_cast<float>(sub));
+            const float dd = glm::length(p_m - c) / 40.0f;
+            if (dd < 1.0f) d.height_at(i, j) += 30.0f * (1.0f - dd * dd);
         }
     }
     d.mark_height_dirty(r);
@@ -132,7 +135,7 @@ COOPA_TEST(grid_edits_reach_the_image) {
     const Frame after = engine.capture_image();
     expect(count_diff(before, after, 12) > 2000, "heightmap terrain: the mound shows (" +
            std::to_string(count_diff(before, after, 12)) + " pixels changed)");
-    toy::world::HeightmapStore::instance().clear();   // the edit must not leak into other tests
+    toy::world::TerraStore::instance().clear();   // the edit must not leak into other tests
 }
 
 /** @brief Deep snow whitens the ground; a storm darkens it (wet). */
@@ -141,7 +144,7 @@ COOPA_TEST(snow_and_rain_change_the_surface) {
     ScopedEnv no_input("NO_INPUT", "1");
     glm::vec3 dry, snowy, wet;
     {
-        toy::world::HeightmapStore::instance().clear();
+        toy::world::TerraStore::instance().clear();
         toy::core::Engine engine(make_test_config(demo(), 320, 180, 320, 180));
         tick_frames(engine, 90);
         dry = band_mean(engine.capture_image(), 0.75f, 0.95f, 0.2f, 0.8f);
@@ -150,7 +153,7 @@ COOPA_TEST(snow_and_rain_change_the_surface) {
         snowy = band_mean(engine.capture_image(), 0.75f, 0.95f, 0.2f, 0.8f);
     }
     {
-        toy::world::HeightmapStore::instance().clear();
+        toy::world::TerraStore::instance().clear();
         const std::string storm = scene_variant(k_demo, "heightmap_terrain_storm", [](fkyaml::node& doc) {
             doc["scene"]["settings"]["weather"]["condition"] = std::string("storm");
         });
@@ -171,7 +174,7 @@ COOPA_TEST(snow_and_rain_change_the_surface) {
 COOPA_TEST(view_distance_static_instances_and_shadow_control) {
     ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
     ScopedEnv no_input("NO_INPUT", "1");
-    toy::world::HeightmapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
     {
         toy::core::Engine engine(make_test_config(demo(), 320, 180, 320, 180));
         tick_frames(engine, 120);
@@ -184,7 +187,7 @@ COOPA_TEST(view_distance_static_instances_and_shadow_control) {
         expect(stats.streamed_instances < 2000, "heightmap terrain: ...so the per-frame stream stays small (" +
                                                     std::to_string(stats.streamed_instances) + ")");
     }
-    toy::world::HeightmapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
     {
         const std::string capped = scene_variant(k_demo, "heightmap_terrain_capped", [](fkyaml::node& doc) {
             fkyaml::node* t = scene_component(doc, "terrain", "Terrain");
@@ -209,7 +212,7 @@ COOPA_TEST(view_distance_static_instances_and_shadow_control) {
         }
         expect(!any_caster, "heightmap terrain: cast_shadows: false reaches every chunk");
     }
-    toy::world::HeightmapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
 }
 
 namespace {
@@ -235,7 +238,7 @@ std::string wind_variant(const char* tag, float wind) {
 /** @brief One capture of a wind variant after 120 frames, the sun held still and the
  *         frame-varying stylization off, so runs differ only by what the wind moved. */
 Frame wind_capture(const std::string& scene) {
-    toy::world::HeightmapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
     toy::core::Engine engine(make_test_config(scene, 320, 180, 320, 180));
     tick_frames(engine, 8);
     if (auto* w = engine.weather()) w->set_clock_paused(true);
@@ -245,7 +248,7 @@ Frame wind_capture(const std::string& scene) {
     rc.outline_enabled = false;
     tick_frames(engine, 112);
     Frame f = engine.capture_image();
-    toy::world::HeightmapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
     return f;
 }
 
@@ -275,7 +278,7 @@ COOPA_TEST(foliage_sways_in_the_weather_wind) {
     const std::string calm_scene = wind_variant("heightmap_terrain_calm", 0.0f);
     const std::string windy_scene = wind_variant("heightmap_terrain_windy", 12.0f);
     {
-        toy::world::HeightmapStore::instance().clear();
+        toy::world::TerraStore::instance().clear();
         toy::core::Engine engine(make_test_config(windy_scene, 160, 90, 160, 90));
         tick_frames(engine, 30);
         expect(glm::length(glm::vec2(engine.pipeline().surface_world_ubo().wind)) > 8.0f,
@@ -311,7 +314,7 @@ COOPA_TEST(foliage_sways_in_the_weather_wind) {
 COOPA_TEST(deactivating_a_heightmap_terrain_drops_its_chunks_and_collider) {
     ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
     ScopedEnv no_input("NO_INPUT", "1");
-    toy::world::HeightmapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
     toy::core::Engine engine(make_test_config(demo(), 160, 90, 160, 90));
     tick_frames(engine, 30);
 
@@ -358,7 +361,7 @@ COOPA_TEST(deactivating_a_heightmap_terrain_drops_its_chunks_and_collider) {
 COOPA_TEST(unified_demo_heightmap_water_lands_in_world_space) {
     ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
     ScopedEnv no_input("NO_INPUT", "1");
-    toy::world::HeightmapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
     const std::string unified = std::string(ROOT_DIR) + "/assets/scenes/terrain/unified_terrain_demo/scene.yaml";
     toy::core::Engine engine(make_test_config(unified, 160, 90, 160, 90));
 
@@ -387,8 +390,8 @@ COOPA_TEST(unified_demo_heightmap_water_lands_in_world_space) {
     // Water lands a frame after its chunk: refresh_water_() runs after stream_chunks_() in tick_.
     tick_frames(engine, 10);
 
-    const float chunk_size = t->data->geometry().chunk_size;
-    const float height = t->data->geometry().height;
+    const float chunk_size = static_cast<float>(t->field.geometry().chunk_tiles) * t->field.geometry().tile_size;
+    const float height = t->field.geometry().height;
     const glm::vec3 origin = t->origin();
 
     int water_bodies = 0;

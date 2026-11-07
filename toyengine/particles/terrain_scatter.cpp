@@ -38,12 +38,12 @@ TerrainScatterCache::Chunk TerrainScatterCache::build_chunk(const world::Terrain
     out.bounds_max = glm::vec3(std::numeric_limits<float>::lowest());
     const world::TerrainField& field = *terrain.field;
     out.revision = field.chunk_revision(cx, cy);
-    const world::TerrainFieldGeometry& g = field.geometry();
-    // Chunk size in metres, whichever mode: the field counts chunks in TILES.
+    const world::TerraGeometry& g = field.geometry();
+    // Chunk size in metres, whichever meshing style: the field counts chunks in TILES.
     const float cs = static_cast<float>(g.chunk_tiles) * g.tile_extent().x;
     const float spacing = 1.0f / std::sqrt(std::max(p.shape.density, 1e-4f));
     const glm::vec2 lo(static_cast<float>(cx) * cs, static_cast<float>(cy) * cs);
-    const glm::vec2 hi = glm::min(lo + glm::vec2(cs), g.size);
+    const glm::vec2 hi = glm::min(lo + glm::vec2(cs), g.size());
     const int nx = std::max(1, static_cast<int>(std::ceil((hi.x - lo.x) / spacing)));
     const int ny = std::max(1, static_cast<int>(std::ceil((hi.y - lo.y) / spacing)));
     const float cos_min = std::cos(glm::radians(std::clamp(p.shape.slope_deg.y, 0.0f, 90.0f)));

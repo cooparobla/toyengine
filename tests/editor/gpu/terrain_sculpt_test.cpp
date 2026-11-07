@@ -3,15 +3,15 @@
  * @brief Terrain Mode through real input: a HeightmapTerrain is added, Terrain Mode entered, a
  *        Raise stroke dragged across it lifts the ground as one undo step (in the scene's
  *        timeline), undo restores the exact grid, a Paint stroke paints its layer, and saving the
- *        scene writes the terrain's heightmap and splat PNGs.
+ *        scene writes the terrain's .terra file.
  */
 
 #include <coopa/testing/test.h>
 
 #include <filesystem>
 
-#include <toyengine/world/heightmap_store.h>
 #include <toyengine/world/heightmap_terrain.h>
+#include <toyengine/world/terra_store.h>
 
 #include "editor/support/editor_session.h"
 
@@ -21,7 +21,7 @@ namespace toy::editor::testing {
 
 COOPA_TEST(terrain_mode_sculpts_paints_undoes_and_saves) {
     using coopa::input::MouseButton;
-    toy::world::HeightmapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
     EditorSession session({.settle_frames = toy::core::Engine::kFillDebounceFrames + 4});
     auto& engine = session.engine;
     auto& app = session.app;
@@ -34,13 +34,13 @@ COOPA_TEST(terrain_mode_sculpts_paints_undoes_and_saves) {
     app.frame_selected();
     tick(engine, 30);
     auto* t = engine.scene().find_first_component<toy::world::HeightmapTerrain>();
-    expect(t != nullptr && t->data != nullptr, "the terrain is live in the editor's scene");
-    if (t == nullptr || t->data == nullptr) return;
+    expect(t != nullptr && !t->field.empty(), "the terrain is live in the editor's scene");
+    if (t == nullptr || t->field.empty()) return;
     // The data outlives the component: the editor rebuilds the object (and its component) on
-    // every document change, but the data is shared through the HeightmapStore.
-    const std::shared_ptr<toy::world::HeightmapData> data = t->data;
-    const glm::vec2 size = data->geometry().size;
-    const float h = data->sample_height(size * 0.5f);
+    // every document change, but the data is shared through the TerraStore.
+    const std::shared_ptr<toy::world::TerraData> data = t->field.data_shared();
+    const glm::vec2 size = data->geometry().size();
+    const float h = data->ground_at(size * 0.5f);
 
     app.set_terrain_mode(true);
     tick(engine, 2);
@@ -85,15 +85,14 @@ COOPA_TEST(terrain_mode_sculpts_paints_undoes_and_saves) {
     const auto scene_path = session.project.assets() / "scenes" / "terrain_test" / "scene.yaml";
     std::filesystem::create_directories(scene_path.parent_path());
     expect(app.save_scene_as(scene_path), "the scene saves");
-    const toy::world::HeightmapFiles files = toy::world::HeightmapStore::instance().files_of(data.get());
-    expect(!files.height.empty() && std::filesystem::exists(files.height), "saving writes the heightmap PNG");
-    expect(std::filesystem::exists(files.splat0), "...and the splat PNGs");
+    const std::string terra_path = toy::world::TerraStore::instance().path_of(data.get());
+    expect(!terra_path.empty() && std::filesystem::exists(terra_path), "saving writes the terrain's .terra file");
     expect(!data->dirty_on_disk(), "the terrain is clean after saving");
 
     app.set_terrain_mode(false);
     tick(engine, 2);
     expect(!app.terrain_mode(), "Terrain Mode exited");
-    toy::world::HeightmapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
 }
 
 } // namespace toy::editor::testing

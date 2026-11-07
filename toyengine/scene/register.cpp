@@ -47,7 +47,6 @@
 #include <toyengine/world/terrain_component.h>
 #include <toyengine/mapgen/map_generator_component.h>
 #include <toyengine/mapgen/terrain_generator.h>
-#include <toyengine/world/tile_map_data.h>
 
 namespace toy {
 namespace scene {
@@ -810,20 +809,21 @@ void register_scene_components(coopa::gfx::core::Device& device,
                 coopa::gfx::engine::components::parse_material_value_(material, terrain->material, assets, ctx);
             }
 
-            // --- The stored tiles ---
-            // `tiles:` names the terrain's .tiles file, scene-relative, default terrain/<object>.tiles.
-            // The store hands back the same live tiles on every re-parse (unsaved edits included),
-            // and an empty grid -- baked from the generator keys on first use -- when there is no file.
-            terrain->tiles_file = node.contains("tiles") ? node.at("tiles").get_value<std::string>()
-                                                         : "terrain/" + obj.name() + ".tiles";
-            // Strictly beside the scene -- never through the asset search, whose by-name fallback
-            // would hand two scenes' same-named terrains one shared file.
+            // --- The stored data ---
+            // `tiles:` names the terrain's .terra file, scene-relative, default terrain/<object>.terra
+            // -- the same backend a HeightmapTerrain uses. sync_field() hands back the same live
+            // data on every re-parse (unsaved edits included), and an empty grid -- baked from the
+            // generator keys on first use -- when there is no file.
             {
-                const std::string path = std::filesystem::path(terrain->tiles_file).is_absolute()
-                                             ? terrain->tiles_file
-                                             : (std::filesystem::path(ctx.base_dir()) / terrain->tiles_file).lexically_normal().string();
-                terrain->tiles = world::TileMapStore::instance().acquire(path);
+                const std::string tiles_key = node.contains("tiles") ? node.at("tiles").get_value<std::string>()
+                                                                     : "terrain/" + obj.name() + ".terra";
+                // Strictly beside the scene -- never through the asset search, whose by-name
+                // fallback would hand two scenes' same-named terrains one shared file.
+                terrain->data_file = std::filesystem::path(tiles_key).is_absolute()
+                                         ? tiles_key
+                                         : (std::filesystem::path(ctx.base_dir()) / tiles_key).lexically_normal().string();
             }
+            terrain->sync_field();
 
             read(node, "collision", terrain->collision);
             if (node.contains("physics_material")) {

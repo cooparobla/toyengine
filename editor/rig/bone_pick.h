@@ -158,6 +158,35 @@ inline std::optional<std::pair<int, BoneEndpoint>> pick_closest_endpoint(const V
     return std::make_pair(best_i, best_end);
 }
 
+/**
+ * @brief What a Rig Edit click landed on: an endpoint handle, a bone's BODY, or nothing.
+ *
+ * Blender's three selectable parts of a bone, as one result -- `endpoint` set means a head/tail
+ * handle, `bone >= 0` with no `endpoint` means the body (which selects both ends).
+ */
+struct BonePickResult {
+    int bone = -1;
+    std::optional<BoneEndpoint> endpoint;
+    bool hit() const { return bone >= 0; }
+};
+
+/**
+ * @brief Endpoints first at a TIGHTER radius, then the body -- so a click meant for a joint is
+ *        never swallowed by the octahedron it sits on, while a click on the middle of a bone
+ *        still grabs the whole bone.
+ */
+inline BonePickResult pick_bone_or_endpoint(const ViewProj& vp, const std::vector<BoneSegment>& bones, glm::vec2 px,
+                                            float endpoint_px = 8.0f, float body_px = 10.0f) {
+    BonePickResult out;
+    if (const auto ep = pick_closest_endpoint(vp, bones, px, endpoint_px)) {
+        out.bone = ep->first;
+        out.endpoint = ep->second;
+        return out;
+    }
+    out.bone = pick_closest_bone(vp, bones, px, body_px);
+    return out;
+}
+
 } // namespace rig_pick
 } // namespace editor
 } // namespace toy

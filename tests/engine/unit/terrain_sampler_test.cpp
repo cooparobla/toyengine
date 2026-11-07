@@ -8,6 +8,7 @@
 
 #include <coopa/testing/test.h>
 
+#include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <limits>
@@ -150,7 +151,7 @@ COOPA_TEST(the_floor_under_water_has_relief_and_grades_by_depth) {
     TerrainSampler sampler;
     sampler.build(config, std::move(generator.graph()), params);
 
-    TileMapData tiles;
+    TerraData tiles;
     sampler.bake(tiles);
     expect(!tiles.empty(), "seabed: the world bakes");
 
@@ -158,15 +159,17 @@ COOPA_TEST(the_floor_under_water_has_relief_and_grades_by_depth) {
     std::size_t level_with_neighbour = 0;
     std::int32_t deepest = 0;
     std::map<TileKind, std::size_t> bed_kinds;
-    for (std::int32_t y = 0; y + 1 < tiles.height(); ++y) {
-        for (std::int32_t x = 0; x + 1 < tiles.width(); ++x) {
-            const TileRecord& t = tiles.at(x, y);
-            if (!t.water() || t.has(TileRecord::Flowing)) continue;
+    const float height_step = tiles.geometry().height_step;
+    for (std::int32_t y = 0; y + 1 < tiles.geometry().tiles_y; ++y) {
+        for (std::int32_t x = 0; x + 1 < tiles.geometry().tiles_x; ++x) {
+            const TileCell& t = tiles.at(x, y);
+            if (!t.wet() || static_cast<WaterKind>(t.water_kind) == WaterKind::River) continue;
             ++flooded;
-            deepest = std::max(deepest, t.water_level() - t.steps);
+            const std::int32_t water_steps = static_cast<std::int32_t>(std::lround(t.water_level / height_step));
+            deepest = std::max(deepest, water_steps - t.steps);
             bed_kinds[t.top_kind()] += 1;
-            const TileRecord& n = tiles.at(x + 1, y);
-            if (n.water() && n.steps == t.steps) ++level_with_neighbour;
+            const TileCell& n = tiles.at(x + 1, y);
+            if (n.wet() && n.steps == t.steps) ++level_with_neighbour;
         }
     }
     expect(flooded > 1000, "seabed: the world has open water to sound");

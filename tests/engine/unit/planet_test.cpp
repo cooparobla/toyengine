@@ -87,20 +87,22 @@ COOPA_TEST(a_planet_bakes_from_the_globe_with_water_never_above_its_banks) {
     params.height_scale = 16.0f;
     TerrainSampler sampler;
     sampler.build(config, std::move(generator.graph()), params);
-    TileMapData tiles;
+    TerraData tiles;
     sampler.bake(tiles);
-    expect(tiles.width() == 6 * 32 && tiles.height() == 32, "six faces side by side");
+    expect(tiles.geometry().tiles_x == 6 * 32 && tiles.geometry().tiles_y == 32, "six faces side by side");
     const PlanetLayout layout = params.layout();
+    const float height_step = tiles.geometry().height_step;
     int wet = 0, over = 0, dry = 0;
-    for (int y = 0; y < tiles.height(); ++y) {
-        for (int x = 0; x < tiles.width(); ++x) {
-            const TileRecord& r = tiles.at(x, y);
-            if (!r.water()) { ++dry; continue; }
+    for (int y = 0; y < tiles.geometry().tiles_y; ++y) {
+        for (int x = 0; x < tiles.geometry().tiles_x; ++x) {
+            const TileCell& r = tiles.at(x, y);
+            if (!r.wet()) { ++dry; continue; }
             ++wet;
             for (int dy = -1; dy <= 1; ++dy)
                 for (int dx = -1; dx <= 1; ++dx) {
                     const glm::ivec2 n = layout.neighbour(x, y, dx, dy);
-                    if (!tiles.at(n.x, n.y).water() && tiles.at(n.x, n.y).steps < r.water_level()) ++over;
+                    const TileCell& nc = tiles.at(n.x, n.y);
+                    if (!nc.wet() && static_cast<float>(nc.steps) * height_step < r.water_level) ++over;
                 }
         }
     }

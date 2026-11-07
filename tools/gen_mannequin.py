@@ -967,7 +967,12 @@ def bake_ik_clip(name):
     # whole animated track from ever reaching the target object at all, but wrong -- and
     # load-bearing -- the moment that path actually resolves.
     pelvis_basis = bone_basis("pelvis")
-    tracks = [tr for tr in clip["tracks"] if tr[0] == "pelvis"]
+    # IK TARGETS ONLY. The source clip's own `pelvis` tracks are deliberately NOT carried over:
+    # they address a bone by OBJECT path, and since the rig split a bone is not a SceneObject,
+    # so nothing resolves them. The pelvis is posed by the SkeletalAnimator playing the shared
+    # keyframed clip (animations/mannequin/<name>.yaml, which keys the pelvis BONE) -- copying
+    # them here only produced dead tracks that read as if the Animator drove the body.
+    tracks = []
     for obj in IK_TARGET_NAMES:
         def local(i):
             p = samples[i][obj][0]
@@ -988,8 +993,11 @@ def bake_ik_clip(name):
                 prev = q
                 rot_keys.append((i / FPS, [round(c, 6) for c in q]))
             tracks.append((target_path(obj), "rotation_quat", rot_keys, "linear"))
+    # No root_motion either, for the same reason: `root_motion: {object: pelvis}` never resolves
+    # post-split, so an Animator's apply_root_motion reading this clip is inert. Root motion for
+    # a rig comes from the SkeletalAnimator's own clip (`root_motion: {bone: pelvis}`) -- see
+    # assets_test.cpp's root_motion_consumers_have_a_skeletal_producer.
     write_property_clip(name, clip["length"], tracks, wrap=clip["wrap"], events=clip["events"],
-                        root_motion=("pelvis", clip["root_motion"][1], clip["root_motion"][2]) if clip["root_motion"] else None,
                         anim_dir=IK_ANIM_DIR, label="mannequin_ik")
 
 

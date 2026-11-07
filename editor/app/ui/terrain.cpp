@@ -8,9 +8,8 @@
 #include <cstdio>
 #include <random>
 
-#include <toyengine/world/heightmap_store.h>
 #include <toyengine/world/heightmap_terrain_system.h>
-#include <toyengine/world/png16.h>
+#include <toyengine/world/terra_store.h>
 
 namespace toy {
 namespace editor {
@@ -23,10 +22,9 @@ void TerrainPanel::set_terrain_mode(bool on) {
     if (on) enter_terrain_mode_(app_.doc_.primary()); else exit_terrain_mode_();
 }
 
-using toy::world::HeightmapData;
-using toy::world::HeightmapGeometry;
 using toy::world::HeightmapTerrain;
 using toy::world::IRect;
+using toy::world::TerraData;
 
 namespace {
 
@@ -105,12 +103,12 @@ void TerrainPanel::terrain_frame_() {
 
 bool TerrainPanel::terrain_hit_(const ViewProj& vp, glm::vec2 px, glm::vec3& world_hit) const {
     const HeightmapTerrain* t = terrain_live_();
-    if (t == nullptr || t->data == nullptr) return false;
+    if (t == nullptr || t->field.data() == nullptr) return false;
     glm::vec3 o, d;
     vp.ray(px, o, d);
     const glm::vec3 origin = t->origin();
     float hit_t = 0.0f;
-    if (!t->data->raycast(o - origin, d, 1e5f, hit_t)) return false;
+    if (!t->field.data()->raycast_surface(o - origin, d, 1e5f, hit_t)) return false;
     world_hit = o + d * hit_t;
     return true;
 }
@@ -156,7 +154,7 @@ void TerrainPanel::terrain_begin_stroke_(const ViewProj& vp, glm::vec2 px, bool 
     if (t == nullptr || !terrain_hit_(vp, px, hit)) return;
     // Set Height: Ctrl-click samples the terrain instead of painting.
     if (terrain_brush_.tool == TerrainTool::SetHeight && ctrl) {
-        terrain_brush_.target_height = t->data->sample_height(glm::vec2(hit) - glm::vec2(t->origin()));
+        terrain_brush_.target_height = t->field.data()->ground_at(glm::vec2(hit) - glm::vec2(t->origin()));
         app_.log_info("Target Height set to " + std::to_string(static_cast<int>(std::lround(terrain_brush_.target_height))) + " m");
         return;
     }
@@ -165,13 +163,13 @@ void TerrainPanel::terrain_begin_stroke_(const ViewProj& vp, glm::vec2 px, bool 
     s.active = true;
     s.invert = ctrl;
     s.tool = shift ? TerrainTool::Smooth : terrain_brush_.tool;
-    s.data = t->data;
-    s.flatten_to = t->data->sample_height(glm::vec2(hit) - glm::vec2(t->origin()));
+    s.data = t->field.data_shared();
+    s.flatten_to = t->field.data()->ground_at(glm::vec2(hit) - glm::vec2(t->origin()));
     s.seed = static_cast<std::uint32_t>(std::random_device{}());
     s.last_px = px;
     if (s.tool == TerrainTool::Paint) {
-        s.start_splat0 = s.data->splat(0);
-        s.start_splat1 = s.data->splat(1);
+        s.start_splat0 = s.data->layer_plane(0);
+        s.start_splat1 = s.data->layer_plane(1);
     } else {
         s.start_heights = s.data->heights();
     }
@@ -218,9 +216,9 @@ void TerrainPanel::terrain_end_stroke_() {
         HeightmapTerrain* live = terrain_live_();
         if (live == nullptr) { s = TerrainStroke{}; return; }
         before.data = s.data;
-        before.nx = s.data->nx();
-        before.ny = s.data->ny();
-        before.splat_size = s.data->splat_w();
+        before.nx = s.data->height_nx();
+        before.ny = s.data->height_ny();
+        before.splat_size = s.data->layer_nx();
         before.water_rect = s.water_rect;
         const int grid_x = live->field.geometry().tiles_x;
         for (int y = s.water_rect.y0; y < s.water_rect.y1; ++y) {
@@ -236,8 +234,8 @@ void TerrainPanel::terrain_end_stroke_() {
         // into s.height_rect) -- capture those too, so undo restores the bed along with the
         // water instead of leaving a graded shelf behind after a reverted flood.
         if (!s.height_rect.empty()) {
-            const TerrainPatch before_h = capture_patch_from(s.data, s.start_heights, s.data->splat(0),
-                                                              s.data->splat(1), s.height_rect, IRect{});
+            const TerrainPatch before_h = capture_patch_from(s.data, s.start_heights, s.data->layer_plane(0),
+                                                              s.data->layer_plane(1), s.height_rect, IRect{});
             const TerrainPatch after_h = capture_patch(s.data, s.height_rect, IRect{});
             before.height_rect = before_h.height_rect;
             before.heights = before_h.heights;
@@ -248,7 +246,7 @@ void TerrainPanel::terrain_end_stroke_() {
         before = capture_patch_from(s.data, s.data->heights(), s.start_splat0, s.start_splat1, IRect{}, s.splat_rect);
         after = capture_patch(s.data, IRect{}, s.splat_rect);
     } else {
-        before = capture_patch_from(s.data, s.start_heights, s.data->splat(0), s.data->splat(1), s.height_rect, IRect{});
+        before = capture_patch_from(s.data, s.start_heights, s.data->layer_plane(0), s.data->layer_plane(1), s.height_rect, IRect{});
         after = capture_patch(s.data, s.height_rect, IRect{});
     }
     terrain_undo_.set_budget(256u << 20, [](const TerrainPatch& p) { return p.bytes(); }, 4);
@@ -256,10 +254,10 @@ void TerrainPanel::terrain_end_stroke_() {
     s = TerrainStroke{};
 }
 
-void TerrainPanel::terrain_push_whole_(const std::string& label, const std::shared_ptr<HeightmapData>& data,
+void TerrainPanel::terrain_push_whole_(const std::string& label, const std::shared_ptr<TerraData>& data,
                                     const std::vector<float>& heights, const std::vector<std::uint8_t>& s0,
                                     const std::vector<std::uint8_t>& s1) {
-    const IRect all_h{0, 0, data->nx(), data->ny()}, all_s{0, 0, data->splat_w(), data->splat_h()};
+    const IRect all_h{0, 0, data->height_nx(), data->height_ny()}, all_s{0, 0, data->layer_nx(), data->layer_ny()};
     TerrainPatch before = capture_patch_from(data, heights, s0, s1, all_h, all_s);
     TerrainPatch after = capture_patch(data, all_h, all_s);
     terrain_undo_.set_budget(256u << 20, [](const TerrainPatch& p) { return p.bytes(); }, 4);
@@ -333,7 +331,7 @@ void TerrainPanel::handle_terrain_input_(imm::Context& ctx, const ViewProj& vp, 
 
 void TerrainPanel::draw_terrain_overlay_(imm::Context& ctx, const ViewProj& vp) {
     const HeightmapTerrain* t = terrain_live_();
-    if (t == nullptr || t->data == nullptr) return;
+    if (t == nullptr || t->field.data() == nullptr) return;
     const glm::vec4 col = terrain_stroke_.invert ? glm::vec4(0.55f, 0.75f, 1.0f, 0.95f) : glm::vec4(1.0f, 1.0f, 1.0f, 0.9f);
     glm::vec3 centre;
     const glm::vec2 m = ctx.mouse();
@@ -350,7 +348,7 @@ void TerrainPanel::draw_terrain_overlay_(imm::Context& ctx, const ViewProj& vp) 
         for (int i = 0; i <= n; ++i) {
             const float a = 6.2831853f * static_cast<float>(i) / static_cast<float>(n);
             const glm::vec2 xy = glm::vec2(centre) + glm::vec2(std::cos(a), std::sin(a)) * radius;
-            const glm::vec3 p(xy, origin.z + t->data->sample_height(xy - glm::vec2(origin)) + 0.05f);
+            const glm::vec3 p(xy, origin.z + t->field.data()->ground_at(xy - glm::vec2(origin)) + 0.05f);
             auto q = vp.project(p);
             if (prev && q) ctx.line(*prev, *q, c, width);
             prev = q;
@@ -416,20 +414,20 @@ EditResult TerrainPanel::draw_terrain_inspector_header_(imm::Context& ctx, Objec
     EditResult r;
     const glm::vec4 dim = ctx.style.text_dim;
 
-    ctx.paragraph("A height grid you sculpt and paint. Its shape and paint live in PNGs beside the "
-                  "scene, not in the scene file -- Ctrl S writes them.", &dim);
+    ctx.paragraph("A height grid you sculpt and paint. Its shape and paint live in a .terra file "
+                  "beside the scene, not in the scene file -- Ctrl S writes it.", &dim);
 
     coopa::scene::SceneObject* live = app_.sync_.live(id);
     auto* t = live ? live->get_component<HeightmapTerrain>() : nullptr;
-    if (t != nullptr && t->mode == toy::world::TerrainMode::Heightmap && t->data != nullptr) {
-        const HeightmapGeometry& g = t->data->geometry();
+    if (t != nullptr && t->mode == toy::world::TerrainMode::Heightmap && t->field.data() != nullptr) {
+        const toy::world::TerraGeometry& g = t->field.geometry();
         char buf[192];
-        std::snprintf(buf, sizeof(buf), "%.0f x %.0f m, %d samples a side (%.2f m apart)", g.size.x, g.size.y,
-                      g.resolution, t->data->cell().x);
+        std::snprintf(buf, sizeof(buf), "%.0f x %.0f m, %d samples a side (%.2f m apart)", g.size().x, g.size().y,
+                      t->field.data()->height_nx(), t->field.data()->cell());
         ctx.label_dim(buf);
         int wet = 0;
-        for (int ty = 0; ty < t->field.geometry().tiles_y; ++ty) {
-            for (int tx = 0; tx < t->field.geometry().tiles_x; ++tx) {
+        for (int ty = 0; ty < g.tiles_y; ++ty) {
+            for (int tx = 0; tx < g.tiles_x; ++tx) {
                 if (t->field.water_at(glm::ivec2(tx, ty)).wet()) ++wet;
             }
         }
@@ -437,7 +435,7 @@ EditResult TerrainPanel::draw_terrain_inspector_header_(imm::Context& ctx, Objec
             std::snprintf(buf, sizeof(buf), "%d tiles under water", wet);
             ctx.label_dim(buf);
         }
-        if (t->data->dirty_on_disk()) ctx.label_dim("Unsaved changes (Ctrl S)");
+        if (t->field.data()->dirty_on_disk()) ctx.label_dim("Unsaved changes (Ctrl S)");
     }
 
     const bool can_edit = !app_.playing() && !app_.asset_view_() && is_terrain_object_(id);
@@ -454,7 +452,7 @@ void TerrainPanel::draw_terrain_tool_panel_(imm::Context& ctx) {
     ctx.label(std::string("Terrain: ") + (obj ? get_string(*obj, "name", "?") : "?"));
     if (ctx.button("Exit Terrain Mode", -1, true, I::ObjectMode)) { exit_terrain_mode_(); return; }
     ctx.tooltip("Exit Terrain Mode (Tab)");
-    if (t == nullptr || t->data == nullptr) {
+    if (t == nullptr || t->field.data() == nullptr) {
         ctx.label_dim("The terrain is still loading.");
         return;
     }
@@ -475,7 +473,7 @@ void TerrainPanel::draw_terrain_tool_panel_(imm::Context& ctx) {
         ctx.slider_float("Spacing", &terrain_brush_.spacing, 0.05f, 1.0f, "%.2f");
         ctx.tooltip("Spacing\nDistance between dabs along a stroke, as a fraction of the radius");
         if (terrain_brush_.tool == TerrainTool::SetHeight) {
-            ctx.drag_float("Target Height (m)", &terrain_brush_.target_height, 0.1f, 0.0f, t->data->geometry().height);
+            ctx.drag_float("Target Height (m)", &terrain_brush_.target_height, 0.1f, 0.0f, t->field.geometry().height);
             ctx.label_dim("Ctrl-click the terrain to pick a height.");
         }
         if (terrain_brush_.tool == TerrainTool::Water) {
@@ -492,7 +490,7 @@ void TerrainPanel::draw_terrain_tool_panel_(imm::Context& ctx) {
                         "Ocean: the sea -- still, and marked as the sea for gameplay.\n"
                         "River: flowing water, drawn with its own current and lighter waves");
             ctx.drag_float("Water Level (m)", &terrain_brush_.water_level, 0.1f, 0.0f,
-                           t->data->geometry().height);
+                           t->field.geometry().height);
             ctx.label_dim("The surface height, not a depth. Ctrl drains instead of flooding.");
         }
         if (terrain_brush_.tool == TerrainTool::Noise) {
@@ -615,15 +613,14 @@ void TerrainPanel::draw_terrain_layers_(imm::Context& ctx, HeightmapTerrain& t) 
 void TerrainPanel::draw_terrain_settings_(imm::Context& ctx, HeightmapTerrain& t) {
     using I = imm::Icon;
     if (!ctx.collapsing_header("Size & Performance", false, nullptr, I::Scale)) return;
-    const toy::world::HeightmapGeometry& g = t.data->geometry();
     TerrainStaged& s = terrain_staged_;
     if (s.id != terrain_object_) {
         s.id = terrain_object_;
-        s.size = g.size;
-        s.height = g.height;
-        s.chunk = g.chunk_size;
-        s.resolution = g.resolution;
-        s.splat_resolution = g.splat_resolution;
+        s.size = t.heightmap_size;
+        s.height = t.heightmap_height;
+        s.chunk = t.heightmap_chunk_size;
+        s.resolution = t.heightmap_resolution;
+        s.splat_resolution = t.heightmap_splat_resolution;
     }
     ctx.drag_float("Width (m)", &s.size.x, 1.0f, 8.0f, 32768.0f);
     ctx.drag_float("Depth (m)", &s.size.y, 1.0f, 8.0f, 32768.0f);
@@ -638,8 +635,8 @@ void TerrainPanel::draw_terrain_settings_(imm::Context& ctx, HeightmapTerrain& t
     std::snprintf(buf, sizeof(buf), "%.2f m per height sample, %d x %d chunks", s.size.x / static_cast<float>(std::max(2, s.resolution) - 1),
                   static_cast<int>(std::ceil(s.size.x / std::max(1.0f, s.chunk))), static_cast<int>(std::ceil(s.size.y / std::max(1.0f, s.chunk))));
     ctx.label_dim(buf);
-    const bool changed = s.size != g.size || s.height != g.height || s.chunk != g.chunk_size || s.resolution != g.resolution ||
-                         s.splat_resolution != g.splat_resolution;
+    const bool changed = s.size != t.heightmap_size || s.height != t.heightmap_height || s.chunk != t.heightmap_chunk_size ||
+                         s.resolution != t.heightmap_resolution || s.splat_resolution != t.heightmap_splat_resolution;
     if (ctx.button("Apply", -1, changed, I::Check)) {
         terrain_edit_component_("Resize Terrain", [&](Node& c) {
             Node size = Node::mapping();
@@ -697,60 +694,18 @@ void TerrainPanel::draw_terrain_settings_(imm::Context& ctx, HeightmapTerrain& t
 void TerrainPanel::draw_terrain_heightmap_(imm::Context& ctx, HeightmapTerrain& t) {
     using I = imm::Icon;
     if (!ctx.collapsing_header("Heightmap", false, nullptr, I::Image)) return;
-    const std::shared_ptr<HeightmapData> data = t.data;
-    const std::string file = app_.project_.relative(t.files.height);
-    ctx.label_dim(file.empty() ? t.files.height : file);
+    const std::shared_ptr<TerraData> data = t.field.data_shared();
+    const std::string file = app_.project_.relative(t.data_file);
+    ctx.label_dim(file.empty() ? t.data_file : file);
     if (data->dirty_on_disk()) ctx.label_dim("Unsaved edits: written with the scene (Ctrl S).");
-    if (ctx.button("Import Heightmap...", -1, true, I::Folder)) {
-        const char* home = std::getenv("HOME");
-        app_.file_dialog_.open(app_.ui(), FileDialog::Mode::OpenFile, "Import Heightmap", home ? fs::path(home) : app_.project_.root(), {".png"},
-                          [this, data](const fs::path& p) {
-                              app_.deferred_.push_back([this, data, p] {
-                                  const std::vector<float> h = data->heights();
-                                  const auto s0 = data->splat(0), s1 = data->splat(1);
-                                  if (!toy::world::load_heightmap_image(*data, p.string())) {
-                                      app_.log_error("Could not read " + p.string());
-                                      return;
-                                  }
-                                  terrain_push_whole_("Import Heightmap", data, h, s0, s1);
-                                  app_.log_info("Imported " + p.filename().string() + " (resampled to the terrain's resolution)");
-                              });
-                          });
-    }
-    ctx.tooltip("Import Heightmap\nReplace the terrain's shape with a greyscale PNG (16-bit for smooth slopes; 8-bit works). "
-                "White is the terrain's full Height. Undoable.");
-    if (ctx.button("Export Heightmap...", -1, true, I::Save)) {
-        app_.file_dialog_.open(app_.ui(), FileDialog::Mode::SaveFile, "Export Heightmap", app_.project_.assets(), {".png"},
-                          [this, data](const fs::path& p) {
-                              fs::path out = p;
-                              if (out.extension() != ".png") out += ".png";
-                              if (toy::world::save_heightmap_image(*data, out.string())) app_.log_info("Exported " + out.filename().string());
-                              else app_.log_error("Could not write " + out.string());
-                          });
-    }
-    ctx.tooltip("Export Heightmap\nSave the current shape as a 16-bit greyscale PNG");
-
-    static toy::world::HeightmapGenerate gen;
-    int seed = static_cast<int>(gen.seed);
-    if (ctx.drag_int("Seed", &seed, 0.2f, 0, 1 << 30)) gen.seed = static_cast<std::uint32_t>(seed);
-    ctx.drag_float("Feature Size (m)", &gen.feature_size, 1.0f, 8.0f, 4096.0f);
-    ctx.slider_float("Ridges", &gen.ridges, 0.0f, 1.0f, "%.2f");
-    ctx.slider_float("Base", &gen.base, 0.0f, 1.0f, "%.2f");
-    ctx.slider_float("Amplitude", &gen.amplitude, 0.0f, 1.0f, "%.2f");
-    ctx.checkbox("Island", &gen.island);
-    if (ctx.button("Generate", -1, true, I::Restart)) {
-        const std::vector<float> h = data->heights();
-        const auto s0 = data->splat(0), s1 = data->splat(1);
-        data->generate(gen);
-        terrain_push_whole_("Generate Terrain", data, h, s0, s1);
-    }
-    ctx.tooltip("Generate\nReplace the shape with procedural hills and ridges. Undoable.");
+    // PNG import/export and procedural generate are not wired to the unified .terra backend yet
+    // (terra_image.h) -- sculpt from flat, or apply a MapGenerator, in the meantime.
     if (ctx.button("Fill to Target Height", -1, true, I::Grid)) {
         const std::vector<float> h = data->heights();
-        const auto s0 = data->splat(0), s1 = data->splat(1);
+        const auto s0 = data->layer_plane(0), s1 = data->layer_plane(1);
         const float v = std::clamp(terrain_brush_.target_height, 0.0f, data->geometry().height);
         std::fill(data->heights().begin(), data->heights().end(), v);
-        data->mark_all_dirty();
+        data->mark_height_dirty(IRect{0, 0, data->height_nx(), data->height_ny()});
         terrain_push_whole_("Fill Terrain", data, h, s0, s1);
     }
     ctx.tooltip("Fill to Target Height\nFlatten the whole terrain to the Brush's Target Height -- a blank start. Undoable.");
@@ -815,7 +770,10 @@ void TerrainPanel::terrain_add_scatter_(const std::string& kind) {
 }
 
 void TerrainPanel::save_terrains_() {
-    const int n = toy::world::HeightmapStore::instance().save_dirty();
+    // Both terrain modes share one store now, so this and TileModePanel::save_tile_maps_() both
+    // drain the same dirty set -- whichever runs first saves everything, and the other finds
+    // nothing left to save.
+    const int n = toy::world::TerraStore::instance().save_dirty();
     if (n > 0) app_.log_info("Saved " + std::to_string(n) + (n == 1 ? " terrain" : " terrains"));
 }
 

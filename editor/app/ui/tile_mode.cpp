@@ -13,9 +13,9 @@
 #include <iterator>
 
 #include <coopa/maps/biome.h>
+#include <toyengine/world/terra_store.h>
 #include <toyengine/world/terrain_component.h>
-#include <toyengine/world/tile_map_data.h>
-#include <toyengine/world/tile_water.h>
+#include <toyengine/world/terrain_water.h>
 
 namespace toy {
 namespace editor {
@@ -29,23 +29,37 @@ void TileModePanel::set_tile_mode(bool on) {
 }
 
 using toy::world::IRect;
+using toy::world::TerraData;
 using toy::world::TerrainComponent;
+using toy::world::TerrainField;
+using toy::world::TileCell;
 using toy::world::TileKind;
-using toy::world::TileMapData;
-using toy::world::TileRecord;
+using toy::world::WaterKind;
 
 namespace {
 
-/** @brief Moves a tile's ground to `steps` (never below 0); water over it keeps its level. */
-void move_ground(TileRecord& r, int steps) {
-    const int level = r.water_level();
-    const bool water = r.water(), ocean = r.has(TileRecord::Ocean), flowing = r.has(TileRecord::Flowing);
-    const std::uint8_t flow = r.flow;
+/** @brief Moves a tile's ground to `steps` (never below 0); water over it keeps its absolute
+ *         level, draining if the new ground has risen through it. */
+void move_ground(TileCell& r, int steps, float height_step) {
     r.steps = static_cast<std::int16_t>(std::clamp(steps, 0, 32000));
-    if (water) {
-        r.set_water(level, ocean, flowing);
-        if (flowing) r.flow = flow;
+    if (r.wet() && r.water_level <= static_cast<float>(r.steps) * height_step) {
+        r.water_kind = static_cast<std::uint8_t>(WaterKind::None);
+        r.water_level = 0.0f;
+        r.flow = 0;
+        r.flow_authored = 0;
     }
+}
+
+/** @brief Sets a tile's water to the terrace `level_steps` (at or under the ground: drains),
+ *         keeping its Ocean-ness as it was. */
+void set_water_level(TileCell& r, int level_steps, float height_step) {
+    const float level_m = static_cast<float>(level_steps) * height_step;
+    const float ground = static_cast<float>(r.steps) * height_step;
+    const bool wet = level_m > ground;
+    const bool was_ocean = r.water_kind == static_cast<std::uint8_t>(WaterKind::Ocean);
+    r.water_kind = static_cast<std::uint8_t>(wet ? (was_ocean ? WaterKind::Ocean : WaterKind::Lake) : WaterKind::None);
+    r.water_level = wet ? level_m : 0.0f;
+    if (!wet) { r.flow = 0; r.flow_authored = 0; }
 }
 
 double tile_now() {
@@ -133,8 +147,9 @@ void TileModePanel::tile_frame_() {
     if (tile_regen_data_ && tile_regen_data_->bakes_done() > tile_regen_wait_) {
         auto data = tile_regen_data_;
         tile_regen_data_.reset();
-        if (data->width() == tile_regen_w_ && data->height() == tile_regen_h_) {
-            tile_push_undo_("Regenerate World", data, tile_regen_before_, IRect{0, 0, data->width(), data->height()});
+        if (data->geometry().tiles_x == tile_regen_w_ && data->geometry().tiles_y == tile_regen_h_) {
+            tile_push_undo_("Regenerate World", data, tile_regen_before_,
+                            IRect{0, 0, data->geometry().tiles_x, data->geometry().tiles_y});
         } else {
             // The world changed size: the step holds the whole grid either side, with its size.
             TilePatch before;
@@ -144,9 +159,9 @@ void TileModePanel::tile_frame_() {
             before.height = tile_regen_h_;
             before.rect = IRect{0, 0, tile_regen_w_, tile_regen_h_};
             before.records = std::move(tile_regen_before_);
-            TilePatch after = capture_tile_patch(data, IRect{0, 0, data->width(), data->height()});
-            after.width = data->width();
-            after.height = data->height();
+            TilePatch after = capture_tile_patch(data, IRect{0, 0, data->geometry().tiles_x, data->geometry().tiles_y});
+            after.width = data->geometry().tiles_x;
+            after.height = data->geometry().tiles_y;
             tile_undo_.set_budget(256u << 20, [](const TilePatch& p) { return p.bytes(); }, 4);
             tile_undo_.push("Regenerate World", std::move(before), std::move(after));
         }
@@ -161,10 +176,6 @@ void TileModePanel::tile_frame_() {
 // Strokes
 // =================================================================================
 
-namespace {
-
-} // namespace
-
 IRect TileModePanel::tile_face_clip_(const IRect& r, const glm::ivec2& anchor) const {
     const TerrainComponent* t = tile_live_();
     if (t == nullptr || !t->params.planet) return r;
@@ -175,7 +186,7 @@ IRect TileModePanel::tile_face_clip_(const IRect& r, const glm::ivec2& anchor) c
 
 bool TileModePanel::tile_hit_(const ViewProj& vp, glm::vec2 px, glm::ivec2& tile, glm::vec3* world) const {
     const TerrainComponent* t = tile_live_();
-    if (t == nullptr || !t->tiles || t->tiles->empty() || t->owner == nullptr) return false;
+    if (t == nullptr || t->field.empty() || t->owner == nullptr) return false;
     glm::vec3 o, d;
     vp.ray(px, o, d);
     const glm::mat4 m = t->owner->get_transform() ? t->owner->get_transform()->transform().get_world_matrix() : glm::mat4(1.0f);
@@ -205,29 +216,32 @@ glm::vec3 TileModePanel::tile_corner_(const TerrainComponent& t, int x, int y, f
 void TileModePanel::tile_dab_(const glm::ivec2& tile) {
     TileStroke& s = tile_stroke_;
     if (!s.data) return;
-    TileMapData& d = *s.data;
+    TerrainComponent* t = tile_live_();
+    if (t == nullptr) return;
+    TerraData& d = *s.data;
+    TerrainField& field = t->field;
     const IRect brush = tile_face_clip_(tile_brush_rect(tile, tile_brush_.size), tile);
     IRect changed;
     switch (s.tool) {
         case TileTool::Raise: {
             // Each tile once per stroke: dragging back and forth does not keep stacking.
-            const IRect r = brush.clipped(d.width(), d.height());
+            const IRect r = brush.clipped(d.geometry().tiles_x, d.geometry().tiles_y);
             const int delta = (s.invert ? -1 : 1) * std::max(1, tile_brush_.strength);
             for (int y = r.y0; y < r.y1; ++y) {
                 for (int x = r.x0; x < r.x1; ++x) {
-                    std::uint8_t& done = s.touched[static_cast<std::size_t>(y * d.width() + x)];
+                    std::uint8_t& done = s.touched[static_cast<std::size_t>(y * d.geometry().tiles_x + x)];
                     if (done) continue;
                     done = 1;
-                    changed.include(tile_raise(d, IRect{x, y, x + 1, y + 1}, delta));
+                    changed.include(tile_raise(field, IRect{x, y, x + 1, y + 1}, delta));
                 }
             }
             break;
         }
-        case TileTool::Flatten:   changed = tile_set_height(d, brush, s.flatten_to); break;
-        case TileTool::SetHeight: changed = tile_set_height(d, brush, tile_brush_.target_height); break;
-        case TileTool::Paint:     changed = tile_paint(d, brush, tile_brush_.paint_kind, tile_brush_.paint_side); break;
-        case TileTool::Smooth:    changed = tile_smooth(d, brush); break;
-        case TileTool::Water:     changed = tile_water(d, brush, tile_brush_.water_level, !s.invert); break;
+        case TileTool::Flatten:   changed = tile_set_height(field, brush, s.flatten_to); break;
+        case TileTool::SetHeight: changed = tile_set_height(field, brush, tile_brush_.target_height); break;
+        case TileTool::Paint:     changed = tile_paint(field, brush, tile_brush_.paint_kind, tile_brush_.paint_side); break;
+        case TileTool::Smooth:    changed = tile_smooth(field, brush); break;
+        case TileTool::Water:     changed = tile_water(field, brush, tile_brush_.water_level, !s.invert); break;
         case TileTool::Select:    break;
     }
     s.rect.include(changed);
@@ -237,15 +251,17 @@ void TileModePanel::tile_begin_stroke_(const ViewProj& vp, glm::vec2 px, bool sh
     TerrainComponent* t = tile_live_();
     glm::ivec2 tile;
     if (t == nullptr || !tile_hit_(vp, px, tile)) return;
-    const std::shared_ptr<TileMapData>& data = t->tiles;
-    if (tile_sel_.width() != data->width() || tile_sel_.height() != data->height()) tile_sel_.reset(data->width(), data->height());
+    const std::shared_ptr<TerraData>& data = t->field.data_shared();
+    if (tile_sel_.width() != data->geometry().tiles_x || tile_sel_.height() != data->geometry().tiles_y) {
+        tile_sel_.reset(data->geometry().tiles_x, data->geometry().tiles_y);
+    }
 
     TileStroke& s = tile_stroke_;
     s = TileStroke{};
     if (tile_brush_.tool == TileTool::Select) {
         if (double_click) {
             if (!shift && !ctrl) tile_sel_.clear();
-            tile_select_similar(*data, tile, tile_brush_.similar_by_kind, tile_sel_);
+            tile_select_similar(t->field, tile, tile_brush_.similar_by_kind, tile_sel_);
             return;
         }
         s.active = true;
@@ -266,7 +282,7 @@ void TileModePanel::tile_begin_stroke_(const ViewProj& vp, glm::vec2 px, bool sh
     s.tool = shift ? TileTool::Smooth : tile_brush_.tool;
     s.invert = ctrl;
     s.data = data;
-    s.start = data->records();
+    s.start = data->tiles();
     s.touched.assign(s.start.size(), 0);
     s.flatten_to = data->at(tile.x, tile.y).steps;
     s.last_tile = tile;
@@ -307,16 +323,17 @@ void TileModePanel::tile_end_stroke_() {
     s = TileStroke{};
 }
 
-void TileModePanel::tile_push_undo_(const std::string& label, const std::shared_ptr<TileMapData>& data,
-                                const std::vector<TileRecord>& whole_before, const IRect& rect) {
-    const IRect r = rect.clipped(data->width(), data->height());
-    if (r.empty() || whole_before.size() != data->records().size()) return;
+void TileModePanel::tile_push_undo_(const std::string& label, const std::shared_ptr<TerraData>& data,
+                                const std::vector<TileCell>& whole_before, const IRect& rect) {
+    const int width = data->geometry().tiles_x, height = data->geometry().tiles_y;
+    const IRect r = rect.clipped(width, height);
+    if (r.empty() || whole_before.size() != data->tiles().size()) return;
     TilePatch before;
     before.data = data;
     before.uid = data->uid();
     before.rect = r;
     for (int y = r.y0; y < r.y1; ++y)
-        for (int x = r.x0; x < r.x1; ++x) before.records.push_back(whole_before[static_cast<std::size_t>(y * data->width() + x)]);
+        for (int x = r.x0; x < r.x1; ++x) before.records.push_back(whole_before[static_cast<std::size_t>(y * width + x)]);
     TilePatch after = capture_tile_patch(data, r);
     tile_undo_.set_budget(256u << 20, [](const TilePatch& p) { return p.bytes(); }, 4);
     tile_undo_.push(label, std::move(before), std::move(after));
@@ -327,23 +344,24 @@ void TileModePanel::tile_apply_undo_(bool redo) {
     if (p != nullptr && !apply_tile_patch(*p)) app_.log_warn("Tile undo skipped: the terrain was rebuilt or removed since");
 }
 
-void TileModePanel::tile_edit_selection_(const std::string& label, const std::function<void(TileRecord&)>& edit,
+void TileModePanel::tile_edit_selection_(const std::string& label, const std::function<void(TileCell&)>& edit,
                                      const std::string& merge, bool settle) {
     TerrainComponent* t = tile_live_();
-    if (t == nullptr || !t->tiles || tile_sel_.empty()) return;
+    if (t == nullptr || t->field.empty() || tile_sel_.empty()) return;
     const IRect bounds = tile_sel_.bounds();
     // Water that runs in (or out) past the selection is part of the same edit, as far as this margin.
     constexpr int k_settle_margin = 24;
     const IRect reach = settle ? IRect{bounds.x0 - k_settle_margin, bounds.y0 - k_settle_margin, bounds.x1 + k_settle_margin,
-                                       bounds.y1 + k_settle_margin}.clipped(t->tiles->width(), t->tiles->height())
+                                       bounds.y1 + k_settle_margin}.clipped(t->field.geometry().tiles_x, t->field.geometry().tiles_y)
                                : bounds;
-    TilePatch before = capture_tile_patch(t->tiles, reach);
-    if (::toy::editor::tile_edit_selection(*t->tiles, tile_sel_, edit).empty()) return;
+    const std::shared_ptr<TerraData> data = t->field.data_shared();
+    TilePatch before = capture_tile_patch(data, reach);
+    if (::toy::editor::tile_edit_selection(t->field, tile_sel_, edit).empty()) return;
     if (settle) {
         t->sync_field();
         toy::world::settle_water(t->field, bounds, reach);
     }
-    TilePatch after = capture_tile_patch(t->tiles, reach);
+    TilePatch after = capture_tile_patch(data, reach);
     tile_undo_.set_budget(256u << 20, [](const TilePatch& p) { return p.bytes(); }, 4);
     tile_undo_.push(label, std::move(before), std::move(after), merge);
 }
@@ -353,19 +371,19 @@ void TileModePanel::tile_regenerate_(ObjectId id) {
     coopa::scene::SceneObject* live = app_.sync_.live(id);
     TerrainComponent* t = live ? live->get_component<TerrainComponent>() : nullptr;
     if (t != nullptr && t->mode != toy::world::TerrainMode::Tiles) t = nullptr;
-    if (t == nullptr || !t->tiles) return;
-    tile_regen_data_ = t->tiles;
-    tile_regen_before_ = t->tiles->records();
-    tile_regen_w_ = t->tiles->width();
-    tile_regen_h_ = t->tiles->height();
-    tile_regen_wait_ = t->tiles->bakes_done();
-    t->tiles->request_bake();
+    if (t == nullptr || t->field.empty()) return;
+    tile_regen_data_ = t->field.data_shared();
+    tile_regen_before_ = tile_regen_data_->tiles();
+    tile_regen_w_ = tile_regen_data_->geometry().tiles_x;
+    tile_regen_h_ = tile_regen_data_->geometry().tiles_y;
+    tile_regen_wait_ = tile_regen_data_->bakes_done();
+    tile_regen_data_->request_bake();
     tile_sel_.clear();
     app_.log_info("Regenerating the world from the generator settings...");
 }
 
 void TileModePanel::save_tile_maps_() {
-    const int n = toy::world::TileMapStore::instance().save_dirty();
+    const int n = toy::world::TerraStore::instance().save_dirty();
     if (n > 0) app_.log_info("Saved " + std::to_string(n) + " tile terrain" + (n == 1 ? "" : "s"));
 }
 
@@ -407,9 +425,10 @@ void TileModePanel::handle_tile_input_(imm::Context& ctx, const ViewProj& vp, bo
     }
     if (ctx.shortcut(Key::A, Mods::Alt)) tile_sel_.clear();
     else if (ctx.shortcut(Key::A)) {
-        if (const TerrainComponent* t = tile_live_(); t && t->tiles) {
-            tile_sel_.reset(t->tiles->width(), t->tiles->height());
-            tile_sel_.set_rect(IRect{0, 0, t->tiles->width(), t->tiles->height()}, true);
+        if (const TerrainComponent* t = tile_live_(); t && !t->field.empty()) {
+            const int w = t->field.geometry().tiles_x, h = t->field.geometry().tiles_y;
+            tile_sel_.reset(w, h);
+            tile_sel_.set_rect(IRect{0, 0, w, h}, true);
         }
     }
     if (ctx.shortcut(Key::Escape)) {
@@ -421,8 +440,8 @@ void TileModePanel::handle_tile_input_(imm::Context& ctx, const ViewProj& vp, bo
 
 void TileModePanel::draw_tile_overlay_(imm::Context& ctx, const ViewProj& vp) {
     const TerrainComponent* t = tile_live_();
-    if (t == nullptr || !t->tiles || t->tiles->empty()) return;
-    const TileMapData& d = *t->tiles;
+    if (t == nullptr || t->field.empty()) return;
+    const TerraData& d = *t->field.data();
     const float lift = 0.04f / std::max(0.01f, t->params.height_step);   // just above the top, in steps
     auto top_of = [&](int x, int y) { return static_cast<float>(std::max<int>(0, d.get(x, y).steps)) + lift; };
     // On a planet each edge is bent onto the globe (in a few segments), on its own tile's face.
@@ -453,7 +472,7 @@ void TileModePanel::draw_tile_overlay_(imm::Context& ctx, const ViewProj& vp) {
     // The outline of a set of tiles: only the edges between an inside and an outside tile, each at
     // its own tile's top -- so it follows the terraces.
     auto outline = [&](const IRect& bounds, const std::function<bool(int, int)>& in, const glm::vec4& c, float w) {
-        const IRect b = bounds.clipped(d.width(), d.height());
+        const IRect b = bounds.clipped(d.geometry().tiles_x, d.geometry().tiles_y);
         for (int y = b.y0; y < b.y1; ++y) {
             for (int x = b.x0; x < b.x1; ++x) {
                 if (!in(x, y)) continue;
@@ -546,11 +565,12 @@ void TileModePanel::draw_tile_tool_panel_(imm::Context& ctx) {
     ctx.label(std::string("Tile Terrain: ") + (obj ? get_string(*obj, "name", "?") : "?"));
     if (ctx.button("Exit Tile Mode", -1, true, I::ObjectMode)) { exit_tile_mode_(); return; }
     ctx.tooltip("Exit Tile Mode (Tab)");
-    if (t == nullptr || !t->tiles || t->tiles->empty()) {
+    if (t == nullptr || t->field.empty()) {
         ctx.label(t && t->baking() ? "Generating the world..." : "The terrain is still loading.", &dim);
         return;
     }
-    TileMapData& d = *t->tiles;
+    TerraData& d = *t->field.data();
+    const float hstep = t->params.height_step;
 
     // --- Tools ---
     if (ctx.collapsing_header("Tools", true, nullptr, I::Tool)) {
@@ -571,8 +591,8 @@ void TileModePanel::draw_tile_tool_panel_(imm::Context& ctx) {
             int by = tile_brush_.similar_by_kind ? 1 : 0;
             if (ctx.combo("Double-Click Matches", &by, {"Same height", "Same surface"})) tile_brush_.similar_by_kind = by == 1;
             if (ctx.button("Select All", 120, true, I::SelectBox)) {
-                tile_sel_.reset(d.width(), d.height());
-                tile_sel_.set_rect(IRect{0, 0, d.width(), d.height()}, true);
+                tile_sel_.reset(d.geometry().tiles_x, d.geometry().tiles_y);
+                tile_sel_.set_rect(IRect{0, 0, d.geometry().tiles_x, d.geometry().tiles_y}, true);
             }
             ctx.same_line();
             if (ctx.button("Clear", 90, !tile_sel_.empty(), I::X)) tile_sel_.clear();
@@ -617,7 +637,7 @@ void TileModePanel::draw_tile_tool_panel_(imm::Context& ctx) {
     // --- Hovered tile ---
     if (ctx.collapsing_header("Tile Under Cursor", false, nullptr, I::Info)) {
         if (tile_hover_valid_ && d.contains(tile_hover_.x, tile_hover_.y)) {
-            const TileRecord& r = d.at(tile_hover_.x, tile_hover_.y);
+            const TileCell& r = d.at(tile_hover_.x, tile_hover_.y);
             char buf[160];
             std::snprintf(buf, sizeof(buf), "Tile %d, %d  --  height %d steps", tile_hover_.x, tile_hover_.y, r.steps);
             ctx.label(buf);
@@ -629,15 +649,18 @@ void TileModePanel::draw_tile_tool_panel_(imm::Context& ctx) {
                           r.moisture01());
             ctx.label(buf, &dim);
             std::string flags;
-            if (r.water()) {
-                flags += std::string(r.has(TileRecord::Flowing) ? "river" : r.has(TileRecord::Ocean) ? "sea" : "lake") +
-                         " water to " + std::to_string(r.water_level()) + " (" + std::to_string(r.water_depth) + " deep) ";
+            if (r.wet()) {
+                const int level_steps = static_cast<int>(std::lround(r.water_level / std::max(1e-4f, hstep)));
+                const char* kind = r.water_kind == static_cast<std::uint8_t>(WaterKind::River) ? "river"
+                                  : r.water_kind == static_cast<std::uint8_t>(WaterKind::Ocean) ? "sea" : "lake";
+                flags += std::string(kind) + " water to " + std::to_string(level_steps) + " (" +
+                         std::to_string(level_steps - r.steps) + " deep) ";
             }
-            if (r.has(TileRecord::Ocean)) flags += "ocean ";
-            if (r.has(TileRecord::Coast)) flags += "coast ";
-            if (r.has(TileRecord::River)) flags += "river ";
-            if (r.region != TileRecord::k_no_id) flags += "region " + std::to_string(r.region) + " ";
-            if (r.country != TileRecord::k_no_id) flags += "country " + std::to_string(r.country);
+            if (r.water_kind == static_cast<std::uint8_t>(WaterKind::Ocean)) flags += "ocean ";
+            if (r.has(TileCell::Coast)) flags += "coast ";
+            if (r.has(TileCell::River)) flags += "river ";
+            if (r.region != TileCell::k_no_id) flags += "region " + std::to_string(r.region) + " ";
+            if (r.country != TileCell::k_no_id) flags += "country " + std::to_string(r.country);
             if (!flags.empty()) ctx.label(flags, &dim);
         } else {
             ctx.label("Hover the terrain.", &dim);
@@ -656,16 +679,18 @@ void TileModePanel::draw_tile_tool_panel_(imm::Context& ctx) {
         }
     }
     char buf[96];
-    std::snprintf(buf, sizeof(buf), "%d x %d tiles%s", d.width(), d.height(), d.dirty_on_disk() ? "  --  unsaved (Ctrl S)" : "");
+    std::snprintf(buf, sizeof(buf), "%d x %d tiles%s", d.geometry().tiles_x, d.geometry().tiles_y,
+                 d.dirty_on_disk() ? "  --  unsaved (Ctrl S)" : "");
     ctx.label(buf, &dim);
 }
 
 void TileModePanel::draw_tile_selection_section_(imm::Context& ctx, TerrainComponent& t) {
     using I = imm::Icon;
     const glm::vec4 dim = ctx.style.text_dim;
-    if (tile_sel_.empty() || !t.tiles) return;
+    if (tile_sel_.empty() || t.field.empty()) return;
     if (!ctx.collapsing_header("Selected Tiles", true, nullptr, I::SelectBox)) return;
-    const TileMapData& d = *t.tiles;
+    const TerraData& d = *t.field.data();
+    const float hstep = t.params.height_step;
 
     // What the selected tiles share: a value when they all agree, "mixed" when not.
     struct Common {
@@ -679,7 +704,7 @@ void TileModePanel::draw_tile_selection_section_(imm::Context& ctx, TerrainCompo
     } c;
     tile_sel_.for_each([&](int x, int y) {
         if (!d.contains(x, y)) return;
-        const TileRecord& r = d.at(x, y);
+        const TileCell& r = d.at(x, y);
         if (c.first) {
             c.first = false;
             c.steps = r.steps; c.top = r.top_kind(); c.side = r.side_kind(); c.biome = r.biome;
@@ -694,9 +719,10 @@ void TileModePanel::draw_tile_selection_section_(imm::Context& ctx, TerrainCompo
         }
         c.temperature += r.temperature01();
         c.moisture += r.moisture01();
-        if (r.water()) {
-            if (c.water > 0 && r.water_level() != c.water_level) c.mixed_water = true;
-            c.water_level = r.water_level();
+        if (r.wet()) {
+            const int level_steps = static_cast<int>(std::lround(r.water_level / std::max(1e-4f, hstep)));
+            if (c.water > 0 && level_steps != c.water_level) c.mixed_water = true;
+            c.water_level = level_steps;
             ++c.water;
         }
     });
@@ -710,15 +736,15 @@ void TileModePanel::draw_tile_selection_section_(imm::Context& ctx, TerrainCompo
     // Height.
     int steps = c.steps;
     if (ctx.drag_int(c.mixed_steps ? "Height (mixed)" : "Height (steps)", &steps, 0.1f, 0, 2000)) {
-        tile_edit_selection_("Set Tile Height", [steps](TileRecord& r) { move_ground(r, steps); }, "tile_height", true);
+        tile_edit_selection_("Set Tile Height", [steps, hstep](TileCell& r) { move_ground(r, steps, hstep); }, "tile_height", true);
     }
     ctx.tooltip("Height\nSets every selected tile's ground to this height (under water, the bed; the water keeps its level)");
-    if (ctx.button("-1 Step", 90, true, I::ArrowDown)) tile_edit_selection_("Lower Tiles", [](TileRecord& r) {
-        move_ground(r, r.steps - 1);
+    if (ctx.button("-1 Step", 90, true, I::ArrowDown)) tile_edit_selection_("Lower Tiles", [hstep](TileCell& r) {
+        move_ground(r, r.steps - 1, hstep);
     }, {}, true);
     ctx.same_line();
-    if (ctx.button("+1 Step", 90, true, I::Plus)) tile_edit_selection_("Raise Tiles", [](TileRecord& r) {
-        move_ground(r, r.steps + 1);
+    if (ctx.button("+1 Step", 90, true, I::Plus)) tile_edit_selection_("Raise Tiles", [hstep](TileCell& r) {
+        move_ground(r, r.steps + 1, hstep);
     }, {}, true);
 
     // Surfaces.
@@ -729,7 +755,7 @@ void TileModePanel::draw_tile_selection_section_(imm::Context& ctx, TerrainCompo
         const int was = k;
         if (ctx.combo(label, &k, opts) && k != was && k < static_cast<int>(toy::world::k_tile_kind_count)) {
             const TileKind kind = static_cast<TileKind>(k);
-            tile_edit_selection_(top ? "Set Tile Surface" : "Set Tile Sides", [kind, top](TileRecord& r) {
+            tile_edit_selection_(top ? "Set Tile Surface" : "Set Tile Sides", [kind, top](TileCell& r) {
                 if (top) r.set_top_kind(kind); else r.set_side_kind(kind);
             });
         }
@@ -744,17 +770,17 @@ void TileModePanel::draw_tile_selection_section_(imm::Context& ctx, TerrainCompo
         if (c.mixed_biome) { opts.push_back("(mixed)"); b = static_cast<int>(opts.size()) - 1; }
         const int was = b;
         if (ctx.combo("Biome", &b, opts) && b != was && b < static_cast<int>(coopa::maps::k_biome_count)) {
-            tile_edit_selection_("Set Tile Biome", [b](TileRecord& r) { r.biome = static_cast<std::uint8_t>(b); });
+            tile_edit_selection_("Set Tile Biome", [b](TileCell& r) { r.biome = static_cast<std::uint8_t>(b); });
         }
     }
     float temp = static_cast<float>(c.temperature);
     if (ctx.slider_float("Temperature", &temp, 0.0f, 1.0f, "%.2f")) {
-        tile_edit_selection_("Set Tile Temperature", [temp](TileRecord& r) { r.temperature = TileRecord::quantise01(temp); }, "tile_temperature");
+        tile_edit_selection_("Set Tile Temperature", [temp](TileCell& r) { r.temperature = TileCell::quantise01(temp); }, "tile_temperature");
     }
     ctx.tooltip("Temperature\nmapcoopa's yearly mean: 0 polar, 1 equatorial (the average is shown when tiles differ)");
     float moist = static_cast<float>(c.moisture);
     if (ctx.slider_float("Moisture", &moist, 0.0f, 1.0f, "%.2f")) {
-        tile_edit_selection_("Set Tile Moisture", [moist](TileRecord& r) { r.moisture = TileRecord::quantise01(moist); }, "tile_moisture");
+        tile_edit_selection_("Set Tile Moisture", [moist](TileCell& r) { r.moisture = TileCell::quantise01(moist); }, "tile_moisture");
     }
 
     // Water: the terrace it fills to. Raising it over the ground floods; at or under it, dry.
@@ -762,27 +788,27 @@ void TileModePanel::draw_tile_selection_section_(imm::Context& ctx, TerrainCompo
         int level = c.water > 0 ? c.water_level : c.steps + 1;
         const char* label = c.water == 0 ? "Water Level (dry)" : (c.water < n || c.mixed_water ? "Water Level (mixed)" : "Water Level");
         if (ctx.drag_int(label, &level, 0.1f, 0, 2000)) {
-            tile_edit_selection_("Set Water Level", [level](TileRecord& r) { r.set_water(level, r.has(TileRecord::Ocean)); },
+            tile_edit_selection_("Set Water Level", [level, hstep](TileCell& r) { set_water_level(r, level, hstep); },
                                  "tile_water", true);
         }
         ctx.tooltip("Water Level\nThe terrace the water fills to, in steps; every selected tile with lower ground is under "
                     "it, and it runs on into any lower ground beside them. Drag it under the ground to dry the tiles");
         if (c.water > 0 && ctx.button("Drain", 90, true, I::X)) {
-            tile_edit_selection_("Drain Water", [](TileRecord& r) { r.set_water(r.steps); });
+            tile_edit_selection_("Drain Water", [hstep](TileCell& r) { set_water_level(r, r.steps, hstep); });
         }
     }
 
     // Region / country ids.
-    int region = c.region == TileRecord::k_no_id ? -1 : c.region;
+    int region = c.region == TileCell::k_no_id ? -1 : c.region;
     if (ctx.drag_int(c.mixed_region ? "Region (mixed)" : "Region", &region, 0.05f, -1, 65534)) {
-        tile_edit_selection_("Set Tile Region", [region](TileRecord& r) {
-            r.region = region < 0 ? TileRecord::k_no_id : static_cast<std::uint16_t>(region);
+        tile_edit_selection_("Set Tile Region", [region](TileCell& r) {
+            r.region = region < 0 ? TileCell::k_no_id : static_cast<std::uint16_t>(region);
         }, "tile_region");
     }
-    int country = c.country == TileRecord::k_no_id ? -1 : c.country;
+    int country = c.country == TileCell::k_no_id ? -1 : c.country;
     if (ctx.drag_int(c.mixed_country ? "Country (mixed)" : "Country", &country, 0.05f, -1, 65534)) {
-        tile_edit_selection_("Set Tile Country", [country](TileRecord& r) {
-            r.country = country < 0 ? TileRecord::k_no_id : static_cast<std::uint16_t>(country);
+        tile_edit_selection_("Set Tile Country", [country](TileCell& r) {
+            r.country = country < 0 ? TileCell::k_no_id : static_cast<std::uint16_t>(country);
         }, "tile_country");
     }
     // A drag's merged step closes when the mouse lets go.

@@ -23,24 +23,55 @@ namespace toy::editor::testing {
 
 using namespace coopa::test;
 
-/** @brief Entering Rig Edit mode on a bare, rig-less object starts an EMPTY, unsaved
- *         RigDocument (authoring from scratch is the whole point of this mode). */
-COOPA_TEST(rig_edit_mode_opens_on_a_bare_object_with_no_rig_yet) {
+/** @brief Rig Edit is the Edit mode of a RIGGED object and nothing else: a bare object is
+ *         refused (there is no skeleton to edit), and Add > Armature is what makes one. */
+COOPA_TEST(rig_edit_opens_only_on_a_rigged_object) {
     EditorSession session;
     auto& engine = session.engine;
     auto& app = session.app;
     auto& doc = app.document();
 
     Node obj = doc.make_object("new_character");
-    const ObjectId id = doc.add_object(obj);
+    const ObjectId bare = doc.add_object(obj);
     app.sync().rebuild(engine, doc);
     tick(engine, 4);
 
+    doc.select(bare);
+    expect(!app.set_interaction_mode(InteractionMode::RigEdit), "Rig Edit is REFUSED on an object with no Rig");
+    expect(app.interaction_mode() != InteractionMode::RigEdit, "...and the mode did not change");
+}
+
+/** @brief Add > Armature creates the object, its Rig component and its own rigs/<name>.yaml with
+ *         one root bone, and leaves you in Rig Edit on it -- Blender's "add an armature, then
+ *         Tab into it", and the only route by which a rig comes into being. */
+COOPA_TEST(add_armature_creates_a_rig_and_enters_edit) {
+    EditorSession session;
+    auto& engine = session.engine;
+    auto& app = session.app;
+    auto& doc = app.document();
+    tick(engine, 4);
+
+    const ObjectId id = app.create_armature();
+    app.sync().rebuild(engine, doc);
+    tick(engine, 4);
+
+    coopa::test::require(id != 0, "Add > Armature created an object");
+    expect(app.interaction_mode() == InteractionMode::RigEdit, "...and dropped straight into Rig Edit on it");
+    expect(app.rig_edit_model().bones.size() == 1, "...with exactly one root bone to start from");
+    coopa::test::require(doc.find_component(id, "Rig") >= 0, "...a Rig component was added");
+
+    const fs::path saved = app.rig_edit_path();
+    coopa::test::require(!saved.empty() && coopa::yaml::document_exists(saved),
+                        "...and its rig file exists on disk: " + saved.string());
+    const coopa::rig::RigAsset rt = coopa::rig::parse_rig(coopa::yaml::load_document(saved));
+    expect(rt.bones.size() == 1, "the runtime's own rig parser reads the one bone back");
+
+    // The gate now passes for this object, which is the point of the whole flow.
+    app.set_interaction_mode(InteractionMode::Object);
     doc.select(id);
-    expect(app.set_interaction_mode(InteractionMode::RigEdit), "Rig Edit mode opens on a plain object");
-    expect(app.interaction_mode() == InteractionMode::RigEdit, "...and reports Rig Edit mode");
-    expect(app.rig_edit_model().bones.empty(), "...with an empty rig to author from scratch");
-    expect(app.rig_edit_path().empty(), "...and no file yet (nothing has been saved)");
+    expect(app.set_interaction_mode(InteractionMode::Edit),
+           "Edit mode on the armature re-enters Rig Edit (no separate mode to pick)");
+    expect(app.interaction_mode() == InteractionMode::RigEdit, "...reporting Rig Edit");
     app.set_interaction_mode(InteractionMode::Object);
 }
 
@@ -56,8 +87,7 @@ COOPA_TEST(add_extrude_and_drag_an_endpoint_builds_and_saves_a_real_rig) {
     auto& doc = app.document();
     auto& in = session.in;
 
-    Node obj = doc.make_object("new_character");
-    const ObjectId id = doc.add_object(obj);
+    const ObjectId id = app.create_armature();   // seeds one root bone and enters Rig Edit
     app.sync().rebuild(engine, doc);
     app.camera().focus = {0.0f, 0.0f, 0.5f};
     app.camera().distance = 4.0f;
@@ -65,17 +95,16 @@ COOPA_TEST(add_extrude_and_drag_an_endpoint_builds_and_saves_a_real_rig) {
     tick(engine, 4);
 
     doc.select(id);
-    coopa::test::require(app.set_interaction_mode(InteractionMode::RigEdit), "Rig Edit mode opens");
+    coopa::test::require(app.interaction_mode() == InteractionMode::RigEdit, "Rig Edit mode is open");
+    coopa::test::require(app.rig_edit_model().bones.size() == 1, "the armature starts with one root bone");
 
     // The keyboard-only shortcuts below are gated on the viewport being hovered (see
     // viewport_keymap_'s own call site) -- unlike every other interaction in this file, this
     // one has no preceding click to put the cursor there incidentally, so it must move there
     // explicitly first (the same pattern animation_test.cpp/viewport_test.cpp use).
     in.move(glm::vec2(app.viewport_box().center()));
-    in.key(Key::A, coopa::input::Mods::Shift);
-    tick(engine, 2);
-    coopa::test::require(app.rig_edit_model().bones.size() == 1, "Shift+A added one root bone");
-    coopa::test::require(app.rig_edit_selected_bone() == 0, "...and selected it");
+    app.select_rig_bone(0);
+    coopa::test::require(app.rig_edit_selected_bone() == 0, "the root bone is selected");
 
     in.key(Key::E);
     tick(engine, 2);
@@ -107,8 +136,8 @@ COOPA_TEST(add_extrude_and_drag_an_endpoint_builds_and_saves_a_real_rig) {
     app.set_interaction_mode(InteractionMode::Object);   // leaving the mode saves
     tick(engine, 2);
 
-    const fs::path saved = session.project.assets() / "rigs" / "new_character.yaml";
-    coopa::test::require(coopa::yaml::document_exists(saved), "Rig Edit saved rigs/new_character.yaml: " + saved.string());
+    const fs::path saved = session.project.assets() / "rigs" / "armature.yaml";
+    coopa::test::require(coopa::yaml::document_exists(saved), "Rig Edit saved rigs/armature.yaml: " + saved.string());
     const coopa::rig::RigAsset asset = coopa::rig::parse_rig(coopa::yaml::load_document(saved));
     expect(asset.bones.size() == 2, "the saved file has both bones");
     expect_near(asset.bones[1].tail.z, tail_after.z, 1e-3f, "...with the dragged tail position");
@@ -116,8 +145,8 @@ COOPA_TEST(add_extrude_and_drag_an_endpoint_builds_and_saves_a_real_rig) {
     auto* live = app.sync().live(id);
     coopa::test::require(live != nullptr, "the object is still live");
     auto* rig = live->get_component<coopa::rig::Rig>();
-    coopa::test::require(rig != nullptr, "...and now has a Rig component (added on first save)");
-    expect(rig->rig_path == "rigs/new_character.yaml", "...pointing at the file Rig Edit just saved");
+    coopa::test::require(rig != nullptr, "...and has its Rig component");
+    expect(rig->rig_path == "rigs/armature.yaml", "...pointing at the file Rig Edit saved");
 }
 
 /** @brief set_selected_rig_bone_roll() writes a numeric roll that round-trips through the
@@ -128,21 +157,20 @@ COOPA_TEST(numeric_roll_round_trips_through_the_saved_file) {
     auto& app = session.app;
     auto& doc = app.document();
 
-    Node obj = doc.make_object("roll_rig");
-    const ObjectId id = doc.add_object(obj);
+    const ObjectId id = app.create_armature();
     app.sync().rebuild(engine, doc);
     tick(engine, 4);
 
     doc.select(id);
-    coopa::test::require(app.set_interaction_mode(InteractionMode::RigEdit), "Rig Edit mode opens");
-    app.add_rig_bone();
-    coopa::test::require(app.rig_edit_model().bones.size() == 1, "a root bone was added");
+    coopa::test::require(app.interaction_mode() == InteractionMode::RigEdit, "Rig Edit mode is open");
+    coopa::test::require(app.rig_edit_model().bones.size() == 1, "the armature's root bone is there");
+    app.select_rig_bone(0);
     app.set_selected_rig_bone_roll(37.0f);
     expect_near(app.rig_edit_model().bones[0].roll, 37.0f, 1e-4f, "the roll took effect in memory");
 
     app.set_interaction_mode(InteractionMode::Object);
     tick(engine, 2);
-    const fs::path saved = session.project.assets() / "rigs" / "roll_rig.yaml";
+    const fs::path saved = session.project.assets() / "rigs" / "armature.yaml";
     coopa::test::require(coopa::yaml::document_exists(saved), "the rig saved: " + saved.string());
     const coopa::rig::RigAsset asset = coopa::rig::parse_rig(coopa::yaml::load_document(saved));
     coopa::test::require(!asset.bones.empty(), "the saved asset has the bone");
@@ -236,14 +264,13 @@ COOPA_TEST(delete_bone_reparents_its_child_in_the_saved_file) {
     auto& app = session.app;
     auto& doc = app.document();
 
-    Node obj = doc.make_object("delete_rig");
-    const ObjectId id = doc.add_object(obj);
+    const ObjectId id = app.create_armature();
     app.sync().rebuild(engine, doc);
     tick(engine, 4);
 
     doc.select(id);
-    coopa::test::require(app.set_interaction_mode(InteractionMode::RigEdit), "Rig Edit mode opens");
-    app.add_rig_bone();                     // bone 0: root
+    coopa::test::require(app.interaction_mode() == InteractionMode::RigEdit, "Rig Edit mode is open");
+    app.select_rig_bone(0);                 // bone 0: the armature's root
     app.extrude_selected_rig_bone();        // bone 1: child of 0
     app.extrude_selected_rig_bone();        // bone 2: child of 1
     coopa::test::require(app.rig_edit_model().bones.size() == 3, "three bones exist");
@@ -262,13 +289,198 @@ COOPA_TEST(delete_bone_reparents_its_child_in_the_saved_file) {
     app.set_interaction_mode(InteractionMode::Object);
     tick(engine, 2);
 
-    const fs::path saved = session.project.assets() / "rigs" / "delete_rig.yaml";
+    const fs::path saved = session.project.assets() / "rigs" / "armature.yaml";
     coopa::test::require(coopa::yaml::document_exists(saved), "the rig saved: " + saved.string());
     const coopa::rig::RigAsset asset = coopa::rig::parse_rig(coopa::yaml::load_document(saved));
     coopa::test::require(asset.bones.size() == 2, "the saved file also has two bones");
     const int saved_gc = asset.find_bone(grandchild_name);
     coopa::test::require(saved_gc >= 0, "...including the reparented one");
     expect(asset.bones[static_cast<size_t>(saved_gc)].parent == 0, "...with parent index 0 in the saved file too");
+}
+
+/** @brief Ctrl+Z in Rig Edit undoes the BONE edit and leaves the scene document alone -- it used
+ *         to fall through to the scene's own undo stack, which could delete the object being
+ *         edited out from under the mode. Ctrl+Shift+Z puts the bone edit back. */
+COOPA_TEST(ctrl_z_undoes_the_bone_edit_not_the_scene) {
+    using coopa::input::Key;
+    using coopa::input::Mods;
+    EditorSession session;
+    auto& engine = session.engine;
+    auto& app = session.app;
+    auto& doc = app.document();
+    auto& in = session.in;
+
+    const ObjectId id = app.create_armature();
+    app.sync().rebuild(engine, doc);
+    tick(engine, 4);
+    doc.select(id);
+    coopa::test::require(app.interaction_mode() == InteractionMode::RigEdit, "Rig Edit mode is open");
+    const std::size_t objects_before = doc.all_ids().size();
+
+    app.select_rig_bone(0);
+    const glm::vec3 tail_before = app.rig_edit_model().bones[0].tail;
+    app.set_selected_rig_bone_tail(tail_before + glm::vec3(0.0f, 0.0f, 0.5f));
+    app.end_rig_edit_merge();
+    tick(engine, 2);
+    coopa::test::require(app.rig_edit_model().bones[0].tail.z > tail_before.z + 0.4f, "the bone edit landed");
+
+    in.move(glm::vec2(app.viewport_box().center()));
+    in.key(Key::Z, Mods::Control);
+    tick(engine, 2);
+    expect_near(app.rig_edit_model().bones[0].tail.z, tail_before.z, 1e-4f, "Ctrl+Z restored the bone's tail");
+    expect(doc.all_ids().size() == objects_before,
+           "...and the SCENE document is untouched (the armature was not undone away)");
+    expect(doc.find(id) != nullptr, "...the object being edited still exists");
+
+    in.key(Key::Z, Mods::Control | Mods::Shift);
+    tick(engine, 2);
+    expect(app.rig_edit_model().bones[0].tail.z > tail_before.z + 0.4f, "Ctrl+Shift+Z redoes the bone edit");
+    app.set_interaction_mode(InteractionMode::Object);
+}
+
+/** @brief Blender's selection model end to end: shift-click extends, a body click takes both
+ *         endpoints while an endpoint click takes one, and G moves exactly what is selected. */
+COOPA_TEST(multi_select_and_endpoint_grab) {
+    using coopa::input::Key;
+    using coopa::input::Mods;
+    EditorSession session;
+    auto& engine = session.engine;
+    auto& app = session.app;
+    auto& doc = app.document();
+    auto& in = session.in;
+
+    const ObjectId id = app.create_armature();
+    app.select_rig_bone(0);
+    app.extrude_selected_rig_bone();                // a second bone, connected
+    app.sync().rebuild(engine, doc);
+    app.camera().focus = {0.0f, 0.0f, 0.4f};
+    app.camera().distance = 3.0f;
+    app.camera().apply();
+    tick(engine, 4);
+    doc.select(id);
+    coopa::test::require(app.interaction_mode() == InteractionMode::RigEdit, "Rig Edit mode is open");
+    coopa::test::require(app.rig_edit_model().bones.size() == 2, "two bones to select between");
+
+    // A body click selects both of that bone's endpoints and makes it active.
+    const RigModel& m = app.rig_edit_model();
+    const glm::vec3 mid0 = glm::mix(m.bones[0].head, m.bones[0].tail, 0.5f);
+    glm::vec2 px;
+    coopa::test::require(engine.world_to_window(mid0, px), "bone 0's body projects into the viewport");
+    in.click(px / in.scale);
+    tick(engine, 2);
+    const auto& sel = app.rig_edit_selection();
+    expect(sel.bones[0].head && sel.bones[0].tail, "a body click selects BOTH endpoints");
+    expect(sel.active == 0, "...and makes that bone active");
+    expect(!sel.bones[1].head && !sel.bones[1].tail, "...leaving the other bone alone");
+
+    // Shift-clicking the second bone's body extends the selection to it.
+    const glm::vec3 mid1 = glm::mix(m.bones[1].head, m.bones[1].tail, 0.5f);
+    coopa::test::require(engine.world_to_window(mid1, px), "bone 1's body projects into the viewport");
+    in.click(px / in.scale, coopa::input::MouseButton::Left, Mods::Shift);
+    tick(engine, 2);
+    expect(sel.bones[0].both() && sel.bones[1].both(), "shift-click EXTENDS to a second bone");
+
+    // G Z 1 Enter now moves every selected endpoint by the typed delta.
+    const glm::vec3 b0_head = m.bones[0].head, b1_tail = m.bones[1].tail;
+    in.key(Key::G);
+    in.key(Key::Z);
+    in.key(Key::Num1);
+    in.key(Key::Enter);
+    tick(engine, 2);
+    expect_near(m.bones[0].head.z - b0_head.z, 1.0f, 0.02f, "G Z 1 moved the first bone's head");
+    expect_near(m.bones[1].tail.z - b1_tail.z, 1.0f, 0.02f, "...and the second bone's tail: the whole selection");
+
+    app.set_interaction_mode(InteractionMode::Object);
+}
+
+/** @brief Symmetrize through the real operator, verified in the SAVED file: an `_l` bone's `_r`
+ *         partner is created mirrored across X. */
+COOPA_TEST(symmetrize_writes_the_mirrored_side_to_the_file) {
+    EditorSession session;
+    auto& engine = session.engine;
+    auto& app = session.app;
+    auto& doc = app.document();
+
+    const ObjectId id = app.create_armature();
+    app.sync().rebuild(engine, doc);
+    tick(engine, 4);
+
+    doc.select(id);
+    coopa::test::require(app.interaction_mode() == InteractionMode::RigEdit, "Rig Edit mode is open");
+
+    app.select_rig_bone(0);
+    app.rename_selected_rig_bone("arm_l");
+    app.set_selected_rig_bone_head({0.2f, 0.0f, 0.0f});
+    app.set_selected_rig_bone_tail({0.7f, 0.0f, 0.0f});
+    app.end_rig_edit_merge();
+    app.select_rig_bone(0);
+    app.symmetrize_rig();
+    tick(engine, 2);
+
+    const int r = app.rig_edit_model().find_bone("arm_r");
+    coopa::test::require(r >= 0, "Symmetrize created the _r partner");
+    expect_near(app.rig_edit_model().bones[static_cast<size_t>(r)].head.x, -0.2f, 1e-4f, "...mirrored across X");
+
+    app.set_interaction_mode(InteractionMode::Object);   // leaving saves
+    tick(engine, 2);
+    const fs::path saved = session.project.assets() / "rigs" / "armature.yaml";
+    coopa::test::require(coopa::yaml::document_exists(saved), "the rig saved: " + saved.string());
+    const coopa::rig::RigAsset asset = coopa::rig::parse_rig(coopa::yaml::load_document(saved));
+    const int saved_r = asset.find_bone("arm_r");
+    coopa::test::require(saved_r >= 0, "...and the runtime's own parser reads the mirrored bone");
+    expect_near(asset.bones[static_cast<size_t>(saved_r)].head.x, -0.2f, 1e-3f, "...at the mirrored position");
+}
+
+/** @brief On an object carrying BOTH a rig and a mesh of its own, Tab cycles
+ *         Object -> Rig Edit -> Mesh Edit -> Object: there is no separate Rig Edit mode row to
+ *         pick, because editing a rig IS what Edit means for one. */
+COOPA_TEST(tab_cycles_object_rig_edit_mesh_edit) {
+    using coopa::input::Key;
+    EditorSession session;
+    auto& engine = session.engine;
+    auto& app = session.app;
+    auto& doc = app.document();
+    auto& in = session.in;
+
+    // create_armature() makes the Rig; give that same object a mesh of its own so it has both.
+    const ObjectId id = app.create_armature();
+    app.set_interaction_mode(InteractionMode::Object);
+    Node renderer = default_component("MeshRenderer");
+    renderer["mesh_path"] = Node(std::string("cube"));
+    doc.add_component(id, renderer);
+    app.sync().rebuild(engine, doc);
+    tick(engine, 4);
+
+    doc.select(id);
+    coopa::test::require(app.interaction_mode() == InteractionMode::Object, "starting in Object Mode");
+    in.move(glm::vec2(app.viewport_box().center()));   // Tab is keyboard-only: the viewport must be hovered
+
+    in.key(Key::Tab);
+    tick(engine, 2);
+    expect(app.interaction_mode() == InteractionMode::RigEdit,
+           "Tab from Object goes to RIG Edit first -- the rig is what Edit means here");
+
+    in.key(Key::Tab);
+    tick(engine, 2);
+    expect(app.interaction_mode() == InteractionMode::Edit, "...a second Tab moves on to the mesh's Edit Mode");
+
+    in.key(Key::Tab);
+    tick(engine, 2);
+    expect(app.interaction_mode() == InteractionMode::Object, "...and a third closes the cycle back to Object");
+
+    // On an object with a rig and NO mesh, the same key is a two-way toggle.
+    const ObjectId bare = app.create_armature();
+    app.set_interaction_mode(InteractionMode::Object);
+    app.sync().rebuild(engine, doc);
+    tick(engine, 4);
+    doc.select(bare);
+    in.move(glm::vec2(app.viewport_box().center()));
+    in.key(Key::Tab);
+    tick(engine, 2);
+    expect(app.interaction_mode() == InteractionMode::RigEdit, "a rig-only object Tabs into Rig Edit");
+    in.key(Key::Tab);
+    tick(engine, 2);
+    expect(app.interaction_mode() == InteractionMode::Object, "...and straight back out, with no mesh step");
 }
 
 } // namespace toy::editor::testing

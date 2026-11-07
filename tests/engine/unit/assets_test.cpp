@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -80,4 +81,65 @@ COOPA_TEST(shipped_config_and_scene_load_identically_from_caml) {
     for (const auto& o : packed.root_objects()) packed_names.push_back(o->name());
     expect(!plain_names.empty() && plain_names == packed_names,
            "scene.caml loads the same root objects (" + std::to_string(packed_names.size()) + ")");
+}
+
+/**
+ * @brief Every CharacterController with `use_root_motion: true` is accompanied by a
+ *        SkeletalAnimator carrying `apply_root_motion: true` -- the thing that actually feeds it.
+ *
+ * Root motion is a two-part contract across two components, and getting half of it right fails
+ * SILENTLY: the character plays its walk clip on the spot and never travels, while jump (a
+ * controller impulse, not root motion) still works, so the scene looks alive and merely "stuck".
+ * The half that rots is the producer: `Animator` (property animation) extracts root motion from a
+ * track addressed by OBJECT path, and since the rig split a bone is not a SceneObject, so an
+ * `Animator` on a rigged character resolves nothing and its `apply_root_motion` is inert. Only
+ * `SkeletalAnimator` (bone-addressed) can drive a rig's root motion. Two shipped scenes had
+ * exactly that stale wiring.
+ */
+COOPA_TEST(root_motion_consumers_have_a_skeletal_producer) {
+    int checked = 0;
+    for (const auto& src : asset_yaml_files()) {
+        const std::string rel = src.lexically_relative(ROOT_DIR).string();
+        if (rel.find("/scenes/") == std::string::npos && rel.find("/objects/") == std::string::npos) continue;
+        fkyaml::node doc;
+        try {
+            doc = coopa::yaml::load_document(src);
+        } catch (const std::exception&) {
+            continue;   // not our concern here: caml_roundtrips_every_asset already guards parseability
+        }
+        // Walk every mapping in the file; any object node that consumes root motion must also
+        // produce it. Components can be written as a block OR inline ({type: X, ...}), so this
+        // matches on the component list rather than on formatting.
+        const std::function<void(const fkyaml::node&)> visit = [&](const fkyaml::node& n) {
+            if (n.is_sequence()) {
+                for (const auto& c : n.as_seq()) visit(c);
+                return;
+            }
+            if (!n.is_mapping()) return;
+            if (n.contains("components") && n.at("components").is_sequence()) {
+                bool consumes = false, produces = false;
+                std::string owner;
+                for (const auto& c : n.at("components").as_seq()) {
+                    if (!c.is_mapping() || !c.contains("type") || !c.at("type").is_string()) continue;
+                    const std::string type = c.at("type").get_value<std::string>();
+                    auto flag = [&](const char* key) {
+                        return c.contains(key) && c.at(key).is_boolean() && c.at(key).get_value<bool>();
+                    };
+                    if (type == "CharacterController" && flag("use_root_motion")) consumes = true;
+                    if (type == "SkeletalAnimator" && flag("apply_root_motion")) produces = true;
+                }
+                if (n.contains("name") && n.at("name").is_string()) owner = n.at("name").get_value<std::string>();
+                if (consumes) {
+                    ++checked;
+                    expect(produces, rel + ": object '" + owner +
+                                         "' sets CharacterController use_root_motion but no SkeletalAnimator supplies it "
+                                         "(an `Animator` cannot: it addresses bones by object path -- the character would "
+                                         "animate in place and only jump would move)");
+                }
+            }
+            for (auto it = n.begin(); it != n.end(); ++it) visit(*it);
+        };
+        visit(doc);
+    }
+    expect(checked > 0, "found root-motion-driven characters to check (got " + std::to_string(checked) + ")");
 }

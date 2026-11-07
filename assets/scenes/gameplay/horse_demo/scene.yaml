@@ -66,8 +66,6 @@ scene:
           sprint_multiplier: 2.0
           jump_height: 1.2
           use_root_motion: true
-        - type: Animator
-          apply_root_motion: true
         - type: SkeletalAnimator
           apply_root_motion: true
         - type: CharacterAnimDriver

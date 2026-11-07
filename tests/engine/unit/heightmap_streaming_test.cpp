@@ -9,14 +9,15 @@
 
 #include <toyengine/world/heightmap_terrain.h>
 #include <toyengine/world/heightmap_terrain_system.h>
+#include <toyengine/world/terra_geometry.h>
 
 #include "engine/support/checks.h"
 
 COOPA_TEST_SUITE("heightmap_streaming");
 
-using toy::world::HeightmapGeometry;
 using toy::world::HeightmapTerrain;
 using toy::world::HeightmapTerrainSystem;
+using toy::world::TerraGeometry;
 
 COOPA_TEST(auto_settings_resolve) {
     HeightmapTerrain t;
@@ -35,9 +36,10 @@ COOPA_TEST(auto_settings_resolve) {
 }
 
 COOPA_TEST(chunk_distance_is_to_the_rectangle) {
-    HeightmapGeometry g;
-    g.size = glm::vec2(256.0f);
-    g.chunk_size = 64.0f;
+    TerraGeometry g;
+    g.tiles_x = g.tiles_y = 256;
+    g.tile_size = 1.0f;
+    g.chunk_tiles = 64;
     const glm::vec3 origin(-128.0f, -128.0f, 0.0f);
     // Chunk (1, 1) spans x, y in [-64, 0].
     expect_near(HeightmapTerrainSystem::chunk_distance(g, origin, 1, 1, glm::vec3(-30.0f, -30.0f, 50.0f)), 0.0f, 1e-5f,

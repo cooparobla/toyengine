@@ -64,6 +64,8 @@
 #include "../viewport/gizmo.h"
 #include "../viewport/modal_transform.h"
 #include "../rig/bone_pick.h"
+#include "../rig/rig_edit_ops.h"
+#include "../rig/rig_selection.h"
 #include "../rig/bone_pose_edit.h"
 #include "../ui/log_view.h"
 #include "../ui/logo.h"
@@ -435,7 +437,7 @@ public:
     void turn_instance_selection(float radians);
     /** @brief Deletes the selected instances (one undo step). */
     void delete_instance_selection();
-    void tile_edit_selection(const std::string& label, const std::function<void(toy::world::TileRecord&)>& edit);
+    void tile_edit_selection(const std::string& label, const std::function<void(toy::world::TileCell&)>& edit);
     TileSelection& tile_selection();
     const std::vector<std::string>& tile_set_assets();
 
@@ -562,6 +564,15 @@ public:
     ObjectId create_with_component(const std::string& type, const std::string& name, ObjectId parent = 0);
     /** @brief Add > Planet: a TileTerrain in planet mode (a small globe with its own gravity). */
     ObjectId create_planet();
+    /**
+     * @brief Add > Armature: a new object with a Rig, one root bone, and its own
+     *        `assets/rigs/<name>.yaml` -- then drops straight into Rig Edit on it.
+     *
+     * This is the ONLY way a rig comes into being, which is what lets Edit mode require one
+     * (rig_edit_target_of_): Blender's model, where you add an armature object and Tab into it
+     * rather than conjuring a skeleton out of an arbitrary object.
+     */
+    ObjectId create_armature();
 
     /** @brief The selection minus inherited children (they come from an object asset: not deleted, moved or copied here). */
     std::vector<ObjectId> own_selection_();
@@ -571,7 +582,7 @@ public:
     void duplicate_selected();
 
     /** @brief Which document Ctrl+Z acts on: what the user is looking at / pointing at. */
-    enum class UndoTarget { Scene, Mesh, Material, Theme, Config, Clip, NodeGraph };
+    enum class UndoTarget { Scene, Mesh, Material, Theme, Config, Clip, NodeGraph, RigEdit };
     UndoTarget undo_target_() const;
 
     void undo();
@@ -1025,6 +1036,16 @@ private:
      *         ancestor carrying a coopa::rig::Rig. Kept separate from rig_of_() itself so that
      *         function's many Animator-specific Timeline callers are untouched. */
     ObjectId pose_target_of_(ObjectId id) const;
+    /**
+     * @brief The id Rig Edit should target for `id`: the nearest ancestor (or `id` itself)
+     *        carrying a coopa::rig::Rig, else 0.
+     *
+     * Rig-ONLY, with no Animator fallback, unlike pose_target_of_(): Rig Edit edits a RigAsset's
+     * rest skeleton, and an Animator-style rig has no such asset to edit -- its "bones" are
+     * ordinary SceneObjects. 0 is what makes entering the mode refuse, which is why a rigless
+     * object gets Add > Armature instead (see create_armature()).
+     */
+    ObjectId rig_edit_target_of_(ObjectId id) const;
 
     /** @brief The edited mesh's object-to-world matrix (identity in the Asset tab). */
     glm::mat4 mesh_world_();
@@ -1108,14 +1129,13 @@ private:
 
     // --- rig edit mode (authoring a RigModel's rest skeleton) ---
     //
-    // Pose mode's sibling: edits REST head/tail/roll/parent/connected on a RigDocument instead
-    // of POSE deltas on a live coopa::rig::Rig. Single-select only (one bone, or one of its
-    // endpoints) -- no box select, no multi-bone drag -- since authoring a skeleton is a much
-    // more deliberate, one-joint-at-a-time operation than posing a whole character at once.
+    // This is what EDIT MODE means on a rigged object, the way Edit means vertices on a mesh:
+    // it edits REST head/tail/roll/parent/connected on a RigDocument, where Pose mode edits
+    // POSE deltas on a live coopa::rig::Rig. Selection follows Blender's edit-armature model --
+    // head, tail and body independently selectable, with an active bone (rig_selection.h).
 
-    /** @brief Enters RigEdit mode on `id`: pre-populates rig_edit_ from its Rig component's
-     *         asset if it has one (loaded), or starts an EMPTY rig to author from scratch.
-     * @return False if `id` is 0. */
+    /** @brief Enters RigEdit mode on the rig at or above `id`, loading its Rig component's asset.
+     * @return False when there is no Rig to edit -- Add > Armature is what creates one. */
     bool enter_rig_edit_mode_(ObjectId id);
     /** @brief Leaves RigEdit mode, saving first if dirty. */
     void exit_rig_edit_mode_();
@@ -1125,11 +1145,18 @@ private:
      *         exactly as a coopa::rig::Rig's bones are in its owner's. Identity if the object
      *         no longer resolves live (e.g. undo removed it out from under RigEdit mode). */
     glm::mat4 rig_edit_owner_world_() const;
-    /** @brief The closest bone body OR endpoint to `px`. Endpoint picking wins within its own
-     *         (tighter) radius -- a click meant for dragging a joint must not instead select
-     *         the whole bone. */
-    int rig_edit_pick_(const ViewProj& vp, glm::vec2 px, bool* endpoint_out, toy::editor::rig_pick::BoneEndpoint* which_out);
-    void rig_edit_click_select_(const ViewProj& vp, glm::vec2 px);
+    /** @brief The ACTIVE bone if it is still in range, else -1 -- what every single-bone operator
+     *         (rename, reparent, roll, extrude-from) targets, as in Blender. */
+    int rig_edit_active_bone_() const {
+        const int a = rig_edit_sel_.active;
+        return (a >= 0 && static_cast<std::size_t>(a) < rig_edit_.model.bones.size()) ? a : -1;
+    }
+    /** @brief Every bone as a world-space segment, for picking, box select and drawing alike. */
+    std::vector<toy::editor::rig_pick::BoneSegment> rig_edit_segments_() const;
+    /** @brief The closest bone body OR endpoint to `px` (endpoints win within a tighter radius). */
+    toy::editor::rig_pick::BonePickResult rig_edit_pick_(const ViewProj& vp, glm::vec2 px) const;
+    void rig_edit_click_select_(const ViewProj& vp, glm::vec2 px, bool shift);
+    void rig_edit_box_select_(const ViewProj& vp, glm::vec2 a, glm::vec2 b, bool additive, bool subtract);
     /** @brief G (move the selected endpoint, or the whole bone if none is specifically picked) /
      *         E (extrude a new child from the selected bone's tail) / X, Delete (delete the
      *         selected bone) / Ctrl+C... no: see the .cpp for the exact key list. */
@@ -1140,7 +1167,23 @@ private:
     /** @brief Adds a disconnected root bone near the 3D cursor (no bone selected) or extrudes a
      *         connected child from the selected bone's tail (A/E keys). */
     void rig_edit_add_or_extrude_(bool extrude);
+    /** @brief X / Delete: removes every FULLY selected bone (children reparent, Blender's rule). */
     void rig_edit_delete_selected_();
+    void rig_edit_duplicate_selected_();                 ///< Shift+D
+    void rig_edit_parent_to_active_();                   ///< Ctrl+P
+    void rig_edit_clear_parent_();                       ///< Alt+P
+    void rig_edit_fill_();                               ///< F: a bone spanning two selected endpoints
+    void rig_edit_merge_();                              ///< Alt+M: collapse a connected selected run
+    void rig_edit_subdivide_(int cuts);
+    /** @brief Ctrl+N: 0 = +Z up, 1 = -Z, 2 = +X, 3 = to the 3D cursor, 4 = to the active bone. */
+    void rig_edit_recalc_roll_(int mode);
+    void rig_edit_align_to_active_();                    ///< Ctrl+Alt+A (roll only -- see rig_edit_ops.h)
+    void rig_edit_symmetrize_();
+    /** @brief The 3D cursor in RIG space, for the operators that aim at a point. */
+    glm::vec3 rig_edit_cursor_rig_() const;
+    /** @brief Mirrors the just-transformed bones onto their `_l`/`_r` partners, inside the SAME
+     *         undo entry, when X-Axis Mirror is on. A no-op otherwise. */
+    void rig_edit_apply_x_mirror_(RigModel& m);
     void rig_edit_set_roll_(float degrees);
     /** @brief Renames the selected bone and repoints every referrer this project can find --
      *         see rig_referrers.h. No-op (logs why) if the name is empty or already taken. */
@@ -1150,9 +1193,18 @@ private:
      *         a distinct "nothing picked yet" sentinel). */
     void rig_edit_reparent_selected_(int new_parent);
     void rig_edit_set_connected_(bool on);
-    /** @brief One undoable edit of rig_edit_.model; the file is written once a frame
-     *         (rig_edit_frame_()), not per edit -- the RigModel sibling of anim_clip_edit_. */
-    void rig_edit_model_edit_(const std::string& label, const std::function<void(RigModel&)>& fn);
+    /**
+     * @brief One undoable edit of rig_edit_.model -- the RigModel sibling of anim_clip_edit_.
+     *
+     * Edits sharing `merge_key` while the mouse stays down (every frame of one modal drag) are
+     * ONE undo step, closed by rig_edit_frame_()'s end_merge() on mouse-up. Without a key each
+     * frame of a drag would be its own entry, so Ctrl+Z would rewind a drag pixel by pixel.
+     */
+    void rig_edit_model_edit_(const std::string& label, const std::function<void(RigModel&)>& fn,
+                              const std::string& merge_key = {});
+    /** @brief Clamps the bone selection back inside the model -- after an undo/redo (or any op)
+     *         changed the bone COUNT, indices held here can point past the end. */
+    void rig_edit_validate_selection_();
     /** @brief Per frame: flushes a dirty rig_edit_ to disk (creating its file and, the FIRST
      *         time, a Rig component on rig_edit_object_, if it has none) and ends any open merge. */
     void rig_edit_frame_(float dt);
@@ -1257,13 +1309,21 @@ public:
     bool is_isolated(ObjectId id) const { return isolated_.count(id) > 0; }
     // --- RigEdit mode (tests, menus) ---
     const RigModel& rig_edit_model() const { return rig_edit_.model; }
-    int rig_edit_selected_bone() const { return rig_edit_selected_bone_; }
-    /** @brief Selects bone `i` directly (whole-bone, no endpoint) -- for tests and a future
-     *         bone-list side panel, where picking by clicking in the viewport is not the point. */
+    /** @brief The ACTIVE bone -- the one single-bone operators target. */
+    int rig_edit_selected_bone() const { return rig_edit_active_bone_(); }
+    /** @brief Selects bone `i` whole (both endpoints) and makes it active, replacing whatever was
+     *         selected -- what a plain click on its body does, for tests and the bone sidebar. */
     void select_rig_bone(int i) {
-        rig_edit_selected_bone_ = i;
-        rig_edit_endpoint_selected_ = false;
+        toy::editor::rig_sel::validate(rig_edit_sel_, rig_edit_.model);
+        toy::editor::rig_sel::select_none(rig_edit_sel_);
+        if (i >= 0 && static_cast<std::size_t>(i) < rig_edit_sel_.bones.size()) {
+            rig_edit_sel_.bones[static_cast<std::size_t>(i)].head = true;
+            rig_edit_sel_.bones[static_cast<std::size_t>(i)].tail = true;
+        }
+        rig_edit_sel_.active = i;
     }
+    /** @brief The full selection, for tests and the sidebar. */
+    const toy::editor::rig_sel::RigSelection& rig_edit_selection() const { return rig_edit_sel_; }
     void extrude_selected_rig_bone() { rig_edit_add_or_extrude_(true); }
     void add_rig_bone() { rig_edit_add_or_extrude_(false); }
     void delete_selected_rig_bone() { rig_edit_delete_selected_(); }
@@ -1271,6 +1331,29 @@ public:
     void rename_selected_rig_bone(const std::string& to) { rig_edit_rename_selected_(to); }
     void reparent_selected_rig_bone(int new_parent) { rig_edit_reparent_selected_(new_parent); }
     void set_selected_rig_bone_connected(bool on) { rig_edit_set_connected_(on); }
+    /** @brief The sidebar's numeric head/tail fields. Merge-keyed so a drag is one undo step,
+     *         closed by end_rig_edit_merge() when the field is released. */
+    void set_selected_rig_bone_head(const glm::vec3& v) {
+        const int i = rig_edit_active_bone_();
+        if (i < 0) return;
+        rig_edit_model_edit_("Move Bone Head", [&](RigModel& m) { m.set_head(i, v); }, "rig_sidebar");
+    }
+    void set_selected_rig_bone_tail(const glm::vec3& v) {
+        const int i = rig_edit_active_bone_();
+        if (i < 0) return;
+        rig_edit_model_edit_("Move Bone Tail", [&](RigModel& m) { m.set_tail(i, v); }, "rig_sidebar");
+    }
+    void end_rig_edit_merge() { rig_edit_.undo.end_merge(); }
+    /** @brief Rig Edit's armature operators, for tests and menus. */
+    void subdivide_selected_rig_bones(int cuts) { rig_edit_subdivide_(cuts); }
+    void fill_rig_bones() { rig_edit_fill_(); }
+    void merge_rig_bones() { rig_edit_merge_(); }
+    void symmetrize_rig() { rig_edit_symmetrize_(); }
+    void recalculate_rig_roll(int mode) { rig_edit_recalc_roll_(mode); }
+    void align_rig_bones_to_active() { rig_edit_align_to_active_(); }
+    void duplicate_selected_rig_bones() { rig_edit_duplicate_selected_(); }
+    void set_rig_edit_x_mirror(bool on) { rig_edit_x_mirror_ = on; }
+    bool rig_edit_x_mirror() const { return rig_edit_x_mirror_; }
     fs::path rig_edit_path() const { return rig_edit_.path; }
 
     InteractionMode interaction_mode() const {
@@ -1673,12 +1756,26 @@ private:
     // --- rig edit mode ---
     ObjectId rig_edit_object_ = 0;        ///< The object whose world Transform anchors rig space; 0 = inactive.
     RigDocument rig_edit_;
-    int rig_edit_selected_bone_ = -1;
-    bool rig_edit_endpoint_selected_ = false;   ///< True: rig_edit_selected_end_ is the drag target, not the whole bone.
-    toy::editor::rig_pick::BoneEndpoint rig_edit_selected_end_ = toy::editor::rig_pick::BoneEndpoint::Head;
+    /** @brief The rig document the mode last held, kept so Tab-out-Tab-in resumes its undo
+     *         history instead of starting a fresh one (parked_meshes_'s one-slot sibling: only
+     *         ever one rig is being edited, so there is nothing to key a map on). */
+    RigDocument parked_rig_;
+    toy::editor::rig_sel::RigSelection rig_edit_sel_;   ///< Per-bone head/tail flags + the active bone.
     ModalTransform rig_edit_modal_;       ///< Separate from modal_/bone_modal_: RigModel is rest data, not a live object or pose.
-    struct RigEditDragStart { glm::vec3 head{0.0f}; glm::vec3 tail{0.0f}; float roll = 0.0f; };
-    RigEditDragStart rig_edit_drag_start_;
+    /** @brief The whole model as the modal started -- mesh_drag_base_'s sibling. A RigModel is
+     *         tens of bones, so snapshotting it per drag is free, and it is what lets every
+     *         frame recompute from scratch instead of accumulating (see transform_endpoints). */
+    RigModel rig_edit_drag_base_;
+    glm::vec3 rig_edit_pivot_world_{0.0f};   ///< The modal's pivot: the selected endpoints' median.
+    /** @brief True while the running Rotate modal is Blender's Ctrl+R ROLL rather than a plain
+     *         rotation -- the two share ModalKind::Rotate but mean different things. */
+    bool rig_edit_roll_modal_ = false;
+    /** @brief X-Axis Mirror: every edit also lands, mirrored, on the `_l`/`_r` partner. Session
+     *         state beside edit_symmetry_, which is likewise not persisted. */
+    bool rig_edit_x_mirror_ = false;
+    /** @brief Captured ONCE at a modal's start, never rebuilt mid-drag: rebuilding from
+     *         already-moved positions would let a partner drift away from its source. */
+    toy::editor::rig_ops::RigMirrorMap rig_edit_mirror_map_;
     std::string rig_edit_rename_buf_;
     EditMesh mesh_drag_base_;
     std::map<std::string, CachedMesh> mesh_cache_;

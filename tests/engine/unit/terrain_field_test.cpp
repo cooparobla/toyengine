@@ -1,12 +1,15 @@
 /**
  * @file terrain_field_test.cpp
- * @brief The unified terrain field, device-free: the two modes answer the same questions over
- *        their own planes, a tile's sub-grid aliases the plane it came from, water is a surface
- *        level in both modes, and one journal covers every plane.
+ * @brief The unified terrain field, device-free: a terraced grid and a smooth grid answer the
+ *        same questions over their own planes, a tile's sub-grid aliases the plane it came from,
+ *        water is a surface level in both, and one journal covers every plane.
  *
  * The claim under test is that a caller -- a brush, the foliage scatter, GroundProbe, gameplay --
- * never needs to know which mode it is looking at. Each test therefore asks the same thing of a
- * Tiles field and a Heightmap field and holds the answers to the same contract.
+ * never needs to know whether the terrain under it has a height plane (`height_sub > 1`) or not.
+ * Each test therefore asks the same thing of a terraced field and a smooth field and holds the
+ * answers to the same contract. `TerrainField` is a thin wrapper over one `TerraData`
+ * (terra_data.h); terra_data_test.cpp covers that store directly, including the
+ * `steps`-as-a-maintained-cache chokepoint this file's history (Stage 0) exists to justify.
  */
 
 #include <coopa/testing/test.h>
@@ -22,13 +25,13 @@ COOPA_TEST_SUITE("terrain_field");
 
 using toy::world::ConstTileHeights;
 using toy::world::IRect;
+using toy::world::TerraData;
+using toy::world::TerraGeometry;
 using toy::world::TerrainField;
 using toy::world::TerrainFieldCursor;
-using toy::world::TerrainFieldGeometry;
 using toy::world::TerrainFieldView;
-using toy::world::TerrainMode;
+using toy::world::TileCell;
 using toy::world::TileHeights;
-using toy::world::TileRecord;
 using toy::world::WaterCell;
 using toy::world::WaterKind;
 
@@ -36,17 +39,16 @@ namespace {
 
 /** @brief 8 x 8 one-metre tiles of terraced ground, two steps high at x >= 4. */
 TerrainField tiled() {
-    TerrainFieldGeometry g;
-    g.mode = TerrainMode::Tiles;
+    TerraGeometry g;
     g.tiles_x = g.tiles_y = 8;
-    g.size = glm::vec2(8.0f);
+    g.tile_size = 1.0f;
     g.height_step = 0.5f;
     g.chunk_tiles = 4;
     TerrainField f;
     f.reset(g);
     for (int y = 0; y < 8; ++y) {
         for (int x = 0; x < 8; ++x) {
-            TileRecord& r = f.tiles()->at(x, y);
+            TileCell& r = f.data()->at(x, y);
             r.steps = x >= 4 ? 2 : 0;
             r.set_top_kind(x >= 4 ? toy::world::TileKind::Stone : toy::world::TileKind::Grass);
         }
@@ -57,19 +59,18 @@ TerrainField tiled() {
 
 /** @brief 8 x 8 two-metre tiles with two height samples per tile edge, ground = 0.5 * local x. */
 TerrainField smooth() {
-    TerrainFieldGeometry g;
-    g.mode = TerrainMode::Heightmap;
+    TerraGeometry g;
     g.tiles_x = g.tiles_y = 8;
-    g.size = glm::vec2(16.0f);
+    g.tile_size = 2.0f;
     g.height = 20.0f;
     g.height_sub = 2;   // 17 x 17 samples over 16 m: one metre apart
     g.layer_sub = 2;
     g.chunk_tiles = 4;
     TerrainField f;
     f.reset(g);
-    toy::world::HeightmapData& h = *f.heights();
-    for (int j = 0; j < h.ny(); ++j) {
-        for (int i = 0; i < h.nx(); ++i) h.at(i, j) = 0.5f * static_cast<float>(i);
+    TerraData* d = f.data();
+    for (int j = 0; j < d->height_ny(); ++j) {
+        for (int i = 0; i < d->height_nx(); ++i) d->height_at(i, j) = 0.5f * static_cast<float>(i);
     }
     f.mark_all_dirty();
     return f;
@@ -81,15 +82,15 @@ TerrainField smooth() {
 COOPA_TEST(sub_resolution_sizes_the_planes) {
     const TerrainField t = tiled();
     expect(t.geometry().height_sub == 1, "tiles: one height step per tile, whatever was asked for");
-    expect(t.heights() == nullptr, "tiles: no height plane -- the record's step IS the height");
-    expect_near(t.geometry().tile_size(), 1.0f, 1e-6f, "tiles: 8 m over 8 tiles");
+    expect(!t.has_height_plane(), "tiles: no height plane -- the record's step IS the height");
+    expect_near(t.geometry().tile_size, 1.0f, 1e-6f, "tiles: 8 m over 8 tiles");
 
     const TerrainField s = smooth();
-    require(s.heights() != nullptr, "heightmap: a height plane exists");
-    expect(s.heights()->nx() == 17, "heightmap: 8 tiles x 2 sub + 1 = 17 samples a side");
-    expect(s.heights()->splat_w() == 16, "heightmap: 8 tiles x 2 sub = 16 layer texels a side");
-    expect_near(s.geometry().cell().x, 1.0f, 1e-6f, "heightmap: 16 m over 16 sample gaps");
-    expect_near(s.geometry().tile_size(), 2.0f, 1e-6f, "heightmap: two-metre tiles");
+    require(s.has_height_plane(), "heightmap: a height plane exists");
+    expect(s.data()->height_nx() == 17, "heightmap: 8 tiles x 2 sub + 1 = 17 samples a side");
+    expect(s.data()->layer_nx() == 16, "heightmap: 8 tiles x 2 sub = 16 layer texels a side");
+    expect_near(s.geometry().cell(), 1.0f, 1e-6f, "heightmap: 16 m over 16 sample gaps");
+    expect_near(s.geometry().tile_size, 2.0f, 1e-6f, "heightmap: two-metre tiles");
 }
 
 /** @brief Ground, normals and the dominant layer read the same way in either mode. */
@@ -112,7 +113,7 @@ COOPA_TEST(ground_and_layers_answer_in_both_modes) {
            "heightmap: the normal follows the slope");
     expect(t.normal_at(glm::vec2(1.5f, 1.5f)).z > 0.99f, "tiles: a column's top is flat");
 
-    s.heights()->fill_layer(3);
+    s.data()->fill_layer(3);
     expect(s.dominant_layer_at(glm::vec2(4.0f, 4.0f)) == 3, "heightmap: the painted layer dominates");
 }
 
@@ -122,12 +123,12 @@ COOPA_TEST(tile_sub_grid_aliases_the_plane) {
     const ConstTileHeights c = s.tile_height_samples(2, 3);
     require(static_cast<bool>(c), "heightmap: tile (2, 3) has its own samples");
     expect(c.n == 3, "heightmap: height_sub 2 means 3 samples a tile edge (its corners)");
-    expect_near(c.at(0, 0), s.heights()->at(4, 6), 1e-6f, "heightmap: sample (0,0) is plane texel (4, 6)");
-    expect_near(c.at(2, 0), s.heights()->at(6, 6), 1e-6f, "heightmap: and (2,0) is (6, 6)");
+    expect_near(c.at(0, 0), s.data()->height_at(4, 6), 1e-6f, "heightmap: sample (0,0) is plane texel (4, 6)");
+    expect_near(c.at(2, 0), s.data()->height_at(6, 6), 1e-6f, "heightmap: and (2,0) is (6, 6)");
 
     TileHeights w = s.tile_height_samples(2, 3);
     w.at(1, 1) = 99.0f;
-    expect_near(s.heights()->at(5, 7), 99.0f, 1e-6f, "heightmap: writing the view writes the plane");
+    expect_near(s.data()->height_at(5, 7), 99.0f, 1e-6f, "heightmap: writing the view writes the plane");
 
     // Neighbouring tiles share the corner between them, which is what keeps a seam closed.
     const ConstTileHeights right = s.tile_height_samples(3, 3);
@@ -147,7 +148,7 @@ COOPA_TEST(tile_layer_weights_read_in_both_modes) {
     expect(tl.dominant(0, 0) == static_cast<int>(toy::world::TileKind::Stone), "tiles: and it dominates");
 
     TerrainField s = smooth();
-    s.heights()->fill_layer(1);
+    s.data()->fill_layer(1);
     const auto sl = s.tile_layer_weights(5, 1);
     require(static_cast<bool>(sl), "heightmap: tile (5, 1) has layer weights");
     expect(sl.n == 2, "heightmap: layer_sub 2 means 2 x 2 texels per tile");
@@ -162,7 +163,8 @@ COOPA_TEST(water_is_a_surface_level_in_both_modes) {
     const WaterCell tw = t.water_at(glm::ivec2(1, 1));
     expect(tw.kind == WaterKind::Ocean, "tiles: the kind round-trips");
     expect_near(tw.level, 1.5f, 1e-6f, "tiles: three 0.5 m steps of water over flat ground");
-    expect(t.tiles()->at(1, 1).water_depth == 3, "tiles: the record holds it as steps, as the file does");
+    expect_near(t.data()->at(1, 1).water_level, 1.5f, 1e-6f,
+               "tiles: the cell holds the level directly in metres, not quantised to a step");
 
     t.set_water(glm::ivec2(2, 2), WaterCell{WaterKind::River, 1.0f, 5});
     const WaterCell river = t.water_at(glm::ivec2(2, 2));
@@ -220,12 +222,12 @@ COOPA_TEST(one_journal_covers_every_plane) {
     expect(s.cursor() != base, "heightmap: the cursor moved");
     expect(s.dirty_since(s.cursor()).empty(), "heightmap: nothing is pending at the new cursor");
 
-    // A splat-only edit still comes back in TILE space, so one consumer re-reads one region.
+    // A layer-only edit still comes back in TILE space, so one consumer re-reads one region.
     const TerrainFieldCursor mid = s.cursor();
-    s.heights()->mark_splat_dirty(IRect{0, 0, 4, 4});
+    s.data()->mark_layer_dirty(IRect{0, 0, 4, 4});
     const IRect sr = s.dirty_since(mid);
     expect(sr.x0 == 0 && sr.y0 == 0 && sr.x1 >= 2 && sr.y1 >= 2,
-           "heightmap: a splat edit covers the tiles it painted");
+           "heightmap: a layer edit covers the tiles it painted");
 
     // Two consumers at different cursors each see their own outstanding work. The rects are a
     // conservative cover (the journals coalesce), so the older cursor can only see more.

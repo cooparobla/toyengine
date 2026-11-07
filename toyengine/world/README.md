@@ -16,30 +16,46 @@ what a bare `Terrain` has always meant. So no scene ever had to be migrated.
 
 ### What the two modes share
 
-- **The data** -- [`terrain_field.h`](terrain_field.h)'s `TerrainField`: a grid of tiles where
-  each tile owns a sub-grid of heights and of layer weights. The **sub-resolution** is what
-  determines detail: one height sample per tile is the terraced world, several is the smooth one.
-  One API answers `ground_at`, `normal_at`, `layer_weight_at`, `record_at` and `water_at` in
-  either mode, which is why GroundProbe, the foliage scatter and gameplay no longer care which
-  they are standing on.
+Both modes are the SAME storage now, not two stores behind a forking facade. One
+[`TerraData`](terra_data.h) ([`terra_geometry.h`](terra_geometry.h) for its shape,
+[`terra_codec.h`](terra_codec.h) for its one `.terra` file, [`terra_store.h`](terra_store.h) for
+the process-wide instance keyed by file) holds the tile grid, an optional float height plane, the
+two splat planes, and every tile's water/biome/climate fields together -- whichever mode draws it.
+`TerrainMode` only decides which **meshing style** reads that data: Heightmap is "draw the float
+plane, GPU-displaced, tessellated"; Tiles is "draw the grid's integer `steps`, welded from a tile
+set's pieces". Nothing about biome, water, or a painted layer is mode-specific storage any more --
+switching mode is switching which system streams the SAME field, not swapping to a different file.
+
+- **The data** -- [`terrain_field.h`](terrain_field.h)'s `TerrainField`: a thin, non-owning
+  wrapper over one `TerraData` plus the local<->world geometry a brush, GroundProbe or gameplay
+  needs. The **sub-resolution** (`height_sub`) is what determines detail: `1` means no height
+  plane exists at all and a tile's own `steps` IS its height (the terraced read); `>1` is a real
+  float plane, continuous, bilinear. One API answers `ground_at`, `normal_at`, `layer_weight_at`,
+  `record_at` and `water_at` whichever way a given terrain is shaped, which is why GroundProbe,
+  the foliage scatter and gameplay no longer care which they are standing on.
 - **The layers** -- one authored `layers:` list (up to `k_terrain_layer_count`), named the same
   way in both modes. A heightmap tile blends them by painted splat weights; a tiles-mode tile
   names one per face through its 4-bit surface nibble. Left empty, a tile world uses the built-in
   set (`builtin_tile_layers()` in [`tile_types.h`](tile_types.h)) and looks exactly as it always
   has.
-- **The water** -- a kind (None / Ocean / Lake / River), a surface **level** and a river's flow,
-  per tile. Depth is never stored; it is `level - ground`. See [Water](#water).
+- **The water** -- a kind (None / Ocean / Lake / River), a surface **level** (absolute metres,
+  exact in both modes) and a river's flow, per tile (`TileCell`/`WaterCell`). Depth is never
+  stored; it is `level - ground`. See [Water](#water).
 
 ### What differs at runtime
 
-The shared API makes the two modes *virtually* interchangeable, not identical. Six gaps are
-accepted rather than papered over -- see `assets/scenes/terrain/unified_terrain_demo` for all
-six against one shared map, and the non-parity table in its scene header:
+A shared field makes the two modes *virtually* interchangeable, not identical -- the two
+streaming systems (`TerrainSystem`, `HeightmapTerrainSystem`) and their meshers stay distinct, so
+a handful of runtime gaps are accepted rather than papered over. See
+`assets/scenes/terrain/unified_terrain_demo` for all of them against one shared map, and the
+non-parity list in its scene header:
 
-- The water plane sits 0-1 m lower on tiles than on the heightmap -- tiles subtract an inset
-  from a quantised step; the heightmap mesher uses the continuous level raw.
-- A `Buoyancy` body floats slightly high on tiles -- `TerrainField::water_at` returns the
-  un-inset terrace level; only the heightmap branch populates the true `water_level_`.
+- The water plane sits 0-1 m lower on tiles than on the heightmap -- the terraced mesher always
+  reads the tile's real integer `steps`, never a fresh rounding of a height plane
+  (`tile_column()`'s `floor(water_level / height_step)` in `terra_data.h`), and subtracts an
+  inset from that quantised step; the heightmap mesher uses the stored continuous level raw. This
+  is now a meshing-time quantisation, not a second, separately-authoritative water field --
+  both modes read the same `TileCell::water_level`.
 - The shallow shelf's shape differs even though which tiles are wet does not: tiles get a flat
   terrace `water_inset` deep; the heightmap's bed is continuously graded (`grade_water_shore()`,
   below) and falls away at whatever rate the generator's own lake/shore grading gave it.
@@ -64,7 +80,7 @@ A streamed 3D tile world, built from a [mapcoopa](../../libs/mapcoopa) `MapGraph
 The map generator produces a 2D world — elevation, biomes, rivers, roads, towns. This module
 **bakes** it once into a stored grid of tiles (integer-height columns plus their climate — see
 [Stored tiles](#stored-tiles)), and from then on the tiles *are* the terrain: edited in the
-editor's Tile Mode or by gameplay, saved in a `.tiles` file. Every column is assembled from a
+editor's Tile Mode or by gameplay, saved in a `.terra` file. Every column is assembled from a
 **tile set**'s authored pieces, chosen by its neighbourhood — a top always, walls only where a
 neighbour is lower. Every piece in a chunk merges into one GPU mesh (and one collision mesh)
 built on the job system.
@@ -105,7 +121,11 @@ rounded, with dynamic bodies dropped onto it. Its header says how to switch it t
 | [`tile_types.h`](tile_types.h) | The vocabulary: `TileFace` (the six sides), `TileKind` (the twelve atlas surfaces), `TileColumn`, `ChunkCoord`, and `variant_transform()` — the eight D4 orientations a piece is baked into. |
 | [`tile_topology.h`](tile_topology.h) | The tile classifier: `TilePiece` (the eleven pieces a tile set is made of), `WallEnd`, `classify_quadrant()`, `classify_wall_end()`, `ColumnPad` (a chunk's columns plus a one-tile neighbour skirt), and the surface blend codes. Pure functions from a column's neighbourhood to a piece and one of eight orientations. |
 | [`tile_mesh_library.h`](tile_mesh_library.h) | `TileMeshLibrary` — bakes each tile set's pieces into all eight orientations once, **derives** their section caps, and `append_styled()`s one into a chunk's buffers with a scale, a translate and an index rebase. Geometry is **copied** out of its asset handles, so a baked library is immutable and safe for concurrent readers. |
-| [`terrain_field.h`](terrain_field.h) | `TerrainField` -- the unified data layer both modes answer through: the tile grid, each tile's height and layer sub-grids, the water cells, the per-plane edit cursor, and `TerrainFieldView` for world-space queries. |
+| [`terra_geometry.h`](terra_geometry.h) | `TerraGeometry` -- the authored shape of a `TerraData`: `tiles_x`/`tiles_y` (independent -- no forced-square rule), `tile_size`, `height_sub`/`layer_sub`, `height_step`, `height`, `chunk_tiles`. The ONE authority every plane's extent derives from. |
+| [`terra_data.h`](terra_data.h) | `TerraData` -- the one CPU store: the tile plane (`TileCell`, 24 bytes), an optional dense float height plane, two RGBA8 layer planes, three change journals and the bake handshake. Pure CPU, unit-testable with nothing else. |
+| [`terra_codec.h`](terra_codec.h) | `save_terra()` / `load_terra()` -- the one `.terra` file format: a plane table (additive, not a version bump) over 32 x 32-tile storage chunks, SoA-transposed then zlib'd, with atomic load-into-scratch. |
+| [`terra_store.h`](terra_store.h) | `TerraStore` -- the process-wide owner of every terrain's `TerraData`, keyed by its `.terra` file, surviving the editor's re-parse-on-every-change. Replaces `TileMapStore` + `HeightmapStore`. |
+| [`terrain_field.h`](terrain_field.h) | `TerrainField` -- a thin, non-owning wrapper over one `TerraData` plus the local<->world geometry every consumer wants: `ground_at`, `normal_at`, `layer_weight_at`, `record_at`, `water_at`, the change cursor, and `TerrainFieldView` for world-space queries. |
 | [`terrain_types.h`](terrain_types.h) | The vocabulary both modes share: `IRect`, `TerrainMode`, `WaterKind`, and `TerrainLayer` -- one authored surface, named the same way in either mode. |
 | [`terrain_params.h`](terrain_params.h) | `TerrainParams` -- how a tile world is cut into tiles and chunks. Passed by value, so a meshing job holds its own copy. |
 | [`terrain_water.h`](terrain_water.h) | The water operations over a field: flood, drain, settle, and the resumable `WaterSettle` a frame's budget is spent on. Shared by both modes, the editor's brush and gameplay. |
@@ -114,8 +134,7 @@ rounded, with dynamic bodies dropped onto it. Its header says how to switch it t
 | [`terrain_sampler.h`](../mapgen/terrain_sampler.h) | `TerrainParams` (the whole tiling: tile size, height step, chunk size, view radius) and `TerrainSampler` — owns the generated `MapGraph` and answers `sample(tile_x, tile_y) -> TileColumn`. Adds the point-to-cell lookup mapcoopa has no need for: a nearest-site query over a uniform bucket index. Const after `build()`, hence concurrently readable. |
 | [`terrain_chunk.h`](terrain_chunk.h) | The mesher. `sample_chunk_columns()` reads a chunk plus a one-tile neighbour skirt; `mesh_chunk_styled()` assembles its columns into a `ChunkMeshData`; `build_chunk_collision()` turns that into a static collision mesh. Pure — no Vulkan, no Scene, no AssetManager — which is what lets it run on a worker and be tested with no device. `ChunkBuildJob` bundles one job's inputs and outputs into a single shared object. |
 | [`terrain_component.h`](terrain_component.h) | `TerrainComponent` — the scene-authored `TileTerrain` component (old name `Terrain`) (tile set, stored tiles, generator keys, tiling, collision, material) plus the long-lived state: the bake, the baked library and the chunk table, and gameplay queries (`tile_at`, `record_at`, `height_at`). Carries no per-frame logic. |
-| [`tile_map_data.h`](tile_map_data.h) | `TileRecord` (16 bytes per tile: ground height, surfaces, flags, biome, climate, water depth and flow, region / country), `TileMapData` (the stored grid: edit journal, column raycast, `.tiles` files) and `TileMapStore` (every terrain's tiles, keyed by file, surviving re-parses). |
-| [`tile_water.h`](tile_water.h) | Editing the water over the tiles: `flood_water`, `drain_water`, `settle_water` (after ground moves) and the bake's rounding rule -- all keeping water from standing over dry ground. |
+| [`tile_edit.h`](tile_edit.h) | The pure edit operations over a `TerrainField&`: `tile_raise()`, `tile_set_height()`, `tile_paint()`, `tile_smooth()`, `tile_water()` -- shared by the editor's brushes and by gameplay. (`tile_water.h` is a compatibility alias for `terrain_water.h`, below -- both spellings of the same operations.) |
 | [`terrain_generator.h`](../mapgen/terrain_generator.h) | The `generator:` block: mapcoopa's own config keys over its standard map (`coopa::maps::standard_config()`), only the differences written; older scenes' flat keys still load. |
 | [`snow_field.h`](snow_field.h) | `SnowField` — the snow trench field: a toroidal 512² grid of trench depths (unorm16, 10 cm cells) following the camera, with `stamp()` (max-combine), `refill()` and `trench_at()`. Also the CPU mirrors of the shaders' open-sky test and deep-snow height (`snow_open_sky()`, `deep_snow_depth()`). Not part of the tile world; it lives here as world-space ground state. |
 | [`snow_system.h`](snow_system.h) | The `SnowDeformer` component and `SnowSystem` (order **370**): stamps every deformer (and every Rigidbody with the weather's `snow_auto_deformers`) that stands in deep snow, refills trenches while it snows, and answers `depth_at()`. See [toyengine/weather](../weather/README.md#snow). |
@@ -171,21 +190,28 @@ stay on the owner thread.
 
 ## Stored tiles
 
-A TileTerrain's tiles live in a `TileMapData` ([`tile_map_data.h`](tile_map_data.h)), one
-16-byte `TileRecord` per tile:
+A terrain's tile plane lives in a `TerraData` ([`terra_data.h`](terra_data.h)), one 24-byte
+`TileCell` per tile -- the same plane whichever meshing style draws it (see
+[What the two modes share](#what-the-two-modes-share) above):
 
 | Field | Meaning |
 |---|---|
-| `steps` | Ground height in whole steps -- under water, the bed |
+| `steps` | Ground height in whole steps -- under water, the bed. Authoritative with no height plane; a maintained derived cache of it otherwise (`TerraData`'s private `refresh_steps_()`) |
 | `kinds` | Top and side surface kinds (4 bits each) |
-| `flags` | Water, Ocean, Coast, River (a channel cuts it), Flowing (its water is a river's); Road, Town reserved |
+| `flags` | Coast, River (a channel cuts it), Road, Town |
 | `biome` | mapcoopa biome |
 | `temperature`, `moisture` | mapcoopa's 0..1 values (temperature is a static yearly mean: 0 polar, 1 equatorial), as bytes |
-| `water_depth` | Steps of water over the ground, filling to the terrace `water_level()`; 0 when dry |
-| `region`, `country` | mapcoopa ids (`0xFFFF` = none) |
+| `water_kind` | `WaterKind` (None/Ocean/Lake/River), as a value -- not flag bits |
+| `water_level` | The water SURFACE, absolute metres (not a depth-in-steps); unused when dry |
 | `flow` | A river's downstream direction, an octant 1..8 |
+| `flow_authored` | Set when a human (or mapcoopa) wrote `flow` directly, as opposed to some future auto-derivation leaving it alone |
+| `region`, `country` | mapcoopa ids (`0xFFFF` = none) |
 
-**Baking.** With no `.tiles` file (or on a Regenerate) the terrain generates the mapcoopa map from
+Depth is never stored -- it is always `water_level - ground`, which is the one rule that makes
+the same cell correct whether a terraced mesher reads a quantised step or a smooth one reads a
+continuous height (see [Water](#water)).
+
+**Baking.** With no `.terra` file (or on a Regenerate) the terrain generates the mapcoopa map from
 its `generator:` settings -- mapcoopa's standard map (`coopa::maps::standard_config()`, what a bare
 `mapcoopa` run makes) in mapcoopa's **natural terrain model** (`default_generator()`: smooth ground
 shaped into ridged mountain ranges, rolling hills and plateaus, instead of the classic model's flat
@@ -265,12 +291,15 @@ of taking the shore's sand all the way down (`TerrainSampler::bed_kind_for()`): 
 silt below the wave base, scoured stone on the open floor, and mud from the margin in on a lake.
 `terrain_sampler_test` holds the baked floor to having relief and more than one surface.
 
-**Files.** `tiles:` names the file (default `terrain/<object>.tiles` beside the scene). A header,
-a chunk index, then one deflated block per 32 × 32 storage chunk, fields stored plane by plane
-so the terrain's coherence compresses (terrain_demo's 65k tiles: 127 KB). Saving recompresses
-only chunks edited since. `TileMapStore` owns every terrain's tiles keyed by file, so re-parsing
-the component (the editor does on every change) keeps the live — possibly unsaved — tiles; the
-editor writes them with the scene (Ctrl S).
+**Files.** `tiles:` (Tiles mode) or `data:` (Heightmap mode) names the file -- both spellings of
+the same key -- default `terrain/<object>.terra` beside the scene. A header, a geometry block, a
+plane table (additive: a new plane or a grown `TileCell` is never a version break), then each
+plane's own chunk index and deflated blobs, one per 32 x 32-tile storage chunk, SoA-transposed so
+the terrain's coherence compresses. Saving recompresses only chunks edited since.
+[`TerraStore`](terra_store.h) owns every terrain's data keyed by file, so re-parsing the
+component (the editor does on every change) keeps the live — possibly unsaved — data; the editor
+writes it with the scene (Ctrl S). A hand-sculpted terrain and a mapcoopa bake are both, in the
+end, just a `TerraData` committed through the same store -- the codec cannot tell them apart.
 
 **Editing at runtime.** The same calls the editor's brushes use:
 
@@ -279,15 +308,18 @@ auto* terrain = scene.find_first_component<toy::world::TerrainComponent>();
 glm::ivec2 t;
 if (terrain->tile_at(world_pos, t)) {
     const toy::world::IRect cell{t.x, t.y, t.x + 1, t.y + 1};
-    terrain->tiles->at(t.x, t.y).steps -= 1;                     // dig (on dry ground)
-    terrain->tiles->mark_dirty(cell);
-    toy::world::settle_water(*terrain->tiles, cell);             // water beside it runs in
+    terrain->field.data()->at(t.x, t.y).steps -= 1;              // dig (on dry ground)
+    terrain->field.mark_tiles_dirty(cell);
+    toy::world::settle_water(terrain->field, cell);              // water beside it runs in
 }
-toy::world::flood_water(*terrain->tiles, {t}, 6);                // fill a basin to terrace 6
-const toy::world::TileRecord* r = terrain->record_at(world_pos);   // biome, temperature...
+toy::world::flood_water(terrain->field, {t}, 6);                 // fill a basin to terrace 6
+const toy::world::TileCell* r = terrain->record_at(world_pos);    // biome, temperature...
 ```
 
-`mark_dirty()` journals the rect; TerrainSystem re-meshes exactly the chunks it touches (and the
+Or through `tile_edit.h`'s pure operations (`tile_raise()`, `tile_paint()`, ...), which both the
+editor's brushes and `TerrainComponent::raise_at()`/`raise_tiles()` forward to.
+
+`mark_tiles_dirty()` journals the rect; TerrainSystem re-meshes exactly the chunks it touches (and the
 neighbours whose skirt it is), each keeping its old mesh until the new one swaps in, and the chunk
 collider follows. Chunk jobs mesh a copy of their columns taken at submit, so edits never race a
 running job. Owner thread only.
@@ -317,10 +349,10 @@ bodies resting on terrain the camera streams away entirely lose their ground wit
 ## Editing it at runtime
 
 The tiles are the terrain (see [Stored tiles](#stored-tiles)), so changing the world is changing
-them: write records, `mark_dirty()`, and the chunks they touch re-mesh with their colliders and
-water. `tile_edit.h` is that as operations rather than raw writes -- `tile_raise()`,
+them: write cells, `mark_tiles_dirty()`, and the chunks they touch re-mesh with their colliders
+and water. `tile_edit.h` is that as operations rather than raw writes -- `tile_raise()`,
 `tile_set_height()`, `tile_paint()`, `tile_smooth()`, `tile_water()` -- pure functions over a
-`TileMapData`, shared by the editor's brushes (`editor/terrain/tile_brush.h` forwards to them)
+`TerrainField&`, shared by the editor's brushes (`editor/terrain/tile_brush.h` forwards to them)
 and by gameplay.
 
 Gameplay goes through the component, which knows where the tiles are in the world and owns the
@@ -333,13 +365,13 @@ terrain->raycast_tiles(ray_origin, ray_direction, 1e4f, hit);          // what i
 
 **The water follows by itself.** Ground that rose through its surface loses it, and ground that
 dropped beside water is flooded by it, to that body's level and carrying what it is -- sea,
-lake, or a river with its flow direction (`tile_water.h`'s `settle_water()`). What gameplay must
+lake, or a river with its flow direction (`terrain_water.h`'s `settle_water()`). What gameplay must
 not do is pay for it all at once: a hole dug at the shore floods as far as the basin runs,
 which is thousands of tiles and a rebuild for every chunk they cross. So an edit through the
 component **queues** the settle (`TerrainComponent::water_settles`) and `TerrainSystem` spends
 `water_settle_budget` tiles a frame on it -- the water is seen to run in, and the chunk rebuilds
 ride the streamer's existing pacing. `settle_water()` still runs the whole thing in one call for
-the editor, and `tile_map_test` asserts the two end up identical.
+the editor, and `terrain_water_test` asserts the two end up identical.
 
 On a planet every one of these steps its neighbours through `PlanetLayout::neighbour()`, because
 one column along in storage is a column of the next face, nowhere near the water.
@@ -687,10 +719,10 @@ See `assets/scenes/terrain/planet_demo` -- a globe held whole in frame, spun by 
 - **Layout** (`planet.h`, `PlanetLayout`). Six faces of a cube, each `face_tiles` square, bent
   onto the sphere with equal-angle faces (tiles stay near-square everywhere). The radius is
   `2 · face_tiles · tile_size / π`, so a tile in the middle of a face is `tile_size` across.
-  The six faces are stored side by side in one `6N × N` `TileMapData`, so the `.tiles` format is
+  The six faces are stored side by side in one `6N × N` `TerraData`, so the `.terra` format is
   the flat one. `wrap()` / `neighbour()` step across a face's edge onto the next face (turned).
 - **`chunk_size` is baked in.** The parser trims `face_tiles` to a multiple of it (the demo's
-  216 becomes 208 at `chunk_size: 16`), and the stored `.tiles` hold the world at that width.
+  216 becomes 208 at `chunk_size: 16`), and the stored `.terra` file holds the world at that width.
   Changing `chunk_size` on a planet whose tiles already exist reads them at the wrong size --
   bands of missing sea across the globe -- until the world is regenerated. Change the two
   together, or pick a `chunk_size` that divides `face_tiles` exactly.
@@ -740,16 +772,42 @@ and more than one planet per scene are out of scope for now.
 
 ## Heightmap terrain
 
-`HeightmapTerrain` ([`heightmap_terrain.h`](heightmap_terrain.h)) is a plain height grid: a size and
-height in metres, a chunk size and a resolution, a 16-bit greyscale heightmap PNG and two RGBA8
-splat PNGs painting eight layers. Demo: `./build/toyengine heightmap_terrain_demo`.
+`HeightmapTerrain` ([`heightmap_terrain.h`](heightmap_terrain.h)) is a plain height grid: a size
+and height in metres, a chunk size, and `height_sub` samples per tile edge. Its data is the SAME
+`TerraData`/`.terra` file every mode uses (see [Stored tiles](#stored-tiles) and
+[What the two modes share](#what-the-two-modes-share)) -- a height plane, two RGBA8 splat planes
+painting eight layers, and the tile plane alongside them for biome/climate/water. Demo:
+`./build/toyengine heightmap_terrain_demo`.
+
+A terrain with no height data gets it one of three ways, all one-shot (none is privileged over
+another, and none re-fires once the field is saved): a `MapGenerator` bake, a hand sculpt in the
+editor, or an `import:` block (see [`terra_image.h`](terra_image.h)) naming a heightmap and/or
+splat PNGs to decode straight into the field:
+
+```yaml
+- type: Terrain
+  mode: heightmap
+  import:
+    height: terrain/height.png     # 16-bit greyscale; any size -- resampled onto this terrain's grid
+    layer0: terrain/splat0.png     # optional, RGBA8: layers 0-3's weights
+    layer1: terrain/splat1.png     # optional, RGBA8: layers 4-7's weights
+```
+
+The import happens in `sync_field()` the first time the field `needs_bake()`; a later save
+(or a `MapGenerator` bake landing first) means the key is never consulted again, same as
+`generator:`'s rule. `import_height_png()`/`import_layer_png()` resample (bilinear) when the
+source PNG isn't the field's exact size, so any heightmap works with any terrain's grid, not
+just one authored at a matching resolution. `export_height_png()`/`export_layer_png()` are the
+reverse, for pulling a sculpted/painted terrain back out to edit in another tool.
 
 | File | Purpose |
 |---|---|
-| [`heightmap_data.h`](heightmap_data.h) | `HeightmapData` -- the CPU source of truth: the height grid (metres), the splats, bilinear sampling / normals / layer weights, a surface raycast, resample on a geometry change, and the **edit journal** (`height_dirty_since(revision)`) every consumer follows. `HeightmapView` is the world-space query handle. |
-| [`heightmap_store.h`](heightmap_store.h) | `HeightmapStore` -- the process-wide owner of every terrain's data, keyed by its heightmap file, so re-parsing a component (the editor does on every edit) keeps unsaved strokes. Saves the PNGs; restores an earlier shape exactly when a resize is undone. |
-| [`png16.h`](png16.h) | 16-bit greyscale PNG writer (stb's zlib, our chunks) and readers. |
-| [`heightmap_terrain_system.h`](heightmap_terrain_system.h) | `HeightmapTerrainSystem` (order **61**) -- chunk objects, the GPU height / splat textures (patched from the journal), the layer texture arrays, the heightfield collider, and the per-frame `TerrainFrameBinding`s the renderer reads. |
+| [`heightmap_terrain.h`](heightmap_terrain.h) | `HeightmapTerrain` (`TerrainComponent` with `mode = Heightmap`): the authored size, height, chunk size, `height_sub`, `import:`, tessellation and streaming budget. Parsing is `parse_heightmap_terrain()` in `heightmap_terrain.cpp`. |
+| [`heightmap_terrain_system.h`](heightmap_terrain_system.h) | `HeightmapTerrainSystem` (order **61**) -- chunk objects, the GPU height / splat textures (patched from `TerraData`'s height/layer journals), the layer texture arrays, the heightfield collider, and the per-frame `TerrainFrameBinding`s the renderer reads. |
+| [`terra_image.h`](terra_image.h) | `import_height_png()` / `export_height_png()` / `import_layer_png()` / `export_layer_png()` -- a pixel-level PNG bridge, outside the `.terra` format entirely; a caller (the `import:` key, an editor button, a script) decides when to use them. |
+
+Its CPU store, change tracking and the `.terra` codec are `terra_data.h` / `terra_codec.h` /
+`terra_store.h`, above -- shared with Tiles mode, not a mode-specific type.
 
 **Drawing.** Every chunk is one instance of one shared flat patch mesh, so all chunks of a terrain
 batch into a single instanced draw. The `heightmap_terrain` surface shader
@@ -821,9 +879,12 @@ by layer / slope / height, streamed around the camera, re-scattered where the te
 
 Caves and overhangs (the height-column model has no room for them, though mapcoopa generates cave
 systems), waterfalls as their own effect (a river's step is a steep slope of its surface),
-rivers/roads/towns as 3D geometry, loading only the `.tiles` chunks near the camera (the file
+rivers/roads/towns as 3D geometry, loading only the `.terra` chunks near the camera (the file
 format allows it; everything is loaded today), and a per-tile tile-set override. A mode-agnostic
-water inset (today only the heightmap branch populates the un-inset `water_level_`, see **What
-differs at runtime** above) and a keep-warm pass for an evicted heightmap (so switching back
-doesn't re-decode every layer PNG synchronously) are both open. Each sits on top of this layer rather
-than requiring it to change shape.
+water inset (today the terraced mesher still quantises `water_level` to a step and subtracts an
+inset at mesh time, see **What differs at runtime** above -- the data itself carries no
+mode-specific copy any more) and a keep-warm pass for an evicted heightmap (so switching back
+doesn't re-decode every layer texture synchronously) are both open. An editor button for
+`terra_image.h`'s import/export (today it is scene-YAML and script only -- see **Heightmap
+terrain** above) is also open. Each sits on top of this layer rather than requiring it to change
+shape.

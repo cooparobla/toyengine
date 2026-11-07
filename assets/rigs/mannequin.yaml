@@ -23,9 +23,9 @@ rig:
     - name: upper_arm_l
       head: { x: -0.21, y: 0.0, z: 1.42 }
       parent: chest
-      tail: { x: -0.21, y: 0.0, z: 1.14 }
+      tail: { x: -0.5506168603897095, y: -0.0, z: 1.281593680381775 }
     - name: lower_arm_l
-      head: { x: -0.21, y: 0.0, z: 1.14 }
+      head: { x: -0.33476, y: -0.0, z: 1.13703 }
       parent: upper_arm_l
       tail: { x: -0.21, y: 0.0, z: 0.89 }
     - name: hand_l

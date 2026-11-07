@@ -21,12 +21,12 @@ constexpr int k_dy[4] = {0, 0, 1, -1};
  * at all, and gets a value far under anything it can resolve.
  */
 float level_epsilon(const TerrainField& field) {
-    return field.mode() == TerrainMode::Tiles ? field.geometry().height_step * 1e-3f : 1e-4f;
+    return !field.has_height_plane() ? field.geometry().height_step * 1e-3f : 1e-4f;
 }
 
 IRect clip_limit(const TerrainField& field, const IRect& limit) {
-    const TileMapData* tiles = field.tiles();
-    const IRect whole{0, 0, tiles ? tiles->width() : 0, tiles ? tiles->height() : 0};
+    const TerraData* d = field.data();
+    const IRect whole{0, 0, d ? d->geometry().tiles_x : 0, d ? d->geometry().tiles_y : 0};
     if (limit.empty()) return whole;
     return IRect{std::max(0, limit.x0), std::max(0, limit.y0), std::min(whole.x1, limit.x1),
                  std::min(whole.y1, limit.y1)};
@@ -207,24 +207,24 @@ IRect settle_water(TerrainField& field, const IRect& rect, const IRect& limit, s
     return field.cursor() == before ? changed : field.dirty_since(before);
 }
 
-void settle_water_rounding(TileMapData& tiles, const IRect& rect, const PlanetLayout* planet) {
-    const int w = tiles.width(), h = tiles.height();
+void settle_water_rounding(TerrainField& field, const IRect& rect, const PlanetLayout* planet) {
+    TerraData* d = field.data();
+    if (!d) return;
+    const float hstep = d->geometry().height_step;
+    const int w = d->geometry().tiles_x, h = d->geometry().tiles_y;
     const int x0 = std::max(0, rect.x0), y0 = std::max(0, rect.y0);
     const int x1 = std::min(w, rect.x1), y1 = std::min(h, rect.y1);
     for (int y = y0; y < y1; ++y) {
         for (int x = x0; x < x1; ++x) {
-            TileRecord& r = tiles.at(x, y);
-            if (r.water()) {
-                const int level = r.water_level();
-                const bool ocean = r.has(TileRecord::Ocean), flowing = r.has(TileRecord::Flowing);
-                const std::uint8_t flow = r.flow;
-                if (r.steps > level - 1) r.steps = static_cast<std::int16_t>(level - 1);
-                if (r.steps < level - 255) r.steps = static_cast<std::int16_t>(level - 255);
-                r.set_water(level, ocean, flowing);
-                r.flow = flowing ? flow : 0;
+            TileCell& c = d->at(x, y);
+            if (c.wet()) {
+                // The bed stays at least one step under the water's surface -- no lower cap: a
+                // continuous metres level has no 255-step depth ceiling to keep it inside.
+                const std::int16_t ceil_step = static_cast<std::int16_t>(std::lround(c.water_level / hstep) - 1);
+                if (c.steps > ceil_step) c.steps = ceil_step;
                 continue;
             }
-            int bank = r.steps;
+            int bank = c.steps;
             for (int dy = -1; dy <= 1; ++dy) {
                 for (int dx = -1; dx <= 1; ++dx) {
                     if (dx == 0 && dy == 0) continue;
@@ -236,11 +236,11 @@ void settle_water_rounding(TileMapData& tiles, const IRect& rect, const PlanetLa
                     } else if (nx < 0 || ny < 0 || nx >= w || ny >= h) {
                         continue;
                     }
-                    const TileRecord& o = tiles.at(nx, ny);
-                    if (o.water()) bank = std::max(bank, o.water_level());
+                    const TileCell& o = d->get(nx, ny);
+                    if (o.wet()) bank = std::max(bank, static_cast<int>(std::lround(o.water_level / hstep)));
                 }
             }
-            r.steps = static_cast<std::int16_t>(bank);
+            c.steps = static_cast<std::int16_t>(bank);
         }
     }
 }
@@ -372,14 +372,10 @@ void grade_water_shore(std::vector<float>& heights, int nx, int ny, const std::v
 
 IRect grade_water_shore(TerrainField& field, const IRect& rect, const ShoreGrade& grade) {
     IRect changed;
-    if (field.mode() != TerrainMode::Heightmap || field.empty()) return changed;
-    HeightmapData* hd = field.heights();
-    if (hd == nullptr) return changed;
-    const int tiles_x = field.geometry().tiles_x, tiles_y = field.geometry().tiles_y;
-    const int nx = hd->nx(), ny = hd->ny();
-    // This reads and writes the raw corner plane directly, which only lines up one-to-one with
-    // the tile grid when there is exactly one height sample per tile edge.
-    if (field.geometry().height_sub != 1 || nx != tiles_x + 1 || ny != tiles_y + 1) return changed;
+    TerraData* d = field.data();
+    if (!d || !d->has_heights() || d->empty()) return changed;
+    const int tiles_x = d->geometry().tiles_x, tiles_y = d->geometry().tiles_y;
+    const int sub = std::max(1, d->geometry().height_sub);
 
     // The distance ramp (pass 2) needs wet-mask context past `rect` to converge correctly, so the
     // window read from the field is padded; only `rect` itself is ever written back.
@@ -395,23 +391,84 @@ IRect grade_water_shore(TerrainField& field, const IRect& rect, const ShoreGrade
         }
     }
 
-    const int hx0 = window.x0, hy0 = window.y0, hnx = ww + 1, hny = wh + 1;
+    // One height sample per tile corner when sub == 1; `sub + 1` per tile edge in general --
+    // every wet TILE's whole corner block is lowered together, same as derive_steps_().
+    const int hx0 = window.x0 * sub, hy0 = window.y0 * sub, hnx = ww * sub + 1, hny = wh * sub + 1;
     std::vector<float> heights(static_cast<std::size_t>(hnx) * hny);
     for (int y = 0; y < hny; ++y) {
-        for (int x = 0; x < hnx; ++x) heights[static_cast<std::size_t>(y) * hnx + x] = hd->at(hx0 + x, hy0 + y);
+        for (int x = 0; x < hnx; ++x) heights[static_cast<std::size_t>(y) * hnx + x] = d->height_at(hx0 + x, hy0 + y);
     }
 
-    grade_water_shore(heights, hnx, hny, water, ww, wh, grade);
+    // The quantity pass 1 has to cap is whatever ground_at_tile()/set_water()'s dryness test
+    // actually reads: TerraData::bilinear_height_() AT THE TILE'S EXACT CENTRE -- the mean of the
+    // WHOLE (sub + 1)^2 corner block only equals that at sub == 1 (where the block IS the 4
+    // corners the bilinear blends). At sub > 1 the centre falls inside the block, at the same
+    // fractional offset on both axes (a tile is always square), so one bilinear blend of the
+    // nearest 2 x 2 samples around it gives the exact value -- a single sample, not a blend, when
+    // sub is even and the centre lands exactly on one.
+    const auto centre_height = [&](int tx, int ty) {
+        const float t = static_cast<float>(sub) * 0.5f;
+        const int i0 = std::min(static_cast<int>(t), sub - 1);
+        const float f = t - static_cast<float>(i0);
+        const int bx = tx * sub + i0, by = ty * sub + i0;
+        const float a = heights[static_cast<std::size_t>(by) * hnx + bx] +
+                        (heights[static_cast<std::size_t>(by) * hnx + bx + 1] - heights[static_cast<std::size_t>(by) * hnx + bx]) * f;
+        const float b = heights[static_cast<std::size_t>(by + 1) * hnx + bx] +
+                        (heights[static_cast<std::size_t>(by + 1) * hnx + bx + 1] - heights[static_cast<std::size_t>(by + 1) * hnx + bx]) * f;
+        return a + (b - a) * f;
+    };
+
+    std::vector<float> drop(heights.size(), 0.0f);
+    for (int ty = 0; ty < wh; ++ty) {
+        for (int tx = 0; tx < ww; ++tx) {
+            const WaterCell& c = water[static_cast<std::size_t>(ty) * ww + tx];
+            if (!c.wet()) continue;
+            const float centre = centre_height(tx, ty);
+            const float deficit = static_cast<float>(std::max(0.0, static_cast<double>(centre) - (static_cast<double>(c.level) - grade.clearance)));
+            if (deficit <= 0.0f) continue;
+            for (int dy = 0; dy <= sub; ++dy) {
+                for (int dx = 0; dx <= sub; ++dx) {
+                    float& dd = drop[static_cast<std::size_t>(ty * sub + dy) * hnx + (tx * sub + dx)];
+                    dd = std::max(dd, deficit);
+                }
+            }
+        }
+    }
+    for (std::size_t i = 0; i < heights.size(); ++i) heights[i] -= drop[i];
+
+    if (grade.depth > 0.0f && grade.band > 0.0f) {
+        const std::vector<float> dist = dry_distance_(water, ww, wh);
+        std::vector<float> ceiling(heights.size(), std::numeric_limits<float>::infinity());
+        for (int ty = 0; ty < wh; ++ty) {
+            for (int tx = 0; tx < ww; ++tx) {
+                const WaterCell& c = water[static_cast<std::size_t>(ty) * ww + tx];
+                if (!c.wet()) continue;
+                const float dd = dist[static_cast<std::size_t>(ty) * ww + tx];
+                const float ramp = grade.depth * smoothstep01(0.0f, grade.band, dd);
+                if (ramp <= 1e-6f) continue;
+                const float ceil_t = c.level - grade.clearance - ramp;
+                for (int dy = 0; dy <= sub; ++dy) {
+                    for (int dx = 0; dx <= sub; ++dx) {
+                        float& cv = ceiling[static_cast<std::size_t>(ty * sub + dy) * hnx + (tx * sub + dx)];
+                        cv = std::min(cv, ceil_t);
+                    }
+                }
+            }
+        }
+        for (std::size_t i = 0; i < heights.size(); ++i) {
+            if (ceiling[i] < heights[i]) heights[i] = ceiling[i];
+        }
+    }
 
     const IRect write = rect.clipped(tiles_x, tiles_y);
     for (int ty = write.y0; ty < write.y1; ++ty) {
         for (int tx = write.x0; tx < write.x1; ++tx) {
-            for (int dy = 0; dy <= 1; ++dy) {
-                for (int dx = 0; dx <= 1; ++dx) {
-                    const int cx = tx + dx, cy = ty + dy;
+            for (int dy = 0; dy <= sub; ++dy) {
+                for (int dx = 0; dx <= sub; ++dx) {
+                    const int cx = tx * sub + dx, cy = ty * sub + dy;
                     const int lx = cx - hx0, ly = cy - hy0;
                     if (lx < 0 || ly < 0 || lx >= hnx || ly >= hny) continue;
-                    float& h = hd->at(cx, cy);
+                    float& h = d->height_at(cx, cy);
                     const float v = heights[static_cast<std::size_t>(ly) * hnx + lx];
                     if (v < h) {
                         h = v;
@@ -421,7 +478,7 @@ IRect grade_water_shore(TerrainField& field, const IRect& rect, const ShoreGrade
             }
         }
     }
-    if (!changed.empty()) hd->mark_height_dirty(changed);
+    if (!changed.empty()) d->mark_height_dirty(changed);
     return changed;
 }
 

@@ -24,9 +24,10 @@
 #include <toyengine/scene/free_mover.h>
 #include <physxcoopa/components/mesh_collider.h>
 #include <physxcoopa/system/physics_system.h>
+#include <toyengine/world/terra_store.h>
 #include <toyengine/world/terrain_component.h>
 #include <toyengine/world/terrain_field.h>
-#include <toyengine/world/tile_water.h>
+#include <toyengine/world/terrain_water.h>
 #include <toyengine/water/buoyancy.h>
 #include <toyengine/water/water_body.h>
 #include <physxcoopa/components/box_collider.h>
@@ -226,7 +227,7 @@ COOPA_TEST(styled_scene_streams_styled_chunks) {
     ScopedEnv fixed_dt("FIXED_DT", "0.016");
     ScopedEnv no_input("NO_INPUT", "1");
 
-    toy::world::TileMapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
     toy::core::AppConfig config =
         make_test_config("assets/scenes/terrain/terrain_demo/scene.yaml", 320, 180, 160, 90);
     toy::core::Engine engine(std::move(config));
@@ -262,7 +263,7 @@ COOPA_TEST(styled_scene_streams_styled_chunks) {
     const float chunk_world = terrain->params.chunk_world_size();
     // The demo loads its stored tiles (the whole island): look at the island's middle.
     (void)chunk_world;
-    const float mid = 0.5f * static_cast<float>(terrain->tiles ? terrain->tiles->width() : 64) * terrain->params.tile_size;
+    const float mid = 0.5f * static_cast<float>(!terrain->field.empty() ? terrain->field.geometry().tiles_x : 64) * terrain->params.tile_size;
     marker->get_transform()->transform().set_position(glm::vec3(mid, mid, 12.0f));
 
     tick_until(engine, 600, [&] { return count_live_chunks(*terrain) >= 9; });
@@ -393,7 +394,8 @@ COOPA_TEST(chunks_collide_with_what_they_draw) {
         for (int dx = -12; dx <= 12; dx += 4) {
             const int tx = static_cast<int>(centre.x / terrain->params.tile_size) + dx;
             const int ty = static_cast<int>(centre.y / terrain->params.tile_size) + dy;
-            const toy::world::TileColumn col = terrain->tiles->get(tx, ty).column();
+            const toy::world::TileColumn col =
+                toy::world::tile_column(terrain->field.data()->get(tx, ty), terrain->params.height_step);
             coopa::physx::geometry::Ray ray;
             ray.origin = glm::vec3((static_cast<float>(tx) + 0.5f) * terrain->params.tile_size,
                                    (static_cast<float>(ty) + 0.5f) * terrain->params.tile_size, 200.0f);
@@ -427,8 +429,8 @@ COOPA_TEST(editing_tiles_remeshes_only_their_chunks) {
     require(terrain != nullptr, "tile edit: the scene carries a TileTerrain");
     const glm::vec3 centre = shrink_terrain_and_centre(*terrain, scene);
     tick_until(engine, 900, [&] { return count_live_chunks(*terrain) >= 25; });
-    require(terrain->tiles != nullptr && !terrain->tiles->empty(), "tile edit: the world baked into stored tiles");
-    if (coopa::test::verbose()) std::cout << "    tiles " << terrain->tiles->width() << " target chunk " << terrain->params.chunk_at(centre).x << "," << terrain->params.chunk_at(centre).y << "\n";
+    require(!terrain->field.empty(), "tile edit: the world baked into stored tiles");
+    if (coopa::test::verbose()) std::cout << "    tiles " << terrain->field.geometry().tiles_x << " target chunk " << terrain->params.chunk_at(centre).x << "," << terrain->params.chunk_at(centre).y << "\n";
 
     // A 3 x 3 patch in the middle of the camera's chunk, clear of its borders.
     const int size = terrain->params.chunk_size;
@@ -436,10 +438,10 @@ COOPA_TEST(editing_tiles_remeshes_only_their_chunks) {
     const int tx = target.x * size + size / 2, ty = target.y * size + size / 2;
     std::map<std::pair<int, int>, std::uint32_t> serials;
     for (const auto& [coord, chunk] : terrain->chunks()) serials[{coord.x, coord.y}] = chunk.mesh_serial;
-    const int raised = terrain->tiles->at(tx, ty).steps + 5;
+    const int raised = terrain->field.data()->at(tx, ty).steps + 5;
     for (int y = ty - 1; y <= ty + 1; ++y)
-        for (int x = tx - 1; x <= tx + 1; ++x) terrain->tiles->at(x, y).steps = static_cast<std::int16_t>(raised);
-    terrain->tiles->mark_dirty(toy::world::IRect{tx - 1, ty - 1, tx + 2, ty + 2});
+        for (int x = tx - 1; x <= tx + 1; ++x) terrain->field.data()->at(x, y).steps = static_cast<std::int16_t>(raised);
+    terrain->field.data()->mark_tiles_dirty(toy::world::IRect{tx - 1, ty - 1, tx + 2, ty + 2});
 
     tick_until(engine, 120, [&] {
         auto it = terrain->chunks().find(target);
@@ -469,11 +471,11 @@ COOPA_TEST(editing_tiles_remeshes_only_their_chunks) {
            "tile edit: the collider has the raised surface (" + std::to_string(found ? hit.point.z : -1.0f) + ")");
 
     // Regenerate: the world is baked again from the generator settings, edits and all.
-    const std::uint64_t bakes = terrain->tiles->bakes_done();
-    terrain->tiles->request_bake();
-    tick_until(engine, 600, [&] { return terrain->tiles->bakes_done() > bakes; });
-    expect(terrain->tiles->bakes_done() > bakes, "regenerate: the world re-bakes on request");
-    expect(terrain->tiles->at(tx, ty).steps == raised - 5, "regenerate: the edit is replaced by the generated tile");
+    const std::uint64_t bakes = terrain->field.data()->bakes_done();
+    terrain->field.data()->request_bake();
+    tick_until(engine, 600, [&] { return terrain->field.data()->bakes_done() > bakes; });
+    expect(terrain->field.data()->bakes_done() > bakes, "regenerate: the world re-bakes on request");
+    expect(terrain->field.data()->at(tx, ty).steps == raised - 5, "regenerate: the edit is replaced by the generated tile");
 }
 
 
@@ -507,8 +509,8 @@ COOPA_TEST(chunk_water_is_published_with_the_water_shader) {
     auto* terrain = scene.find_first_component<toy::world::TerrainComponent>();
     require(terrain != nullptr, "water material: the scene carries a TileTerrain");
     shrink_terrain_and_centre(*terrain, scene);
-    tick_until(engine, 900, [&] { return terrain->tiles && !terrain->tiles->empty() && !terrain->baking(); });
-    require(terrain->tiles != nullptr && !terrain->tiles->empty(), "water material: the world baked");
+    tick_until(engine, 900, [&] { return !terrain->field.empty() && !terrain->baking(); });
+    require(!terrain->field.empty(), "water material: the world baked");
 
     // Let the chunks around the camera stream in and their water bake and publish.
     tick_frames(engine, 120);
@@ -562,35 +564,40 @@ COOPA_TEST(water_lies_over_the_beds_and_floats_a_crate) {
     auto* terrain = scene.find_first_component<toy::world::TerrainComponent>();
     require(terrain != nullptr, "water: the scene carries a TileTerrain");
     const glm::vec3 centre = shrink_terrain_and_centre(*terrain, scene);
-    tick_until(engine, 900, [&] { return terrain->tiles && !terrain->tiles->empty() && !terrain->baking(); });
-    require(terrain->tiles != nullptr && !terrain->tiles->empty(), "water: the world baked");
-    const toy::world::TileMapData& tiles = *terrain->tiles;
+    tick_until(engine, 900, [&] { return !terrain->field.empty() && !terrain->baking(); });
+    require(!terrain->field.empty(), "water: the world baked");
+    const toy::world::TerraData& tiles = *terrain->field.data();
     const toy::world::TerrainParams& p = terrain->params;
 
     // The invariant the bake keeps: no dry tile beside water lies under that water's terrace.
+    using toy::world::WaterKind;
+    const float height_step = p.height_step;
+    const auto depth_steps = [&](const toy::world::TileCell& c) {
+        return static_cast<int>(std::lround(c.water_level / height_step)) - c.steps;
+    };
     int wet = 0, over = 0;
     glm::ivec2 sea{-1};
     float best = 1e9f;
-    for (int y = 0; y < tiles.height(); ++y) {
-        for (int x = 0; x < tiles.width(); ++x) {
-            const toy::world::TileRecord& r = tiles.at(x, y);
-            if (!r.water()) continue;
+    for (int y = 0; y < tiles.geometry().tiles_y; ++y) {
+        for (int x = 0; x < tiles.geometry().tiles_x; ++x) {
+            const toy::world::TileCell& r = tiles.at(x, y);
+            if (!r.wet()) continue;
             ++wet;
             for (int dy = -1; dy <= 1; ++dy)
                 for (int dx = -1; dx <= 1; ++dx)
-                    if (tiles.contains(x + dx, y + dy) && !tiles.at(x + dx, y + dy).water() &&
-                        tiles.at(x + dx, y + dy).steps < r.water_level())
+                    if (tiles.contains(x + dx, y + dy) && !tiles.at(x + dx, y + dy).wet() &&
+                        static_cast<float>(tiles.at(x + dx, y + dy).steps) * height_step < r.water_level)
                         ++over;
             // Deep sea nearest the island's middle: where the crate goes.
             const float d = glm::length(glm::vec2(x + 0.5f, y + 0.5f) * p.tile_size - glm::vec2(centre));
-            if (r.has(toy::world::TileRecord::Ocean) && r.water_depth >= 2 && d < best) {
+            if (static_cast<WaterKind>(r.water_kind) == WaterKind::Ocean && depth_steps(r) >= 2 && d < best) {
                 // Still water all round, so the crate cannot ground on a bank and the tile's corners
                 // are the sea's alone (a river mouth's corners blend toward the river's surface).
                 bool open = true;
                 for (int dy = -1; dy <= 1 && open; ++dy)
                     for (int dx = -1; dx <= 1 && open; ++dx)
-                        open = tiles.contains(x + dx, y + dy) && tiles.at(x + dx, y + dy).water() &&
-                               !tiles.at(x + dx, y + dy).has(toy::world::TileRecord::Flowing);
+                        open = tiles.contains(x + dx, y + dy) && tiles.at(x + dx, y + dy).wet() &&
+                               static_cast<WaterKind>(tiles.at(x + dx, y + dy).water_kind) != WaterKind::River;
                 if (open) { best = d; sea = {x, y}; }
             }
         }
@@ -599,10 +606,11 @@ COOPA_TEST(water_lies_over_the_beds_and_floats_a_crate) {
     expect(over == 0, "water: no dry tile lies under the water beside it (" + std::to_string(over) + ")");
     if (sea.x < 0 && coopa::test::verbose()) {
         int deepest = 0, ocean = 0, hist[8] = {0};
-        for (const auto& t : tiles.records()) {
-            deepest = std::max<int>(deepest, t.water_depth);
-            ocean += t.has(toy::world::TileRecord::Ocean) ? 1 : 0;
-            hist[std::min<int>(7, t.water_depth)]++;
+        for (const auto& t : tiles.tiles()) {
+            const int d = t.wet() ? depth_steps(t) : 0;
+            deepest = std::max(deepest, d);
+            ocean += static_cast<WaterKind>(t.water_kind) == WaterKind::Ocean ? 1 : 0;
+            hist[std::clamp(d, 0, 7)]++;
         }
         std::cout << "    deepest water " << deepest << " steps, ocean " << ocean << ", depth histogram";
         for (int h : hist) std::cout << " " << h;
@@ -610,9 +618,9 @@ COOPA_TEST(water_lies_over_the_beds_and_floats_a_crate) {
     }
     require(sea.x >= 0, "water: there is open sea to drop the crate in");
 
-    const toy::world::TileRecord& r = tiles.at(sea.x, sea.y);
-    const float surface = (static_cast<float>(r.water_level()) - p.water_inset) * p.height_step;
-    const float bed = static_cast<float>(r.steps) * p.height_step;
+    const toy::world::TileCell& r = tiles.at(sea.x, sea.y);
+    const float surface = r.water_level - p.water_inset * height_step;
+    const float bed = static_cast<float>(r.steps) * height_step;
     const glm::vec3 above((sea.x + 0.5f) * p.tile_size, (sea.y + 0.5f) * p.tile_size, surface);
     if (auto* marker = scene.find_object("focus_marker")) marker->get_transform()->transform().set_position(above);
     const toy::world::ChunkCoord chunk = p.chunk_at(above);
@@ -794,11 +802,11 @@ COOPA_TEST(digging_the_shore_lets_the_sea_in) {
     auto* terrain = scene.find_first_component<toy::world::TerrainComponent>();
     require(terrain != nullptr, "dig: the scene carries a TileTerrain");
     shrink_terrain_and_centre(*terrain, scene);
-    tick_until(engine, 900, [&] { return terrain->tiles && !terrain->tiles->empty() && !terrain->baking(); });
+    tick_until(engine, 900, [&] { return !terrain->field.empty() && !terrain->baking(); });
     tick_until(engine, 900, [&] { return count_live_chunks(*terrain) >= 9; });
-    require(terrain->tiles != nullptr && !terrain->tiles->empty(), "dig: the world baked");
+    require(!terrain->field.empty(), "dig: the world baked");
 
-    toy::world::TileMapData& tiles = *terrain->tiles;
+    toy::world::TerraData& tiles = *terrain->field.data();
     const toy::world::TerrainParams& p = terrain->params;
 
     // The pond is built here rather than hunted for: where the generator puts a coast depends on
@@ -810,7 +818,8 @@ COOPA_TEST(digging_the_shore_lets_the_sea_in) {
     bool found = false;
     for (const auto& [coord, c] : terrain->chunks()) {
         if (c.state != toy::world::ChunkState::Live) continue;
-        if ((coord.x + 1) * p.chunk_size >= tiles.width() || (coord.y + 1) * p.chunk_size >= tiles.height()) continue;
+        if ((coord.x + 1) * p.chunk_size >= tiles.geometry().tiles_x ||
+            (coord.y + 1) * p.chunk_size >= tiles.geometry().tiles_y) continue;
         chunk = coord;
         found = true;
         break;
@@ -820,28 +829,29 @@ COOPA_TEST(digging_the_shore_lets_the_sea_in) {
     // The shelf stands ABOVE the water line and the pit below it, so the flood fills the pit
     // only: a bank is what makes a shore, and the tile dug below in is dry until it is dug.
     const int ground = 14, level = 12;
+    const float level_m = static_cast<float>(level) * p.height_step;
     for (int y = y0; y < y0 + 4; ++y) {
         for (int x = x0; x < x0 + 6; ++x) {
-            toy::world::TileRecord& r = tiles.at(x, y);
-            r = toy::world::TileRecord{};
+            toy::world::TileCell& r = tiles.at(x, y);
+            r = toy::world::TileCell{};
             r.steps = static_cast<std::int16_t>(ground);     // a shelf, with banks round it
             r.set_top_kind(toy::world::TileKind::Grass);
         }
     }
     for (int y = y0 + 1; y < y0 + 3; ++y)
         for (int x = x0 + 1; x < x0 + 3; ++x) tiles.at(x, y).steps = static_cast<std::int16_t>(ground - 4);
-    tiles.mark_dirty(toy::world::IRect{x0, y0, x0 + 6, y0 + 4});
-    toy::world::TerrainField water_field = toy::world::borrow_tiles(tiles);
-    toy::world::flood_water(water_field, {{x0 + 1, y0 + 1}}, static_cast<float>(level), toy::world::WaterKind::Lake);
+    tiles.mark_tiles_dirty(toy::world::IRect{x0, y0, x0 + 6, y0 + 4});
+    toy::world::TerrainField water_field = toy::world::borrow(tiles);
+    toy::world::flood_water(water_field, {{x0 + 1, y0 + 1}}, level_m, toy::world::WaterKind::Lake);
     tick_until(engine, 240, [&] {
         const auto it = terrain->chunks().find(chunk);
         return it != terrain->chunks().end() && it->second.state == toy::world::ChunkState::Live;
     });
-    require(tiles.at(x0 + 1, y0 + 1).water(), "dig: the pond filled");
+    require(tiles.at(x0 + 1, y0 + 1).wet(), "dig: the pond filled");
 
     // The tile to dig: dry, on the shelf, one step from the pond.
     const glm::ivec2 shore{x0 + 3, y0 + 1};
-    require(!tiles.at(shore.x, shore.y).water(), "dig: the tile beside the pond is dry to begin with");
+    require(!tiles.at(shore.x, shore.y).wet(), "dig: the tile beside the pond is dry to begin with");
     const std::uint32_t serial = terrain->chunks().at(chunk).mesh_serial;
     const glm::vec3 world((shore.x + 0.5f) * p.tile_size, (shore.y + 0.5f) * p.tile_size,
                           tiles.at(shore.x, shore.y).steps * p.height_step);
@@ -851,11 +861,11 @@ COOPA_TEST(digging_the_shore_lets_the_sea_in) {
     expect(tiles.at(shore.x, shore.y).steps < level, "dig: ...below the water beside it");
     expect(!terrain->water_settles.empty(), "dig: ...and the water is queued to follow, not applied at once");
 
-    tick_until(engine, 240, [&] { return tiles.at(shore.x, shore.y).water(); });
-    const toy::world::TileRecord& filled = tiles.at(shore.x, shore.y);
-    expect(filled.water() && filled.water_level() == level,
-           "dig: the pond runs into the hole, to its own level (" + std::to_string(filled.water_level()) +
-               " vs " + std::to_string(level) + ")");
+    tick_until(engine, 240, [&] { return tiles.at(shore.x, shore.y).wet(); });
+    const toy::world::TileCell& filled = tiles.at(shore.x, shore.y);
+    expect(filled.wet() && std::abs(filled.water_level - level_m) < 1e-4f,
+           "dig: the pond runs into the hole, to its own level (" + std::to_string(filled.water_level) +
+               " vs " + std::to_string(level_m) + ")");
 
     tick_until(engine, 240, [&] {
         const auto it = terrain->chunks().find(chunk);

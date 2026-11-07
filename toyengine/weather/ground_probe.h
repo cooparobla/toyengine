@@ -37,7 +37,6 @@
 
 
 #include <toyengine/particles/particle_system.h>
-#include <toyengine/world/heightmap_data.h>
 
 /// Reference-only below (probe_physics_); defined in physxcoopa/system/physics_system.h,
 /// included by ground_probe.cpp.

@@ -20,7 +20,7 @@ scene:
           chunk_size: 32
           collision: true
           height: 40
-          heightmap: terrain/height.png
+          import: { height: terrain/height.png }   # one-shot: only fires while there's no saved .terra yet
           layers:
             - name: grass
               albedo: textures/terrain/layers/grass_albedo.png
@@ -127,7 +127,10 @@ scene:
           sprint_multiplier: 3.0
           step_height: 0.35
           use_root_motion: true
-        - { type: Animator, apply_root_motion: true }
+        # The prefab's SkeletalAnimator plays the clips, so it is what extracts their pelvis
+        # travel for use_root_motion above -- an `Animator` here is inert (see the same note in
+        # heightmap_terrain_demo): the walk would animate in place and only jump would move.
+        - { type: SkeletalAnimator, apply_root_motion: true }
         - { type: CharacterAnimDriver, crossfade: 0.2, run_speed: 4.0, walk_speed: 0.2 }
     - name: camera
       components:

@@ -27,7 +27,6 @@
 #include <physxcoopa/geometry/triangle_mesh.h>
 #include <physxcoopa/system/physics_system.h>
 #include <toyengine/world/terrain_chunk.h>
-#include <toyengine/world/tile_map_data.h>
 #include <toyengine/world/tile_types.h>
 
 namespace toy {
@@ -119,6 +118,7 @@ void TerrainSystem::execute(coopa::scene::Scene& scene, const coopa::scene::Fram
 void TerrainSystem::tick_terrain_(TerrainComponent& terrain, coopa::scene::Scene& scene,
                    const coopa::scene::FrameContext& ctx) {
     terrain.set_jobs(ctx.jobs);
+    terrain.set_streaming_system(this);
     terrain.poll_tile_sets();
     // After the map generator system (order 59) has had its turn, because an apply landing this
     // frame resizes the grid the field is a view over.
@@ -173,16 +173,16 @@ glm::vec3 TerrainSystem::stream_centre_(const TerrainComponent& terrain) const {
     // happens to touch. One chunk of slack at the edges, so standing just off the coast still
     // loads the coast.
     const float reach = 4.0f * static_cast<float>(terrain.params.view_radius + 1) * terrain.params.chunk_world_size();
-    if (terrain.tiles && !terrain.tiles->empty()) {
+    if (!terrain.field.empty()) {
         const float slack = terrain.params.chunk_world_size();
-        const float w = static_cast<float>(terrain.tiles->width()) * terrain.params.tile_size;
-        const float h = static_cast<float>(terrain.tiles->height()) * terrain.params.tile_size;
+        const float w = static_cast<float>(terrain.field.geometry().tiles_x) * terrain.params.tile_size;
+        const float h = static_cast<float>(terrain.field.geometry().tiles_y) * terrain.params.tile_size;
         if (pos.x > -slack && pos.y > -slack && pos.x < w + slack && pos.y < h + slack) return pos;
 
         // Off the map: stream around what it looks at instead, so an orbit or editor camera
         // parked outside the world still loads the part of it that it is framing.
         TileHit hit;
-        if (terrain.tiles->raycast(pos, fwd, terrain.params.tile_size, terrain.params.height_step, reach, hit)) return hit.point;
+        if (terrain.field.data()->raycast_columns(pos, fwd, reach, hit)) return hit.point;
     }
     if (fwd.z < -1e-3f) {
         const float t = -pos.z / fwd.z;   // the terrain's base plane
@@ -192,17 +192,21 @@ glm::vec3 TerrainSystem::stream_centre_(const TerrainComponent& terrain) const {
 }
 
 bool TerrainSystem::chunk_in_world(const TerrainComponent& terrain, const ChunkCoord& coord) {
-    if (!terrain.tiles) return false;
+    if (terrain.field.empty()) return false;
     const std::int32_t size = terrain.params.chunk_size;
-    return coord.x >= 0 && coord.y >= 0 && coord.x * size < terrain.tiles->width() &&
-           coord.y * size < terrain.tiles->height();
+    return coord.x >= 0 && coord.y >= 0 && coord.x * size < terrain.field.geometry().tiles_x &&
+           coord.y * size < terrain.field.geometry().tiles_y;
 }
 
 void TerrainSystem::mark_edited_chunks_(TerrainComponent& terrain) {
-    const TileMapData& tiles = *terrain.tiles;
-    if (terrain.applied_tile_revision == tiles.revision()) return;
+    TerraData& data = *terrain.field.data();
+    if (terrain.applied_tile_revision == data.revision()) return;
     const std::int32_t size = std::max(1, terrain.params.chunk_size);
-    tiles.for_each_dirty_since(terrain.applied_tile_revision, [&](const IRect& rect) {
+    const std::int32_t width = data.geometry().tiles_x, height = data.geometry().tiles_y;
+    // Only the tile plane ever changes in Tiles mode -- the height/layer cursors start at their
+    // current value, so for_each_dirty_since() reports nothing new from planes nothing writes.
+    const TerraCursor since{terrain.applied_tile_revision, data.cursor().heights, data.cursor().layers};
+    data.for_each_dirty_since(since, [&](const IRect& rect) {
         if (terrain.params.planet) {
             // A tile on a face's edge is in the next face's skirt too: mark the chunks of every
             // tile the rect touches and of each of their neighbours, wrapped across the faces.
@@ -213,8 +217,8 @@ void TerrainSystem::mark_edited_chunks_(TerrainComponent& terrain) {
                 if (it != terrain.chunks().end() && it->second.state != ChunkState::Retiring &&
                     it->second.state != ChunkState::Queued) it->second.stale = true;
             };
-            for (int y = std::max(0, rect.y0); y < std::min(tiles.height(), rect.y1); ++y)
-                for (int x = std::max(0, rect.x0); x < std::min(tiles.width(), rect.x1); ++x)
+            for (int y = std::max(0, rect.y0); y < std::min(height, rect.y1); ++y)
+                for (int x = std::max(0, rect.x0); x < std::min(width, rect.x1); ++x)
                     for (int dy = -1; dy <= 1; ++dy)
                         for (int dx = -1; dx <= 1; ++dx) mark(layout.neighbour(x, y, dx, dy));
             return;
@@ -229,14 +233,14 @@ void TerrainSystem::mark_edited_chunks_(TerrainComponent& terrain) {
             if (coord.x >= cx0 && coord.x <= cx1 && coord.y >= cy0 && coord.y <= cy1) chunk.stale = true;
         }
     });
-    terrain.applied_tile_revision = tiles.revision();
+    terrain.applied_tile_revision = data.revision();
 }
 
 void TerrainSystem::want_planet_chunks_(TerrainComponent& terrain) {
-    if (!terrain.tiles) return;
+    if (terrain.field.empty()) return;
     const std::int32_t size = std::max(1, terrain.params.chunk_size);
-    for (std::int32_t cy = 0; cy * size < terrain.tiles->height(); ++cy) {
-        for (std::int32_t cx = 0; cx * size < terrain.tiles->width(); ++cx) {
+    for (std::int32_t cy = 0; cy * size < terrain.field.geometry().tiles_y; ++cy) {
+        for (std::int32_t cx = 0; cx * size < terrain.field.geometry().tiles_x; ++cx) {
             const ChunkCoord coord{cx, cy};
             if (terrain.chunks().find(coord) != terrain.chunks().end()) continue;
             TerrainChunk chunk;
@@ -248,7 +252,7 @@ void TerrainSystem::want_planet_chunks_(TerrainComponent& terrain) {
 }
 
 void TerrainSystem::advance_water_settles_(TerrainComponent& terrain) {
-    if (terrain.water_settles.empty() || !terrain.tiles) return;
+    if (terrain.water_settles.empty() || terrain.field.empty()) return;
     // One budget shared over however many settles are in flight, oldest first, so digging again
     // while the last flood is still running cannot multiply the per-frame cost.
     std::size_t budget = static_cast<std::size_t>(std::max(1, terrain.water_settle_budget));
@@ -648,7 +652,7 @@ void TerrainSystem::submit_queued_chunks_(TerrainComponent& terrain, const Chunk
         auto build = terrain.take_build_job();
         // Sampled here, on the owner thread: the job meshes its own copy, so the tiles may be
         // edited while it runs.
-        sample_chunk_columns(*terrain.tiles, terrain.params, chunk.coord, build->pad);
+        sample_chunk_columns(terrain.field, terrain.params, chunk.coord, build->pad);
         build->library   = &terrain.library();
         build->params    = terrain.params;
         build->coord     = chunk.coord;

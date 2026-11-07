@@ -4,12 +4,6 @@ clip:
   wrap: once
   length: 0.5
   tracks:
-    - object: pelvis
-      property: position.z
-      keys:
-        - {time: 0, value: 0.95, easing: ease_out}
-        - {time: 0.1667, value: 0.95, easing: ease_out}
-        - {time: 0.5, value: 0.95, easing: ease_out}
     - object: foot_target_l
       property: position
       keys:

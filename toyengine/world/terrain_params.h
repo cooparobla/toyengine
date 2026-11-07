@@ -136,15 +136,22 @@ struct TerrainParams {
     float shore_grade_band = 4.0f;
 
     /**
-     * @brief How far past the waterline the water surface runs, in tiles, buried under the bank.
+     * @brief How far past the waterline the water surface runs, in METRES, buried under the bank.
      *
      * The smooth mesher's skirt (terrain_water_mesh.cpp): past the wet tiles themselves, the
-     * surface keeps going for this many more, held flat at the water's level everywhere its own
-     * ground is still underwater and tucked a few centimetres under it only where that ground has
-     * risen to meet the surface. One tile is enough on a steep bank; a gentle beach wants more so
-     * the polygon edge never surfaces in the open.
+     * surface keeps going for this much further, held flat at the water's level everywhere its
+     * own ground is still underwater and tucked a few centimetres under it only where that ground
+     * has risen to meet the surface. A metre or two is enough on a steep bank; a gentle beach
+     * wants more so the polygon edge never surfaces in the open.
+     *
+     * Converted to a tile-count radius at the terrain's own `tile_extent()` where it is consumed
+     * (`HeightmapTerrainSystem::refresh_chunk_water_()`), so the authored reach stays the same
+     * physical width whatever `height_sub` or the heightmap's own `tile_size` happen to be -- the
+     * field used to be a raw tile count, which silently doubled the apron's real-world reach (and
+     * the size of the hard, tile-quantised edge where it meets dry land) anywhere `tile_size`
+     * wasn't exactly 1 m, `unified_terrain_demo`'s default `height_sub: 2` among them.
      */
-    std::int32_t water_skirt_tiles = 4;
+    float water_skirt_tiles = 4.0f;
 
     // --- Planets (planet.h) ---
 

@@ -122,26 +122,26 @@ COOPA_TEST(a_non_uniform_scale_does_not_shear_the_normal_off_the_surface) {
 }
 
 COOPA_TEST(a_heightmap_terrain_is_marched_and_bisected_to_its_surface) {
+    using toy::world::TerraData;
+    using toy::world::TerraGeometry;
     using toy::world::TerrainField;
-    using toy::world::TerrainFieldGeometry;
     using toy::world::TerrainFieldView;
 
-    TerrainFieldGeometry g;
-    g.mode = toy::world::TerrainMode::Heightmap;
+    TerraGeometry g;
     g.tiles_x = 16;
     g.tiles_y = 16;
-    g.size = glm::vec2(64.0f);
+    g.tile_size = 4.0f;
     g.height_sub = 2;
     g.height = 20.0f;
     TerrainField field;
     field.reset(g);
-    require(field.heights() != nullptr, "surface_raycast: a Heightmap field owns a height plane");
+    require(field.has_height_plane(), "surface_raycast: a Heightmap field owns a height plane");
     // A ramp climbing in +x, so the hit height depends on where the ray comes down.
-    toy::world::HeightmapData& plane_data = *field.heights();
-    const int n = plane_data.nx();
-    for (int y = 0; y < plane_data.ny(); ++y) {
+    TerraData& plane_data = *field.data();
+    const int n = plane_data.height_nx();
+    for (int y = 0; y < plane_data.height_ny(); ++y) {
         for (int x = 0; x < n; ++x) {
-            plane_data.at(x, y) = 10.0f * static_cast<float>(x) / static_cast<float>(n - 1);
+            plane_data.height_at(x, y) = 10.0f * static_cast<float>(x) / static_cast<float>(n - 1);
         }
     }
     plane_data.mark_all_dirty();
@@ -166,15 +166,14 @@ COOPA_TEST(a_heightmap_terrain_is_marched_and_bisected_to_its_surface) {
 }
 
 COOPA_TEST(a_ray_outside_the_terrains_footprint_misses_it) {
+    using toy::world::TerraGeometry;
     using toy::world::TerrainField;
-    using toy::world::TerrainFieldGeometry;
     using toy::world::TerrainFieldView;
 
-    TerrainFieldGeometry g;
-    g.mode = toy::world::TerrainMode::Heightmap;
+    TerraGeometry g;
     g.tiles_x = 4;
     g.tiles_y = 4;
-    g.size = glm::vec2(16.0f);
+    g.tile_size = 4.0f;
     g.height_sub = 1;
     g.height = 10.0f;
     TerrainField field;
@@ -189,15 +188,14 @@ COOPA_TEST(a_ray_outside_the_terrains_footprint_misses_it) {
 }
 
 COOPA_TEST(a_terrain_and_a_mesh_above_it_resolve_by_distance) {
+    using toy::world::TerraGeometry;
     using toy::world::TerrainField;
-    using toy::world::TerrainFieldGeometry;
     using toy::world::TerrainFieldView;
 
-    TerrainFieldGeometry g;
-    g.mode = toy::world::TerrainMode::Heightmap;
+    TerraGeometry g;
     g.tiles_x = 8;
     g.tiles_y = 8;
-    g.size = glm::vec2(32.0f);
+    g.tile_size = 4.0f;
     g.height_sub = 1;
     g.height = 10.0f;
     TerrainField field;

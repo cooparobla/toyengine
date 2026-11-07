@@ -28,8 +28,8 @@
 #include "editor/terrain/terrain_brush.h"
 #include "editor/viewport/gizmo.h"
 #include <coopa/input/input.h>
-#include <toyengine/world/heightmap_data.h>
 #include <toyengine/world/heightmap_terrain.h>
+#include <toyengine/world/terra_data.h>
 
 namespace toy::editor {
 
@@ -71,7 +71,7 @@ public:
         float flatten_to = 0.0f;
         glm::vec2 last_px{0.0f};
         std::uint32_t seed = 1;
-        std::shared_ptr<toy::world::HeightmapData> data;
+        std::shared_ptr<toy::world::TerraData> data;
         // The state before the stroke, to cut the undo patch from.
         std::vector<float> start_heights;
         std::vector<std::uint8_t> start_splat0, start_splat1;
@@ -97,8 +97,8 @@ public:
     void terrain_continue_stroke_(const ViewProj& vp, glm::vec2 px);
     void terrain_end_stroke_();
 
-    /** @brief Records an undo step that changed the whole terrain (import, generate). */
-    void terrain_push_whole_(const std::string& label, const std::shared_ptr<toy::world::HeightmapData>& data,
+    /** @brief Records an undo step that changed the whole terrain (fill). */
+    void terrain_push_whole_(const std::string& label, const std::shared_ptr<toy::world::TerraData>& data,
                              const std::vector<float>& heights, const std::vector<std::uint8_t>& s0,
                              const std::vector<std::uint8_t>& s1);
 

@@ -3,6 +3,8 @@
 #include <coopa/rig/rig_asset.h>
 
 #include <algorithm>
+#include <cmath>
+#include <functional>
 
 namespace toy {
 namespace editor {
@@ -180,6 +182,58 @@ std::vector<std::string> RigModel::delete_bone(int i) {
         else if (b.parent > i) --b.parent;
     }
     return reparented;
+}
+
+std::vector<int> RigModel::sort_parent_first() {
+    const int n = static_cast<int>(bones.size());
+    std::vector<std::vector<int>> children(static_cast<size_t>(n));
+    std::vector<int> roots;
+    for (int i = 0; i < n; ++i) {
+        const int p = bones[static_cast<size_t>(i)].parent;
+        if (p >= 0 && p < n && p != i) children[static_cast<size_t>(p)].push_back(i);
+        else roots.push_back(i);
+    }
+    // Depth first from each root, children in their existing relative order: a stable result, so
+    // sorting an already-sorted rig is the identity and re-saving it is byte-stable.
+    std::vector<int> order;
+    order.reserve(bones.size());
+    std::vector<char> seen(static_cast<size_t>(n), 0);
+    const std::function<void(int)> walk = [&](int i) {
+        if (seen[static_cast<size_t>(i)]) return;   // a parent cycle would otherwise spin forever
+        seen[static_cast<size_t>(i)] = 1;
+        order.push_back(i);
+        for (int c : children[static_cast<size_t>(i)]) walk(c);
+    };
+    for (int r : roots) walk(r);
+    for (int i = 0; i < n; ++i) walk(i);   // anything left is in a cycle: keep it rather than drop it
+
+    std::vector<int> old_to_new(static_cast<size_t>(n), -1);
+    for (size_t k = 0; k < order.size(); ++k) old_to_new[static_cast<size_t>(order[k])] = static_cast<int>(k);
+    std::vector<RigModelBone> out;
+    out.reserve(bones.size());
+    for (int old : order) out.push_back(bones[static_cast<size_t>(old)]);
+    for (RigModelBone& b : out) {
+        if (b.parent >= 0 && b.parent < n) b.parent = old_to_new[static_cast<size_t>(b.parent)];
+    }
+    bones = std::move(out);
+    return old_to_new;
+}
+
+float roll_to_align_z(const glm::vec3& head, const glm::vec3& tail, const glm::vec3& up) {
+    const glm::vec3 axis = tail - head;
+    if (glm::length(axis) < 1e-8f) return 0.0f;
+    const glm::vec3 y = glm::normalize(axis);
+    // The roll-0 basis, straight from the runtime's own builder so the convention cannot drift
+    // (including its seed-axis switch for a bone running along world Z).
+    RigModelBone probe;
+    probe.head = head;
+    probe.tail = tail;
+    probe.roll = 0.0f;
+    const glm::mat4 m = coopa::rig::bone_rest_matrix(to_coopa_bone(probe));
+    const glm::vec3 x0(m[0]), z0(m[2]);
+    const glm::vec3 perp = up - y * glm::dot(up, y);   // no roll can tilt out of this plane
+    if (glm::length(perp) < 1e-6f) return 0.0f;        // `up` is along the bone: nothing to aim at
+    return glm::degrees(std::atan2(glm::dot(perp, x0), glm::dot(perp, z0)));
 }
 
 } // namespace editor

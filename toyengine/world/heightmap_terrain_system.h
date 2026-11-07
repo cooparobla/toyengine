@@ -103,7 +103,7 @@ struct HeightmapTerrainRuntime {
     std::vector<coopa::scene::SceneObject*> chunks;   ///< cy * count.x + cx; owned by the terrain's object (null: not loaded)
     int live_chunks = 0;                              ///< Non-null entries of `chunks`
     glm::ivec2 chunk_count{0};
-    HeightmapGeometry built_geometry;
+    TerraGeometry built_geometry;
     int built_patch = 0;
     std::uint64_t bounds_revision = 0;   ///< data revision the chunk boxes were fitted at
     std::shared_ptr<HeightmapGpu> gpu;
@@ -174,7 +174,7 @@ public:
     static coopa::gfx::engine::data::MeshCpuData build_patch(int resolution);
 
     /** @brief The culling box of chunk (cx, cy) as a local position + scale (see the file comment). */
-    static void chunk_box(const HeightmapData& data, int cx, int cy, glm::vec3& position, glm::vec3& scale);
+    static void chunk_box(const TerraData& data, int cx, int cy, glm::vec3& position, glm::vec3& scale);
 
     /**
      * @struct ChunkSettings
@@ -192,15 +192,15 @@ public:
     static ChunkSettings resolve_settings(const HeightmapTerrain& terrain, float camera_far, float max_tess);
 
     /** @brief Distance (m) from `camera` to chunk (cx, cy)'s ground rectangle, in the xy plane. */
-    static float chunk_distance(const HeightmapGeometry& g, const glm::vec3& origin, int cx, int cy, const glm::vec3& camera);
+    static float chunk_distance(const TerraGeometry& g, const glm::vec3& origin, int cx, int cy, const glm::vec3& camera);
 
     /** @brief The renderer-side numbers of `terrain` drawn at `slot` (exposed for tests). */
     static render::TerrainGpuParams gpu_params(const HeightmapTerrain& terrain, const HeightmapTerrainRuntime& rt);
 
 private:
     void tick_(HeightmapTerrain& terrain, coopa::scene::Scene& scene, const coopa::scene::FrameContext& ctx);
-    std::shared_ptr<HeightmapGpu> gpu_for_(const HeightmapData& data);
-    void upload_(HeightmapGpu& gpu, const HeightmapData& data);
+    std::shared_ptr<HeightmapGpu> gpu_for_(const TerraData& data);
+    void upload_(HeightmapGpu& gpu, const TerraData& data);
     void layers_for_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt);
     /** @brief Spawns chunks that came within view distance, drops those well past it. */
     void stream_chunks_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt, coopa::scene::Scene& scene,
@@ -293,10 +293,10 @@ inline HeightmapTerrainSystem* find_heightmap_terrain_system(const coopa::scene:
 }
 
 /** @brief Every heightmap terrain in `scene` as a world-space query view. */
-std::vector<HeightmapView> heightmap_views(const coopa::scene::Scene& scene);
+std::vector<TerrainFieldView> heightmap_views(const coopa::scene::Scene& scene);
 
 /** @brief The first heightmap terrain covering world xy, or an empty view. */
-HeightmapView heightmap_at(const coopa::scene::Scene& scene, const glm::vec3& world);
+TerrainFieldView heightmap_at(const coopa::scene::Scene& scene, const glm::vec3& world);
 
 } // namespace world
 } // namespace toy

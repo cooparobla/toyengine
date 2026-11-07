@@ -9,8 +9,8 @@
 #include <coopa/testing/test.h>
 
 #include <toyengine/mapgen/map_generator_component.h>
+#include <toyengine/world/terra_store.h>
 #include <toyengine/world/terrain_component.h>
-#include <toyengine/world/tile_map_data.h>
 
 #include "editor/support/editor_session.h"
 
@@ -19,7 +19,7 @@ COOPA_TEST_SUITE("world_generator");
 namespace toy::editor::testing {
 
 COOPA_TEST(world_generator_previews_generates_and_undoes) {
-    toy::world::TileMapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
     EditorSession session({.settle_frames = toy::core::Engine::kFillDebounceFrames + 4});
     auto& engine = session.engine;
     auto& app = session.app;
@@ -60,9 +60,10 @@ COOPA_TEST(world_generator_previews_generates_and_undoes) {
         t = live();
         if (t && t->is_ready() && !t->baking()) break;
     }
-    coopa::test::require(t != nullptr && t->tiles && t->tiles->width() == 48, "the terrain bakes its 24-cell world");
-    const std::shared_ptr<toy::world::TileMapData> tiles = t->tiles;
-    const std::vector<toy::world::TileRecord> before = tiles->records();
+    coopa::test::require(t != nullptr && !t->field.empty() && t->field.geometry().tiles_x == 48,
+                         "the terrain bakes its 24-cell world");
+    const std::shared_ptr<toy::world::TerraData> tiles = t->field.data_shared();
+    const std::vector<toy::world::TileCell> before = tiles->tiles();
 
     app.open_world_generator(id);
     tick(engine, 3);
@@ -99,13 +100,13 @@ COOPA_TEST(world_generator_previews_generates_and_undoes) {
     toy::mapgen::MapGeneratorComponent* g = live_generator();
     expect(g != nullptr && g->config.seed == 77 && g->config.sea_level == 0.35,
            "the live generator has them");
-    expect(tiles->bakes_done() > bakes && tiles->records() != before, "the tiles are re-baked from them");
-    expect(get_int(gen, "world_tiles", 0) == 60 && tiles->width() == 60 && tiles->height() == 60,
-           "...at the chosen world size: 60 x 60 tiles from 24 map cells (" + std::to_string(tiles->width()) + ")");
+    expect(tiles->bakes_done() > bakes && tiles->tiles() != before, "the tiles are re-baked from them");
+    expect(get_int(gen, "world_tiles", 0) == 60 && tiles->geometry().tiles_x == 60 && tiles->geometry().tiles_y == 60,
+           "...at the chosen world size: 60 x 60 tiles from 24 map cells (" + std::to_string(tiles->geometry().tiles_x) + ")");
 
     app.undo();
     tick(engine, 3);
-    expect(tiles->records() == before && tiles->width() == 48, "undo restores the tiles, size and all");
+    expect(tiles->tiles() == before && tiles->geometry().tiles_x == 48, "undo restores the tiles, size and all");
     app.undo();
     tick(engine, 3);
     const Node restored = component();
@@ -114,7 +115,7 @@ COOPA_TEST(world_generator_previews_generates_and_undoes) {
     expect(app.document().find_component(id, "MapGenerator") < 0,
            "...and takes the generator component with them: the apply is ONE undo step, so Ctrl Z "
            "cannot leave the scene half-migrated");
-    toy::world::TileMapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
 }
 
 } // namespace toy::editor::testing

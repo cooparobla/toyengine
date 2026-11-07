@@ -135,8 +135,8 @@ coopa::asset::AssetHandle<Mesh> HeightmapTerrainSystem::patch_mesh(int resolutio
     return handle;
 }
 
-void HeightmapTerrainSystem::chunk_box(const HeightmapData& data, int cx, int cy, glm::vec3& position, glm::vec3& scale) {
-    const float cs = data.geometry().chunk_size;
+void HeightmapTerrainSystem::chunk_box(const TerraData& data, int cx, int cy, glm::vec3& position, glm::vec3& scale) {
+    const float cs = static_cast<float>(data.geometry().chunk_tiles) * data.geometry().tile_size;
     const glm::vec2 mm = data.chunk_minmax(cx, cy);
     const float lo = mm.x - k_heightmap_chunk_pad;
     const float hi = mm.y + k_heightmap_chunk_pad;
@@ -146,18 +146,19 @@ void HeightmapTerrainSystem::chunk_box(const HeightmapData& data, int cx, int cy
 
 render::TerrainGpuParams HeightmapTerrainSystem::gpu_params(const HeightmapTerrain& t, const HeightmapTerrainRuntime& rt) {
     render::TerrainGpuParams p;
-    const HeightmapData& d = *t.data;
-    const HeightmapGeometry& g = d.geometry();
-    p.origin = glm::vec4(t.origin(), g.chunk_size);
-    p.cell = glm::vec4(d.cell(), g.size);
+    const TerraData& d = *t.field.data();
+    const TerraGeometry& g = d.geometry();
+    const float chunk_m = static_cast<float>(g.chunk_tiles) * g.tile_size;
+    p.origin = glm::vec4(t.origin(), chunk_m);
+    p.cell = glm::vec4(glm::vec2(d.cell()), g.size());
     int flags = 0;
     if (t.deep_snow) flags |= render::kTerrainDeepSnow;
     if (t.puddles) flags |= render::kTerrainPuddles;
     const int count = std::min<int>(static_cast<int>(t.layers.size()), render::kSurfaceTerrainLayers);
-    p.dims = glm::ivec4(d.nx(), d.ny(), std::max(1, count), flags);
-    p.misc = glm::vec4(g.height, static_cast<float>(g.splat_resolution), 0.0f, 0.0f);
+    p.dims = glm::ivec4(d.height_nx(), d.height_ny(), std::max(1, count), flags);
+    p.misc = glm::vec4(g.height, static_cast<float>(d.layer_nx()), 0.0f, 0.0f);
     for (int i = 0; i < count; ++i) {
-        const HeightmapLayer& l = t.layers[static_cast<std::size_t>(i)];
+        const TerrainLayer& l = t.layers[static_cast<std::size_t>(i)];
         p.layer[i] = glm::vec4(1.0f / std::max(l.tiling, 0.01f), l.roughness, l.metallic, l.normal_strength);
         const bool has_normal = rt.normal != nullptr && i < static_cast<int>(t.layer_normal_paths.size()) &&
                                 !t.layer_normal_paths[static_cast<std::size_t>(i)].empty();
@@ -178,7 +179,7 @@ void HeightmapTerrainSystem::execute(coopa::scene::Scene& scene, const coopa::sc
     std::unordered_set<HeightmapTerrain*> live;
     for (HeightmapTerrain* terrain : scene.get_components<HeightmapTerrain>()) {
         if (terrain->mode != TerrainMode::Heightmap) continue;
-        if (terrain->data == nullptr || terrain->owner == nullptr) continue;
+        if (terrain->field.data() == nullptr || terrain->owner == nullptr) continue;
         // get_components() already skips a terrain whose own object is inactive; this also
         // catches an inactive ANCESTOR (an EnvPresetSwitcher preset group, say), which it does
         // not -- see active_in_hierarchy()'s doc.
@@ -200,7 +201,7 @@ void HeightmapTerrainSystem::execute(coopa::scene::Scene& scene, const coopa::sc
 void HeightmapTerrainSystem::tick_(HeightmapTerrain& terrain, coopa::scene::Scene& scene, const coopa::scene::FrameContext& ctx) {
     if (!terrain.runtime) terrain.runtime = std::make_unique<HeightmapTerrainRuntime>();
     HeightmapTerrainRuntime& rt = *terrain.runtime;
-    const HeightmapData& data = *terrain.data;
+    const TerraData& data = *terrain.field.data();
 
     // 1. The grid and splats on the GPU, patched from the edit journal.
     std::shared_ptr<HeightmapGpu> gpu = gpu_for_(data);
@@ -258,9 +259,10 @@ void HeightmapTerrainSystem::tick_(HeightmapTerrain& terrain, coopa::scene::Scen
     bindings_.push_back(std::move(b));
 }
 
-std::shared_ptr<HeightmapGpu> HeightmapTerrainSystem::gpu_for_(const HeightmapData& data) {
+std::shared_ptr<HeightmapGpu> HeightmapTerrainSystem::gpu_for_(const TerraData& data) {
     auto& slot = gpu_cache_[data.uid()];
-    const bool shape_ok = slot && slot->nx == data.nx() && slot->ny == data.ny() && slot->splat_size == data.splat_w();
+    const bool shape_ok =
+        slot && slot->nx == data.height_nx() && slot->ny == data.height_ny() && slot->splat_size == data.layer_nx();
     if (shape_ok) return slot;
 
     // (Re)create at the data's current shape. The old textures stay alive through their
@@ -268,47 +270,47 @@ std::shared_ptr<HeightmapGpu> HeightmapTerrainSystem::gpu_for_(const HeightmapDa
     // own unload grace period.
     if (slot && !slot->height_id.empty()) assets_.unload(coopa::asset::AssetId::from_path(slot->height_id));
     auto gpu = std::make_shared<HeightmapGpu>();
-    gpu->nx = data.nx();
-    gpu->ny = data.ny();
-    gpu->splat_size = data.splat_w();
+    gpu->nx = data.height_nx();
+    gpu->ny = data.height_ny();
+    gpu->splat_size = data.layer_nx();
     gpu->height = std::make_shared<Texture>(Texture::upload(
         device_, allocator_, cmd_pool_, reinterpret_cast<const std::uint8_t*>(data.heights().data()),
-        static_cast<std::uint32_t>(data.nx()), static_cast<std::uint32_t>(data.ny()),
+        static_cast<std::uint32_t>(data.height_nx()), static_cast<std::uint32_t>(data.height_ny()),
         coopa::gfx::Format::R32_Sfloat, coopa::gfx::SamplerDesc::pixel_art()));
     gpu->height_id = "runtime/heightmap/height_" + std::to_string(next_id_++) + "_" +
                      std::to_string(reinterpret_cast<std::uintptr_t>(this));
     gpu->height_handle = assets_.create<Texture>(gpu->height_id, gpu->height);
     const auto splat_sampler = coopa::gfx::SamplerDesc::pixel_art_smooth();
     gpu->splat0 = std::make_shared<Texture>(Texture::upload(
-        device_, allocator_, cmd_pool_, data.splat(0).data(), static_cast<std::uint32_t>(data.splat_w()),
-        static_cast<std::uint32_t>(data.splat_h()), coopa::gfx::Format::RGBA8_Unorm, splat_sampler));
+        device_, allocator_, cmd_pool_, data.layer_plane(0).data(), static_cast<std::uint32_t>(data.layer_nx()),
+        static_cast<std::uint32_t>(data.layer_ny()), coopa::gfx::Format::RGBA8_Unorm, splat_sampler));
     gpu->splat1 = std::make_shared<Texture>(Texture::upload(
-        device_, allocator_, cmd_pool_, data.splat(1).data(), static_cast<std::uint32_t>(data.splat_w()),
-        static_cast<std::uint32_t>(data.splat_h()), coopa::gfx::Format::RGBA8_Unorm, splat_sampler));
+        device_, allocator_, cmd_pool_, data.layer_plane(1).data(), static_cast<std::uint32_t>(data.layer_nx()),
+        static_cast<std::uint32_t>(data.layer_ny()), coopa::gfx::Format::RGBA8_Unorm, splat_sampler));
     gpu->uploaded_revision = data.revision();
     slot = gpu;
     return gpu;
 }
 
-void HeightmapTerrainSystem::upload_(HeightmapGpu& gpu, const HeightmapData& data) {
+void HeightmapTerrainSystem::upload_(HeightmapGpu& gpu, const TerraData& data) {
     if (gpu.uploaded_revision == data.revision()) return;
     const IRect hr = data.height_dirty_since(gpu.uploaded_revision);
     if (!hr.empty()) {
         std::vector<float> region(static_cast<std::size_t>(hr.width()) * hr.height());
         for (int j = 0; j < hr.height(); ++j) {
-            std::copy_n(data.heights().begin() + static_cast<std::ptrdiff_t>((hr.y0 + j) * data.nx() + hr.x0),
+            std::copy_n(data.heights().begin() + static_cast<std::ptrdiff_t>((hr.y0 + j) * data.height_nx() + hr.x0),
                         hr.width(), region.begin() + static_cast<std::ptrdiff_t>(j) * hr.width());
         }
         gpu.height->update(device_, allocator_, cmd_pool_, region.data(), static_cast<std::uint32_t>(hr.x0),
                            static_cast<std::uint32_t>(hr.y0), static_cast<std::uint32_t>(hr.width()),
                            static_cast<std::uint32_t>(hr.height()));
     }
-    const IRect sr = data.splat_dirty_since(gpu.uploaded_revision);
+    const IRect sr = data.layer_dirty_since(gpu.uploaded_revision);
     if (!sr.empty()) {
         for (int k = 0; k < 2; ++k) {
             std::vector<std::uint8_t> region(static_cast<std::size_t>(sr.width()) * sr.height() * 4);
             for (int j = 0; j < sr.height(); ++j) {
-                std::copy_n(data.splat(k).begin() + static_cast<std::ptrdiff_t>(((sr.y0 + j) * data.splat_w() + sr.x0) * 4),
+                std::copy_n(data.layer_plane(k).begin() + static_cast<std::ptrdiff_t>(((sr.y0 + j) * data.layer_nx() + sr.x0) * 4),
                             sr.width() * 4, region.begin() + static_cast<std::ptrdiff_t>(j) * sr.width() * 4);
             }
             (k == 0 ? gpu.splat0 : gpu.splat1)->update(device_, allocator_, cmd_pool_, region.data(),
@@ -373,10 +375,11 @@ HeightmapTerrainSystem::ChunkSettings HeightmapTerrainSystem::resolve_settings(c
     return s;
 }
 
-float HeightmapTerrainSystem::chunk_distance(const HeightmapGeometry& g, const glm::vec3& origin, int cx, int cy,
+float HeightmapTerrainSystem::chunk_distance(const TerraGeometry& g, const glm::vec3& origin, int cx, int cy,
                                              const glm::vec3& camera) {
-    const glm::vec2 lo = glm::vec2(origin) + glm::vec2(static_cast<float>(cx), static_cast<float>(cy)) * g.chunk_size;
-    const glm::vec2 hi = glm::min(lo + glm::vec2(g.chunk_size), glm::vec2(origin) + g.size);
+    const float chunk_m = static_cast<float>(g.chunk_tiles) * g.tile_size;
+    const glm::vec2 lo = glm::vec2(origin) + glm::vec2(static_cast<float>(cx), static_cast<float>(cy)) * chunk_m;
+    const glm::vec2 hi = glm::min(lo + glm::vec2(chunk_m), glm::vec2(origin) + g.size());
     const glm::vec2 p(camera);
     const glm::vec2 d = glm::max(glm::max(lo - p, p - hi), glm::vec2(0.0f));
     return glm::length(d);
@@ -388,7 +391,7 @@ glm::vec3 HeightmapTerrainSystem::camera_position_(const HeightmapTerrain& terra
             if (auto* tc = camera->owner->get_transform()) return glm::vec3(tc->transform().get_world_matrix()[3]);
         }
     }
-    return terrain.origin() + glm::vec3(terrain.data->geometry().size * 0.5f, 0.0f);
+    return terrain.origin() + glm::vec3(terrain.field.geometry().size() * 0.5f, 0.0f);
 }
 
 float HeightmapTerrainSystem::camera_far_() const {
@@ -398,10 +401,10 @@ float HeightmapTerrainSystem::camera_far_() const {
 
 void HeightmapTerrainSystem::stream_chunks_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt, coopa::scene::Scene& scene,
                                             const ChunkSettings& s, const glm::vec3& camera) {
-    const HeightmapGeometry& g = terrain.data->geometry();
+    const TerraGeometry& g = terrain.field.geometry();
     const glm::vec3 origin = terrain.origin();
     // One chunk of slack before dropping, so a camera on the boundary does not flicker chunks.
-    const float keep = s.view_distance + g.chunk_size;
+    const float keep = s.view_distance + static_cast<float>(g.chunk_tiles) * g.tile_size;
 
     // Missing chunks the camera wants, nearest first: spawning (and the water rebuild it
     // triggers inline) is not jobified here the way Tiles mode is, so a teleport or a first
@@ -443,9 +446,12 @@ void HeightmapTerrainSystem::stream_chunks_(HeightmapTerrain& terrain, Heightmap
 
 void HeightmapTerrainSystem::refresh_chunk_water_(HeightmapTerrain& terrain,
                                                   coopa::scene::SceneObject& chunk_object, int cx, int cy) {
+    const int skirt_tiles = skirt_tiles_from_metres(terrain.params.water_skirt_tiles,
+                                                     terrain.field.geometry().tile_extent().x);
+
     ChunkWaterData still, flowing;
     build_smooth_chunk_water(terrain.field, glm::ivec2(cx, cy), terrain.field.geometry().chunk_tiles,
-                             terrain.params.river_wave_scale, terrain.params.water_skirt_tiles, still, flowing);
+                             terrain.params.river_wave_scale, skirt_tiles, still, flowing);
 
     for (int pass = 0; pass < 2; ++pass) {
         const bool river = pass == 1;
@@ -470,7 +476,7 @@ void HeightmapTerrainSystem::refresh_chunk_water_(HeightmapTerrain& terrain,
             // the chunk's origin in the SAME metres the mesh already uses.
             if (auto* parent = terrain.owner->get_transform()) {
                 tc->set_parent_transform(&parent->transform());
-                const float cs = terrain.data->geometry().chunk_size;
+                const float cs = static_cast<float>(terrain.field.geometry().chunk_tiles) * terrain.field.geometry().tile_size;
                 tc->transform().set_position(glm::vec3(static_cast<float>(cx) * cs, static_cast<float>(cy) * cs, 0.0f));
             }
             auto* body = object->add_component<water::WaterBody>();
@@ -521,7 +527,7 @@ void HeightmapTerrainSystem::refresh_water_(HeightmapTerrain& terrain, Heightmap
 
 void HeightmapTerrainSystem::spawn_chunk_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt, coopa::scene::Scene& scene,
                                           const ChunkSettings& s, int cx, int cy) {
-    const HeightmapData& data = *terrain.data;
+    const TerraData& data = *terrain.field.data();
     auto object = std::make_unique<SceneObject>("terrain_chunk_" + std::to_string(cx) + "_" + std::to_string(cy));
     object->add_component<toy::scene::RuntimeObject>("HeightmapTerrain", "terrain chunk -- edit the HeightmapTerrain");
     auto* tc = object->add_component<TransformComponent>();
@@ -611,13 +617,13 @@ void HeightmapTerrainSystem::write_materials_(HeightmapTerrain& terrain, Heightm
 }
 
 void HeightmapTerrainSystem::fit_chunk_boxes_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt) {
-    const HeightmapData& data = *terrain.data;
+    const TerraData& data = *terrain.field.data();
     if (rt.bounds_revision == data.revision()) return;
     const IRect r = data.height_dirty_since(rt.bounds_revision);
     rt.bounds_revision = data.revision();
     if (r.empty()) return;
-    const glm::vec2 c = data.cell();
-    const float cs = data.geometry().chunk_size;
+    const glm::vec2 c(data.cell());
+    const float cs = static_cast<float>(data.geometry().chunk_tiles) * data.geometry().tile_size;
     const int cx0 = std::clamp(static_cast<int>(std::floor(static_cast<float>(r.x0 - 1) * c.x / cs)), 0, rt.chunk_count.x - 1);
     const int cy0 = std::clamp(static_cast<int>(std::floor(static_cast<float>(r.y0 - 1) * c.y / cs)), 0, rt.chunk_count.y - 1);
     const int cx1 = std::clamp(static_cast<int>(std::floor(static_cast<float>(r.x1) * c.x / cs)), 0, rt.chunk_count.x - 1);
@@ -650,7 +656,7 @@ void HeightmapTerrainSystem::update_collider_(HeightmapTerrain& terrain, Heightm
         }
         return;
     }
-    const HeightmapData& data = *terrain.data;
+    const TerraData& data = *terrain.field.data();
     if (rt.collision == nullptr) {
         auto object = std::make_unique<SceneObject>("terrain_collision");
         object->add_component<toy::scene::RuntimeObject>("HeightmapTerrain", "terrain collider -- edit the HeightmapTerrain");
@@ -705,9 +711,9 @@ void HeightmapTerrainSystem::update_collider_(HeightmapTerrain& terrain, Heightm
     // the grid may be edited again while it runs (that edit is simply seen as dirty again once
     // this build lands, by the height_revision() check above).
     auto build = std::make_shared<HeightmapColliderBuild>();
-    build->nx = data.nx();
-    build->ny = data.ny();
-    build->cell = data.cell();
+    build->nx = data.height_nx();
+    build->ny = data.height_ny();
+    build->cell = glm::vec2(data.cell());
     build->heights = data.heights();
     const std::uint64_t building_revision = data.height_revision();
     if (ctx.jobs != nullptr) {
@@ -761,20 +767,22 @@ HeightmapTerrainSystem* install_heightmap_terrain_system(coopa::scene::Scene& sc
     return raw;
 }
 
-std::vector<HeightmapView> heightmap_views(const coopa::scene::Scene& scene) {
-    std::vector<HeightmapView> out;
+std::vector<TerrainFieldView> heightmap_views(const coopa::scene::Scene& scene) {
+    std::vector<TerrainFieldView> out;
     for (const HeightmapTerrain* t : scene.get_components<HeightmapTerrain>()) {
         if (t->mode != TerrainMode::Heightmap) continue;
-        if (t->data != nullptr && t->owner != nullptr && active_in_hierarchy(*t->owner)) out.push_back(t->view());
+        if (t->field.data() != nullptr && t->owner != nullptr && active_in_hierarchy(*t->owner)) {
+            out.push_back(t->field_view());
+        }
     }
     return out;
 }
 
-HeightmapView heightmap_at(const coopa::scene::Scene& scene, const glm::vec3& world) {
-    for (const HeightmapView& v : heightmap_views(scene)) {
+TerrainFieldView heightmap_at(const coopa::scene::Scene& scene, const glm::vec3& world) {
+    for (const TerrainFieldView& v : heightmap_views(scene)) {
         if (v.contains(world)) return v;
     }
-    return HeightmapView{};
+    return TerrainFieldView{};
 }
 
 } // namespace world

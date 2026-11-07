@@ -18,10 +18,10 @@
  *
  * ### Where its data lives
  *
- * In a HeightmapData shared through the HeightmapStore (heightmap_store.h), keyed by the
- * heightmap file -- so the editor re-parsing this component keeps unsaved strokes -- not in the
- * scene file. Collision reads the same grid through a heightfield collider; GroundProbe, the
- * foliage scatter and gameplay read it through view().
+ * In a TerraData shared through TerraStore (terra_store.h), keyed by its `.terra` file -- the
+ * same backend a TileTerrain uses -- so the editor re-parsing this component keeps unsaved
+ * strokes, not in the scene file. Collision reads the same grid through a heightfield collider;
+ * GroundProbe, the foliage scatter and gameplay read it through TerrainComponent::field_view().
  *
  * Example YAML:
  * @code
@@ -30,11 +30,9 @@
  *   height: 160                   # metres at a full-white heightmap
  *   chunk_size: 64                # metres per chunk (render / collision / scatter unit)
  *   resolution: 1025              # height samples per side
+ *   height_sub: 2                 # height samples per TILE edge (1 = terraced, no height plane)
  *   splat_resolution: 1024
- *   heightmap: terrain/height.png # 16-bit greyscale; generated (see `generate`) when missing
- *   splat0: terrain/splat0.png    # layers 0-3 in RGBA
- *   splat1: terrain/splat1.png    # layers 4-7
- *   generate: { seed: 7, feature_size: 220, ridges: 0.4 }
+ *   data: terrain/height.terra    # default terrain/<object>.terra beside the scene
  *   layers:
  *     - { name: grass, albedo: textures/terrain/grass.png, normal: textures/terrain/grass_n.png, tiling: 6 }
  *     - { name: rock, albedo: textures/terrain/rock.png, tiling: 12, triplanar: true }
@@ -63,7 +61,6 @@
 
 #include <coopa/scene/scene_loader.h>
 
-#include <toyengine/world/heightmap_data.h>
 #include <toyengine/world/terrain_component.h>
 
 namespace coopa {
@@ -81,8 +78,8 @@ namespace world {
  * One C++ type serves both terrain modes (toyengine/world/terrain_component.h); this is the
  * scene-YAML name the heightmap half has traditionally been authored and inspected under (a
  * parser alias of `Terrain`/`TileTerrain` -- toyengine/scene/register.cpp). A component whose
- * `mode` is `TerrainMode::Heightmap` reads `geometry`, `layers` and `data`. `type_name()` always
- * reports `"Terrain"`, whichever mode it is in.
+ * `mode` is `TerrainMode::Heightmap` reads the `heightmap_*` fields, `layers` and `field`.
+ * `type_name()` always reports `"Terrain"`, whichever mode it is in.
  */
 using HeightmapTerrain = TerrainComponent;
 

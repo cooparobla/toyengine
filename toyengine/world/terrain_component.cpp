@@ -3,6 +3,8 @@
 // For a complete HeightmapTerrainRuntime: the constructor and destructor below destroy one.
 #include <toyengine/world/heightmap_terrain_system.h>
 
+#include <iostream>
+
 #include <coopa/asset/asset_handle.h>
 #include <coopa/debug/logger.h>
 #include <coopa/job/engine.h>
@@ -14,6 +16,9 @@
 #include <gfxcoopa/engine/data/mesh.h>
 #include <gfxcoopa/engine/data/skinned_mesh_source.h>
 #include <physxcoopa/geometry/triangle_mesh.h>
+#include <toyengine/world/terra_image.h>
+#include <toyengine/world/terra_store.h>
+#include <toyengine/world/terrain_system.h>
 #include <toyengine/world/tile_mesh_library.h>
 #include <toyengine/world/tile_topology.h>
 #include <toyengine/world/tile_edit.h>
@@ -34,7 +39,7 @@ namespace {
  *        at a time, until it is inside a column -- then the crossing is refined by bisection.
  *        Columns are tested by their tops only (a wall hit reads as the column in front of it).
  */
-bool planet_raycast(const TileMapData& d, const TerrainParams& params, const glm::vec3& origin,
+bool planet_raycast(const TerraData& d, const TerrainParams& params, const glm::vec3& origin,
                     const glm::vec3& dir, toy::world::TileHit& hit) {
     const PlanetLayout layout = params.layout();
     const double r0 = layout.radius();
@@ -81,6 +86,10 @@ bool planet_raycast(const TileMapData& d, const TerrainParams& params, const glm
 TerrainComponent::TerrainComponent() : logger_("terrain") {}
 
 TerrainComponent::~TerrainComponent() {
+    // Before anything else: TerrainSystem must never read `this` again once it is freed (see
+    // forget_terrain()'s doc comment for why a destroyed terrain is not the same as an inactive
+    // one to it).
+    if (streaming_system_ != nullptr) streaming_system_->forget_terrain(this);
     if (jobs_ == nullptr) return;
     for (auto& entry : chunks_) {
         coopa::job::JobHandle& handle = entry.second.job;
@@ -114,45 +123,56 @@ glm::vec3 TerrainComponent::origin() const {
 }
 
 void TerrainComponent::sync_field() {
+    TerraGeometry g;
     if (mode == TerrainMode::Heightmap) {
-        sync_heightmap_field_();
+        const int sub = std::max(1, height_sub);
+        g.tiles_x = g.tiles_y = std::max(1, (heightmap_resolution - 1) / sub);
+        g.tile_size = g.tiles_x > 0 ? heightmap_size.x / static_cast<float>(g.tiles_x) : 1.0f;
+        g.height_sub = sub;
+        g.layer_sub = g.tiles_x > 0 ? std::max(1, heightmap_splat_resolution / g.tiles_x) : 1;
+        g.height = heightmap_height;
+        g.height_step = params.height_step;
+        g.chunk_tiles = g.tile_size > 0.0f
+                            ? std::max(1, static_cast<int>(std::lround(heightmap_chunk_size / g.tile_size)))
+                            : 16;
+    } else {
+        // mapcoopa decides the tile count at bake time; 0 tells sync below and TerraStore to keep
+        // whatever is already loaded, rather than reshaping a baked world down to nothing.
+        g.tiles_x = 0;
+        g.tiles_y = 0;
+        g.tile_size = params.tile_size;
+        g.height_sub = 1;
+        g.layer_sub = 1;
+        g.height = params.height_scale;
+        g.height_step = params.height_step;
+        g.chunk_tiles = params.chunk_size;
+    }
+    g = g.sanitized();
+
+    const TerraGeometry& cur = field.geometry();
+    const bool size_matches = mode == TerrainMode::Heightmap ? (cur.tiles_x == g.tiles_x && cur.tiles_y == g.tiles_y) : true;
+    if (size_matches && cur.tile_size == g.tile_size && cur.height_sub == g.height_sub &&
+        cur.layer_sub == g.layer_sub && cur.height_step == g.height_step && cur.height == g.height &&
+        cur.chunk_tiles == g.chunk_tiles) {
         return;
     }
-    if (!tiles) return;
-    TerrainFieldGeometry g;
-    g.mode = TerrainMode::Tiles;
-    g.tiles_x = tiles->width();
-    g.tiles_y = tiles->height();
-    g.size = glm::vec2(static_cast<float>(g.tiles_x), static_cast<float>(g.tiles_y)) * params.tile_size;
-    g.height_step = params.height_step;
-    g.height = params.height_scale;
-    g.chunk_tiles = params.chunk_size;
-    g = g.sanitized();
-    if (field.tiles() == tiles.get() && field.geometry() == g) return;
-    field.adopt(tiles, nullptr, g);
-}
+    field.attach(TerraStore::instance().acquire(data_file, g));
 
-void TerrainComponent::sync_heightmap_field_() {
-    if (!data) return;
-    const HeightmapGeometry& h = data->geometry();
-    TerrainFieldGeometry g;
-    g.mode = TerrainMode::Heightmap;
-    // A height sample sits on a tile corner, so `resolution` samples span `resolution - 1` tiles.
-    g.tiles_x = g.tiles_y = std::max(1, h.resolution - 1);
-    g.size = h.size;
-    g.height = h.height;
-    g.height_sub = 1;
-    g.layer_sub = std::max(1, h.splat_resolution / g.tiles_x);
-    g.chunk_tiles = std::max(1, static_cast<int>(std::lround(h.chunk_size / g.tile_size())));
-    g = g.sanitized();
-    if (field.heights() == data.get() && field.geometry() == g) return;
-    // The records carry this terrain's water, biome and climate; the height plane is `data`.
-    std::shared_ptr<TileMapData> records = field.tiles_shared();
-    if (!records) records = std::make_shared<TileMapData>();
-    if (records->width() != g.tiles_x || records->height() != g.tiles_y) {
-        records->resize(g.tiles_x, g.tiles_y);
+    // A one-shot import, exactly as privileged as a mapcoopa bake and no more: only fires on a
+    // field that has never been baked/imported/sculpted (needs_bake()), so a later re-parse (the
+    // editor does one on every change) never clobbers whatever the field now holds.
+    if (TerraData* d = field.data(); d != nullptr && d->needs_bake() && !import_height_path.empty()) {
+        if (import_height_png(import_height_path, *d)) {
+            if (!import_layer0_path.empty()) import_layer_png(import_layer0_path, *d, 0);
+            if (!import_layer1_path.empty()) import_layer_png(import_layer1_path, *d, 1);
+            d->clear_needs_bake();
+            d->mark_all_dirty();
+        } else {
+            std::cerr << "[Terrain] '" << (owner != nullptr ? owner->name() : std::string())
+                      << "': import_height_png('" << import_height_path << "') failed -- check the "
+                         "path and that the terrain has a height plane (height_sub > 1)\n";
+        }
     }
-    field.adopt(std::move(records), data, g);
 }
 
 TerrainFieldView TerrainComponent::field_view() const {
@@ -187,17 +207,17 @@ void TerrainComponent::recycle_build_job(std::shared_ptr<ChunkBuildJob> job) {
 }
 
 bool TerrainComponent::tile_at(const glm::vec3& world, glm::ivec2& tile) const {
-    if (!tiles || tiles->empty()) return false;
+    if (field.empty()) return false;
     const glm::vec3 local = to_local_(world);
     if (params.planet) {
         // A planet's tiles are not laid out under x and y: they are six faces on a sphere, and
         // which one a point is over is the direction out of the centre (planet.h).
         if (glm::length(local) < 1e-4f) return false;
         tile = params.layout().tile_of(glm::normalize(glm::dvec3(local)));
-        return tiles->contains(tile.x, tile.y);
+        return field.contains(tile);
     }
-    tile = glm::ivec2(static_cast<int>(std::floor(local.x / params.tile_size)), static_cast<int>(std::floor(local.y / params.tile_size)));
-    return tiles->contains(tile.x, tile.y);
+    tile = field.tile_at(glm::vec2(local));
+    return field.contains(tile);
 }
 
 glm::vec3 TerrainComponent::to_local_(const glm::vec3& world) const {
@@ -208,31 +228,31 @@ glm::vec3 TerrainComponent::to_local_(const glm::vec3& world) const {
 }
 
 IRect TerrainComponent::raise_tiles(const IRect& rect, int delta) {
-    if (!tiles || tiles->empty() || delta == 0) return IRect{};
+    if (field.empty() || delta == 0) return IRect{};
     const PlanetLayout layout = params.layout();
     const PlanetLayout* planet = params.planet ? &layout : nullptr;
     // settle = false: the ground moves now, the water is queued -- see the header.
-    const IRect changed = tile_raise(*tiles, rect, delta, false, planet);
+    const IRect changed = tile_raise(field, rect, delta, false, planet);
     queue_settle_(changed);
     return changed;
 }
 
 IRect TerrainComponent::set_tile_height(const IRect& rect, int steps) {
-    if (!tiles || tiles->empty()) return IRect{};
+    if (field.empty()) return IRect{};
     const PlanetLayout layout = params.layout();
     const PlanetLayout* planet = params.planet ? &layout : nullptr;
-    const IRect changed = tile_set_height(*tiles, rect, steps, false, planet);
+    const IRect changed = tile_set_height(field, rect, steps, false, planet);
     queue_settle_(changed);
     return changed;
 }
 
 IRect TerrainComponent::paint_tiles(const IRect& rect, TileKind kind, bool side) {
-    if (!tiles || tiles->empty()) return IRect{};
-    return tile_paint(*tiles, rect, kind, side);   // paint moves no ground: no water to settle
+    if (field.empty()) return IRect{};
+    return tile_paint(field, rect, kind, side);   // paint moves no ground: no water to settle
 }
 
 void TerrainComponent::queue_settle_(const IRect& changed) {
-    if (changed.empty() || !tiles) return;
+    if (changed.empty() || field.empty()) return;
     const PlanetLayout layout = params.layout();
     sync_field();
     water_settles.push_back(begin_settle(field, changed, IRect{}, params.planet ? &layout : nullptr));
@@ -255,11 +275,11 @@ bool TerrainComponent::raise_at(const glm::vec3& world, int radius_tiles, int de
 }
 
 bool TerrainComponent::tile_outline(const IRect& rect, std::array<glm::vec3, 4>& corners, float lift) const {
-    if (!tiles || tiles->empty()) return false;
-    const IRect r = rect.clipped(tiles->width(), tiles->height());
+    if (field.empty()) return false;
+    const int tiles_x = field.geometry().tiles_x, tiles_y = field.geometry().tiles_y;
+    const IRect r = rect.clipped(tiles_x, tiles_y);
     if (r.empty()) return false;
-    const float top = static_cast<float>(std::max<int>(0, tiles->at((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2).steps)) *
-                          params.height_step + lift;
+    const float top = field.ground_at_tile(glm::ivec2((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2)) + lift;
     glm::mat4 to_world(1.0f);
     if (owner != nullptr) {
         if (auto* tc = owner->get_transform()) to_world = tc->transform().get_world_matrix();
@@ -294,28 +314,29 @@ bool TerrainComponent::tile_outline(const IRect& rect, std::array<glm::vec3, 4>&
 
 bool TerrainComponent::raycast_tiles(const glm::vec3& origin, const glm::vec3& dir, float max_t,
                                      TileHit& hit) const {
-    if (!tiles || tiles->empty()) return false;
+    const TerraData* d = field.data();
+    if (!d || d->empty()) return false;
     const glm::vec3 o = to_local_(origin);
-    glm::vec3 d = dir;
+    glm::vec3 d2 = dir;
     if (owner != nullptr) {
         if (auto* tc = owner->get_transform()) {
-            d = glm::vec3(glm::inverse(tc->transform().get_world_matrix()) * glm::vec4(dir, 0.0f));
+            d2 = glm::vec3(glm::inverse(tc->transform().get_world_matrix()) * glm::vec4(dir, 0.0f));
         }
     }
-    if (glm::length(d) < 1e-6f) return false;
-    d = glm::normalize(d);
-    if (params.planet) return planet_raycast(*tiles, params, o, d, hit);
-    return tiles->raycast(o, d, params.tile_size, params.height_step, max_t, hit);
+    if (glm::length(d2) < 1e-6f) return false;
+    d2 = glm::normalize(d2);
+    if (params.planet) return planet_raycast(*d, params, o, d2, hit);
+    return d->raycast_columns(o, d2, max_t, hit);
 }
 
-const TileRecord* TerrainComponent::record_at(const glm::vec3& world) const {
+const TileCell* TerrainComponent::record_at(const glm::vec3& world) const {
     glm::ivec2 tile;
-    return tile_at(world, tile) ? &tiles->at(tile.x, tile.y) : nullptr;
+    return tile_at(world, tile) ? field.record_at(tile) : nullptr;
 }
 
 float TerrainComponent::height_at(const glm::vec3& world) const {
-    const TileRecord* r = record_at(world);
-    float z = r ? static_cast<float>(std::max<int>(0, r->steps)) * params.height_step : 0.0f;
+    glm::ivec2 tile;
+    float z = tile_at(world, tile) ? field.ground_at_tile(tile) : 0.0f;
     if (owner != nullptr) {
         if (auto* tc = owner->get_transform()) z += glm::vec3(tc->transform().get_world_matrix()[3]).z;
     }

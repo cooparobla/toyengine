@@ -264,15 +264,17 @@ void apply_component_sections(std::map<std::string, ComponentSchema>& table) {
             sec("Terrain", "Terrain").when("mode", {"heightmap"}).custom("HeightmapTerrain.edit").done(),
             sec("Shape", "Terrain").keys({"mode", "chunk_size"}).done(),
             sec("Size", "Terrain").when("mode", {"heightmap"})
-                .says("How big the landscape is and how finely it is sampled. Resolution is 2^n + 1.")
-                .keys({"size", "height", "resolution"}).done(),
+                .says("How big the landscape is and how finely it is sampled. Height Sub is samples "
+                      "per tile edge -- 1 is a terraced read with no height plane at all.")
+                .keys({"size", "height", "resolution", "height_sub"}).done(),
             sec("World", "World").when("mode", {"tiles"})
                 .says("How the generated world is cut into tiles and chunks, and the tile set it is built from.")
                 .keys({"tile_set", "tiles", "world_tiles", "tiles_per_grid_unit", "tile_size", "height_step",
                        "height_scale", "max_wall_steps", "soil_depth_steps", "view_radius"}).done(),
-            sec("Maps", "Image").when("mode", {"heightmap"})
-                .says("The 16-bit height map, and the splat maps that say which layer paints where.")
-                .keys({"heightmap", "splat0", "splat1", "splat_resolution", "layer_texture_size"}).done(),
+            sec("Data", "Image").when("mode", {"heightmap"})
+                .says("The stored .terra file -- height, layers and water together. Splat Resolution "
+                      "and Layer Texture Size are the GPU textures it is streamed into.")
+                .keys({"data", "splat_resolution", "layer_texture_size"}).done(),
             sec("Layers", "Palette")
                 .says("The surfaces this terrain can wear. A heightmap terrain blends them by weight; a "
                       "tiled one names one per face -- empty keeps the built-in tile set.")

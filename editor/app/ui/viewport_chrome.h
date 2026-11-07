@@ -19,6 +19,7 @@
 // prune anything the declarations do not actually need).
 #include "editor/rig/bone_pick.h"
 #include "editor/rig/rig_model.h"
+#include "editor/rig/rig_selection.h"
 #include "editor/viewport/gizmo.h"
 #include <coopa/rig/rig_component.h>
 #include <coopa/util/transform.h>
@@ -106,12 +107,17 @@ public:
     void draw_rig_bones_(imm::Context& ctx, const ViewProj& vp, coopa::rig::Rig& rig, const glm::vec4& col,
                         const glm::vec4& selected_col);
     /** @brief RigEdit mode's display: the REST skeleton straight from a RigModel (no live
-     *         coopa::rig::Rig needed -- RigEdit authors a rig that may not even be attached to
-     *         one yet). The selected bone's octahedron highlights; its specifically-picked
-     *         endpoint (if any -- see EditorApp::rig_edit_endpoint_selected_) draws a bigger ring. */
-    void draw_rig_edit_bones_(imm::Context& ctx, const ViewProj& vp, const RigModel& model, const glm::mat4& owner_world,
-                              int selected_bone, bool endpoint_selected, toy::editor::rig_pick::BoneEndpoint selected_end,
-                              const glm::vec4& col, const glm::vec4& selected_col);
+     *         coopa::rig::Rig needed -- RigEdit authors a rig that may not be attached to one
+     *         yet). Three bone states (active / fully selected / neither) plus a handle on every
+     *         head and tail, filled when that ENDPOINT is selected -- which is what shows at a
+     *         glance what G is about to move. */
+    void draw_rig_edit_bones_(imm::Context& ctx, const ViewProj& vp, const RigModel& model,
+                              const toy::editor::rig_sel::RigSelection& sel, const glm::mat4& owner_world,
+                              const glm::vec4& col, const glm::vec4& selected_col, const glm::vec4& active_col);
+    /** @brief The sidebar's Item tab in Rig Edit: the active bone's name, head, tail, roll,
+     *         parent and connected flag -- Blender's N-panel Bone section, and the only UI for
+     *         the authoring ops that are otherwise keyboard-only. */
+    void draw_bone_sidebar_(imm::Context& ctx);
     /** @brief The origin glyph itself (the `kind`-less tail of draw_object_glyph_). */
     void draw_origin_glyph_(imm::Context& ctx, const ViewProj& vp, ObjectId id, const glm::mat4& w, const glm::vec4& col);
     /**

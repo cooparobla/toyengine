@@ -62,6 +62,10 @@ vec4 styled_sample(sampler2D tex, vec2 uv);
 #include <gfx/surface/gbuffer_fs.glsl>
 #include <gfx/surface/wetness.glsl>
 
+// The packed surface-kind code, carried flat from terrain_styled.vert instead of through the
+// backbone's smoothly-interpolated frag_uv -- see that file's doc for why.
+layout(location = 6) flat in float frag_blend_code;
+
 // Twelve, though TileKind has THIRTEEN (cubeworld appended Road). The clamp below is doing real
 // work: planet chunks decode surface nibbles above the table's range, and raising this to 13
 // moved 1.2% of planet_demo's pixels -- 27x the capture noise -- by routing them to a new entry
@@ -193,7 +197,7 @@ float octave_weight(float freq, float footprint) {
 /// backbone samples the atlas several times before calling the fragment hook.
 int styled_kind() {
     if (g_kind >= 0) return g_kind;
-    uint code = uint(max(frag_uv.x, 0.0) + 0.5);
+    uint code = uint(max(frag_blend_code, 0.0) + 0.5);
     int k0 = int(code & 15u), k1 = int((code >> 4) & 15u), k2 = int((code >> 8) & 15u), k3 = int((code >> 12) & 15u);
     uint type = (code >> 16) & 3u;
     int kind = k0;

@@ -192,7 +192,7 @@ EditResult TileTerrainPanel::draw_tile_terrain_panel_(imm::Context& ctx, ObjectI
                 ++building;
             }
         }
-        if (live->baking() || !live->tiles || live->tiles->empty()) {
+        if (live->baking() || live->field.empty()) {
             std::snprintf(buf, sizeof(buf), "Live: generating the world...");
         } else if (!live->library().is_baked()) {
             std::snprintf(buf, sizeof(buf), "Live: loading the tile set...");
@@ -204,9 +204,9 @@ EditResult TileTerrainPanel::draw_tile_terrain_panel_(imm::Context& ctx, ObjectI
                           colliders, dormant);
         }
         ctx.label(buf, &dim);
-        if (live->tiles && !live->tiles->empty()) {
-            std::snprintf(buf, sizeof(buf), "Tiles: %d x %d in %s%s", live->tiles->width(), live->tiles->height(),
-                          live->tiles_file.c_str(), live->tiles->dirty_on_disk() ? " -- unsaved (Ctrl S)" : "");
+        if (!live->field.empty()) {
+            std::snprintf(buf, sizeof(buf), "Tiles: %d x %d in %s%s", live->field.geometry().tiles_x, live->field.geometry().tiles_y,
+                          live->data_file.c_str(), live->field.data()->dirty_on_disk() ? " -- unsaved (Ctrl S)" : "");
             ctx.label(buf, &dim);
         }
     }
@@ -367,9 +367,9 @@ EditResult TileTerrainPanel::draw_tile_terrain_panel_(imm::Context& ctx, ObjectI
         if (num_of(comp, "world_tiles", 0.0f) <= 0.0f) fields({tfield("tiles_per_grid_unit", "Tiles per Cell")});
         mark({"tiles_per_grid_unit"});
         fields({tfield("tile_size", "Tile Size (m)"), tfield("height_step", "Step Height (m)")});
-        if (TerrainComponent* live = live_tile_terrain_(id); live && live->tiles && !live->tiles->empty()) {
-            const float metres = static_cast<float>(live->tiles->width()) * num_of(comp, "tile_size", 1.0f);
-            std::snprintf(buf, sizeof(buf), "World: %d x %d tiles, %.0f m square", live->tiles->width(), live->tiles->height(), metres);
+        if (TerrainComponent* live = live_tile_terrain_(id); live && !live->field.empty()) {
+            const float metres = static_cast<float>(live->field.geometry().tiles_x) * num_of(comp, "tile_size", 1.0f);
+            std::snprintf(buf, sizeof(buf), "World: %d x %d tiles, %.0f m square", live->field.geometry().tiles_x, live->field.geometry().tiles_y, metres);
             ctx.label(buf, &dim);
         }
         fields({tfield("soil_depth_steps", "Soil Depth (steps)"), tfield("max_wall_steps", "Max Wall (steps)")});

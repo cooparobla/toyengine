@@ -407,7 +407,9 @@ EditResult ParticlePanel::draw_particle_terrain_section_(imm::Context& ctx, Obje
         }
         char buf[200];
         const float spacing = 1.0f / std::sqrt(density);
-        const float chunk = terrain && terrain->data ? terrain->data->geometry().chunk_size : 64.0f;
+        const float chunk = terrain && terrain->field.data()
+                               ? static_cast<float>(terrain->field.geometry().chunk_tiles) * terrain->field.geometry().tile_size
+                               : 64.0f;
         std::snprintf(buf, sizeof(buf), "About one every %.2f m -- up to %.0f per %.0f m chunk", spacing, density * chunk * chunk, chunk);
         ctx.label(buf, &dim);
     }

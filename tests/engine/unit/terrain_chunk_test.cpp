@@ -18,7 +18,6 @@
 #include <glm/glm.hpp>
 #include <physxcoopa/geometry/triangle_mesh.h>
 #include <toyengine/world/terrain_chunk.h>
-#include <toyengine/world/tile_map_data.h>
 #include <toyengine/world/tile_mesh_library.h>
 #include <toyengine/world/tile_topology.h>
 
@@ -172,23 +171,30 @@ COOPA_TEST(meshing_is_byte_deterministic) {
 COOPA_TEST(adjacent_chunks_agree_on_shared_water_edge) {
     using namespace toy::world;
     const TerrainParams params = make_test_params(4);
-    TileMapData tiles;
-    tiles.resize(8, 4);
+    TerraGeometry g;
+    g.tiles_x = 8;
+    g.tiles_y = 4;
+    g.tile_size = params.tile_size;
+    g.height_step = params.height_step;
+    TerraData tiles(g);
     for (int y = 0; y < 4; ++y)
         for (int x = 0; x < 8; ++x) tiles.at(x, y).steps = 3;
     // A pond across the chunk border at x = 4, over a bed that varies tile to tile, so the
     // corner depths differ along the edge and agreement cannot pass by accident.
     for (int y = 1; y <= 2; ++y) {
         for (int x = 2; x <= 5; ++x) {
-            TileRecord& r = tiles.at(x, y);
+            TileCell& r = tiles.at(x, y);
             r.steps = static_cast<std::int16_t>((x + y) % 3);
-            r.set_water(3);
+            r.water_kind = static_cast<std::uint8_t>(WaterKind::Lake);
+            r.water_level = 3.0f * params.height_step;
         }
     }
+    tiles.mark_all_dirty();
+    TerrainField field = borrow(tiles);
 
     ColumnPad pad_a, pad_b;
-    sample_chunk_columns(tiles, params, ChunkCoord{0, 0}, pad_a);
-    sample_chunk_columns(tiles, params, ChunkCoord{1, 0}, pad_b);
+    sample_chunk_columns(field, params, ChunkCoord{0, 0}, pad_a);
+    sample_chunk_columns(field, params, ChunkCoord{1, 0}, pad_b);
     ChunkWaterData still_a, flowing_a, still_b, flowing_b;
     build_chunk_water(pad_a, params, still_a, flowing_a);
     build_chunk_water(pad_b, params, still_b, flowing_b);

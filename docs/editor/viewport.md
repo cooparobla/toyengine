@@ -174,15 +174,59 @@ attach socket) is a plain marker, never a clickable bone of its own.
 
 ## Pose a rig
 
-Posing a `Rig`-based character currently has no dedicated viewport mode: its `SkeletalAnimator`
-clips and the `TwoBoneIK`/`ChainIK`/`LookAtIK`/`BoneAttachment` components in `coopa/rig/` drive
-it, authored as scene/clip YAML rather than posed by hand in the viewport. A full Pose mode and
-Rig Edit mode for it are planned but not built yet.
+Select a `Rig`-based character and pick **Pose Mode** from the mode menu in the viewport header.
+Its bones draw as octahedra; click one to select it, Shift-click to add, drag a box to select
+several. **G** / **R** / **S** move, rotate and scale the selected bones' pose (with the usual
+axis locks, typed values and Ctrl snapping), **Alt+G** / **Alt+R** / **Alt+S** clear a channel
+back to rest, **Ctrl+C** / **Ctrl+V** copy and paste a pose by bone name, **Ctrl+M** mirrors a
+posed `_l` limb onto its `_r` partner, and **I** keys the selected bones into the open
+`SkeletalAnimator` state's clip at the playhead. A pose edits the live pose only -- the rest
+skeleton is edited in Edit Mode, below.
 
-The rest of this section describes the OLDER property-animation rig style still used by a few
-assets (`robot_arm`, `bouncing_ball`): a joint is an ordinary object with an **Animator** at or
-above it, posed with its own Transform. Select such a rig -- the object with the **Animator**,
-or a joint under one -- and pick **Pose Mode** from the mode menu in the viewport header.
+## Edit a rig's skeleton
+
+**Tab** on a rigged object enters **Edit Mode on its skeleton** -- the same key that edits a
+mesh's vertices, because editing a rig means editing its bones. (On an object that has both a rig
+and a mesh of its own, Tab cycles Object -> Rig -> Mesh -> Object.) A new rig comes from
+**Add > Armature**, which creates the object, its `Rig` component and a one-bone
+`assets/rigs/<name>.yaml`, then drops straight into Edit Mode on it.
+
+A bone has three selectable parts, as in Blender: its **head**, its **tail**, and its **body**.
+Clicking the body selects both endpoints; clicking a handle selects just that one. What is
+selected is what moves -- grabbing only a tail lengthens the bone and changes its direction,
+while grabbing both slides it rigidly. A bone marked **connected** shares its head with its
+parent's tail, so moving either moves that one joint.
+
+| Key | Does |
+|---|---|
+| Click / Shift-click / drag | select a head, tail or body; extend; box select |
+| `A` / `Alt+A` / `Ctrl+I` | select all / none / invert (per endpoint) |
+| `G` / `R` / `S` | move / rotate / scale the selected endpoints |
+| `Ctrl+R` | roll (the bone's twist about its own axis) |
+| `E` | extrude a new connected child from every selected tail |
+| `Shift+A` | add a free bone at the 3D cursor |
+| `Shift+D` | duplicate the selected bones |
+| `F` | fill a new bone between two selected endpoints |
+| `Alt+M` | merge a connected run of selected bones into one |
+| `Ctrl+P` / `Alt+P` | parent the selection to the active bone / clear parent |
+| `Ctrl+N` | recalculate roll (to an axis, the 3D cursor, or the active bone) |
+| `Ctrl+Alt+A` | align the selection's roll to the active bone |
+| `X` / `Delete` | delete the selected bones (children reparent) |
+| `W` or right-click | the Armature menu, including **Symmetrize** and **X-Axis Mirror** |
+
+**Symmetrize** copies every fully-selected `_l`/`_r` bone onto its opposite-side partner,
+creating it if needed; **X-Axis Mirror** keeps the two sides in step live, so dragging one arm
+moves the other as one undoable step. Renaming a bone (the sidebar's **N** panel, Item > Bone)
+repoints every referrer the project can find -- clips, IK fields, `FootIK` legs, `Ragdoll` bones
+and `BoneAttachment`s -- because a bone name is a contract, not a label.
+
+## Pose a property-animation rig
+
+A few assets (`robot_arm`, `bouncing_ball`) use the older rig style, where a joint is an ordinary
+object with an **Animator** at or above it, posed with its own Transform. Such a rig has no `Rig`
+component and therefore no Edit Mode on its skeleton -- its "bones" are objects, moved in Object
+Mode. Select the object with the **Animator**, or a joint under one, and pick **Pose Mode** from
+the mode menu in the viewport header.
 
 In it:
 

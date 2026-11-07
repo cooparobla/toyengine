@@ -1,34 +1,22 @@
 /**
  * @file terrain_field.h
- * @brief One terrain's data, in either mode: a grid of tiles where each tile owns a sub-grid of
- *        heights and a sub-grid of layer weights, plus the water that stands over it.
+ * @brief One terrain's data: a grid of tiles where each tile owns a sub-grid of heights and a
+ *        sub-grid of layer weights, plus the water that stands over it.
  *
- * ### The model
+ * A thin, storage-owning wrapper over ONE `TerraData` (terra_data.h) -- the actual grid, height
+ * plane, layer planes and change tracking live there. This type adds the local<->world geometry
+ * helpers and the water-as-a-surface-level view every consumer (a brush, the foliage scatter,
+ * GroundProbe, gameplay) already asks for, so none of them need to know whether the terrain under
+ * them has a height plane (a "smooth" meshing style) or not (a "terraced" one):
  *
- * A terrain is `tiles_x` x `tiles_y` **tiles** of `tile_size` metres. Per tile it stores a record
- * (surface layers, climate, map ids) and a water cell. The detail inside a tile is the
- * **sub-resolution**:
- *
- * | | `TerrainMode::Tiles` | `TerrainMode::Heightmap` |
+ * | | no height plane (`height_sub == 1`) | a height plane (`height_sub > 1`) |
  * |---|---|---|
- * | height | one step per tile, quantised to `height_step` | `height_sub` + 1 samples per tile edge, continuous metres |
- * | layers | one layer index per tile face (a 4-bit nibble) | `layer_sub`^2 splat texels per tile, up to eight weights each |
+ * | height | one step per tile, quantised to `height_step` | continuous metres, bilinear |
+ * | layers | one layer index per tile (`TileCell::kinds`) | splat weights, up to eight per tile |
  * | drawn as | a welded mesh of tile-set pieces, per chunk | one shared patch per chunk, GPU-displaced |
  *
- * Storage stays **contiguous per plane**, because the GPU displacement map, the heightfield
- * collider and the PNG sidecars each need one array; a tile's sub-grid is a *view* into the plane
- * (tile_height_samples(), tile_layer_weights()), not a block of its own.
- *
- * ### Why a facade
- *
- * The two planes already exist and are already good at their jobs: HeightmapData owns the height
- * grid, the splats, bilinear sampling, normals, a surface raycast, resampling and an edit
- * journal; TileMapData owns the records, their journal, the column raycast and the `.tiles`
- * codec. This type owns one of each and presents one API over them, so a caller -- the foliage
- * scatter, GroundProbe, a brush, a gameplay query -- asks the same question in either mode.
- *
- * In `Tiles` mode there is no height plane at all: `TileRecord::steps` is the height, which is
- * what keeps `.tiles` files, the mesher and the tile edit operations byte-for-byte as they are.
+ * Which meshing style a terrain actually uses is `TerrainComponent::mode`'s business, not this
+ * type's -- `TerrainField` answers the same way regardless.
  *
  * ### Coordinates
  *
@@ -48,9 +36,9 @@
 
 #include <glm/glm.hpp>
 
-#include <toyengine/world/heightmap_data.h>
+#include <toyengine/world/terra_data.h>
+#include <toyengine/world/terra_geometry.h>
 #include <toyengine/world/terrain_types.h>
-#include <toyengine/world/tile_map_data.h>
 #include <toyengine/world/tile_types.h>
 
 namespace toy {
@@ -62,8 +50,7 @@ namespace world {
  *        runs.
  *
  * Depth is never stored -- it is `level - ground`, so the same cell describes water over a
- * terrace and water over smooth ground. `level` is metres in both modes; `Tiles` mode quantises
- * it to `height_step` on the way in and out.
+ * terrace and water over smooth ground. `level` is metres, exact, in both.
  */
 struct WaterCell {
     WaterKind    kind = WaterKind::None; /**< @brief Dry when None; `level` and `flow` are then unused. */
@@ -75,104 +62,25 @@ struct WaterCell {
 
 /**
  * @struct TerrainFieldCursor
- * @brief How far a consumer has read each of a field's planes.
+ * @brief How far a consumer has read each of a field's three planes (tiles, height, layers).
  *
- * One integer per plane, not one for the field: each backing store keeps its own revision
- * counter, so a single number could not be compared against either of them. A consumer -- a
- * scene's GPU copy, a collider, the foliage scatter, the chunk streamer -- holds its own cursor
- * and hands it back to dirty_since(), which is what lets any number of them follow the same data
- * without draining each other's changes.
+ * Mirrors `TerraCursor` one-for-one; a thin wrapper so `TerrainField`'s own type stays the public
+ * spelling consumers hold onto.
  */
 struct TerrainFieldCursor {
-    std::uint64_t tiles = 0;   /**< @brief TileMapData::revision(). */
-    std::uint64_t heights = 0; /**< @brief HeightmapData::revision(); 0 on a Tiles field. */
+    std::uint64_t tiles = 0;
+    std::uint64_t heights = 0;
+    std::uint64_t layers = 0;
 
-    bool operator==(const TerrainFieldCursor& o) const { return tiles == o.tiles && heights == o.heights; }
+    bool operator==(const TerrainFieldCursor& o) const {
+        return tiles == o.tiles && heights == o.heights && layers == o.layers;
+    }
     bool operator!=(const TerrainFieldCursor& o) const { return !(*this == o); }
-};
 
-/**
- * @struct TerrainFieldGeometry
- * @brief The authored shape of a field: its tile grid, its sub-resolutions and its vertical scale.
- *
- * Changing any of it reshapes the data (heights resampled, splats resampled, records kept where
- * they still exist), so the editor stages these behind an Apply.
- */
-struct TerrainFieldGeometry {
-    /** @brief Which model the tiles carry their shape in. */
-    TerrainMode mode = TerrainMode::Tiles;
-
-    int tiles_x = 0; /**< @brief Tiles along +x. */
-    int tiles_y = 0; /**< @brief Tiles along +y. */
-
-    /**
-     * @brief Metres covered, x and y.
-     *
-     * `Tiles` mode keeps tiles square, so this is `tiles * tile_size`. `Heightmap` mode may
-     * cover a rectangle with a square sample grid, exactly as HeightmapGeometry does, which
-     * makes cell() rectangular.
-     */
-    glm::vec2 size{0.0f};
-
-    /**
-     * @brief Height samples per tile edge; the grid is `tiles * height_sub + 1` per side.
-     *
-     * Forced to 1 in `Tiles` mode (a tile is one step). Raising it in `Heightmap` mode is what
-     * "sub-resolution determines detail" means: `tile_size: 8` with `height_sub: 8` is a metre
-     * per sample over eight-metre tiles.
-     */
-    int height_sub = 1;
-
-    /** @brief Layer (splat) texels per tile edge; the plane is `tiles * layer_sub` per side. */
-    int layer_sub = 1;
-
-    /** @brief Metres at a normalised height of 1 -- the vertical scale of a `Heightmap` field. */
-    float height = 64.0f;
-
-    /** @brief Metres per step: the vertical quantum of a `Tiles` field. */
-    float height_step = 1.0f;
-
-    /** @brief Tiles per chunk edge -- the streaming, drawing and collision unit in both modes. */
-    int chunk_tiles = 16;
-
-    /** @brief Metres per tile edge along x. Tiles mode keeps this equal along y. */
-    float tile_size() const {
-        return tiles_x > 0 ? size.x / static_cast<float>(tiles_x) : 1.0f;
+    TerraCursor terra() const { return TerraCursor{tiles, heights, layers}; }
+    static TerrainFieldCursor from_terra(const TerraCursor& c) {
+        return TerrainFieldCursor{c.tiles, c.heights, c.layers};
     }
-
-    /** @brief Metres per tile, x and y (they differ only on a rectangular heightmap). */
-    glm::vec2 tile_extent() const {
-        return glm::vec2(tiles_x > 0 ? size.x / static_cast<float>(tiles_x) : 1.0f,
-                         tiles_y > 0 ? size.y / static_cast<float>(tiles_y) : 1.0f);
-    }
-
-    /** @brief Height samples per side along x (`Heightmap` mode). */
-    int height_nx() const { return tiles_x * height_sub + 1; }
-    /** @brief Height samples per side along y (`Heightmap` mode). */
-    int height_ny() const { return tiles_y * height_sub + 1; }
-    /** @brief Layer texels along x. */
-    int layer_nx() const { return tiles_x * layer_sub; }
-    /** @brief Layer texels along y. */
-    int layer_ny() const { return tiles_y * layer_sub; }
-
-    /** @brief Metres between adjacent height samples, x and y. */
-    glm::vec2 cell() const {
-        const int nx = height_nx(), ny = height_ny();
-        return glm::vec2(nx > 1 ? size.x / static_cast<float>(nx - 1) : size.x,
-                         ny > 1 ? size.y / static_cast<float>(ny - 1) : size.y);
-    }
-
-    /** @brief Chunks along x and y (ceil, at least one each). */
-    glm::ivec2 chunk_count() const;
-
-    /** @brief Clamps every field into its supported range, and forces mode-only invariants. */
-    TerrainFieldGeometry sanitized() const;
-
-    /** @brief The HeightmapGeometry a `Heightmap` field's plane is kept in. */
-    HeightmapGeometry heightmap_geometry() const;
-
-    bool operator==(const TerrainFieldGeometry& o) const;
-    bool operator!=(const TerrainFieldGeometry& o) const { return !(*this == o); }
 };
 
 /**
@@ -195,9 +103,9 @@ struct TileHeights {
  * @struct ConstTileHeights
  * @brief TileHeights, read-only.
  *
- * `n` is `height_sub + 1`: the tile's own corners, shared with its neighbours. A `Tiles` field
- * has no height plane -- its height is the record's step -- so the view is falsy there and
- * TerrainField::ground_at() is the way to ask.
+ * `n` is `height_sub + 1`: the tile's own corners, shared with its neighbours. A field with no
+ * height plane has no height sub-grid at all -- its height is the tile's own `steps` -- so the
+ * view is falsy there and TerrainField::ground_at() is the way to ask.
  */
 struct ConstTileHeights {
     const float* base = nullptr;
@@ -221,14 +129,14 @@ class TerrainField;
  * @brief The layer weights one tile owns: `n` x `n` texels of up to eight weights each.
  *
  * A handle rather than a pointer view, because the weights live in two interleaved RGBA8 planes
- * on a `Heightmap` field and in the record's surface nibble on a `Tiles` field (where `n` is 1
- * and the tile's layer has the whole weight). Reading one is the same call either way, which is
- * the point -- a brush, a scatter mask and a query all speak one layer index.
+ * when a height plane exists, and in the tile's own `kinds` nibble otherwise (where `n` is 1 and
+ * the tile's layer has the whole weight). Reading one is the same call either way, which is the
+ * point -- a brush, a scatter mask and a query all speak one layer index.
  */
 struct TileLayerWeights {
     const TerrainField* field = nullptr;
     int tx = 0, ty = 0;
-    int n = 0; /**< @brief Texels per tile edge (`layer_sub`, or 1 on a Tiles field). */
+    int n = 0; /**< @brief Texels per tile edge (`layer_sub`, or 1 without a height plane). */
 
     explicit operator bool() const { return field != nullptr; }
 
@@ -240,71 +148,66 @@ struct TileLayerWeights {
 
 /**
  * @class TerrainField
- * @brief See the file comment. Owns the planes; carries no per-frame logic and no GPU state.
+ * @brief See the file comment. Owns one `TerraData`; carries no per-frame logic and no GPU state.
  */
 class TerrainField {
 public:
     TerrainField() = default;
 
     /** @brief Process-unique id; consumers key caches on it, never on the address. */
-    std::uint64_t uid() const;
+    std::uint64_t uid() const { return data_ ? data_->uid() : 0; }
+
+    /** @brief Reshapes to `geometry`, allocating a fresh TerraData. Everything is marked changed. */
+    void reset(const TerraGeometry& geometry);
 
     /**
-     * @brief Reshapes to `geometry`, allocating the planes each mode needs.
+     * @brief Takes a shared TerraData -- a component acquired it from a store, or a bake just
+     *        finished one -- and reads this field's state off it from now on.
      *
-     * A `Tiles` field gets records only; a `Heightmap` field gets records and a height plane.
-     * Everything is marked changed.
+     * The store outlives a component re-parse, which is what keeps unsaved editor strokes across
+     * the editor's parse-on-every-change.
      */
-    void reset(const TerrainFieldGeometry& geometry);
+    void attach(std::shared_ptr<TerraData> data);
 
-    /**
-     * @brief Takes the shared stores a component acquired, and reads the geometry back off them.
-     *
-     * The stores outlive a component re-parse (TileMapStore, HeightmapStore), which is what
-     * keeps unsaved editor strokes across the editor's parse-on-every-change.
-     *
-     * @param tiles   The record / water plane. Required.
-     * @param heights The height plane; null on a `Tiles` field.
-     */
-    void adopt(std::shared_ptr<TileMapData> tiles, std::shared_ptr<HeightmapData> heights,
-               const TerrainFieldGeometry& geometry);
+    const TerraGeometry& geometry() const {
+        static const TerraGeometry k_empty;
+        return data_ ? data_->geometry() : k_empty;
+    }
+    /** @brief Whether this field is drawn with a continuous height plane or terraced `steps`. */
+    bool has_height_plane() const { return data_ && data_->has_heights(); }
+    /** @brief `Heightmap` when a height plane exists, `Tiles` otherwise -- a convenience for
+     *         callers that still think in the old two-mode vocabulary (e.g. an epsilon that
+     *         differs between a quantised and a continuous field). */
+    TerrainMode mode() const { return has_height_plane() ? TerrainMode::Heightmap : TerrainMode::Tiles; }
+    bool empty() const { return !data_ || data_->empty(); }
 
-    const TerrainFieldGeometry& geometry() const { return geometry_; }
-    TerrainMode mode() const { return geometry_.mode; }
-    bool empty() const { return !tiles_ || tiles_->empty(); }
-
-    /** @brief The record / water plane; null before adopt(). */
-    TileMapData* tiles() { return tiles_.get(); }
-    const TileMapData* tiles() const { return tiles_.get(); }
-    /** @brief The height plane; null on a `Tiles` field. */
-    HeightmapData* heights() { return heights_.get(); }
-    const HeightmapData* heights() const { return heights_.get(); }
-
-    std::shared_ptr<TileMapData> tiles_shared() const { return tiles_; }
-    std::shared_ptr<HeightmapData> heights_shared() const { return heights_; }
+    /** @brief The backing store; null before reset()/attach(). */
+    TerraData* data() { return data_.get(); }
+    const TerraData* data() const { return data_.get(); }
+    std::shared_ptr<TerraData> data_shared() const { return data_; }
 
     // ------------------------------------------------------------------ tiles
 
-    bool contains(glm::ivec2 tile) const { return tiles_ && tiles_->contains(tile.x, tile.y); }
+    bool contains(glm::ivec2 tile) const { return data_ && data_->contains(tile.x, tile.y); }
     /** @brief True when local xy lies on the terrain. */
-    bool contains(glm::vec2 local) const;
+    bool contains(glm::vec2 local) const { return data_ && data_->contains(local); }
     /** @brief The tile covering local xy (unclamped: may be off the grid). */
-    glm::ivec2 tile_at(glm::vec2 local) const;
+    glm::ivec2 tile_at(glm::vec2 local) const { return data_ ? data_->tile_at(local) : glm::ivec2(0); }
     /** @brief Local xy of tile (tx, ty)'s centre. */
-    glm::vec2 tile_centre(glm::ivec2 tile) const;
+    glm::vec2 tile_centre(glm::ivec2 tile) const { return data_ ? data_->tile_centre(tile) : glm::vec2(0.0f); }
 
-    /** @brief The record of a tile, clamped to the nearest edge tile; null on an empty field. */
-    const TileRecord* record_at(glm::ivec2 tile) const;
+    /** @brief The cell of a tile, clamped to the nearest edge tile; null on an empty field. */
+    const TileCell* record_at(glm::ivec2 tile) const;
 
     // ------------------------------------------------------------------ ground
 
     /**
      * @brief Ground height in metres under local xy -- under water, the bed.
      *
-     * Bilinear over the height plane on a `Heightmap` field; the column's terrace on a `Tiles`
-     * field. Clamped to the terrain's edge.
+     * Bilinear over the height plane when one exists; the tile's own `steps` otherwise. Clamped
+     * to the terrain's edge.
      */
-    float ground_at(glm::vec2 local) const;
+    float ground_at(glm::vec2 local) const { return data_ ? data_->ground_at(local) : 0.0f; }
 
     /**
      * @brief Ground height in metres at a tile, clamped to the nearest edge tile.
@@ -312,13 +215,15 @@ public:
      * The same answer as `ground_at(tile_centre(tile))` without the round trip through local
      * metres -- which matters because the water operations walk thousands of tiles per flood.
      */
-    float ground_at_tile(glm::ivec2 tile) const;
+    float ground_at_tile(glm::ivec2 tile) const { return data_ ? data_->ground_at_tile(tile) : 0.0f; }
 
-    /** @brief Unit surface normal at local xy. `Tiles` mode answers +Z on a top face. */
-    glm::vec3 normal_at(glm::vec2 local) const;
+    /** @brief Unit surface normal at local xy. No height plane: +Z, a column's top is flat. */
+    glm::vec3 normal_at(glm::vec2 local) const {
+        return data_ ? data_->normal_at(local) : glm::vec3(0.0f, 0.0f, 1.0f);
+    }
 
     /** @brief Min and max ground height over chunk (cx, cy), its shared border included. */
-    glm::vec2 chunk_height_range(int cx, int cy) const;
+    glm::vec2 chunk_height_range(int cx, int cy) const { return data_ ? data_->chunk_minmax(cx, cy) : glm::vec2(0.0f); }
 
     /** @brief The height samples tile (tx, ty) owns; falsy off the grid or without a plane. */
     ConstTileHeights tile_height_samples(int tx, int ty) const;
@@ -342,15 +247,15 @@ public:
     /** @brief The water over a tile, clamped to the nearest edge tile. */
     WaterCell water_at(glm::ivec2 tile) const;
     /** @brief The water over local xy. */
-    WaterCell water_at(glm::vec2 local) const;
+    WaterCell water_at(glm::vec2 local) const { return water_at(tile_at(local)); }
 
     /**
      * @brief Sets the water over a tile. Does NOT mark dirty -- a caller editing a region marks
      *        it once (see toyengine/world/terrain_water.h, which is this as operations).
      *
-     * `Tiles` mode quantises `level` to the terrace at or below it; `Heightmap` mode keeps it
-     * exact. Neither leaves water standing at or under the ground: a level that does not clear
-     * the ground drains the tile.
+     * The level is kept exact, whether or not this field has a height plane -- quantising to a
+     * terraced mesh's steps is the mesher's business (terrain_chunk.h's column sampling), not the
+     * data's. A level that does not clear the ground drains the tile.
      */
     void set_water(glm::ivec2 tile, const WaterCell& water);
     /** @brief Drains a tile. */
@@ -364,31 +269,32 @@ public:
      * One call per edited region, whatever was written in it -- heights, layers, water or the
      * record -- so a consumer following `dirty_since()` re-reads a region once.
      */
-    void mark_tiles_dirty(const IRect& tiles);
+    void mark_tiles_dirty(const IRect& tiles) { if (data_) data_->mark_tiles_dirty(tiles); }
     /** @brief Everything changed (a bake, a load, a resize). */
-    void mark_all_dirty();
+    void mark_all_dirty() { if (data_) data_->mark_all_dirty(); }
 
     /** @brief Where every plane stands now; a consumer keeps the one it last built from. */
-    TerrainFieldCursor cursor() const;
+    TerrainFieldCursor cursor() const {
+        return data_ ? TerrainFieldCursor::from_terra(data_->cursor()) : TerrainFieldCursor{};
+    }
 
     /**
      * @brief A revision for one chunk, so a consumer rebuilds only what actually moved.
      *
      * What the foliage scatter keys its per-chunk cache on: sculpting one hillside must not
-     * re-scatter the whole terrain. A `Heightmap` field answers per chunk; a `Tiles` field has
-     * no per-chunk revision of its own and answers with the grid's, so any tile edit re-scatters
-     * every chunk -- correct, and coarser than it could be.
+     * re-scatter the whole terrain.
      */
-    std::uint64_t chunk_revision(int cx, int cy) const;
+    std::uint64_t chunk_revision(int cx, int cy) const { return data_ ? data_->chunk_revision(cx, cy) : 0; }
 
     /**
      * @brief The union, in TILES, of everything edited in any plane since `since`.
      *
      * A conservative cover, never an exact set: the backing journals coalesce nearby entries to
-     * stay bounded, so a small edit beside a large one is reported with it. Consumers re-read the
-     * rectangle they are given, which is why covering is the contract and tightness is not.
+     * stay bounded, so a small edit beside a large one is reported with it.
      */
-    IRect dirty_since(const TerrainFieldCursor& since) const;
+    IRect dirty_since(const TerrainFieldCursor& since) const {
+        return data_ ? data_->dirty_since(since.terra()) : IRect{};
+    }
 
     /**
      * @brief The tiles a height-texel rectangle covers.
@@ -402,33 +308,18 @@ public:
     IRect tiles_of_layer_texels(const IRect& texels) const;
 
 private:
-
-    TerrainFieldGeometry geometry_;
-    std::shared_ptr<TileMapData> tiles_;
-    std::shared_ptr<HeightmapData> heights_;
-
-    /**
-     * @brief Water surface height per tile, metres -- the authority on a `Heightmap` field.
-     *
-     * Empty on a `Tiles` field, where the record's terrace (`steps + water_depth`) is the
-     * authority and needs no second copy. The water's KIND and FLOW live in the record in both
-     * modes, which is why only the level needs a plane of its own.
-     */
-    std::vector<float> water_level_;
+    std::shared_ptr<TerraData> data_;
 };
 
 /**
- * @brief A field that BORROWS an existing tile grid instead of owning it.
+ * @brief A field that BORROWS an existing TerraData instead of owning it.
  *
- * For code that holds a bare `TileMapData` and wants the field operations over it -- the map
- * bake, and the tile edit operations, neither of which has a component to hand. The returned
- * field keeps the grid alive for exactly as long as the caller does, and no longer: it must not
- * outlive `tiles`.
- *
- * `height_step` defaults to 1, which makes a level in metres and a terrace in steps the same
- * number -- what a caller working in whole terraces wants.
+ * For code that holds a bare `TerraData` and wants the field operations over it -- the map bake,
+ * and the tile edit operations, neither of which has a component to hand. The returned field
+ * keeps the data alive for exactly as long as the caller does, and no longer: it must not outlive
+ * `data`.
  */
-TerrainField borrow_tiles(TileMapData& tiles, float height_step = 1.0f, float tile_size = 1.0f);
+TerrainField borrow(TerraData& data);
 
 /**
  * @struct TerrainFieldView

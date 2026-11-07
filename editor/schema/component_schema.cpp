@@ -1452,7 +1452,7 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                 with_tip(f_string("tile_set", "objects/terrain/tileset_round", true),
                          "The tile-set object the terrain is built from -- its pieces shape every edge, corner and "
                          "wall. tileset_voxel: square blocks"),
-                with_tip(f_string("tiles", ""), "The stored tiles' file (scene-relative); empty: terrain/<object>.tiles. "
+                with_tip(f_string("tiles", ""), "The stored .terra file (scene-relative); empty: terrain/<object>.terra. "
                                                 "Baked from the generator settings (World Generator) when it does not exist"),
                 with_tip(f_int("world_tiles", 0, 0, 16384), "The world's size in tiles per side: how many tiles the generated map is "
                                                             "cut into. 0: Map Cells x Tiles per Cell. Applies when the world is generated"),
@@ -1497,10 +1497,14 @@ std::map<std::string, ComponentSchema>& schema_table_() {
         // differs per alias, matching what each bare name has always meant with no other key
         // to go on (world::infer_terrain_mode()'s tie-break).
         //
-        // Heightmap shape and paint live in PNGs beside the scene; Terrain Mode (viewport mode
-        // menu) edits them. `generate:` is a YAML-only map, preserved on save. `tessellation:`'s
-        // own keys are inspectable below via a dotted FieldDesc ("tessellation.max_distance"),
-        // which draw_field() (editor/schema/inspector.cpp) resolves into that sub-mapping.
+        // Heightmap shape, layers and water all live in the same .terra file as Tiles mode
+        // (`data:`, scene-relative; default terrain/<object>.terra) -- Terrain Mode (viewport mode
+        // menu) edits it directly. `heightmap:` is accepted as a deprecated spelling of `data:`;
+        // an older scene's `generate:` logs a warning and is dropped (a fresh terrain starts
+        // flat); `splat0:`/`splat1:` are gone with no warning -- the layers live in the .terra
+        // file now, not beside it. `tessellation:`'s own keys are inspectable below via a dotted
+        // FieldDesc ("tessellation.max_distance"), which draw_field() (editor/schema/inspector.cpp)
+        // resolves into that sub-mapping.
         auto terrain_fields = [&](const char* default_mode) {
             Node grass_layer = Node::mapping();
             grass_layer["name"] = std::string("grass");
@@ -1520,13 +1524,14 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             // Heightmap-only keys. `chunk_size`, `collision`, `physics_material` and
             // `shadow_distance` are shared with Tiles mode and already came from
             // tile_terrain_fields() above -- one key, one widget, in both modes.
+            fs.push_back(with_tip(f_string("data", ""), "The stored .terra file (scene-relative); empty: terrain/<object>.terra. "
+                                                        "`heightmap:` is accepted as a deprecated spelling"));
             fs.push_back(with_tip(f_vec2("size", glm::vec2(256.0f), 1.0f, true), "Width (x) and depth (y) in metres"));
             fs.push_back(with_tip(f_float("height", 64.0f, 0.1f, 0.01f, 10000.0f, true), "Metres at the heightmap's full value"));
-            fs.push_back(with_tip(f_int("resolution", 257, 3, 8193, true), "Height samples per side (2^n + 1: 257, 513, 1025...)"));
+            fs.push_back(with_tip(f_int("resolution", 129, 3, 8193, true), "Height samples per side (height_sub x tiles + 1)"));
             fs.push_back(f_int("splat_resolution", 512, 4, 8192));
-            fs.push_back(with_tip(f_string("heightmap", ""), "16-bit greyscale PNG (scene-relative); default terrain/<object>_height.png"));
-            fs.push_back(f_string("splat0", ""));
-            fs.push_back(f_string("splat1", ""));
+            fs.push_back(with_tip(f_int("height_sub", 2, 1, 64), "Height samples per tile edge; 1 is a terraced read with no "
+                                                                 "height plane at all, matching Tiles mode's own ground"));
             fs.push_back(f_items("layers", {
                 f_string("name", "layer"),
                 f_asset("albedo", "textures", ".png"),
@@ -1572,8 +1577,8 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                      "Extra depth the bed reaches shore_grade_band tiles in from the shoreline; 0 keeps the bed as generated"));
             fs.push_back(with_tip(f_float("shore_grade_band", 4.0f, 0.5f, 0.0f, 64.0f),
                      "Tiles the extra depth in shore_grade_depth ramps over"));
-            fs.push_back(with_tip(f_int("water_skirt_tiles", 4, 0, 16),
-                     "How far the water surface's buried apron reaches past the wet tiles, over ground that stays underwater"));
+            fs.push_back(with_tip(f_float("water_skirt_tiles", 4.0f, 0.5f, 0.0f, 32.0f),
+                     "Metres the water surface's buried apron reaches past the wet tiles, over ground that stays underwater"));
             return fs;
         };
         add({"Terrain", "World", terrain_fields("tiles")});

@@ -123,7 +123,33 @@ struct RigModel {
      *        disconnected, if `i` had no parent). @return The reparented children's names.
      */
     std::vector<std::string> delete_bone(int i);
+
+    /**
+     * @brief Reorders `bones` into a stable parent-first order (depth first from the roots,
+     *        children keeping their current relative order) and fixes every `parent` index.
+     * @return old index -> new index, for remapping anything that holds bone indices
+     *         (rig_sel::remap()).
+     *
+     * Lets an authoring op append bones wherever it likes and normalise afterwards, instead of
+     * every op having to splice at exactly the right position -- and it is the piece
+     * reparent_bone()'s doc calls "not implemented", so an arbitrary reparent is now
+     * reparent + sort.
+     */
+    std::vector<int> sort_parent_first();
 };
+
+/**
+ * @brief The roll (degrees) that aims the bone (head -> tail)'s rest Z as close to `up` as the
+ *        bone's own axis allows; the bone's current roll is irrelevant to the answer.
+ *
+ * Closed form, no search. With (x0, y, z0) the roll-0 basis coopa::rig::bone_rest_matrix builds,
+ * rotating by t about y gives z(t) = cos(t)*z0 + sin(t)*x0, so aiming z at `up` (with the
+ * component along y removed, since no roll can tilt out of that plane) is
+ * t = atan2(dot(up_perp, x0), dot(up_perp, z0)).
+ *
+ * @return 0 for a degenerate bone, or when `up` is parallel to the bone axis (nothing to aim at).
+ */
+float roll_to_align_z(const glm::vec3& head, const glm::vec3& tail, const glm::vec3& up);
 
 } // namespace editor
 } // namespace toy

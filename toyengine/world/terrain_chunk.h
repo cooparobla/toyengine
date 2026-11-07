@@ -52,8 +52,8 @@
 #include <vector>
 
 
+#include <toyengine/world/terrain_field.h>
 #include <toyengine/world/terrain_params.h>
-#include <toyengine/world/tile_map_data.h>
 #include <toyengine/world/tile_mesh_library.h>
 
 namespace coopa::physx::geometry {
@@ -163,10 +163,12 @@ void sample_chunk_columns(const TerrainSampler& sampler, const TerrainParams& pa
                                  const ChunkCoord& coord, ColumnPad& out);
 
 /**
- * @brief The same, from a terrain's stored tiles -- what streaming uses. Owner thread: the job
- *        gets the copy, never the TileMapData. Past the grid's edge the edge tiles repeat.
+ * @brief The same, from a terrain's stored field -- what streaming uses. Owner thread: the job
+ *        gets the copy, never the field. Past the grid's edge the edge tiles repeat. Reads
+ *        `TileCell::steps` directly (never a fresh quantisation of a height plane), so a field
+ *        with a height plane meshes exactly as terraced as its maintained `steps` cache says.
  */
-void sample_chunk_columns(const TileMapData& tiles, const TerrainParams& params, const ChunkCoord& coord,
+void sample_chunk_columns(const TerrainField& field, const TerrainParams& params, const ChunkCoord& coord,
                           ColumnPad& out);
 
 /**

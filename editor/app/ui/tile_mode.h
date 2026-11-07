@@ -31,9 +31,8 @@
 #include "editor/terrain/tile_brush.h"
 #include "editor/viewport/gizmo.h"
 #include <coopa/input/input.h>
-#include <toyengine/world/heightmap_data.h>
+#include <toyengine/world/terra_data.h>
 #include <toyengine/world/terrain_component.h>
-#include <toyengine/world/tile_map_data.h>
 
 namespace toy::editor {
 
@@ -73,8 +72,8 @@ public:
         bool invert = false;
         TileTool tool = TileTool::Raise;
         int flatten_to = 0;
-        std::shared_ptr<toy::world::TileMapData> data;
-        std::vector<toy::world::TileRecord> start;   ///< The whole grid before the stroke (the undo patch is cut from it).
+        std::shared_ptr<toy::world::TerraData> data;
+        std::vector<toy::world::TileCell> start;   ///< The whole grid before the stroke (the undo patch is cut from it).
         std::vector<std::uint8_t> touched;           ///< Tiles already raised this stroke: each once.
         toy::world::IRect rect;                      ///< Everything the stroke changed.
         glm::ivec2 last_tile{-1};
@@ -99,8 +98,8 @@ public:
     void tile_dab_(const glm::ivec2& tile);
 
     /** @brief Records an undo step from `before` (cut from a whole-grid copy) to the current tiles over `rect`. */
-    void tile_push_undo_(const std::string& label, const std::shared_ptr<toy::world::TileMapData>& data,
-                         const std::vector<toy::world::TileRecord>& whole_before, const toy::world::IRect& rect);
+    void tile_push_undo_(const std::string& label, const std::shared_ptr<toy::world::TerraData>& data,
+                         const std::vector<toy::world::TileCell>& whole_before, const toy::world::IRect& rect);
     /** @brief scene_undo_() / scene_redo_()'s tile half. */
     void tile_apply_undo_(bool redo);
 
@@ -109,7 +108,7 @@ public:
      *        join one step). With `settle` (the edit moved ground or water), the water then
      *        re-settles around the selection -- within a margin, so the undo step stays bounded.
      */
-    void tile_edit_selection_(const std::string& label, const std::function<void(toy::world::TileRecord&)>& edit,
+    void tile_edit_selection_(const std::string& label, const std::function<void(toy::world::TileCell&)>& edit,
                               const std::string& merge = {}, bool settle = false);
 
     /** @brief Asks object `id`'s live terrain (0: the Tile Mode one) to re-bake its world from the generator settings (undoable once it lands). */
@@ -144,8 +143,8 @@ public:
     double tile_last_click_ = -1.0;        ///< For double-click (select similar): the last Select click's time...
     glm::ivec2 tile_last_click_tile_{-1};  ///< ...and tile.
     // Regenerate: the grid before, until the bake lands and the undo step can be recorded.
-    std::shared_ptr<toy::world::TileMapData> tile_regen_data_;
-    std::vector<toy::world::TileRecord> tile_regen_before_;
+    std::shared_ptr<toy::world::TerraData> tile_regen_data_;
+    std::vector<toy::world::TileCell> tile_regen_before_;
     int tile_regen_w_ = 0, tile_regen_h_ = 0;
     std::uint64_t tile_regen_wait_ = 0;    ///< bakes_done() to wait past.
 
@@ -156,7 +155,7 @@ public:
     void set_tile_mode(bool on);
     const UndoStack<TilePatch>& tile_history() const { return tile_undo_; }
     /** @brief Test hook: edit the selection as the panel does. */
-    void tile_edit_selection(const std::string& label, const std::function<void(toy::world::TileRecord&)>& edit) {
+    void tile_edit_selection(const std::string& label, const std::function<void(toy::world::TileCell&)>& edit) {
         tile_edit_selection_(label, edit);
     }
 

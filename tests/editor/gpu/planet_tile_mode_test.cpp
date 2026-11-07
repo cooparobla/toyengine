@@ -8,8 +8,8 @@
 #include <coopa/testing/test.h>
 
 #include <toyengine/world/planet.h>
+#include <toyengine/world/terra_store.h>
 #include <toyengine/world/terrain_component.h>
-#include <toyengine/world/tile_map_data.h>
 
 #include "editor/support/editor_session.h"
 
@@ -19,7 +19,7 @@ namespace toy::editor::testing {
 
 COOPA_TEST(tile_mode_raises_tiles_on_two_faces_of_a_planet) {
     using coopa::input::MouseButton;
-    toy::world::TileMapStore::instance().clear();
+    toy::world::TerraStore::instance().clear();
     EditorSession session({.settle_frames = toy::core::Engine::kFillDebounceFrames + 4});
     auto& engine = session.engine;
     auto& app = session.app;
@@ -41,11 +41,12 @@ COOPA_TEST(tile_mode_raises_tiles_on_two_faces_of_a_planet) {
         tick(engine, 1);
         coopa::scene::SceneObject* live = app.sync().live(id);
         t = live ? live->get_component<toy::world::TerrainComponent>() : nullptr;
-        if (t && t->is_ready() && t->tiles && !t->tiles->empty() && t->chunks().size() >= 24) break;
+        if (t && t->is_ready() && !t->field.empty() && t->chunks().size() >= 24) break;
     }
-    coopa::test::require(t != nullptr && t->tiles && !t->tiles->empty(), "the planet bakes its globe");
-    const std::shared_ptr<toy::world::TileMapData> tiles = t->tiles;
-    expect(tiles->width() == 6 * 32 && tiles->height() == 32, "a planet's tiles are six 32 x 32 faces side by side");
+    coopa::test::require(t != nullptr && !t->field.empty(), "the planet bakes its globe");
+    const std::shared_ptr<toy::world::TerraData> tiles = t->field.data_shared();
+    expect(tiles->geometry().tiles_x == 6 * 32 && tiles->geometry().tiles_y == 32,
+           "a planet's tiles are six 32 x 32 faces side by side");
 
     // The World Generator previews the planet's map unrolled (twice as wide as tall).
     app.open_world_generator(id);
@@ -71,9 +72,9 @@ COOPA_TEST(tile_mode_raises_tiles_on_two_faces_of_a_planet) {
         glm::ivec2 best{-1};
         float score = 0.35f;
         for (int y = 2; y < layout.n - 2; ++y) {
-            for (int x = 0; x < tiles->width(); ++x) {
+            for (int x = 0; x < tiles->geometry().tiles_x; ++x) {
                 const int face = x / layout.n, i = x - face * layout.n;
-                if (face == skip_face || i < 2 || i >= layout.n - 2 || tiles->at(x, y).water()) continue;
+                if (face == skip_face || i < 2 || i >= layout.n - 2 || tiles->at(x, y).wet()) continue;
                 const float s = glm::dot(glm::vec3(layout.tile_direction(x, y)), eye);
                 if (s > score) { score = s; best = {x, y}; }
             }
@@ -94,7 +95,7 @@ COOPA_TEST(tile_mode_raises_tiles_on_two_faces_of_a_planet) {
         const double r = layout.radius() + tiles->at(tile.x, tile.y).steps * t->params.height_step;
         return screen_of(engine, app, id, glm::vec3(d * r), in.scale);
     };
-    const std::vector<toy::world::TileRecord> before = tiles->records();
+    const std::vector<toy::world::TileCell> before = tiles->tiles();
     const std::size_t undo0 = app.tile_history().undo_count();
     for (const glm::ivec2 tile : {a, b}) {
         const auto p = at_tile(tile);
@@ -108,14 +109,14 @@ COOPA_TEST(tile_mode_raises_tiles_on_two_faces_of_a_planet) {
 
     // Every changed tile is on one of the two stroked faces, within the brush of its stroke.
     int on_a = 0, on_b = 0, stray = 0;
-    for (int y = 0; y < tiles->height(); ++y) {
-        for (int x = 0; x < tiles->width(); ++x) {
-            const std::size_t i = static_cast<std::size_t>(y * tiles->width() + x);
-            if (tiles->records()[i].steps == before[i].steps) continue;
+    for (int y = 0; y < tiles->geometry().tiles_y; ++y) {
+        for (int x = 0; x < tiles->geometry().tiles_x; ++x) {
+            const std::size_t i = static_cast<std::size_t>(y * tiles->geometry().tiles_x + x);
+            if (tiles->tiles()[i].steps == before[i].steps) continue;
             const auto near = [&](const glm::ivec2& s) { return x / layout.n == s.x / layout.n && std::abs(x - s.x) <= 2 && std::abs(y - s.y) <= 2; };
             if (near(a)) ++on_a;
             else if (near(b)) ++on_b;
-            else if (!before[i].water()) ++stray;
+            else if (!before[i].wet()) ++stray;
         }
     }
     expect(on_a >= 4 && on_b >= 4 && stray == 0,
@@ -125,7 +126,7 @@ COOPA_TEST(tile_mode_raises_tiles_on_two_faces_of_a_planet) {
     app.undo();
     app.undo();
     tick(engine, 2);
-    expect(tiles->records() == before, "undo restores the globe exactly");
+    expect(tiles->tiles() == before, "undo restores the globe exactly");
 }
 
 } // namespace toy::editor::testing

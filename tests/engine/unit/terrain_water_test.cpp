@@ -21,14 +21,14 @@
 
 COOPA_TEST_SUITE("terrain_water");
 
-using toy::world::borrow_tiles;
+using toy::world::borrow;
 using toy::world::IRect;
 using toy::world::k_water_flood_cap;
 using toy::world::ShoreGrade;
+using toy::world::TerraData;
+using toy::world::TerraGeometry;
 using toy::world::TerrainField;
-using toy::world::TerrainFieldGeometry;
-using toy::world::TerrainMode;
-using toy::world::TileRecord;
+using toy::world::TileCell;
 using toy::world::WaterCell;
 using toy::world::WaterKind;
 using toy::world::WaterSettle;
@@ -51,45 +51,44 @@ int wet_count(const TerrainField& f) {
  *        notch of 3 leading east -- a basin with a spillway.
  */
 TerrainField tiled_basin() {
-    TerrainFieldGeometry g;
-    g.mode = TerrainMode::Tiles;
+    TerraGeometry g;
     g.tiles_x = g.tiles_y = 9;
-    g.size = glm::vec2(9.0f);
+    g.tile_size = 1.0f;
     g.height_step = 1.0f;
     TerrainField f;
     f.reset(g);
     for (int y = 0; y < 9; ++y) {
         for (int x = 0; x < 9; ++x) {
-            f.tiles()->at(x, y).steps = (x >= 3 && x <= 5 && y >= 3 && y <= 5) ? 2 : 5;
+            f.data()->at(x, y).steps = (x >= 3 && x <= 5 && y >= 3 && y <= 5) ? 2 : 5;
         }
     }
-    f.tiles()->at(6, 4).steps = 3;
+    f.data()->at(6, 4).steps = 3;
     f.mark_all_dirty();
     return f;
 }
 
 /**
- * @brief 8 x 8 two-metre tiles over a 17 x 17 sample plane, ground 5 m with a smooth bowl of 2 m.
+ * @brief 8 x 8 two-metre tiles over a 17 x 17 sample plane (height_sub 2), ground 5 m with a
+ *        smooth bowl of 2 m.
  *
- * The samples in [3, 6] are 2 m, so the nine tiles whose four corners all lie inside that block
- * read exactly 2 m and everything around them reads higher -- a bowl with a sloped rim rather
- * than a terrace with a wall.
+ * The corners in [6, 12] are 2 m, so the nine tiles (3, 4, 5 each way) whose four corners all
+ * lie inside that block read exactly 2 m and everything around them reads higher -- a bowl with
+ * a sloped rim rather than a terrace with a wall.
  */
 TerrainField smooth_basin() {
-    TerrainFieldGeometry g;
-    g.mode = TerrainMode::Heightmap;
+    TerraGeometry g;
     g.tiles_x = g.tiles_y = 8;
-    g.size = glm::vec2(16.0f);
+    g.tile_size = 2.0f;
     g.height = 20.0f;
-    g.height_sub = 1;
+    g.height_sub = 2;
     g.layer_sub = 1;
     TerrainField f;
     f.reset(g);
-    toy::world::HeightmapData& h = *f.heights();
-    for (int j = 0; j < h.ny(); ++j) {
-        for (int i = 0; i < h.nx(); ++i) {
-            const bool in_bowl = i >= 3 && i <= 6 && j >= 3 && j <= 6;
-            h.at(i, j) = in_bowl ? 2.0f : 5.0f;
+    TerraData* d = f.data();
+    for (int j = 0; j < d->height_ny(); ++j) {
+        for (int i = 0; i < d->height_nx(); ++i) {
+            const bool in_bowl = i >= 6 && i <= 12 && j >= 6 && j <= 12;
+            d->height_at(i, j) = in_bowl ? 2.0f : 5.0f;
         }
     }
     f.mark_all_dirty();
@@ -132,7 +131,7 @@ COOPA_TEST(a_spread_carries_the_kind_and_the_flow) {
     TerrainField t = tiled_basin();
     // A river at level 4 on the basin floor, flowing east, and a channel dug beside it.
     t.set_water(glm::ivec2(3, 4), WaterCell{WaterKind::River, 4.0f, 3});
-    t.tiles()->at(4, 4).steps = 1;
+    t.data()->at(4, 4).steps = 1;
     t.mark_tiles_dirty(IRect{4, 4, 5, 5});
     settle_water(t, IRect{4, 4, 5, 5});
 
@@ -144,7 +143,7 @@ COOPA_TEST(a_spread_carries_the_kind_and_the_flow) {
     // Ocean and Lake are different kinds, and a spread keeps them apart.
     TerrainField o = tiled_basin();
     o.set_water(glm::ivec2(3, 3), WaterCell{WaterKind::Ocean, 4.0f, 0});
-    o.tiles()->at(4, 3).steps = 1;
+    o.data()->at(4, 3).steps = 1;
     o.mark_tiles_dirty(IRect{4, 3, 5, 4});
     settle_water(o, IRect{4, 3, 5, 4});
     expect(o.water_at(glm::ivec2(4, 3)).kind == WaterKind::Ocean, "tiles: the sea spreads as the sea");
@@ -161,34 +160,29 @@ COOPA_TEST(a_spread_carries_the_kind_and_the_flow) {
 /**
  * @brief Ground raised through its own surface becomes dry land; the water round it stays.
  *
- * The two modes get there differently, and the difference is the point of the field's own water
- * level. In `Tiles` a record's surface IS `steps + water_depth`, so ground above its own surface
- * cannot be written down: raising a bed re-applies the water at its old level, which drains that
- * tile on the spot (`move_ground()` in tile_edit.cpp), and the settle's job is only the
- * neighbours. In `Heightmap` the ground plane and the water level are independent, so the state
- * IS representable -- and removing it is work only the settle can do.
+ * Water's level is an absolute-metres field on the cell now, independent of `steps`, in every
+ * field -- so raising a tile's ground past its own water's level does not touch the water at
+ * all; the cell is left wet with ground above its own surface until settle_water() removes it.
+ * One behaviour, not a per-mode split (the old Tiles-only `steps + water_depth` encoding this
+ * used to need is gone with `water_depth` itself).
  */
 COOPA_TEST(ground_raised_through_the_surface_dries) {
     TerrainField t = tiled_basin();
     flood_water(t, {{4, 4}}, 4.0f, WaterKind::Lake);
-    {
-        // What a brush does: move the bed, keep the water's surface where it was.
-        TileRecord& bed = t.tiles()->at(4, 4);
-        const int level = bed.water_level();
-        bed.steps = 6;
-        bed.set_water(level);
-    }
+    t.data()->at(4, 4).steps = 6;   // raises the bed through the water; water_level is untouched
     t.mark_tiles_dirty(IRect{4, 4, 5, 5});
+    expect(t.water_at(glm::ivec2(4, 4)).wet(),
+           "tiles: the ground is above the level and the water is still recorded");
     settle_water(t, IRect{4, 4, 5, 5});
-    expect(!t.water_at(glm::ivec2(4, 4)).wet(), "tiles: a bed raised through the water is dry land");
+    expect(!t.water_at(glm::ivec2(4, 4)).wet(), "tiles: ...and the settle is what removes it");
     expect(t.water_at(glm::ivec2(3, 4)).wet() && t.water_at(glm::ivec2(5, 4)).wet(),
            "tiles: ...and the water around it stays");
 
     TerrainField s = smooth_basin();
     flood_water(s, {{4, 4}}, 2.5f, WaterKind::Lake);
-    toy::world::HeightmapData& h = *s.heights();
-    for (int j = 4; j <= 5; ++j) {
-        for (int i = 4; i <= 5; ++i) h.at(i, j) = 6.0f;
+    TerraData* d = s.data();
+    for (int j = 8; j <= 10; ++j) {
+        for (int i = 8; i <= 10; ++i) d->height_at(i, j) = 6.0f;
     }
     s.mark_tiles_dirty(IRect{4, 4, 5, 5});
     expect(s.water_at(glm::ivec2(4, 4)).wet(),
@@ -219,21 +213,20 @@ COOPA_TEST(a_drain_takes_the_whole_body) {
  * The contract gameplay editing rests on: TerrainSystem spends a bounded number of tiles a frame
  * on a flood (TerrainComponent::water_settle_budget), so digging beside the sea cannot cost one
  * frame the whole basin. The budget may change WHEN the water arrives, never where it ends up.
- * `tile_map_test` holds this for a tile world; this is the smooth one.
  */
 COOPA_TEST(a_budgeted_settle_matches_one_call_on_a_smooth_field) {
     // A long trough one tile wide, with water at one end: a flood with a lot of tiles to cross.
     const auto build = [] {
-        TerrainFieldGeometry g;
-        g.mode = TerrainMode::Heightmap;
+        TerraGeometry g;
         g.tiles_x = g.tiles_y = 32;
-        g.size = glm::vec2(32.0f);
+        g.tile_size = 1.0f;
         g.height = 20.0f;
+        g.height_sub = 2;
         TerrainField f;
         f.reset(g);
-        toy::world::HeightmapData& h = *f.heights();
-        for (int j = 0; j < h.ny(); ++j) {
-            for (int i = 0; i < h.nx(); ++i) h.at(i, j) = (j >= 15 && j <= 17) ? 1.0f : 6.0f;
+        TerraData* h = f.data();
+        for (int j = 0; j < h->height_ny(); ++j) {
+            for (int i = 0; i < h->height_nx(); ++i) h->height_at(i, j) = (j >= 28 && j <= 36) ? 1.0f : 6.0f;
         }
         f.set_water(glm::ivec2(0, 16), WaterCell{WaterKind::Ocean, 4.0f, 0});
         f.mark_all_dirty();
@@ -381,17 +374,22 @@ COOPA_TEST(grade_water_shore_is_idempotent) {
     }
 }
 
-/** @brief Over a borrowed grid, a terrace in steps and a level in metres are the same number. */
-COOPA_TEST(a_borrowed_grid_speaks_terraces) {
-    toy::world::TileMapData d;
-    d.resize(8, 8);
+/** @brief Over a borrowed grid, water lands directly in the caller's own TerraData, exactly. */
+COOPA_TEST(a_borrowed_grid_speaks_in_exact_metres) {
+    TerraGeometry g;
+    g.tiles_x = g.tiles_y = 8;
+    g.tile_size = 1.0f;
+    g.height_step = 1.0f;
+    TerraData d(g);
     for (int y = 0; y < 8; ++y) {
         for (int x = 0; x < 8; ++x) d.at(x, y).steps = (x == 4) ? 1 : 5;
     }
-    TerrainField f = borrow_tiles(d);
+    d.mark_all_dirty();
+    TerrainField f = borrow(d);
     flood_water(f, {{4, 4}}, 3.0f, WaterKind::Lake);
-    expect(d.at(4, 4).water() && d.at(4, 4).water_level() == 3,
-           "borrowed: level 3.0 is terrace 3 in the record the caller still owns");
-    expect(d.at(4, 4).water_depth == 2, "borrowed: ...which is two steps over ground at 1");
-    expect(!d.at(3, 4).water(), "borrowed: the bank beside it stays dry");
+    expect(d.at(4, 4).wet() && d.at(4, 4).water_kind == static_cast<std::uint8_t>(WaterKind::Lake),
+           "borrowed: the water lands in the record the caller still owns");
+    expect_near(d.at(4, 4).water_level, 3.0f, 1e-6f,
+               "borrowed: the level is kept exact, in metres -- not quantised to a terrace");
+    expect(!d.at(3, 4).wet(), "borrowed: the bank beside it stays dry");
 }

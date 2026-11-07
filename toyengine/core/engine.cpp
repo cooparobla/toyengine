@@ -162,11 +162,22 @@ Engine::Engine(AppConfig config, EngineOptions options)
     // boundaries blend over one screen pixel, so a moving camera glides them sub-pixel
     // instead of snapping them to the pixel grid (the snap reads as full-surface shimmer
     // on magnified texels). texel_aa: false restores raw NEAREST point sampling for A/B.
+    //
+    // Mips on top of that (mipmapped = true, mipmap mode left at the preset's own Nearest):
+    // every data::Texture -- every material map, every UI/sprite texture -- shares this one
+    // loader, so with no mip chain a texture minified past one screen pixel per texel (distant
+    // terrain, a far prop) has no prefiltered level to fall back to and aliases into per-pixel
+    // noise. Nearest mip SELECTION (no blending between levels) keeps the hard-edged pixel-art
+    // look up close exactly as before; it only changes what a minified texel resolves to.
+    const auto texture_sampler = [&] {
+        coopa::gfx::SamplerDesc d = config_.render.texel_aa ? coopa::gfx::SamplerDesc::pixel_art_smooth()
+                                                             : coopa::gfx::SamplerDesc::pixel_art();
+        d.mipmapped = true;
+        return d;
+    }();
     assets_.register_loader<coopa::gfx::engine::data::Texture>(
         std::make_unique<coopa::gfx::engine::loaders::TextureLoader>(
-            ctx_.device(), ctx_.allocator(), ctx_.command_pool(),
-            config_.render.texel_aa ? coopa::gfx::SamplerDesc::pixel_art_smooth()
-                                    : coopa::gfx::SamplerDesc::pixel_art()));
+            ctx_.device(), ctx_.allocator(), ctx_.command_pool(), texture_sampler));
     // Authored UI panels (toyengine/ui/ui_panel.h), so a PanelScreen gets the asset system's
     // caching -- N screens on one file parse it once -- and hot reload while the editor is
     // previewing it.
@@ -1948,7 +1959,10 @@ render::ToyRenderConfig Engine::make_render_config_(const AppConfig& config,
     rc.surface_shaders.add({
         /* name  */ "terrain_styled",
         /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Opaque,
-        /* vert  */ "",  // stock gbuffer.vert
+        // terrain_styled.vert: carries the packed surface-kind code through its own flat
+        // varying instead of the stock gbuffer.vert's smoothly-interpolated uv -- see that
+        // file's doc for why a plain gbuffer.vert aliases at distance.
+        /* vert  */ "terrain_styled.vert",
         /* frag  */ "terrain_styled.frag", // kind colour from the atlas, procedural world-space detail
         /* shadow_vert */ "",
         /* shadow_frag */ "",
@@ -1960,7 +1974,7 @@ render::ToyRenderConfig Engine::make_render_config_(const AppConfig& config,
     rc.surface_shaders.add({
         /* name  */ "terrain_styled_planet",
         /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Opaque,
-        /* vert  */ "",
+        /* vert  */ "terrain_styled.vert", // shared with terrain_styled: see its doc
         /* frag  */ "terrain_styled_planet.frag",
         /* shadow_vert */ "",
         /* shadow_frag */ "",

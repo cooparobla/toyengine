@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cmath>
 #include <utility>
 #include <vector>
@@ -46,16 +45,12 @@ const char* auto_apply_name(AutoApply mode) {
  * @struct MapGeneratorComponent::Bake
  * @brief One apply in flight.
  *
- * A whole grid rather than a patch: a bake writes every tile, and the target only takes it once
- * the worker has finished, so a half-written world is never visible.
+ * One `TerraData`, whichever meshing style the target draws with: a bake writes every plane it
+ * has, and the target only takes it once the worker has finished, so a half-written world is
+ * never visible.
  */
 struct MapGeneratorComponent::Bake {
-    world::TileMapData tiles;            ///< The Tiles target's new grid.
-    std::vector<float> heights;          ///< The Heightmap target's new plane.
-    std::vector<std::uint8_t> splat0, splat1;
-    std::vector<world::WaterCell> water; ///< Per tile, both modes.
-    int water_w = 0, water_h = 0;
-    bool heightmap = false;
+    world::TerraData out;
 };
 
 MapGeneratorComponent::MapGeneratorComponent() : logger_("mapgen"), config(default_generator()) {}
@@ -120,8 +115,13 @@ bool MapGeneratorComponent::apply_to(world::TerrainComponent& terrain, coopa::jo
     jobs_ = jobs != nullptr ? jobs : jobs_;
     target_ = &terrain;
 
+    terrain.sync_field();
+    if (terrain.mode == world::TerrainMode::Heightmap && terrain.field.empty()) return false;
+
     auto bake = std::make_shared<Bake>();
-    bake->heightmap = terrain.mode == world::TerrainMode::Heightmap;
+    // The target's own shape (tile size, height_sub, layer_sub, chunk_tiles, height_step); the
+    // tile COUNT is mapcoopa's to decide (TerrainSampler::bake() overrides it from the map).
+    bake->out = world::TerraData(terrain.field.geometry());
 
     // Built here, not when the graph landed: reading the map per tile needs the target's own
     // quantisation and layout. A rebuild is only the site index -- cheap beside the bake.
@@ -131,36 +131,11 @@ bool MapGeneratorComponent::apply_to(world::TerrainComponent& terrain, coopa::jo
     std::shared_ptr<const world::TerrainSampler> sampler = built;
     sampler_ = sampler;
 
-    if (!bake->heightmap) {
-        // The terraced world: exactly the bake a tile terrain has always had.
-        auto run = [bake, sampler]() { sampler->bake(bake->tiles); };
-        bake_ = bake;
-        if (jobs_ != nullptr) {
-            bake_handle_ = jobs_->create_handle();
-            jobs_->submit(run, k_apply_job_type, bake_handle_, nullptr, 0u, coopa::job::Priority::Normal);
-        } else {
-            run();
-        }
-        return true;
-    }
-
-    // The smooth world: the height plane, the layer weights under it, and the water over it.
-    if (!terrain.data) return false;
-    const world::HeightmapGeometry g = terrain.data->geometry();
-    const int nx = g.resolution, ny = g.resolution;
-    const int sw = g.splat_resolution, sh = g.splat_resolution;
-    const int tiles_x = std::max(1, nx - 1), tiles_y = std::max(1, ny - 1);
-    bake->heights.assign(static_cast<std::size_t>(nx) * ny, 0.0f);
-    bake->splat0.assign(static_cast<std::size_t>(sw) * sh * 4, 0);
-    bake->splat1.assign(static_cast<std::size_t>(sw) * sh * 4, 0);
-    bake->water.assign(static_cast<std::size_t>(tiles_x) * tiles_y, world::WaterCell{});
-    bake->water_w = tiles_x;
-    bake->water_h = tiles_y;
-
     // The map names a surface as a TileKind; the terrain names its own in `layers:`. Resolve
     // one to the other BY NAME, not by index -- a terrain's list is its own, and only the
     // built-in set happens to be in TileKind order. A kind the terrain has no layer for falls
-    // back to its first, which is the one a heightmap terrain always has.
+    // back to its first, which is the one a smooth terrain always has. Only read when the field
+    // has a height plane to blend splat weights over at all.
     std::array<int, world::k_tile_kind_count> layer_for_kind{};
     for (std::size_t k = 0; k < world::k_tile_kind_count; ++k) {
         layer_for_kind[k] = 0;
@@ -170,60 +145,32 @@ bool MapGeneratorComponent::apply_to(world::TerrainComponent& terrain, coopa::jo
         }
     }
 
-    // The map covers the terrain's full extent, whatever resolution each is at: a sample at
-    // normalised (u, v) reads the map at that fraction of its tile grid.
-    const double map_tiles = static_cast<double>(sampler->params().tiles_for_grid(generated_config_.grid_size));
-    const world::ShoreGrade shore_grade{terrain.params.shore_clearance, terrain.params.shore_grade_depth,
-                                        terrain.params.shore_grade_band};
-    auto run = [bake, sampler, nx, ny, sw, sh, tiles_x, tiles_y, map_tiles, layer_for_kind, shore_grade]() {
-        for (int j = 0; j < ny; ++j) {
-            for (int i = 0; i < nx; ++i) {
-                const double u = nx > 1 ? static_cast<double>(i) / (nx - 1) : 0.0;
-                const double v = ny > 1 ? static_cast<double>(j) / (ny - 1) : 0.0;
-                const auto s = sampler->sample_surface(u * map_tiles, v * map_tiles);
-                bake->heights[static_cast<std::size_t>(j) * nx + i] = s.ground;
-            }
-        }
+    auto run = [bake, sampler, layer_for_kind]() {
+        // Fills the tile plane, and (on a field with a height plane) the height and water too --
+        // see TerrainSampler::bake()'s doc. Layer weights are the one thing it can't fill: they
+        // need this terrain's own `layers:` name mapping, which the sampler has no idea exists.
+        sampler->bake(bake->out);
+        if (!bake->out.has_heights()) return;
+        const int lnx = bake->out.layer_nx(), lny = bake->out.layer_ny();
+        const double n = static_cast<double>(bake->out.geometry().tiles_x);
+        if (lnx <= 0 || lny <= 0 || n <= 0.0) return;
         // Layers at the splat plane's own resolution: one dominant surface per texel, which is
         // what a generated world has to say. Painting over it afterwards blends as usual.
-        for (int j = 0; j < sh; ++j) {
-            for (int i = 0; i < sw; ++i) {
-                const double u = (static_cast<double>(i) + 0.5) / sw;
-                const double v = (static_cast<double>(j) + 0.5) / sh;
-                const auto s = sampler->sample_surface(u * map_tiles, v * map_tiles);
+        for (int j = 0; j < lny; ++j) {
+            for (int i = 0; i < lnx; ++i) {
+                const double u = (static_cast<double>(i) + 0.5) / lnx;
+                const double v = (static_cast<double>(j) + 0.5) / lny;
+                const auto s = sampler->sample_surface(u * n, v * n);
                 const std::size_t kind = static_cast<std::size_t>(s.top);
                 const int layer = kind < layer_for_kind.size() ? layer_for_kind[kind] : 0;
-                auto& plane = layer < 4 ? bake->splat0 : bake->splat1;
-                plane[(static_cast<std::size_t>(j) * sw + i) * 4 + (layer % 4)] = 255;
+                // reset() left every texel at layer 0 (fill_layer(0)): clear the rest before
+                // setting this texel's own dominant layer, or a non-grass kind keeps layer 0's
+                // full weight alongside its own.
+                for (int l = 0; l < static_cast<int>(world::k_heightmap_layer_count); ++l) bake->out.layer_at(l, i, j) = 0;
+                bake->out.layer_at(layer, i, j) = 255;
             }
         }
-        // Water per tile, as a surface level: the shoreline is wherever the ground crosses it.
-        for (int ty = 0; ty < tiles_y; ++ty) {
-            for (int tx = 0; tx < tiles_x; ++tx) {
-                const double u = (static_cast<double>(tx) + 0.5) / tiles_x;
-                const double v = (static_cast<double>(ty) + 0.5) / tiles_y;
-                const auto s = sampler->sample_surface(u * map_tiles, v * map_tiles);
-                world::WaterCell c;
-                switch (s.water) {
-                    case coopa::maps::WaterKind::Sea:   c.kind = world::WaterKind::Ocean; break;
-                    case coopa::maps::WaterKind::Lake:  c.kind = world::WaterKind::Lake; break;
-                    case coopa::maps::WaterKind::River: c.kind = world::WaterKind::River; break;
-                    default: break;
-                }
-                c.level = s.water_surface;
-                c.flow = s.flow;
-                bake->water[static_cast<std::size_t>(ty) * tiles_x + tx] = c;
-            }
-        }
-        // Heights above are sampled at CORNERS, water at TILE CENTRES, half a tile apart on the
-        // same noise-shaped surface -- so a tile mapcoopa calls wet can have a corner that reads
-        // a hair above its own water level, and TerrainField::set_water() re-checks ground against
-        // water level with zero tolerance, dropping the water mesh there outright.
-        // grade_water_shore() is this mode's counterpart to settle_water_rounding(): it lowers
-        // only as much as the sampling mismatch needs (the MEAN of a tile's four corners, which is
-        // exactly what set_water()'s own dryness test reads), so mapcoopa's own lake and shore
-        // grading survives instead of being planed into a tile-quantised trench.
-        if (nx > 1 && ny > 1) world::grade_water_shore(bake->heights, nx, ny, bake->water, tiles_x, tiles_y, shore_grade);
+        bake->out.mark_layer_dirty(world::IRect{0, 0, lnx, lny});
     };
     bake_ = bake;
     if (jobs_ != nullptr) {
@@ -248,57 +195,22 @@ bool MapGeneratorComponent::poll_apply() {
         return false;
     }
 
-    if (!bake_->heightmap) {
-        if (terrain->tiles) terrain->tiles->assign_baked(std::move(bake_->tiles));
-        terrain->applied_map = sampler_;
+    // The bake lands as one TerraData, water and all, written on the job thread alongside
+    // everything else -- no per-tile set_water() sweep needed here. assign_baked() keeps the
+    // SAME TerraData object (and so the same TerraStore entry) the terrain already had,
+    // which is what makes an unsaved-edits check or a GPU cache keyed on it stay meaningful.
+    world::TerraData* d = terrain->field.data();
+    if (d == nullptr) {
         terrain->sync_field();
-        bake_.reset();
-        return true;
+        d = terrain->field.data();
     }
-
-    if (!terrain->data) {
+    if (d == nullptr) {
         bake_.reset();
         return false;
     }
-
-    // The heights and splats land the frame the bake completes -- each is a move, not a copy,
-    // so there is nothing here worth spreading across frames.
-    if (!water_apply_started_) {
-        terrain->data->heights() = std::move(bake_->heights);
-        terrain->data->splat(0) = std::move(bake_->splat0);
-        terrain->data->splat(1) = std::move(bake_->splat1);
-        terrain->data->mark_all_dirty();
-        terrain->sync_field();
-        water_apply_started_ = true;
-    }
-
-    // The water is the part worth pacing: up to a million tiles, each a bilinear height sample
-    // inside set_water(). Resumed across frames at the same budget heightmap chunk streaming
-    // uses -- see HeightmapColliderBuild's and HeightmapTerrainSystem::stream_chunks_()'s file
-    // comments for why this terrain mode has nothing jobified to lean on instead.
-    const int total = bake_->water_w * bake_->water_h;
-    const auto start = std::chrono::steady_clock::now();
-    const double budget_ms = std::max(0.1f, terrain->chunk_budget_ms);
-    int i = water_apply_cursor_;
-    for (; i < total; ++i) {
-        const int tx = i % bake_->water_w;
-        const int ty = i / bake_->water_w;
-        terrain->field.set_water(glm::ivec2(tx, ty), bake_->water[static_cast<std::size_t>(i)]);
-        // Checked after the first tile, never before it: a budget too small for even one would
-        // otherwise stall the sweep outright.
-        const double spent = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-        if (spent >= budget_ms) { ++i; break; }
-    }
-    water_apply_cursor_ = i;
-    if (water_apply_cursor_ < total) return false;   // more tiles left; not landed yet
-
-    // mark_all_dirty() is what bumps the field's revision -- called exactly once, here, so every
-    // consumer sees the water go from entirely absent to entirely present in a single step, same
-    // as before this was spread across frames.
-    terrain->field.mark_all_dirty();
+    d->assign_baked(std::move(bake_->out));
     terrain->applied_map = sampler_;
-    water_apply_started_ = false;
-    water_apply_cursor_ = 0;
+    terrain->sync_field();
     bake_.reset();
     return true;
 }
@@ -402,13 +314,12 @@ private:
     static bool wants_world_(const MapGeneratorComponent& g, const world::TerrainComponent& terrain) {
         if (g.auto_apply == AutoApply::Never) return false;
         if (g.auto_apply == AutoApply::Always) return terrain.applied_map == nullptr;
-        // WhenMissing: the target has no data of its own. A tile world says so itself (its
-        // `.tiles` file was absent, or the editor asked to regenerate); a heightmap's PNG is
-        // generated by its own store, so it is never missing by the time we get here.
-        if (terrain.mode == world::TerrainMode::Tiles) {
-            return terrain.tiles != nullptr && terrain.tiles->needs_bake();
-        }
-        return false;
+        // WhenMissing: the target has no data of its own. A Tiles terrain says so itself (its
+        // `.terra` file was absent, or the editor asked to regenerate); a Heightmap terrain's
+        // data is reset() by TerraStore on first acquire, so it needs_bake() exactly the same way.
+        // Not gated on field.empty(): a fresh, not-yet-baked Tiles field is 0x0 tiles until this
+        // very bake lands, and that is exactly the case that must say yes.
+        return terrain.field.data() != nullptr && terrain.field.data()->needs_bake();
     }
 };
 

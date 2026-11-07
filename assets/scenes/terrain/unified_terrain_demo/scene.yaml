@@ -13,8 +13,14 @@
 # button panel", so it is reused rather than writing a purpose-built component.
 #
 # THE NUMERIC INVARIANT -- what makes the three actually interchangeable:
-#   world_tiles 1024  ==  heightmap splat_resolution 1024  ==  resolution 1025 - 1
+#   world_tiles 1024  ==  heightmap splat_resolution 1024
 #                     ==  heightmap size.x 1024 / tile_size 1.0
+#                     ==  (heightmap resolution 2049 - 1) / height_sub 2
+# `resolution` alone is corner SAMPLES, not tiles -- it takes height_sub (default 2, a real
+# bilinear plane rather than a terraced read) to get back to a tile count, which is the one this
+# invariant actually has to match. Forgetting the divide here once left this at 1025 (512 tiles at
+# 2 m, not 1024 at 1 m): the water apron below (water_skirt_tiles, authored in METRES) silently
+# reached twice as far as intended, and its tile-quantised edge was twice as coarse.
 #   height_scale 64   ==  heightmap height 64            (equal, or the 16-bit PNG rescales)
 #   height_step 1.0                                      (bed_kind_for's thresholds are in steps)
 #   heightmap chunk_size 32 -> chunk_tiles 32  ==  tile chunk_size 32
@@ -44,7 +50,7 @@
 # flat tints sampled from the tile palette atlas (tools/gen_terrain_atlas.py's KINDS table), so
 # the two tile flavours and the heightmap read as the same ground.
 #
-# SIX THINGS THAT CANNOT BE MADE IDENTICAL (by design, not oversight -- see
+# SEVEN THINGS THAT CANNOT BE MADE IDENTICAL (by design, not oversight -- see
 # toyengine/world/README.md for the full reasoning):
 #   1. The water plane sits 0-1m lower on tiles than on the heightmap (tiles subtract the
 #      water/river inset from a quantised step; the heightmap mesher uses the continuous level).
@@ -84,9 +90,10 @@
 # in a much bigger ring per cascade -- that, not the three terrain flavours, was most of this
 # scene's steady-state cost. Three flavours' worth of scatter still adds up faster than
 # `terrain_demo`'s one, so this stays a bit above its budget rather than matching it exactly.
-# Also note: saving this scene from the editor writes the heightmap's 16-bit height PNG and two
-# splat PNGs to disk (~10MB) -- nothing is shipped today, so a fresh checkout regenerates all
-# three flavours from the seed on first run.
+# Also note: all three flavours persist to `terrain/<object_name>.terra` beside this scene, the
+# one chunked store both Tiles and Heightmap modes share (toyengine/world/terra_codec.h) -- not a
+# PNG. Those files are untracked, so a fresh checkout regenerates all three from the seed on first
+# run; PNG import/export exists for hand-authored heightmaps but is not wired to this backend yet.
 #
 #   ./build/toyengine unified_terrain_demo
 scene:
@@ -323,7 +330,10 @@ scene:
           size: { x: 1024, y: 1024 }
           height: 64
           chunk_size: 32
-          resolution: 1025
+          resolution: 2049   # height_sub 2 (default) * 1024 tiles + 1 -- 1 m tiles, matching the
+                              # two tile flavours' tile_size 1.0 (was 1025 = 512 tiles at 2 m,
+                              # which doubled the water apron's real-world reach below and the
+                              # size of its tile-quantised edge against the actual shoreline)
           splat_resolution: 1024
           layer_texture_size: 256
           collision: true

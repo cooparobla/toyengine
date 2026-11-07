@@ -11,18 +11,23 @@
 
 #include <coopa/testing/test.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <limits>
 #include <map>
+#include <queue>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <coopa/debug/logger.h>
-#include <coopa/util/transform.h>
+#include <coopa/maps/passes/water_levels.h>
 #include <coopa/yaml/document.h>
 #include <glm/glm.hpp>
 
 #include <toyengine/mapgen/map_generator_component.h>
 #include <toyengine/mapgen/terrain_generator.h>
-#include <toyengine/world/heightmap_data.h>
 #include <toyengine/world/terrain_component.h>
 
 #include "engine/support/checks.h"
@@ -31,10 +36,11 @@ COOPA_TEST_SUITE("map_generator");
 
 using toy::mapgen::AutoApply;
 using toy::mapgen::MapGeneratorComponent;
+using toy::world::TerraData;
+using toy::world::TerraGeometry;
 using toy::world::TerrainComponent;
-using toy::world::TerrainFieldGeometry;
 using toy::world::TerrainMode;
-using toy::world::TileRecord;
+using toy::world::TileCell;
 using toy::world::WaterCell;
 using toy::world::WaterKind;
 
@@ -59,7 +65,19 @@ void generate(MapGeneratorComponent& g, std::uint32_t seed = 7) {
     g.begin(nullptr);            // no job engine: generates here and now
 }
 
-/** @brief A tiles-mode terrain with nothing in it yet. */
+/**
+ * @brief A fresh, never-reused key into the process-wide TerraStore.
+ *
+ * sync_field() (called by apply_to()) routes every terrain through TerraStore::acquire(), keyed
+ * by `data_file` -- a store shared by the whole process, not per-test. Two terrains sharing a key
+ * would alias the SAME TerraData, which is exactly what each test here must not do.
+ */
+std::string unique_data_file() {
+    static int counter = 0;
+    return "test/map_generator_test_" + std::to_string(++counter) + ".terra";
+}
+
+/** @brief A tiles-mode terrain with nothing in it yet; sync_field() (inside apply_to()) fills `field`. */
 void make_tile_terrain(TerrainComponent& t) {
     t.mode = TerrainMode::Tiles;
     t.params.world_tiles = 160;
@@ -67,19 +85,20 @@ void make_tile_terrain(TerrainComponent& t) {
     t.params.height_step = 1.0f;
     t.params.height_scale = 32.0f;
     t.params.chunk_size = 16;
-    t.tiles = std::make_shared<toy::world::TileMapData>();
+    t.data_file = unique_data_file();
 }
 
-/** @brief A heightmap-mode terrain with a flat plane and no paint. */
+/** @brief A heightmap-mode terrain with a flat plane and no paint; height_sub 2, so it has a real
+ *         height plane (height_sub 1 would mean no plane at all -- a terraced read instead). */
 void make_smooth_terrain(TerrainComponent& t) {
     t.mode = TerrainMode::Heightmap;
-    toy::world::HeightmapGeometry g;
-    g.size = glm::vec2(160.0f);
-    g.height = 32.0f;
-    g.chunk_size = 16.0f;
-    g.resolution = 161;          // one sample a metre, so 160 tiles a side
-    g.splat_resolution = 160;
-    t.data = std::make_shared<toy::world::HeightmapData>(g.sanitized());
+    t.heightmap_size = glm::vec2(160.0f);
+    t.heightmap_height = 32.0f;
+    t.heightmap_chunk_size = 16.0f;
+    t.height_sub = 2;
+    t.heightmap_resolution = 321;    // 160 tiles * height_sub 2 + 1
+    t.heightmap_splat_resolution = 160;
+    t.data_file = unique_data_file();
 }
 
 /** @brief Runs an apply to completion (synchronous bake, no job engine). A heightmap target's
@@ -117,22 +136,23 @@ COOPA_TEST(a_map_applies_to_a_tile_terrain) {
     make_tile_terrain(t);
     require(apply(g, t), "tiles: the apply ran");
 
-    require(t.tiles && !t.tiles->empty(), "tiles: the grid is filled");
-    expect(t.tiles->width() == 160 && t.tiles->height() == 160, "tiles: at the size the generator asked for");
+    require(!t.field.empty(), "tiles: the grid is filled");
+    expect(t.field.geometry().tiles_x == 160 && t.field.geometry().tiles_y == 160,
+           "tiles: at the size the generator asked for");
     expect(t.applied_map != nullptr, "tiles: the terrain keeps the map it was given");
 
     int wet = 0, dry = 0, ocean = 0, river = 0;
     std::int16_t lowest = 32767, highest = -32768;
     std::map<WaterKind, int> kinds;
-    for (int y = 0; y < t.tiles->height(); ++y) {
-        for (int x = 0; x < t.tiles->width(); ++x) {
-            const TileRecord& r = t.tiles->at(x, y);
+    for (int y = 0; y < t.field.geometry().tiles_y; ++y) {
+        for (int x = 0; x < t.field.geometry().tiles_x; ++x) {
+            const TileCell& r = t.field.data()->at(x, y);
             lowest = std::min(lowest, r.steps);
             highest = std::max(highest, r.steps);
-            if (r.water()) {
+            if (r.wet()) {
                 ++wet;
-                if (r.has(TileRecord::Ocean)) ++ocean;
-                if (r.has(TileRecord::Flowing)) ++river;
+                if (static_cast<WaterKind>(r.water_kind) == WaterKind::Ocean) ++ocean;
+                if (static_cast<WaterKind>(r.water_kind) == WaterKind::River) ++river;
             } else {
                 ++dry;
             }
@@ -144,10 +164,10 @@ COOPA_TEST(a_map_applies_to_a_tile_terrain) {
     expect(ocean > 0, "tiles: the sea is marked as the sea");
     expect(river > 0, "tiles: and a river is marked as flowing (" + std::to_string(river) + " tiles)");
     int with_flow = 0;
-    for (int y = 0; y < t.tiles->height(); ++y) {
-        for (int x = 0; x < t.tiles->width(); ++x) {
-            const TileRecord& r = t.tiles->at(x, y);
-            if (r.has(TileRecord::Flowing) && r.flow >= 1 && r.flow <= 8) ++with_flow;
+    for (int y = 0; y < t.field.geometry().tiles_y; ++y) {
+        for (int x = 0; x < t.field.geometry().tiles_x; ++x) {
+            const TileCell& r = t.field.data()->at(x, y);
+            if (static_cast<WaterKind>(r.water_kind) == WaterKind::River && r.flow >= 1 && r.flow <= 8) ++with_flow;
         }
     }
     expect(with_flow == river, "tiles: every river tile carries a downstream direction");
@@ -168,10 +188,10 @@ COOPA_TEST(the_same_map_applies_to_a_heightmap_terrain) {
     TerrainComponent t;
     make_smooth_terrain(t);
     require(apply(g, t), "heightmap: the apply ran");
-    require(t.data != nullptr, "heightmap: the plane is there");
+    require(t.field.data() != nullptr, "heightmap: the plane is there");
 
     float lowest = 1e9f, highest = -1e9f;
-    for (const float h : t.data->heights()) {
+    for (const float h : t.field.data()->heights()) {
         lowest = std::min(lowest, h);
         highest = std::max(highest, h);
     }
@@ -182,16 +202,16 @@ COOPA_TEST(the_same_map_applies_to_a_heightmap_terrain) {
     // Heights are continuous, not snapped to a step: a terraced bake would give a handful of
     // distinct values over a whole world, and this is the difference the smooth path exists for.
     std::map<int, int> millimetre_buckets;
-    for (const float h : t.data->heights()) ++millimetre_buckets[static_cast<int>(h * 1000.0f)];
+    for (const float h : t.field.data()->heights()) ++millimetre_buckets[static_cast<int>(h * 1000.0f)];
     expect(millimetre_buckets.size() > 500,
            "heightmap: " + std::to_string(millimetre_buckets.size()) + " distinct heights, so not terraced");
 
     // Layers: the generated surface is painted, not left blank.
     int painted = 0;
-    for (int j = 0; j < t.data->splat_h(); ++j) {
-        for (int i = 0; i < t.data->splat_w(); ++i) {
+    for (int j = 0; j < t.field.data()->layer_ny(); ++j) {
+        for (int i = 0; i < t.field.data()->layer_nx(); ++i) {
             int total = 0;
-            for (int l = 0; l < toy::world::k_heightmap_layer_count; ++l) total += t.data->splat_at(l, i, j);
+            for (int l = 0; l < toy::world::k_heightmap_layer_count; ++l) total += t.field.data()->layer_at(l, i, j);
             if (total > 0) ++painted;
         }
     }
@@ -228,10 +248,10 @@ COOPA_TEST(a_seed_is_a_world) {
     require(apply(a, ta) && apply(b, tb) && apply(c, tc), "seed: all three applied");
 
     bool same = true, differs = false;
-    for (int y = 0; y < ta.tiles->height() && same; ++y) {
-        for (int x = 0; x < ta.tiles->width(); ++x) {
-            if (ta.tiles->at(x, y).steps != tb.tiles->at(x, y).steps) { same = false; break; }
-            if (ta.tiles->at(x, y).steps != tc.tiles->at(x, y).steps) differs = true;
+    for (int y = 0; y < ta.field.geometry().tiles_y && same; ++y) {
+        for (int x = 0; x < ta.field.geometry().tiles_x; ++x) {
+            if (ta.field.data()->at(x, y).steps != tb.field.data()->at(x, y).steps) { same = false; break; }
+            if (ta.field.data()->at(x, y).steps != tc.field.data()->at(x, y).steps) differs = true;
         }
     }
     expect(same, "seed: the same seed bakes the same ground");
@@ -278,10 +298,10 @@ COOPA_TEST(one_map_gives_both_modes_the_same_ground_and_field) {
     require(ta.applied_map != nullptr && tb.applied_map != nullptr,
             "both modes: both terrains kept the map they were given");
 
-    const TerrainFieldGeometry ga = ta.field.geometry();
-    const TerrainFieldGeometry gb = tb.field.geometry();
+    const TerraGeometry ga = ta.field.geometry();
+    const TerraGeometry gb = tb.field.geometry();
     expect(ga.tiles_x == gb.tiles_x && ga.tiles_y == gb.tiles_y, "both modes: the same tile grid");
-    expect(ga.size == gb.size, "both modes: the same world extent");
+    expect(ga.size() == gb.size(), "both modes: the same world extent");
     expect(ga.chunk_tiles == gb.chunk_tiles, "both modes: the same chunking");
 
     // Ground: at tile centres away from any shoreline, the terrace (tiles) and the continuous
@@ -292,12 +312,12 @@ COOPA_TEST(one_map_gives_both_modes_the_same_ground_and_field) {
     //    one tile of water are excluded outright (the accepted non-parity on
     //    unified_terrain_demo's shoreline-depth row), rather than loosening the tolerance for
     //    everyone to cover it.
-    //  - at height_sub 1 the height plane carries one SAMPLE per tile, taken at the tile's
-    //    CORNER; ground_at_tile() then bilinearly reconstructs the CENTRE from its four corners.
-    //    The tile path samples the centre directly. mapcoopa's fractal detail noise is not
-    //    linear between those corners, so the reconstruction and the direct sample can differ by
-    //    a fraction of the world's vertical scale even with no bug at all -- this is what a
-    //    `height_sub` above 1 exists to shrink.
+    //  - at this height_sub the height plane carries a handful of samples per tile, corner-
+    //    aligned with its neighbours; ground_at_tile() bilinearly reconstructs the CENTRE from
+    //    the nearest four. The tile path samples the centre directly. mapcoopa's fractal detail
+    //    noise is not linear between those corners, so the reconstruction and the direct sample
+    //    can differ by a fraction of the world's vertical scale even with no bug at all -- this
+    //    is what raising `height_sub` further exists to shrink.
     const float tolerance = ga.height_step * 0.5f + 0.15f * gb.height;
     const auto near_water = [&](glm::ivec2 tile) {
         for (int dy = -1; dy <= 1; ++dy) {
@@ -345,7 +365,7 @@ COOPA_TEST(one_map_gives_both_modes_the_same_ground_and_field) {
     int off_grass_checked = 0, off_grass_correct = 0;
     const double map_tiles =
         static_cast<double>(tb.applied_map->params().tiles_for_grid(g.generated_config().grid_size));
-    const int sw = tb.data->splat_w(), sh = tb.data->splat_h();
+    const int sw = tb.field.data()->layer_nx(), sh = tb.field.data()->layer_ny();
     for (int j = 0; j < sh; j += 13) {
         for (int i = 0; i < sw; i += 13) {
             const double u = (static_cast<double>(i) + 0.5) / sw;
@@ -353,7 +373,7 @@ COOPA_TEST(one_map_gives_both_modes_the_same_ground_and_field) {
             const auto s = tb.applied_map->sample_surface(u * map_tiles, v * map_tiles);
             if (s.top == TileKind::Grass) continue;
             ++off_grass_checked;
-            if (tb.data->splat_at(0, i, j) == 0) ++off_grass_correct;
+            if (tb.field.data()->layer_at(0, i, j) == 0) ++off_grass_correct;
         }
     }
     expect(off_grass_checked > 0, "both modes: sampled at least one non-grass texel");
@@ -402,22 +422,22 @@ COOPA_TEST(every_tile_the_map_calls_wet_renders_wet_on_a_heightmap_too) {
     ta.params.height_step = 1.0f;
     ta.params.height_scale = 64.0f;
     ta.params.chunk_size = 32;
-    ta.tiles = std::make_shared<toy::world::TileMapData>();
+    ta.data_file = unique_data_file();
 
     TerrainComponent tb;
     tb.mode = TerrainMode::Heightmap;
-    toy::world::HeightmapGeometry hg;
-    hg.size = glm::vec2(1024.0f);
-    hg.height = 64.0f;
-    hg.chunk_size = 32.0f;
-    hg.resolution = 1025;
-    hg.splat_resolution = 1024;
-    tb.data = std::make_shared<toy::world::HeightmapData>(hg.sanitized());
+    tb.heightmap_size = glm::vec2(1024.0f);
+    tb.heightmap_height = 64.0f;
+    tb.heightmap_chunk_size = 32.0f;
+    tb.height_sub = 2;
+    tb.heightmap_resolution = 2049;   // 1024 tiles * height_sub 2 + 1
+    tb.heightmap_splat_resolution = 1024;
+    tb.data_file = unique_data_file();
 
     require(apply(g, ta), "wet parity: tile apply ran");
     require(apply(g, tb), "wet parity: heightmap apply ran");
 
-    const TerrainFieldGeometry ga = ta.field.geometry();
+    const TerraGeometry ga = ta.field.geometry();
     require(ga.tiles_x == tb.field.geometry().tiles_x && ga.tiles_y == tb.field.geometry().tiles_y,
             "wet parity: both modes share the same tile grid");
 
@@ -475,18 +495,19 @@ COOPA_TEST(grading_moves_the_bed_by_millimetres_not_a_flat_metre) {
 
     TerrainComponent tb;
     tb.mode = TerrainMode::Heightmap;
-    toy::world::HeightmapGeometry hg;
-    hg.size = glm::vec2(1024.0f);
-    hg.height = 64.0f;
-    hg.chunk_size = 32.0f;
-    hg.resolution = 1025;
-    hg.splat_resolution = 1024;
-    tb.data = std::make_shared<toy::world::HeightmapData>(hg.sanitized());
+    tb.heightmap_size = glm::vec2(1024.0f);
+    tb.heightmap_height = 64.0f;
+    tb.heightmap_chunk_size = 32.0f;
+    tb.height_sub = 2;
+    tb.heightmap_resolution = 2049;   // 1024 tiles * height_sub 2 + 1
+    tb.heightmap_splat_resolution = 1024;
+    tb.data_file = unique_data_file();
     require(apply(g, tb), "stair-step: heightmap apply ran");
 
-    const toy::world::HeightmapData& h = *tb.field.heights();
-    const TerrainFieldGeometry geo = tb.field.geometry();
-    require(h.nx() == geo.tiles_x + 1 && h.ny() == geo.tiles_y + 1, "stair-step: one sample per corner");
+    const TerraData& h = *tb.field.data();
+    const TerraGeometry geo = tb.field.geometry();
+    require(h.height_nx() == geo.tiles_x * geo.height_sub + 1 && h.height_ny() == geo.tiles_y * geo.height_sub + 1,
+            "stair-step: the plane follows height_sub corners-per-tile");
 
     // For every wet tile, how far its own corner-mean had to drop below its water level to pass
     // set_water()'s dryness test -- the quantity grade_water_shore() controls directly. This is
@@ -503,7 +524,17 @@ COOPA_TEST(grading_moves_the_bed_by_millimetres_not_a_flat_metre) {
             const WaterCell w = tb.field.water_at(glm::ivec2(tx, ty));
             if (!w.wet()) continue;
             ++wet_tiles;
-            const float mean = 0.25f * (h.at(tx, ty) + h.at(tx + 1, ty) + h.at(tx, ty + 1) + h.at(tx + 1, ty + 1));
+            // The mean over the tile's WHOLE corner block (height_sub + 1 samples a side) --
+            // exactly what grade_water_shore() lowers together (terrain_water.cpp).
+            double sum = 0.0;
+            int n = 0;
+            for (int dy = 0; dy <= geo.height_sub; ++dy) {
+                for (int dx = 0; dx <= geo.height_sub; ++dx) {
+                    sum += h.height_at(tx * geo.height_sub + dx, ty * geo.height_sub + dy);
+                    ++n;
+                }
+            }
+            const float mean = static_cast<float>(sum / n);
             const float deficit = w.level - mean;
             if (std::abs(deficit - k_old_clamp) <= k_old_clamp_slack) ++near_old_clamp;
         }
@@ -518,11 +549,27 @@ COOPA_TEST(grading_moves_the_bed_by_millimetres_not_a_flat_metre) {
            " m of the old clamp's flat " + std::to_string(k_old_clamp) + " m");
 }
 
-/** @brief TEMPORARY diagnostic: march the demo camera's actual view rays (several pitches
- *         across its vertical FOV) out to the far clip, comparing where each mode's ground
- *         first occludes the ray -- checks for a FAR-FIELD relief mismatch the near-field
- *         (camera-tile-neighbourhood) diagnostic could not see. */
-COOPA_TEST(zzz_diagnose_unified_terrain_demo_view_rays) {
+/**
+ * @brief An enclosed bay reported shallow ("the lake by the ocean on the left" -- about one block
+ *        deep on the tile flavours) gets a real basin, not just whatever the open sea's own rank
+ *        remap happened to leave under it.
+ *
+ * `PassWater`'s flood fill gives the sea and any inlet off it the same `ocean` flag the instant
+ * they touch through even one strait tile, so `assign_water_levels()` (water_levels.h) used to
+ * skip carving a bed under a lagoon exactly as it skips the open sea -- correctly for the sea,
+ * whose depth is the elevation pass's job, but wrongly for the lagoon, which has no bathymetry of
+ * its own and so sat at whatever the rank remap happened to leave it: near a shore, barely under
+ * `sea_level`, i.e. about one `height_step`.
+ *
+ * `ocean_enclosure()` tells the two apart by distance, in strait-widths, from the open-sea CORE a
+ * morphological opening of the water mask finds -- scale-free, unlike the border-distance ratio
+ * it replaced, which could only ever fire for a bay close to the map's edge. This bakes
+ * `unified_terrain_demo`'s own config (seed 7, grid 128) -- its reported lagoon sits tens of
+ * cells inland, which is exactly the case the ratio test missed -- and holds every cell the fix
+ * reads as meaningfully enclosed (`strength >= 0.5`) to more than one `height_step` under its
+ * surface.
+ */
+COOPA_TEST(an_enclosed_bay_gets_a_real_basin_not_the_open_seas_shallow_rank) {
     const std::string path =
         std::string(ROOT_DIR) + "/assets/scenes/terrain/unified_terrain_demo/scene.yaml";
     const fkyaml::node doc = coopa::yaml::load_document(path);
@@ -533,60 +580,203 @@ COOPA_TEST(zzz_diagnose_unified_terrain_demo_view_rays) {
             if (c.at("type").get_value<std::string>() == "MapGenerator") gen_node = c;
         }
     }
-    require(!gen_node.is_null(), "diag: found the world's MapGenerator node");
+    require(!gen_node.is_null(), "bay-depth: found the world's MapGenerator node");
 
     MapGeneratorComponent g;
     g.config = toy::mapgen::generator_config_from_node(gen_node);
     g.world_tiles = 1024;
     g.height_scale = 64.0f;
     g.begin(nullptr);
-    require(g.ready(), "diag: the real generator config built");
+    require(g.ready(), "bay-depth: the real generator config built");
 
-    TerrainComponent ta;
-    ta.mode = TerrainMode::Tiles;
-    ta.params.world_tiles = 1024;
-    ta.params.tile_size = 1.0f;
-    ta.params.height_step = 1.0f;
-    ta.params.height_scale = 64.0f;
-    ta.params.chunk_size = 32;
-    ta.tiles = std::make_shared<toy::world::TileMapData>();
+    const coopa::maps::MapGraph* graph = g.graph();
+    require(graph != nullptr, "bay-depth: graph() is populated after a synchronous generate");
 
-    TerrainComponent tb;
-    tb.mode = TerrainMode::Heightmap;
-    toy::world::HeightmapGeometry hg;
-    hg.size = glm::vec2(1024.0f);
-    hg.height = 64.0f;
-    hg.chunk_size = 32.0f;
-    hg.resolution = 1025;
-    hg.splat_resolution = 1024;
-    tb.data = std::make_shared<toy::world::HeightmapData>(hg.sanitized());
+    const std::vector<double> enclosure = coopa::maps::ocean_enclosure(*graph);
+    const float height_scale = 64.0f;
+    const float height_step = 1.0f;
+    const float k_shallow_rank_depth = 1.5f;   // world units -- about the old "one block" symptom
+    const double k_meaningfully_enclosed = 0.5;   // strength -- past the strait's own fade-in
 
-    require(apply(g, ta), "diag: tile apply ran");
-    require(apply(g, tb), "diag: heightmap apply ran");
-
-    // The real camera.yaml Transform: position {470,430,95}, rotation {42,0,0}, fov 60.
-    const glm::vec3 cam_pos(470.0f, 430.0f, 95.0f);
-    const float fov = 60.0f, half_fov = fov * 0.5f;
-    const float center_pitch = 42.0f;
-
-    std::cout << "=== view ray march, camera (470,430,95) fov 60 ===\n";
-    for (float dp : {-half_fov, -half_fov * 0.5f, 0.0f, half_fov * 0.5f, half_fov}) {
-        const float pitch = center_pitch + dp;   // top of frame = +half_fov (see forward below)
-        coopa::util::Transform t;
-        t.set_position(cam_pos);
-        t.set_rotation(glm::vec3(pitch, 0.0f, 0.0f));
-        const glm::vec3 forward = glm::normalize(-glm::vec3(t.get_world_matrix()[2]));
-
-        float hit_t_a = -1.0f, hit_t_b = -1.0f;
-        for (float dist = 5.0f; dist <= 600.0f; dist += 5.0f) {
-            const glm::vec3 p = cam_pos + forward * dist;
-            const glm::ivec2 tile(static_cast<int>(std::lround(p.x)), static_cast<int>(std::lround(p.y)));
-            if (hit_t_a < 0.0f && p.z <= ta.field.ground_at_tile(tile)) hit_t_a = dist;
-            if (hit_t_b < 0.0f && p.z <= tb.field.ground_at_tile(tile)) hit_t_b = dist;
-            if (hit_t_a >= 0.0f && hit_t_b >= 0.0f) break;
-        }
-        std::cout << "pitch=" << pitch << " forward=(" << forward.x << "," << forward.y << "," << forward.z
-                   << ") tile_hit_dist=" << hit_t_a << " hmap_hit_dist=" << hit_t_b << "\n";
+    int enclosed_n = 0, shallow_n = 0;
+    float deepest = 0.0f;
+    for (const auto& cell : graph->centers) {
+        if (!cell.water || !cell.ocean) continue;
+        if (enclosure[static_cast<std::size_t>(cell.index)] < k_meaningfully_enclosed) continue;
+        ++enclosed_n;
+        const float depth_world = static_cast<float>(cell.water_level - cell.elevation) * height_scale;
+        deepest = std::max(deepest, depth_world);
+        if (depth_world <= k_shallow_rank_depth * height_step) ++shallow_n;
     }
-    expect(true, "diag: printed");
+    require(enclosed_n > 0, "bay-depth: this seed's map has at least one enclosed bay to check");
+    expect(shallow_n == 0,
+           "bay-depth: " + std::to_string(shallow_n) + " / " + std::to_string(enclosed_n) +
+           " enclosed-bay cells still read shallow-rank depth (<= " +
+           std::to_string(k_shallow_rank_depth) + " world units)");
+    expect(deepest > 2.0f * height_step,
+           "bay-depth: the bay's deepest carved cell clears a plain one-step reading (" +
+           std::to_string(deepest) + " world units)");
 }
+
+/**
+ * @brief Every shallow water patch on `unified_terrain_demo`'s own map with a deep-reaching
+ *        interior is actually carved there -- the invariant that would have caught the "1m deep
+ *        inland lake" report before it shipped.
+ *
+ * Segments by SHALLOWNESS (every water cell under 1.5 world units of depth), not connectivity --
+ * at tile resolution a bay is joined to the open sea through its own strait, so a flood fill over
+ * "is water" would merge it into the ocean and hide it. A patch's own shoreline distance (how far
+ * its deepest-reaching cell sits from the nearest dry land, in grid units) is what tells a real
+ * open coastline's shallow fringe apart from a bay with an actual interior: a probe over this
+ * exact seed found every legitimate shelf under 0.8 grid units and the reported bay's patches at
+ * 3.3-4.1, so `k_max_open_shelf_shore` sits at 2.0, comfortably between the two.
+ *
+ * A patch past that threshold is not strictly required to carve literally every cell -- the
+ * shallow flood-fill above does not stop at a body's own true edge, so a patch could in principle
+ * span a real bay's deep reach plus a strip of ordinary open shelf beside it. In practice, on this
+ * seed, every patch past the shelf threshold carves completely (`enclosed_frac` 1.0): before the
+ * fix it measured exactly 0 for all of them (see the superseded
+ * `an_enclosed_bay_gets_a_real_basin_not_the_open_seas_shallow_rank`'s own history); an earlier,
+ * smaller `k_strait_half_width` (3.0 grid units) reached only 33-58% -- real, but still visibly
+ * shallow over much of each bay -- which is why `k_min_enclosed_fraction` sits at 0.9 rather than
+ * some looser bound: this invariant is meant to catch "the fix only reaches part of the bay" too,
+ * not just "the fix doesn't run at all". A failure prints the offending patch's centroid (in world
+ * tile coordinates, matching the editor's own camera) and its ocean/enclosure fractions so it is
+ * self-diagnosing.
+ */
+COOPA_TEST(no_water_body_has_a_flat_shallow_interior) {
+    const std::string path =
+        std::string(ROOT_DIR) + "/assets/scenes/terrain/unified_terrain_demo/scene.yaml";
+    const fkyaml::node doc = coopa::yaml::load_document(path);
+    fkyaml::node gen_node;
+    for (const auto& obj : doc.at("scene").at("root_objects")) {
+        if (obj.at("name").get_value<std::string>() != "world") continue;
+        for (const auto& c : obj.at("components")) {
+            if (c.at("type").get_value<std::string>() == "MapGenerator") gen_node = c;
+        }
+    }
+    require(!gen_node.is_null(), "flat-shallow: found the world's MapGenerator node");
+
+    MapGeneratorComponent g;
+    g.config = toy::mapgen::generator_config_from_node(gen_node);
+    g.world_tiles = 1024;
+    g.height_scale = 64.0f;
+    g.begin(nullptr);
+    require(g.ready(), "flat-shallow: the real generator config built");
+
+    const coopa::maps::MapGraph* graph = g.graph();
+    require(graph != nullptr, "flat-shallow: graph() is populated after a synchronous generate");
+
+    const std::size_t n = graph->centers.size();
+    const float height_scale = 64.0f;
+    constexpr double k_shallow_depth_world = 1.5;     // world units -- the "one block" symptom
+    constexpr double k_max_open_shelf_shore = 2.0;    // grid units -- see the doc comment above
+    constexpr double k_min_enclosed_fraction = 0.9;   // see the doc comment above
+
+    // Global shoreline distance over EVERY water cell at once (not per flood-filled body): the
+    // Dijkstra relaxation shoreline_distances() (water_levels.h) does, generalised off one body.
+    std::vector<double> shore(n, 0.0);
+    {
+        const double infinity = std::numeric_limits<double>::max();
+        std::vector<double> dist(n, infinity);
+        using Entry = std::pair<double, std::size_t>;
+        std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> pending;
+        for (std::size_t i = 0; i < n; ++i) {
+            const coopa::maps::MapCenter& cell = graph->centers[i];
+            if (!cell.water) continue;
+            double s = infinity;
+            for (const coopa::maps::CenterId nb : cell.neighbors) {
+                const coopa::maps::MapCenter& neighbor = graph->centers[static_cast<std::size_t>(nb)];
+                if (!neighbor.water) s = std::min(s, 0.5 * cell.point.distance_to(neighbor.point));
+            }
+            if (s < infinity) {
+                dist[i] = s;
+                pending.emplace(s, i);
+            }
+        }
+        while (!pending.empty()) {
+            const Entry e = pending.top();
+            pending.pop();
+            if (e.first > dist[e.second]) continue;
+            const coopa::maps::MapCenter& cell = graph->centers[e.second];
+            for (const coopa::maps::CenterId nb : cell.neighbors) {
+                const std::size_t ni = static_cast<std::size_t>(nb);
+                if (!graph->centers[ni].water) continue;
+                const double reached = e.first + cell.point.distance_to(graph->centers[ni].point);
+                if (reached < dist[ni]) {
+                    dist[ni] = reached;
+                    pending.emplace(reached, ni);
+                }
+            }
+        }
+        for (std::size_t i = 0; i < n; ++i) shore[i] = dist[i] == infinity ? 0.0 : dist[i];
+    }
+
+    const std::vector<double> enclosure = coopa::maps::ocean_enclosure(*graph);
+
+    // Connected components of SHALLOW water cells (depth_world < k_shallow_depth_world).
+    std::vector<bool> visited(n, false);
+    std::vector<double> depth_world(n, 0.0);
+    for (std::size_t i = 0; i < n; ++i) {
+        const coopa::maps::MapCenter& c = graph->centers[i];
+        if (c.water) depth_world[i] = (c.water_level - c.elevation) * height_scale;
+    }
+
+    const double tiles_per_cell = 1024.0 / static_cast<double>(g.config.grid_size);   // world_tiles / grid_size
+
+    int patch_n = 0, violations = 0;
+    for (std::size_t seed_i = 0; seed_i < n; ++seed_i) {
+        const coopa::maps::MapCenter& seed = graph->centers[seed_i];
+        if (!seed.water || visited[seed_i] || depth_world[seed_i] >= k_shallow_depth_world) continue;
+
+        std::vector<std::size_t> patch;
+        std::queue<std::size_t> pending;
+        pending.push(seed_i);
+        visited[seed_i] = true;
+        while (!pending.empty()) {
+            const std::size_t cur = pending.front();
+            pending.pop();
+            patch.push_back(cur);
+            for (const coopa::maps::CenterId nb : graph->centers[cur].neighbors) {
+                const std::size_t ni = static_cast<std::size_t>(nb);
+                if (visited[ni] || !graph->centers[ni].water) continue;
+                if (depth_world[ni] >= k_shallow_depth_world) continue;
+                visited[ni] = true;
+                pending.push(ni);
+            }
+        }
+        if (patch.size() < 4) continue;   // ignore noise-sized puddles
+        ++patch_n;
+
+        double sum_x = 0.0, sum_y = 0.0, ocean_n = 0.0, enc_n = 0.0, max_shore = 0.0;
+        for (const std::size_t idx : patch) {
+            const coopa::maps::MapCenter& c = graph->centers[idx];
+            sum_x += c.point.x;
+            sum_y += c.point.y;
+            if (c.ocean) ocean_n += 1.0;
+            if (enclosure[idx] > 0.0) enc_n += 1.0;
+            max_shore = std::max(max_shore, shore[idx]);
+        }
+        if (max_shore <= k_max_open_shelf_shore) continue;   // an ordinary beach shelf
+
+        const double enclosed_fraction = enc_n / static_cast<double>(patch.size());
+        if (enclosed_fraction >= k_min_enclosed_fraction) continue;   // the carve engaged here
+
+        ++violations;
+        const double cx = (sum_x / static_cast<double>(patch.size())) * tiles_per_cell;
+        const double cy = (sum_y / static_cast<double>(patch.size())) * tiles_per_cell;
+        expect(false,
+               "flat-shallow: patch " + std::to_string(patch_n) + " at world tile (" +
+               std::to_string(cx) + "," + std::to_string(cy) + "), " + std::to_string(patch.size()) +
+               " cells, max_shore=" + std::to_string(max_shore) + " (> " +
+               std::to_string(k_max_open_shelf_shore) + "), ocean_frac=" +
+               std::to_string(ocean_n / static_cast<double>(patch.size())) + " enclosed_frac=" +
+               std::to_string(enclosed_fraction) + " (< " + std::to_string(k_min_enclosed_fraction) +
+               ") -- a deep patch the carve never engaged on");
+    }
+    require(patch_n > 0, "flat-shallow: this seed's map has shallow water to check");
+    expect(violations == 0,
+           "flat-shallow: " + std::to_string(violations) + " / " + std::to_string(patch_n) +
+           " shallow patches have an interior deeper than an open shelf should reach");
+}
+

@@ -67,8 +67,10 @@ void ViewportChromePanel::draw_viewport_header_(imm::Context& ctx, const imm::Bo
         const bool tiles = app_.tile_mode_panel_->in_tile_mode_();
         const bool painting_instances = app_.instance_paint_panel_->in_instance_mode_();
         const bool vpaint = app_.paint_panel_->in_paint_mode_() && !app_.paint_panel_->in_weight_paint_(), wpaint = app_.paint_panel_->in_weight_paint_();
+        const bool rig_edit = app_.rig_edit_mode_(), posing = app_.in_pose_mode_();
         const std::string mode = terrain ? "Terrain Mode" : tiles ? "Tile Mode" : painting_instances ? "Instance Paint"
                                : sculpting ? "Sculpt Mode" : vpaint ? "Vertex Paint" : wpaint ? "Weight Paint"
+                               : rig_edit ? "Edit Mode (Rig)" : posing ? "Pose Mode"
                                : mesh_edit ? "Edit Mode"
                                : app_.curve_pen_panel_->in_pen_mode_() ? "Pen Mode" : "Object Mode";
         const float w = ctx.text_width(mode) + bh + 26;
@@ -78,7 +80,7 @@ void ViewportChromePanel::draw_viewport_header_(imm::Context& ctx, const imm::Bo
         ctx.fill_rounded(mb, hov ? ctx.style.button_hover : ctx.style.button);
         ctx.icon(terrain || tiles ? I::Terrain : painting_instances ? I::BrushDraw
                  : sculpting ? I::SculptMode : vpaint ? I::VertexPaint : wpaint ? I::WeightPaint
-                 : mesh_edit ? I::EditMode : I::ObjectMode,
+                 : mesh_edit || rig_edit ? I::EditMode : I::ObjectMode,
                  {mb.x + 4, mb.y + 2, bh - 4, bh - 4}, ctx.style.text);
         ctx.text_in({mb.x + bh + 2, mb.y, w - bh - 16, bh}, mode, ctx.style.text, 0.0f);
         ctx.arrow({mb.right() - 14, mb.y + 4, 10, bh - 8}, true, ctx.style.text_dim);
@@ -348,6 +350,9 @@ void ViewportChromePanel::draw_add_menu_items_(imm::Context& ctx) {
     }
     if (ctx.menu_item("Camera", "", nullptr, true, I::Camera)) app_.create_with_component("Camera", "Camera");
     if (ctx.menu_item("Empty", "", nullptr, true, I::Empty)) app_.create_empty();
+    if (ctx.menu_item("Armature", "", nullptr, true, I::ObjectMode)) app_.create_armature();
+    ctx.tooltip("Armature\nA new rig with one bone, opened in Edit Mode. Shift+A adds more bones and E extrudes "
+                "a chain from the selected tails; a mesh is bound to it with Object > Parent > Bind to Rig.");
     ctx.menu_separator();
     if (ctx.menu_item("Reflection Probe", "", nullptr, true, I::EnvLight)) app_.create_with_component("ReflectionProbe", "Reflection Probe");
     if (ctx.menu_item("Heightmap Terrain", "", nullptr, true, I::Terrain)) app_.create_with_component("HeightmapTerrain", "Terrain");
@@ -610,6 +615,57 @@ void ViewportChromePanel::draw_nav_gizmo_(imm::Context& ctx) {
     }
 }
 
+void ViewportChromePanel::draw_bone_sidebar_(imm::Context& ctx) {
+    using I = imm::Icon;
+    const RigModel& model = app_.rig_edit_model();
+    const int i = app_.rig_edit_selected_bone();
+    if (i < 0 || static_cast<std::size_t>(i) >= model.bones.size()) {
+        ctx.label_dim("No bone selected");
+        return;
+    }
+    const RigModelBone& b = model.bones[static_cast<std::size_t>(i)];
+    if (ctx.collapsing_header("Bone", true, nullptr, I::Orientation)) {
+        std::string name = b.name;
+        if (ctx.input_text("Name", &name) && !name.empty() && name != b.name) app_.rename_selected_rig_bone(name);
+        ctx.tooltip("Name\nA bone name is a contract: clips, IK, FootIK legs and vertex groups all address it. "
+                    "Renaming here repoints every referrer this project can find.");
+
+        glm::vec3 head = b.head, tail = b.tail;
+        if (ctx.drag_float_stacked("Head", &head.x, 3, 0.01f, "%.3f m")) app_.set_selected_rig_bone_head(head);
+        if (ctx.last_deactivated()) app_.end_rig_edit_merge();
+        if (ctx.drag_float_stacked("Tail", &tail.x, 3, 0.01f, "%.3f m")) app_.set_selected_rig_bone_tail(tail);
+        if (ctx.last_deactivated()) app_.end_rig_edit_merge();
+
+        float roll = b.roll;
+        if (ctx.drag_float("Roll", &roll, 0.5f)) app_.set_selected_rig_bone_roll(roll);
+        if (ctx.last_deactivated()) app_.end_rig_edit_merge();
+        ctx.tooltip("Roll\nThe bone's twist about its own head->tail axis, in degrees (Ctrl+R in the viewport).");
+
+        char len[64];
+        std::snprintf(len, sizeof(len), "Length  %.3f m", glm::length(b.tail - b.head));
+        ctx.label_dim(len);
+    }
+    if (ctx.collapsing_header("Relations", true, nullptr, I::Collection)) {
+        // "(none)" is index 0, so a parent index maps to i+1 and back.
+        std::vector<std::string> options{"(none)"};
+        std::vector<int> option_bone{-1};
+        for (std::size_t j = 0; j < model.bones.size(); ++j) {
+            if (static_cast<int>(j) == i) continue;   // a bone cannot parent itself
+            options.push_back(model.bones[j].name);
+            option_bone.push_back(static_cast<int>(j));
+        }
+        int chosen = 0;
+        for (std::size_t k = 0; k < option_bone.size(); ++k) if (option_bone[k] == b.parent) chosen = static_cast<int>(k);
+        if (ctx.combo("Parent", &chosen, options) && chosen >= 0 && static_cast<std::size_t>(chosen) < option_bone.size()) {
+            app_.reparent_selected_rig_bone(option_bone[static_cast<std::size_t>(chosen)]);
+        }
+        bool connected = b.connected;
+        if (ctx.checkbox("Connected", &connected)) app_.set_selected_rig_bone_connected(connected);
+        ctx.tooltip("Connected\nPins this bone's head to its parent's tail, so moving either moves the shared "
+                    "joint -- Blender's connected bones.");
+    }
+}
+
 void ViewportChromePanel::draw_sidebar_(imm::Context& ctx, bool mesh_edit) {
     using I = imm::Icon;
     const imm::Box r = sidebar_rect_();
@@ -620,7 +676,9 @@ void ViewportChromePanel::draw_sidebar_(imm::Context& ctx, bool mesh_edit) {
     const float saved_ratio = ctx.style.label_ratio;
     ctx.style.label_ratio = 0.34f;
     if (app_.sidebar_tab_ == 0) {
-        if (mesh_edit) {
+        if (app_.rig_edit_mode_()) {
+            draw_bone_sidebar_(ctx);
+        } else if (mesh_edit) {
             if (ctx.collapsing_header("Transform", true, nullptr, I::Orientation)) {
                 const auto vs = app_.mesh_.selection.affected_vertices(app_.mesh_.mesh);
                 if (vs.empty()) ctx.label_dim("Nothing selected");
@@ -895,35 +953,47 @@ void ViewportChromePanel::draw_rig_bones_(imm::Context& ctx, const ViewProj& vp,
     }
 }
 
-void ViewportChromePanel::draw_rig_edit_bones_(imm::Context& ctx, const ViewProj& vp, const RigModel& model, const glm::mat4& owner_world,
-                                               int selected_bone, bool endpoint_selected, toy::editor::rig_pick::BoneEndpoint selected_end,
-                                               const glm::vec4& col, const glm::vec4& selected_col) {
+void ViewportChromePanel::draw_rig_edit_bones_(imm::Context& ctx, const ViewProj& vp, const RigModel& model,
+                                               const toy::editor::rig_sel::RigSelection& sel, const glm::mat4& owner_world,
+                                               const glm::vec4& col, const glm::vec4& selected_col, const glm::vec4& active_col) {
+    namespace rs = toy::editor::rig_sel;
     for (std::size_t i = 0; i < model.bones.size(); ++i) {
-        const glm::mat4 rest = owner_world * model.world_rest_matrix(static_cast<int>(i));
+        const int bi = static_cast<int>(i);
+        const glm::mat4 rest = owner_world * model.world_rest_matrix(bi);
         const glm::vec3 head(glm::vec3(owner_world * glm::vec4(model.bones[i].head, 1.0f)));
         const glm::vec3 tail(glm::vec3(owner_world * glm::vec4(model.bones[i].tail, 1.0f)));
         const glm::vec3 X = glm::normalize(glm::vec3(rest[0])), Z = glm::normalize(glm::vec3(rest[2]));
-        const bool selected = static_cast<int>(i) == selected_bone;
-        const glm::vec4& c = selected ? selected_col : col;
+        // Three states, as in Blender: the active bone, a fully-selected one, and everything
+        // else. A HALF-selected bone stays in the base colour -- its one selected endpoint
+        // handle is what shows the selection, which is the whole point of endpoint editing.
+        const bool active = sel.active == bi;
+        const bool whole = rs::is_fully_selected(sel, bi);
+        const glm::vec4& c = active ? active_col : whole ? selected_col : col;
         glm::vec2 head_px, tail_px, q[4];
         if (!toy::editor::rig_pick::project_bone(vp, head, tail, X, Z, head_px, tail_px, q)) continue;
-        const glm::vec4 fill = imm::with_alpha(c, c.a * 0.25f);
+        const glm::vec4 fill = imm::with_alpha(c, c.a * (whole || active ? 0.3f : 0.18f));
         for (int k = 0; k < 4; ++k) {
             ctx.triangle(head_px, q[k], q[(k + 1) % 4], fill);
             ctx.triangle(tail_px, q[k], q[(k + 1) % 4], fill);
         }
+        const float lw = active ? 1.8f : whole ? 1.5f : 1.1f;
         for (int k = 0; k < 4; ++k) {
-            ctx.line(head_px, q[k], c, 1.3f);
-            ctx.line(q[k], tail_px, c, 1.3f);
-            ctx.line(q[k], q[(k + 1) % 4], c, 1.0f);
+            ctx.line(head_px, q[k], c, lw);
+            ctx.line(q[k], tail_px, c, lw);
+            ctx.line(q[k], q[(k + 1) % 4], c, lw * 0.8f);
         }
-        // A plain joint ring at the head, same as Pose mode's -- and a BIGGER one on whichever
-        // endpoint is the specific drag target (G), so it is clear which end a Grab will move.
-        if (const auto cj = vp.project(head)) ctx.ring(*cj, 3.5f, 1.3f, c);
-        if (selected && endpoint_selected) {
-            const auto ep = vp.project(selected_end == toy::editor::rig_pick::BoneEndpoint::Head ? head : tail);
-            if (ep) ctx.ring(*ep, 6.0f, 2.0f, selected_col);
-        }
+        // EVERY endpoint gets a handle, filled when selected: without one there is no affordance
+        // showing what G will actually move, which is the first thing you need to see here.
+        const bool head_sel = bi < static_cast<int>(sel.bones.size()) && sel.bones[i].head;
+        const bool tail_sel = bi < static_cast<int>(sel.bones.size()) && sel.bones[i].tail;
+        auto handle = [&](const glm::vec3& at, bool on) {
+            const auto p = vp.project(at);
+            if (!p) return;
+            if (on) ctx.circle(*p, 4.0f, active ? active_col : selected_col);
+            else ctx.ring(*p, 3.5f, 1.2f, col);
+        };
+        handle(head, head_sel);
+        handle(tail, tail_sel);
     }
 }
 
@@ -1012,7 +1082,12 @@ void ViewportChromePanel::draw_mode_menu_items_(imm::Context& ctx) {
     const bool mesh_obj = app_.active_type_ == AssetType::Mesh ||
                           (!app_.asset_view_() && (app_.edit_object_ || (app_.doc_.primary() && app_.doc_.find_component(app_.doc_.primary(), "MeshRenderer") >= 0)));
     const InteractionMode cur = app_.interaction_mode();
-    bool o = cur == InteractionMode::Object, e = cur == InteractionMode::Edit, sc = cur == InteractionMode::Sculpt;
+    // Edit on a rigged object edits its SKELETON -- there is no separate Rig Edit row, the way
+    // there is no separate "vertex edit" row for a mesh. Tab moves on to the mesh when the
+    // object has one too (EditorApp::toggle_edit_mode_).
+    const bool has_rig = !app_.asset_view_() && app_.rig_edit_target_of_(app_.doc_.primary()) != 0;
+    bool o = cur == InteractionMode::Object, e = cur == InteractionMode::Edit || cur == InteractionMode::RigEdit;
+    bool sc = cur == InteractionMode::Sculpt;
     bool vp = cur == InteractionMode::VertexPaint, wp = cur == InteractionMode::WeightPaint;
     const bool terrain = app_.terrain_panel_->in_terrain_mode_();
     const bool tiles = app_.tile_mode_panel_->in_tile_mode_();
@@ -1024,7 +1099,14 @@ void ViewportChromePanel::draw_mode_menu_items_(imm::Context& ctx) {
         if (painting_instances) app_.instance_paint_panel_->exit_instance_mode_();
         app_.set_interaction_mode(InteractionMode::Object);
     }
-    if (ctx.menu_item("Edit Mode", "Tab", &e, mesh_obj && !app_.playing(), I::EditMode)) app_.set_interaction_mode(InteractionMode::Edit);
+    if (ctx.menu_item("Edit Mode", "Tab", &e, (mesh_obj || has_rig) && !app_.playing(), I::EditMode)) {
+        app_.set_interaction_mode(InteractionMode::Edit);
+    }
+    if (has_rig) {
+        ctx.tooltip("Edit Mode\nEdit this rig's REST skeleton: Shift+A adds a bone, E extrudes from the selected "
+                    "tails, G/R/S move the selected endpoints, Ctrl+R rolls, X deletes.\n"
+                    "Tab again for the object's own mesh, if it has one.");
+    }
     if (ctx.menu_item("Sculpt Mode", "", &sc, mesh_obj && !app_.playing(), I::SculptMode)) app_.set_interaction_mode(InteractionMode::Sculpt);
     if (ctx.menu_item("Vertex Paint", "", &vp, mesh_obj && !app_.playing(), I::VertexPaint)) app_.set_interaction_mode(InteractionMode::VertexPaint);
     if (ctx.menu_item("Weight Paint", "", &wp, mesh_obj && !app_.playing(), I::WeightPaint)) app_.set_interaction_mode(InteractionMode::WeightPaint);
@@ -1051,15 +1133,6 @@ void ViewportChromePanel::draw_mode_menu_items_(imm::Context& ctx) {
     }
     ctx.tooltip("Pose Mode\nPose the rig's joints by hand: they draw as bones, a move edits the pose instead of the "
                 "rest transform, and I keys it at the playhead (Auto-Key keys every edit)");
-    // Any object: author a NEW rig on it, or edit the rest skeleton of one it already has.
-    bool rm = cur == InteractionMode::RigEdit;
-    if (ctx.menu_item("Rig Edit Mode", "", &rm, !app_.asset_view_() && app_.doc_.primary() && !app_.playing(), I::EditMode)) {
-        if (app_.rig_edit_mode_()) app_.exit_rig_edit_mode_();
-        else app_.enter_rig_edit_mode_(app_.doc_.primary());
-    }
-    ctx.tooltip("Rig Edit Mode\nAuthor the REST skeleton: Shift+A adds a bone, E extrudes one from the selected bone's "
-                "tail, G moves a picked head/tail endpoint, R rolls it, X deletes it. Saves to its own rigs/<name>.yaml "
-                "the first time, adding a Rig component here if there wasn't one already.");
     // A HeightmapTerrain object: sculpt and paint the terrain itself.
     bool tm = terrain;
     const ObjectId terrain_id = terrain ? app_.terrain_panel_->terrain_object_ : app_.doc_.primary();

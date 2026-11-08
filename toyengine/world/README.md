@@ -452,8 +452,48 @@ the override style shares its neighbours' `round_kind_corners` and corner radii 
 (below) is `soft`'s own radii at coarser segment counts for exactly this reason. `native_border`
 keeps that many tiles of the chunk's rim in the un-overridden style, for a tier that wants its
 interior cheap but its edge geometry matching a full-detail neighbour exactly. Planets don't
-support this tier: the planet warp and the forced `max_merge = 1` both run before a style level
-would need its own copies of both.
+support this tier: the planet warp runs before a style level would need its own copy of it.
+
+**The `field` tier: a chunk as a plain heightfield.** A level can instead name `field:`, the
+number of tiles per cell of a quantised grid (`mesh_chunk_field()`): one flat quad per cell at
+that cell's *tallest* column, vertical walls wherever two cells differ, and no tile pieces, lip or
+corner rounding at all. `native_border` keeps that many tiles of the rim at one cell per tile, so
+the coarse surface matches the true heights where it meets a neighbour.
+
+```yaml
+lods:
+  - { ratio: 0.40, screen_size: 0.33 }
+  - { field: 1,  screen_size: 0.20, native_border: 1 }   # one quad per tile -- no lips
+  - { field: 16, screen_size: 0.085 }                    # one quad per 16x16 tiles
+```
+
+It is the cheapest tier by a wide margin and the only re-meshed one a **planet** carries. Measured
+on a busy 32-tile `soft` chunk (`terrain_chunk_cost`), against LOD 0's 19.9k triangles:
+
+| tier | triangles | of LOD 0 | build |
+|---|---|---|---|
+| the three default `ratio` levels | 7k + 2k (+1 rejected) | 40% / 15% | **18 ms** |
+| `field: 1, native_border: 1` | 2,392 | 12.0% | 0.09 ms |
+| `field: 4, native_border: 1` | 336 | 1.7% | 0.02 ms |
+| `field: 8, native_border: 1` | 146 | 0.7% | 0.01 ms |
+| `field: 8, native_border: 0` | 82 | 0.41% | 0.01 ms |
+
+Three properties `ratio` lacks. Its cost is a function of `chunk_size / field` and nothing else,
+not of how busy the terrain is. It cannot be rejected, so the tier exists on *every* chunk. And
+being built in face space from the same columns LOD 0 used, `warp_chunk_to_planet()` bends it onto
+a globe like any other geometry — which is what makes it work on a planet where a style tier
+cannot. Note the 18 ms: the `ratio` tiers cost **5.6x the 3.2 ms of meshing and welding the chunk
+in the first place**, so a scene that replaces them with field tiers gets its load time back as
+well as its triangles.
+
+**Why a field tier cannot crack against its neighbours.** Not by preserving vertices, as a `ratio`
+level does, but by construction. A cell takes the height of its *tallest* column, so a coarse
+surface only ever sits at or above the ground it stands in for; and a chunk's boundary walls
+descend to the neighbouring chunk's **own** column height, read from the shared `ColumnPad` — the
+same value that neighbour sampled. Two chunks therefore always overlap along their shared edge
+rather than opening a gap, whatever levels each happened to pick. `terrain_chunk_cost`'s
+`two_field_chunks_overlap_on_their_shared_seam` builds neighbours at *different* strides and checks
+all 32 seam rows for this.
 
 **What a chunk costs the frame it lands in.** Meshing, welding, the collider's BVH *and the
 chunk's GPU buffers* are all built on its worker (see `terrain_chunk.h` for why the Vulkan half
@@ -736,10 +776,25 @@ See `assets/scenes/terrain/planet_demo` -- a globe held whole in frame, spun by 
   coming back round the limb costs nothing, and the hide threshold sits a little further round
   than the show threshold so a chunk on the limb cannot flicker. Measured on planet_demo:
   1206 drawn meshes → 835, shadow casters 1424 → 1011.
-- **Meshing.** Each chunk is meshed in flat face space exactly as a flat chunk, with merging
-  capped at one tile (`max_merge`: a merged quad would cut a chord under the curve), then
+- **Meshing.** Each chunk is meshed in flat face space exactly as a flat chunk, then
   `warp_chunk_to_planet()` bends every vertex onto the globe and carries its normal through the
   map's Jacobian. Chunk objects sit at the planet's centre. A planet keeps every chunk loaded.
+- **Merging on a curve.** A merged quad bent onto the sphere is a **chord**: its corners sit
+  exactly on the globe (the per-tile geometry beside it shares them) and only its interior falls
+  away, by that chord's sagitta. So the merge width is *solved for* rather than given up —
+  `TerrainParams::planet_max_merge()` inverts the sagitta against a tolerance of 0.02 of a height
+  step, giving 2 tiles on a 40-unit globe, 4 on `planet_demo`'s 122, and 10 on a 652-unit one; a
+  bigger planet is flatter and merges wider. What sag remains is lifted out:
+  `planet_merge_lift()` raises every merged run radially, and deliberately by the *cap's* sagitta
+  rather than its own width, because two neighbouring chunks merge independently and a
+  width-dependent lift would leave their shared seam corners at different radii. One cap-derived
+  lift puts both sides at the same radius whatever they merged, and over-lifts anything narrower
+  into an overlap — which cannot open a hole, where the bare chord could.
+  A scene may still author `max_merge:` directly, and `max_merge: 1` restores the per-tile meshing
+  a planet used to be fixed at. Worth what it costs only where LOD 0 actually draws: measured on
+  `planet_demo` it is 16x off a *flat* chunk (2048 → 128 triangles) but about 5% of the shadow
+  triangles and 11% of load time on that archipelago, whose ground is terraced nearly everywhere —
+  and nothing at all when zoomed out, where no chunk draws LOD 0.
 - **Water.** Each chunk's sea, lakes and rivers are WaterBodies in **their own frame** (local Z
   out from the planet at the chunk's centre, `WaterBody::local_frame`), so the water system's
   height-field queries, depth probes, flow and buoyancy still hold over a curved surface. Their

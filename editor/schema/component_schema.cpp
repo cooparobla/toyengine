@@ -1487,6 +1487,9 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                          "The same for rivers (steps): lower sits them higher in their channels, nearer the bank tops"),
                 with_tip(f_int("max_wall_steps", 24, 0, 1024), "Tallest wall drawn under a column, in steps (deep sea cliffs stop here)"),
                 with_tip(f_int("soil_depth_steps", 3, 0, 1024), "Steps of soil under the surface before bare stone"),
+                with_tip(with_label(f_int("max_merge", 0, 0, 512), "Max merge (tiles)"),
+                         "Widest merged flat run, in tiles; 0 = unlimited. A planet leaves this 0 "
+                         "and derives its own from its curvature"),
                 with_tip(f_int("chunk_size", 16, 4, 512), "Tiles per chunk side -- the streaming, drawing and collision unit"),
                 with_tip(with_label(f_int("view_radius", 3, 0, 64), "View radius (chunks)"),
                          "Chunks kept loaded around the camera in each direction"),

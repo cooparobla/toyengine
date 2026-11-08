@@ -2,6 +2,7 @@
 
 #include <toyengine/core/yaml_read.h>
 
+#include <algorithm>
 #include <filesystem>
 
 #include <coopa/asset/asset_manager.h>
@@ -773,10 +774,20 @@ void register_scene_components(coopa::gfx::core::Device& device,
             read(node, "planet", params.planet);
             read(node, "face_tiles", params.face_tiles);
             read(node, "gravity", terrain->gravity);
+            // Widest merged top or wall run, in tiles. A scene rarely sets it; a planet derives
+            // one from its own curvature below when it does not.
+            const bool authored_max_merge = node.contains("max_merge");
+            if (authored_max_merge) {
+                params.max_merge = node.at("max_merge").get_value<std::int32_t>();
+            }
             if (params.planet) {
-                params.max_merge = 1;   // every tile its own piece: merged quads would crack when bent
                 params.face_tiles = std::max<std::int32_t>(params.chunk_size, params.face_tiles);
                 params.face_tiles -= params.face_tiles % std::max<std::int32_t>(1, params.chunk_size);
+                // After face_tiles, which sets the radius planet_max_merge() reads. A merged quad
+                // bent onto the sphere is a chord, so the run width is bounded by how far it may
+                // sag rather than fixed at one tile -- and what sag remains is lifted out in
+                // mesh_chunk_styled(). `max_merge: 1` still restores per-tile meshing exactly.
+                if (!authored_max_merge) params.max_merge = params.planet_max_merge();
             }
             read(node, "river_inset", params.river_inset);
             // The water's look: WaterBody's own keys, onto the terrain's stock look.
@@ -982,6 +993,14 @@ void register_scene_components(coopa::gfx::core::Device& device,
                         }
                         if (level.contains("native_border")) {
                             out.native_border = static_cast<std::int8_t>(level.at("native_border").get_value<int>());
+                        }
+                        // A quantised heightfield level (mesh_chunk_field()): `field` tiles per
+                        // cell, in place of `ratio`'s simplification or `tile_set`'s re-stamp.
+                        // The one re-meshed level a planet can carry.
+                        if (level.contains("field")) {
+                            const int stride = level.at("field").get_value<int>();
+                            out.field_stride = static_cast<std::int8_t>(
+                                std::clamp(stride, 1, std::min(127, std::max(1, params.chunk_size))));
                         }
                     }
                 }

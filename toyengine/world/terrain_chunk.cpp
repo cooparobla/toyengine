@@ -4,6 +4,7 @@
 
 #include <cstdlib>
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 #include <gfxcoopa/engine/data/mesh.h>
@@ -380,9 +381,15 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
                 for (std::int32_t y = ly; y < ly + h; ++y)
                     for (std::int32_t x = lx; x < lx + w; ++x) at(x, y) = 2;
                 const TileColumn& col = pad.at(lx / 2, ly / 2);
+                // On a planet the merged rectangle is a chord under the sphere; lift it clear so
+                // it overlaps the per-tile geometry beside it instead of cutting under it and
+                // showing daylight along the join. The lift comes from the merge CAP, not from
+                // this run's own width -- see planet_merge_lift() for why that is what keeps two
+                // chunks' shared seam at one radius.
+                const float sag = params.planet_merge_lift(static_cast<float>(col.steps) * params.height_step);
                 const glm::vec3 origin = origin_of({lx / 2, ly / 2}, col.steps - 1) +
                     glm::vec3((lx & 1) ? 0.5f * params.tile_size : 0.0f,
-                             (ly & 1) ? 0.5f * params.tile_size : 0.0f, 0.0f);
+                             (ly & 1) ? 0.5f * params.tile_size : 0.0f, sag);
                 library.append_styled(library.full_top(), origin,
                                       glm::vec3(0.5f * scale.x * static_cast<float>(w),
                                                0.5f * scale.y * static_cast<float>(h), scale.z),
@@ -423,9 +430,13 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
         const bool  along_x = first.turns == 0 || first.turns == 2; // North / South
         const float start   = 0.5f * static_cast<float>(first.slot) * params.tile_size;
         const float across  = static_cast<float>(first.line) * params.tile_size;
-        const glm::vec3 origin(along_x ? start : across, along_x ? across : start,
-                               static_cast<float>(first.cell_bottom) * params.height_step);
         const float h_stretch = 0.5f * static_cast<float>(j - i);
+        // Same chord correction as the merged tops above, measured at the strip's TOP -- the edge
+        // that has to clear the per-tile geometry beside it.
+        const float sag = params.planet_merge_lift(
+            static_cast<float>(first.cell_bottom + first.cell_count) * params.height_step);
+        const glm::vec3 origin(along_x ? start : across, along_x ? across : start,
+                               static_cast<float>(first.cell_bottom) * params.height_step + sag);
         const float v_stretch = static_cast<float>(first.cell_count);
         library.append_styled(library.straight(first.style, first.cap, first.turns), origin, scale,
                               first.code, first.cap, out.vertices, out.indices,
@@ -433,6 +444,219 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
         i = j;
     }
 
+}
+
+namespace {
+
+/**
+ * @brief Cell boundaries along one axis of a field level, ascending from 0 to `n`: cell `i`
+ *        covers tiles `[out[i], out[i+1])`.
+ *
+ * Every tile within `border` of the chunk's rim is its own cell, so the rim keeps the terrain's
+ * true per-tile heights; the interior is `stride`-tile blocks.
+ */
+std::vector<std::int32_t> field_cell_edges(std::int32_t n, std::int32_t stride, std::int32_t border) {
+    std::vector<std::int32_t> edges;
+    edges.push_back(0);
+    while (edges.back() < n) {
+        const std::int32_t at   = edges.back();
+        const std::int32_t next = (at < border || at >= n - border)
+                                      ? at + 1
+                                      : std::min(at + stride, std::max(at + 1, n - border));
+        edges.push_back(std::min(next, n));
+    }
+    return edges;
+}
+
+} // namespace
+
+void mesh_chunk_field(const ColumnPad& pad, const TerrainParams& params, std::int32_t stride,
+                      std::int32_t native_border, ChunkMeshData& out) {
+    out.clear();
+    const std::int32_t n = params.chunk_size;
+    if (n <= 0) return;
+
+    const std::int32_t s      = std::max<std::int32_t>(1, stride);
+    const std::int32_t border = std::clamp(native_border, 0, n / 2);
+
+    const std::vector<std::int32_t> edges = field_cell_edges(n, s, border);
+    const std::int32_t bands = static_cast<std::int32_t>(edges.size()) - 1;
+    if (bands <= 0) return;
+
+    // Which cell band a tile falls in, for both axes (a chunk is square).
+    std::vector<std::int32_t> band_of(static_cast<std::size_t>(n), 0);
+    for (std::int32_t b = 0; b < bands; ++b) {
+        for (std::int32_t i = edges[b]; i < edges[b + 1]; ++i) band_of[static_cast<std::size_t>(i)] = b;
+    }
+
+    /** @brief One coarse cell: the height it stands at and the kinds it is surfaced in. */
+    struct Cell {
+        std::int32_t steps     = 0;
+        TileKind     top_kind  = TileKind::Grass;
+        TileKind     side_kind = TileKind::Dirt;
+    };
+    std::vector<Cell> cells(static_cast<std::size_t>(bands) * static_cast<std::size_t>(bands));
+    for (std::int32_t by = 0; by < bands; ++by) {
+        for (std::int32_t bx = 0; bx < bands; ++bx) {
+            Cell& cell = cells[static_cast<std::size_t>(by) * static_cast<std::size_t>(bands) +
+                               static_cast<std::size_t>(bx)];
+            // The TALLEST column the cell covers, not the mean. Two things rest on it: nothing the
+            // full mesh carries can poke through a coarse chunk, and -- since every chunk's
+            // boundary wall descends to its neighbour's TRUE height (coarse_steps() below) while
+            // its own surface only ever sits at or above that height -- two chunks drawing
+            // different levels always overlap at the seam instead of opening a hole.
+            std::int32_t best = 0;
+            for (std::int32_t y = edges[by]; y < edges[by + 1]; ++y) {
+                for (std::int32_t x = edges[bx]; x < edges[bx + 1]; ++x) {
+                    const TileColumn& col = pad.at(x, y);
+                    if (col.steps > best || (x == edges[bx] && y == edges[by])) {
+                        best           = col.steps;
+                        cell.steps     = col.steps;
+                        cell.side_kind = col.side_kind;
+                    }
+                }
+            }
+            // The kind the cell reads as is the one most of it is made of, so a lone tall spike
+            // raises the cell without also recolouring it.
+            std::array<std::uint16_t, k_tile_kind_count> votes{};
+            for (std::int32_t y = edges[by]; y < edges[by + 1]; ++y) {
+                for (std::int32_t x = edges[bx]; x < edges[bx + 1]; ++x) {
+                    ++votes[static_cast<std::size_t>(pad.at(x, y).top_kind)];
+                }
+            }
+            std::size_t winner = 0;
+            for (std::size_t k = 1; k < votes.size(); ++k) {
+                if (votes[k] > votes[winner]) winner = k;   // ties keep the lower kind: deterministic
+            }
+            cell.top_kind  = static_cast<TileKind>(winner);
+            out.max_steps  = std::max(out.max_steps, cell.steps);
+        }
+    }
+
+    const float ts = params.tile_size;
+    const float hs = params.height_step;
+
+    auto cell_at = [&](std::int32_t x, std::int32_t y) -> const Cell& {
+        return cells[static_cast<std::size_t>(band_of[static_cast<std::size_t>(y)]) *
+                         static_cast<std::size_t>(bands) +
+                     static_cast<std::size_t>(band_of[static_cast<std::size_t>(x)])];
+    };
+    // Off the chunk this is the neighbour's OWN column, never a coarsened one -- see the Cell
+    // comment above for why that is what keeps the seam watertight.
+    auto coarse_steps = [&](std::int32_t x, std::int32_t y) -> std::int32_t {
+        if (x < 0 || y < 0 || x >= n || y >= n) return pad.at(x, y).steps;
+        return cell_at(x, y).steps;
+    };
+
+    auto emit_quad = [&](const glm::vec3& a, const glm::vec3& b, const glm::vec3& c, const glm::vec3& d,
+                         const glm::vec3& normal, float code) {
+        const std::uint32_t base = static_cast<std::uint32_t>(out.vertices.size());
+        // The same deterministic tangent choice append_styled() makes, so welding behaves alike.
+        const glm::vec3 axis = std::abs(normal.z) < 0.9f ? glm::vec3(0.0f, 0.0f, 1.0f)
+                                                         : glm::vec3(1.0f, 0.0f, 0.0f);
+        const glm::vec4 tangent(glm::normalize(glm::cross(axis, normal)), 1.0f);
+        for (const glm::vec3& p : {a, b, c, d}) {
+            coopa::gfx::engine::data::Vertex v;
+            v.position = p;
+            v.normal   = normal;
+            v.uv       = glm::vec2(code, 0.0f);
+            v.tangent  = tangent;
+            out.vertices.push_back(v);
+        }
+        for (const std::uint32_t i : {0u, 1u, 2u, 0u, 2u, 3u}) out.indices.push_back(base + i);
+    };
+
+    // --- Tops: one quad per cell ---
+    for (std::int32_t by = 0; by < bands; ++by) {
+        for (std::int32_t bx = 0; bx < bands; ++bx) {
+            const Cell& cell = cells[static_cast<std::size_t>(by) * static_cast<std::size_t>(bands) +
+                                     static_cast<std::size_t>(bx)];
+            const float x0 = static_cast<float>(edges[bx]) * ts, x1 = static_cast<float>(edges[bx + 1]) * ts;
+            const float y0 = static_cast<float>(edges[by]) * ts, y1 = static_cast<float>(edges[by + 1]) * ts;
+            const float z  = static_cast<float>(cell.steps) * hs;
+            emit_quad({x0, y0, z}, {x1, y0, z}, {x1, y1, z}, {x0, y1, z}, {0.0f, 0.0f, 1.0f},
+                      encode_surface_flat(cell.top_kind));
+        }
+    }
+
+    // --- Walls: one run per maximal stretch of tile edges sharing both heights and the side kind ---
+    const std::int32_t soil = std::max(0, params.soil_depth_steps);
+    const std::int32_t reach = std::max(1, params.max_wall_steps);
+    // `u` then `v` is the order that makes the quad face `normal` (bottom edge u->v, then up).
+    auto emit_wall = [&](const glm::vec2& u, const glm::vec2& v, std::int32_t bottom, std::int32_t top,
+                         const glm::vec3& normal, TileKind side_kind) {
+        if (top <= bottom) return;
+        const std::int32_t split = std::max(bottom, top - soil);   // soil band at the lip, stone under it
+        const auto quad = [&](std::int32_t zb, std::int32_t zt, TileKind kind) {
+            if (zt <= zb) return;
+            const float fb = static_cast<float>(zb) * hs, ft = static_cast<float>(zt) * hs;
+            emit_quad({u.x, u.y, fb}, {v.x, v.y, fb}, {v.x, v.y, ft}, {u.x, u.y, ft}, normal,
+                      encode_surface_flat(kind));
+        };
+        quad(split, top, side_kind);
+        quad(bottom, split, TileKind::Stone);
+    };
+
+    for (std::int32_t x = 0; x < n; ++x) {
+        for (std::int32_t y = 0; y < n;) {
+            const std::int32_t own = coarse_steps(x, y), nb = coarse_steps(x + 1, y);
+            if (nb >= own) { ++y; continue; }
+            const TileKind kind = cell_at(x, y).side_kind;
+            std::int32_t   y2   = y + 1;
+            while (y2 < n && coarse_steps(x, y2) == own && coarse_steps(x + 1, y2) == nb &&
+                   cell_at(x, y2).side_kind == kind) {
+                ++y2;
+            }
+            const float ex = static_cast<float>(x + 1) * ts;
+            emit_wall({ex, static_cast<float>(y) * ts}, {ex, static_cast<float>(y2) * ts},
+                      std::max(nb, own - reach), own, {1.0f, 0.0f, 0.0f}, kind);
+            y = y2;
+        }
+        for (std::int32_t y = 0; y < n;) {
+            const std::int32_t own = coarse_steps(x, y), nb = coarse_steps(x - 1, y);
+            if (nb >= own) { ++y; continue; }
+            const TileKind kind = cell_at(x, y).side_kind;
+            std::int32_t   y2   = y + 1;
+            while (y2 < n && coarse_steps(x, y2) == own && coarse_steps(x - 1, y2) == nb &&
+                   cell_at(x, y2).side_kind == kind) {
+                ++y2;
+            }
+            const float ex = static_cast<float>(x) * ts;
+            emit_wall({ex, static_cast<float>(y2) * ts}, {ex, static_cast<float>(y) * ts},
+                      std::max(nb, own - reach), own, {-1.0f, 0.0f, 0.0f}, kind);
+            y = y2;
+        }
+    }
+    for (std::int32_t y = 0; y < n; ++y) {
+        for (std::int32_t x = 0; x < n;) {
+            const std::int32_t own = coarse_steps(x, y), nb = coarse_steps(x, y + 1);
+            if (nb >= own) { ++x; continue; }
+            const TileKind kind = cell_at(x, y).side_kind;
+            std::int32_t   x2   = x + 1;
+            while (x2 < n && coarse_steps(x2, y) == own && coarse_steps(x2, y + 1) == nb &&
+                   cell_at(x2, y).side_kind == kind) {
+                ++x2;
+            }
+            const float ey = static_cast<float>(y + 1) * ts;
+            emit_wall({static_cast<float>(x2) * ts, ey}, {static_cast<float>(x) * ts, ey},
+                      std::max(nb, own - reach), own, {0.0f, 1.0f, 0.0f}, kind);
+            x = x2;
+        }
+        for (std::int32_t x = 0; x < n;) {
+            const std::int32_t own = coarse_steps(x, y), nb = coarse_steps(x, y - 1);
+            if (nb >= own) { ++x; continue; }
+            const TileKind kind = cell_at(x, y).side_kind;
+            std::int32_t   x2   = x + 1;
+            while (x2 < n && coarse_steps(x2, y) == own && coarse_steps(x2, y - 1) == nb &&
+                   cell_at(x2, y).side_kind == kind) {
+                ++x2;
+            }
+            const float ey = static_cast<float>(y) * ts;
+            emit_wall({static_cast<float>(x) * ts, ey}, {static_cast<float>(x2) * ts, ey},
+                      std::max(nb, own - reach), own, {0.0f, -1.0f, 0.0f}, kind);
+            x = x2;
+        }
+    }
 }
 
 namespace {
@@ -734,15 +958,17 @@ std::vector<coopa::gfx::engine::data::MeshLod> build_chunk_lods(const TerrainPar
                                                                 ChunkMeshData& mesh) {
     std::vector<coopa::gfx::engine::data::LodRequest> levels;
     bool any_style = false;
+    bool any_field = false;
     for (const TerrainParams::ChunkLod& lod : params.chunk_lods) {
+        if (lod.field_stride > 0) { any_field = true; continue; }
         if (lod.style >= 0) { any_style = true; continue; }
-        if (lod.ratio <= 0.0f) break;   // a default (ratio 0, no style) entry ends the table
+        if (lod.ratio <= 0.0f) break;   // a default (ratio 0, no style, no field) entry ends the table
         levels.push_back({lod.ratio, lod.screen_size, 1.0f});
     }
     // TOY_TERRAIN_NO_LODS: diagnostic. Every chunk then draws its base level, which is what
     // separates "the geometry is wrong" from "the COARSE geometry is wrong".
     static const bool no_lods = std::getenv("TOY_TERRAIN_NO_LODS") != nullptr;
-    if ((levels.empty() && !any_style) || mesh.empty() || no_lods) return {};
+    if ((levels.empty() && !any_style && !any_field) || mesh.empty() || no_lods) return {};
 
     // Always goes through simplify_levels(), even with an empty `levels`: it is what supplies
     // table[0], the full chunk -- a style-only table (no `ratio` entries) still needs that
@@ -754,20 +980,35 @@ std::vector<coopa::gfx::engine::data::MeshLod> build_chunk_lods(const TerrainPar
     // behind every ratio level's vertices (simplify_levels() above has already read `ratio`
     // levels' extent off mesh.indices' size at entry, so this order is load-bearing). Skipped on
     // a planet: see build_chunk_lods()'s doc.
-    if (any_style && !params.planet) {
+    //
+    // A `field` level is appended the same way, and unlike a style level it is also built on a
+    // planet: it is meshed in face space from the same columns LOD 0 used, so the one thing a
+    // re-mesh here cannot otherwise do -- the planet warp -- applies to it unchanged.
+    if (any_style || any_field) {
         for (const TerrainParams::ChunkLod& lod : params.chunk_lods) {
-            if (lod.style < 0) continue;
-            ChunkMeshData style_mesh;
-            mesh_chunk_styled(pad, library, params, style_mesh, lod.style, lod.native_border);
-            if (style_mesh.empty()) continue;
-            coopa::gfx::engine::data::Mesh::weld_and_optimize(style_mesh.vertices, style_mesh.indices);
+            const bool field = lod.field_stride > 0;
+            if (!field && lod.style < 0) continue;
+            if (!field && params.planet) continue;   // style levels: see build_chunk_lods()'s doc
+            ChunkMeshData level_mesh;
+            if (field) {
+                mesh_chunk_field(pad, params, lod.field_stride, lod.native_border, level_mesh);
+                if (params.planet) {
+                    // Positions and normals only: a level carries no water of its own.
+                    ChunkWaterData none_still, none_flowing;
+                    warp_chunk_to_planet(params, coord, level_mesh, none_still, none_flowing);
+                }
+            } else {
+                mesh_chunk_styled(pad, library, params, level_mesh, lod.style, lod.native_border);
+            }
+            if (level_mesh.empty()) continue;
+            coopa::gfx::engine::data::Mesh::weld_and_optimize(level_mesh.vertices, level_mesh.indices);
             coopa::gfx::engine::data::MeshLod out_lod;
             out_lod.first_index   = static_cast<std::uint32_t>(mesh.indices.size());
-            out_lod.index_count   = static_cast<std::uint32_t>(style_mesh.indices.size());
+            out_lod.index_count   = static_cast<std::uint32_t>(level_mesh.indices.size());
             out_lod.vertex_offset = static_cast<std::int32_t>(mesh.vertices.size());
             out_lod.screen_size   = lod.screen_size;
-            mesh.vertices.insert(mesh.vertices.end(), style_mesh.vertices.begin(), style_mesh.vertices.end());
-            mesh.indices.insert(mesh.indices.end(), style_mesh.indices.begin(), style_mesh.indices.end());
+            mesh.vertices.insert(mesh.vertices.end(), level_mesh.vertices.begin(), level_mesh.vertices.end());
+            mesh.indices.insert(mesh.indices.end(), level_mesh.indices.begin(), level_mesh.indices.end());
             result.push_back(out_lod);
         }
     }

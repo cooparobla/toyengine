@@ -197,18 +197,43 @@ scene:
           # resident radius) / fov 60, a 32 m chunk's ~22.6 m bounding radius only crosses the
           # first (0.14) threshold at ~280 m -- just inside the resident radius -- so almost
           # every visible chunk draws at LOD 0 the whole time. These thresholds instead spread
-          # the three tiers across the resident radius itself: LOD 1 (ratio 0.40) at ~120 m, LOD 2
-          # (0.15) at ~190 m, LOD 3 (0.07, the coarsest ratio level) at ~260 m -- inside 320 m but
-          # past the 224 m shadow_distance, so shadows never see the coarsened mesh. A fourth, style
-          # level follows past 260 m: tileset_soft_lod re-meshes the chunk in soft's own corner radii
-          # (seam-safe -- see tools/gen_tile_styles.py's `soft_lod` entry) but far coarser segments,
-          # so the chunk still reads as soft terrain instead of ratio simplification's eventual
-          # arbitrary silhouette, with no risk of simplify_levels rejecting the level outright.
+          # the tiers across the resident radius itself. A chunk's projected height is
+          # radius * cot(fov/2) / depth = ~39 / depth here, so a threshold T engages past 39/T
+          # metres, and the farthest RESIDENT chunk's corner is at ~452 m (320 m radius, diagonal):
+          #   ratio 0.40 (0.33) past ~118 m
+          #   ratio 0.15 (0.20) past ~196 m -- both inside the 224 m shadow_distance
+          #   soft_lod   (0.15) past ~261 m -- past shadow_distance, so shadows never see it
+          #   field 8    (0.11) past ~355 m -- the outer ~100 m of the resident ring
+          #
+          # Two corrections to what this table used to say. The style tier was authored at
+          # screen_size 0.08, which engages past ~489 m -- BEYOND the 452 m where the resident set
+          # ends, so it never drew at all, while still costing every one of the ~441 resident
+          # chunks an unconditional extra stamp-and-weld and its own appended vertex buffer. It now
+          # sits at 0.15, where it is actually reached. And the `ratio: 0.07` tier it displaces was
+          # measured being REJECTED outright on a busy 32-tile chunk (terrain_chunk_cost): a ratio
+          # level that loses a pinned seam vertex is dropped, so that tier did not reliably exist.
+          # tileset_soft_lod is soft's own corner radii at coarser segment counts (seam-safe -- see
+          # tools/gen_tile_styles.py's `soft_lod` entry), so the chunk still reads as soft terrain,
+          # and being a re-mesh rather than a simplification it cannot be rejected.
+          #
+          # `field: 8` is the coarsest tier (mesh_chunk_field): one flat quad per 8x8 tiles with
+          # the rim kept at tile resolution, 0.7% of LOD 0's triangles, built in 0.01 ms against
+          # the 18 ms the three ratio tiers cost. It has no lip and no corner rounding, which past
+          # 355 m is well under a pixel -- and past the 224 m shadow_distance, so no shadow ever
+          # sees it either.
+          #
+          # Measured end to end on this scene (4000 frames, static camera, HEADLESS): 86.3 -> 70.7
+          # ms mean frame and 344 -> 282 s wall, i.e. ~18% off both, WHILE carrying more resident
+          # geometry (806 -> 845 meshes) because the cheaper tiers let streaming keep up. Note what
+          # that does and does not say: from this camera most chunks are near, so the far tiers
+          # barely engage and the gain is in BUILD cost rather than triangles drawn. The scene's
+          # standing cost is its shadows -- ~18.8M shadow triangles against ~4.7M camera ones --
+          # which no LOD table reaches, since casters inside shadow_distance are at LOD 0 anyway.
           lods:
             - { ratio: 0.40, screen_size: 0.33 }
             - { ratio: 0.15, screen_size: 0.20 }
-            - { ratio: 0.07, screen_size: 0.15 }
-            - { tile_set: objects/terrain/tileset_soft_lod, screen_size: 0.08 }
+            - { tile_set: objects/terrain/tileset_soft_lod, screen_size: 0.15 }
+            - { field: 8, screen_size: 0.11, native_border: 1 }
           collision: true
           tile_set: objects/terrain/tileset_soft
           kind_tile_sets:

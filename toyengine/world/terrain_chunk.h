@@ -218,6 +218,32 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
                               int style_override = -1, int native_border = 0);
 
 /**
+ * @brief Re-meshes a chunk's columns as a quantised heightfield: one flat quad per `stride` x
+ *        `stride` block of tiles at that block's tallest column, with vertical walls wherever
+ *        two blocks differ. No tile pieces, no lip, no corner rounding.
+ *
+ * What a `TerrainParams::ChunkLod::field_stride` level is built from. Deterministic in cost (a
+ * function of `chunk_size / stride`, not of the terrain's shape) and in output, so two workers
+ * meshing equal pads emit byte-identical buffers; and pure, with no simplifier involved, so
+ * unlike a `ratio` level this one exists on every chunk. Meshed in face space, so
+ * warp_chunk_to_planet() bends it onto a globe unchanged.
+ *
+ * **Why the seam holds.** A block's height is the tallest column it covers, never the mean, and
+ * the chunk's boundary walls descend to the neighbouring chunk's OWN column height read from the
+ * pad -- the same value that neighbour sampled. So a chunk's coarse surface only ever sits at or
+ * above the ground it stands in for, while its boundary wall reaches down to the neighbour's true
+ * height: two chunks drawing different levels overlap along the seam rather than opening a hole,
+ * whatever levels they picked. With `native_border >= 1` the rim blocks are single tiles, so the
+ * coarse surface additionally matches the true heights exactly where it meets a neighbour.
+ *
+ * @param stride        Tiles per interior block; clamped to at least 1.
+ * @param native_border Tiles of the chunk's rim meshed one block per tile; clamped to
+ *                      `chunk_size / 2`.
+ */
+void mesh_chunk_field(const ColumnPad& pad, const TerrainParams& params, std::int32_t stride,
+                      std::int32_t native_border, ChunkMeshData& out);
+
+/**
  * @brief A static collision mesh of a chunk's drawn surface (welded, with adjacency and a BVH),
  *        or null for an empty chunk. Pure; run on the chunk's worker.
  */
@@ -248,10 +274,14 @@ std::vector<std::uint8_t> chunk_seam_locks(const TerrainParams& params, const Ch
  * (`Mesh::simplify_levels` reads `mesh.indices`' size at entry as LOD 0's extent, so `ratio`
  * levels must build first) -- drawn with its own `vertex_offset`, costing the chunk's full
  * vertex set again. Skipped on a planet: the planet path warps the mesh before welding, which a
- * re-mesh here has no chance to do, and a planet already forces `max_merge = 1` and square
- * corners.
+ * re-mesh in another tile set has no chance to do, and a planet already forces `max_merge = 1`
+ * and square corners.
  *
- * @param pad     The chunk's columns, needed to re-mesh any `style` level.
+ * A `field` level (`TerrainParams::ChunkLod::field_stride > 0`) is appended the same way, and is
+ * the one re-meshed level a planet DOES carry: mesh_chunk_field() works in face space from the
+ * same columns LOD 0 used, so warp_chunk_to_planet() applies to it unchanged.
+ *
+ * @param pad     The chunk's columns, needed to re-mesh any `style` or `field` level.
  * @param library The chunk's baked tile library, needed to re-mesh any `style` level.
  */
 std::vector<coopa::gfx::engine::data::MeshLod> build_chunk_lods(const TerrainParams& params,

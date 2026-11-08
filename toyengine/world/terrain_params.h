@@ -160,9 +160,12 @@ struct TerrainParams {
     /** @brief Planet only: tiles along one face's edge (a multiple of `chunk_size`). */
     std::int32_t face_tiles = 128;
     /**
-     * @brief Most tiles one merged top or wall run may span; 0 is unlimited. A planet meshes every
-     *        tile on its own (1): a merged quad bent onto the sphere would cut a chord under the
-     *        tiles beside it and open cracks along its edges.
+     * @brief Most tiles one merged top or wall run may span; 0 is unlimited.
+     *
+     * A planet derives its own from its curvature (`planet_max_merge()`) rather than meshing
+     * every tile on its own, which is what a flat 1 costs it: a flat planet chunk at 1 is one
+     * quad per tile where a flat terrain chunk is a single merged rectangle. A scene may still
+     * author `max_merge:` explicitly, and `1` restores the per-tile meshing exactly.
      */
     std::int32_t max_merge = 0;
 
@@ -184,8 +187,27 @@ struct TerrainParams {
          * `lods:` in scene YAML (register.cpp); never set by `ratio`-only levels.
          */
         std::int8_t style         = -1;
-        /** @brief Tiles of the chunk's rim kept in the authored (non-style) tile set, style levels only. */
+        /**
+         * @brief Tiles of the chunk's rim kept at full detail -- in the authored (non-style) tile
+         *        set for a `style` level, at one cell per tile for a `field` level.
+         */
         std::int8_t native_border = 0;
+        /**
+         * @brief Tiles per cell to re-mesh this level as a quantised heightfield, instead of
+         *        simplifying LOD 0; 0 (the default) is not a field level.
+         *
+         * One flat quad per `field_stride` x `field_stride` block of tiles at that block's
+         * tallest column, with vertical walls wherever two blocks differ -- no tile pieces, no
+         * lip, no corner rounding. Three properties `ratio` and `style` levels lack: its cost is
+         * a function of `chunk_size / field_stride` alone, it can never be rejected the way a
+         * `ratio` level whose pinned seam vertex collapses is, and it is meshed in face space
+         * from the chunk's own columns, so **it is the one extra level a planet can carry** --
+         * warp_chunk_to_planet() bends it onto the globe like any other geometry.
+         *
+         * Resolved from a `field:` entry under `lods:` in scene YAML (register.cpp); `ratio` is
+         * ignored for it.
+         */
+        std::int8_t field_stride = 0;
     };
 
     /** @brief Most levels a chunk mesh carries, past LOD 0. */
@@ -209,6 +231,68 @@ struct TerrainParams {
 
     /** @brief The planet's cube-sphere (planet.h). */
     PlanetLayout layout() const { return PlanetLayout{face_tiles, tile_size}; }
+
+    /**
+     * @brief How far a merged run `span` world units long, standing `height` above sea level,
+     *        sags under the sphere -- in world units; 0 on a flat terrain.
+     *
+     * A merged quad bent onto the planet is a **chord**. Its corners sit exactly on the sphere --
+     * the per-tile geometry beside it shares them -- and only its interior falls away, by that
+     * chord's sagitta. Lifting the quad by this much turns the shortfall into an overlap (see
+     * mesh_chunk_styled()'s merge passes): the quad then meets the surface at its mid-span and
+     * stands just above it at its corners.
+     *
+     * `height` is not a refinement, it is the difference between a correct lift and one short by
+     * `height / radius` -- 3% on a 4-step terrace of a 122-unit globe. Face space is calibrated
+     * to arc length at SEA level, so a run's half-angle is `span / (2 * radius)` however high it
+     * stands, while the arc it has to clear is drawn at `radius + height`. Hence
+     * `span^2 * (radius + height) / (8 * radius^2)` rather than `span^2 / (8 * radius)`.
+     */
+    float planet_merge_sag(float span, float height) const {
+        if (!planet) return 0.0f;
+        const float radius = layout().radius();
+        if (radius <= 0.0f) return 0.0f;
+        return span * span * (radius + height) / (8.0f * radius * radius);
+    }
+
+    /**
+     * @brief The widest merged top or wall run this planet's curvature allows, in tiles.
+     *
+     * Inverts `planet_merge_sag()`: bounding a run's sag to `tolerance_steps` of a height step
+     * gives `W = sqrt(8 * radius * tolerance * height_step) / tile_size`. A bigger planet is
+     * flatter and so merges wider, which a fixed `max_merge = 1` gave up -- on a 122-unit globe
+     * of 1-unit tiles this is 4 tiles, and a flat chunk costs 16x less than at 1.
+     *
+     * Reads `face_tiles` through `layout()`, so set that first.
+     */
+    /**
+     * @brief The radial lift EVERY merged run on a planet gets, at a terrace `height` up; 0 on a
+     *        flat terrain.
+     *
+     * Deliberately a function of the merge CAP rather than of each run's own width, which is what
+     * makes it safe at a chunk seam. Two neighbouring chunks merge independently, so the runs
+     * meeting at their shared edge are rarely the same width; lifting each by its own sagitta
+     * would leave their shared corners at different radii -- a step, and a gap to see through at a
+     * grazing angle, exactly where `max_merge = 1` used to guarantee agreement. One cap-derived
+     * lift puts both sides at the same radius whatever they merged.
+     *
+     * A run narrower than the cap is then lifted further than its own sagitta, so it bulges
+     * slightly ABOVE the sphere rather than under it: an overlap against the per-tile geometry
+     * beside it, which cannot open a hole, where the un-lifted chord could. The surface therefore
+     * stands up to one cap-sagitta proud of true wherever it is merged -- a uniform offset, not a
+     * crack.
+     */
+    float planet_merge_lift(float height) const {
+        return planet_merge_sag(static_cast<float>(std::max(1, max_merge)) * tile_size, height);
+    }
+
+    std::int32_t planet_max_merge(float tolerance_steps = 0.02f) const {
+        if (!planet || tile_size <= 0.0f) return 1;
+        // Solved at sea level (height 0), where planet_merge_sag() reduces to span^2 / (8 R); a
+        // terrace standing higher sags proportionally more, which the per-quad lift absorbs.
+        const float span = std::sqrt(8.0f * layout().radius() * tolerance_steps * height_step);
+        return std::max<std::int32_t>(1, static_cast<std::int32_t>(span / tile_size));
+    }
 
     /** @brief World-space size of one chunk edge. */
     float chunk_world_size() const {

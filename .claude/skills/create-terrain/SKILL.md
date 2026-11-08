@@ -91,6 +91,13 @@ Write `tile_set:` in new scenes.
   come from `tools/gen_tile_styles.py` and `tools/gen_terrain_atlas.py` -- extend those
   generators (a new set is a new STYLES entry) rather than hand-editing their outputs. In the
   editor, *Duplicate as New Tile Set* copies a set with its own piece meshes to reshape.
+- **The sets are not equally cheap**, and the gap is large enough to drive the choice. Triangles
+  across all 11 pieces: `voxel` 22, `rock` 112, `round` 136, **`soft` 198**, `soft_lod` 68. Almost
+  all of soft's cost is four cap-tier corner pieces (`wall_cap_concave` 44, `wall_cap_continue_taper`
+  43, `wall_cap_convex` 40, `wall_cap_concave_taper` 31 = 158 of its 198); every other piece is
+  under 10. So `soft` is ~9x `voxel`, and a cliff-heavy or coastline-heavy world pays that most.
+  Soft is the right look for a lot of games -- just give a soft terrain `lods:` tiers (above)
+  rather than leaving it at the defaults, which is where the cost actually bites.
 - **Hard-edged voxel look**: `tile_set: objects/terrain/tileset_voxel`, and **erase any
   `kind_tile_sets` entries** -- pointing a kind at `tileset_rock` (or any set that uses
   `round_kind_corners: true`) softens exactly the corners the voxel set draws hard. See
@@ -103,16 +110,44 @@ Write `tile_set:` in new scenes.
   of them a collider -- `collision: false` (with `gravity: 0`) is most of the load time back for
   a globe nothing stands on. Reference: `assets/scenes/terrain/planet_demo`, a globe spun by the
   mouse (`Turntable` on the terrain object) in front of a fixed orbit camera that only zooms.
-- Every chunk mesh carries coarser LOD levels (`lods:`, a list of `{ratio, screen_size}`
-  coarsest last; `[]` turns them off). The defaults only coarsen chunks small on screen, so a
-  ground-level camera is unaffected; they pay on planets seen whole and on terrains with a
-  large `view_radius`. Seam vertices are pinned through every level, so chunks at different
-  levels never crack. A level can give `tile_set:` instead of `ratio:`, re-meshing the chunk in
-  another style rather than simplifying LOD 0 -- a style level can't lose a pinned seam vertex
-  to simplification, so it always exists, at the cost of its own vertex buffer instead of shared
-  index ranges. Keep a style tier's radii matching the chunks it borders (a `soft_lod` tile set
-  sharing `soft`'s own radii at coarser segment counts is the shipped example) or the seam shows a
-  visible step. Style levels must come last in the list, and don't apply on planets.
+- **A planet held whole in frame needs `field` LOD tiers, and nothing else comes close.** Every
+  chunk of a globe stays resident, so with no `lods:` the camera draws all of them at full
+  density. Measured on `planet_demo` (216 chunks, `face_tiles: 192`), adding three field tiers and
+  no ratio tier at all: **2,723k -> 119k camera triangles, 24.8 -> 4.1 ms a frame, and load+700
+  frames 17.8 -> 3.9 s wall.** A ratio tier is the wrong tool here twice over -- it costs 18 ms a
+  chunk to build (x216 chunks at load) and its coarsest level can be rejected. Start from:
+  ```yaml
+  lods:
+    - { field: 1,  screen_size: 0.20, native_border: 1 }
+    - { field: 4,  screen_size: 0.12, native_border: 1 }
+    - { field: 16, screen_size: 0.085 }
+  ```
+- A planet also derives its own `max_merge` from its curvature rather than meshing every tile
+  separately, so flat ground costs it far less than it used to; leave the key unset. It is worth
+  16x on a genuinely flat chunk but only a few percent on terraced ground, and nothing when zoomed
+  out (no chunk draws LOD 0 there). `max_merge: 1` restores the old per-tile meshing.
+- Every chunk mesh carries coarser LOD levels (`lods:`, coarsest last; `[]` turns them off).
+  Seam vertices are pinned through every level, so chunks at different levels never crack. Three
+  kinds of level, and the choice matters more than the thresholds:
+  - `{ratio, screen_size}` simplifies LOD 0 with meshopt, sharing its vertices. **Expensive to
+    build and not guaranteed to exist**: measured on a busy 32-tile chunk, the three shipped
+    default tiers cost **18 ms** -- 5.6x the 3.2 ms of meshing and welding the chunk at all -- and
+    the coarsest was *rejected* for losing a pinned seam vertex.
+  - `{tile_set, screen_size}` re-meshes the chunk in another style, so it cannot be rejected, at
+    the cost of its own vertex buffer. Keep its radii matching the chunks it borders (`soft_lod`
+    is `soft`'s own radii at coarser segment counts) or the seam shows a step. Not on planets.
+  - `{field, screen_size, native_border}` re-meshes the chunk as a plain heightfield: one flat
+    quad per `field` x `field` tiles, no pieces, lip or rounding. **The cheapest by far and the
+    only re-meshed tier a planet carries** -- 0.7% of LOD 0's triangles at `field: 8` and 0.01 ms
+    to build. `native_border: 1` keeps the rim at one quad per tile. Prefer this for far tiers.
+- **Threshold arithmetic, because getting it wrong gives you a tier that never draws.** A chunk's
+  `screen_size` is its projected height, `radius * cot(fov/2) / depth`, where `radius` is roughly
+  `0.71 * chunk_size * tile_size`. So a tier engages past `radius * cot(fov/2) / screen_size`
+  metres -- and on a streamed terrain the farthest resident chunk is only
+  `1.41 * view_radius * chunk_size * tile_size` away. `unified_terrain_demo` shipped a style tier
+  at `screen_size: 0.08`, which engages past ~489 m against a resident set ending at ~452 m: it
+  never drew, while costing all ~441 chunks an extra stamp-and-weld and vertex buffer. Work the
+  distance out, and check it against the resident radius.
 - **Editing at runtime**: `TerrainComponent::raise_at(world, radius, delta)` /
   `set_tile_height()` / `paint_tiles()` move the ground and queue the water, which then flows in
   (or off) over the next frames at `water_settle_budget` tiles each -- sea, lakes and rivers

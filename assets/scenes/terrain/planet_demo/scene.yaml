@@ -17,6 +17,27 @@ scene:
           gravity: 0.0
           height_step: 1.0
           kind_tile_sets: { rock: objects/terrain/tileset_rock, stone: objects/terrain/tileset_rock }
+          # Field tiers only -- no `ratio:` entry anywhere, so Mesh::simplify_levels() never runs
+          # on this scene. Measured on a busy 32-tile chunk (terrain_chunk_cost): the three default
+          # ratio tiers cost 18 ms a chunk to build -- 5.6x the 3.2 ms of meshing and welding the
+          # chunk in the first place -- and the coarsest of them is routinely REJECTED when it
+          # loses a pinned seam vertex. Across this globe's 216 always-resident chunks that was
+          # ~3.9 s of worker time for two levels that only engage in the last of the zoom range.
+          # A field tier re-meshes the chunk as a plain heightfield instead (mesh_chunk_field):
+          # 12% of LOD 0's triangles at stride 1 and 1.7% at stride 4, built in 0.01-0.09 ms, and
+          # it cannot be rejected. It is also the ONLY re-meshed tier a planet can carry, since it
+          # is built in face space and warped onto the globe with everything else.
+          #
+          # Thresholds are a chunk's projected height (radius * cot(fov/2) / depth). At fov 50 and
+          # a ~23 m chunk bounding radius that is ~49/depth, and the orbit camera runs
+          # distance 165..700 against a 122 m radius, so a front chunk's depth is ~43..578:
+          #   field 1  (0.20) past depth ~247  -- the soft lip stops resolving
+          #   field 4  (0.12) past depth ~411
+          #   field 16 (0.085) past depth ~580 -- i.e. the far end of the zoom-out
+          lods:
+            - { field: 1,  screen_size: 0.20, native_border: 1 }
+            - { field: 4,  screen_size: 0.12, native_border: 1 }
+            - { field: 16, screen_size: 0.085 }
           max_wall_steps: 8
           mode: tiles
           planet: true

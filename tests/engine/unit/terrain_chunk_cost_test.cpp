@@ -266,3 +266,461 @@ COOPA_TEST(style_lod_level_indexes_its_own_appended_vertices) {
     expect(in_range, "the style level's indices stay inside its own appended vertex range -- they "
                      "are local to vertex_offset, not absolute into the combined buffer");
 }
+
+/**
+ * @brief A planet's merge width comes from its curvature, and the sag it permits is the bound
+ *        that width was solved for.
+ *
+ * `max_merge = 1` is what a planet used to be fixed at, on the grounds that a merged quad bent
+ * onto the sphere cuts a chord under its neighbours. It does -- by `span^2 / (8 R)`, which is a
+ * number, so the width can be solved for instead of given up.
+ */
+COOPA_TEST(a_planet_derives_its_merge_width_from_curvature) {
+    for (const std::int32_t face_tiles : {64, 192, 1024}) {
+        TerrainParams params = make_test_params(32);
+        params.planet      = true;
+        params.face_tiles  = face_tiles;
+        params.tile_size   = 1.0f;
+        params.height_step = 1.0f;
+
+        const float        radius = params.layout().radius();
+        const std::int32_t width  = params.planet_max_merge();
+        const float        sag    = params.planet_merge_sag(static_cast<float>(width) * params.tile_size, 0.0f);
+        std::printf("    face_tiles %4d -> radius %7.1f, merge width %2d tiles, sag %.4f steps\n",
+                    face_tiles, radius, width, sag);
+
+        expect(width >= 1, "a planet always merges at least one tile");
+        expect(sag <= 0.02f + 1e-4f, "the derived width keeps the chord sag inside its tolerance");
+        // One tile wider would break the tolerance the width was solved for -- i.e. the bound is
+        // tight, not merely satisfied.
+        const float over = params.planet_merge_sag(static_cast<float>(width + 1) * params.tile_size, 0.0f);
+        expect(over > 0.02f * 0.5f, "the width is the largest the tolerance allows, not an arbitrary cap");
+    }
+
+    // A flat terrain is not a sphere and must keep merging without limit.
+    TerrainParams flat = make_test_params(32);
+    expect(flat.planet_merge_sag(32.0f, 4.0f) == 0.0f, "a flat terrain has no chord sag");
+    expect(flat.planet_max_merge() == 1, "planet_max_merge() is meaningless off a planet");
+}
+
+/**
+ * @brief The lift clears the chord at EVERY width up to the merge cap, and is the same number
+ *        whatever a run's own width -- the two properties a chunk seam depends on.
+ *
+ * Worked through PlanetLayout directly rather than through the mesher, because this is the
+ * arithmetic the lift rests on. Unlifted, the chord between two on-sphere corners dips its
+ * sagitta below the surface mid-span. Lifted by the CAP's sagitta, a run of any width up to the
+ * cap sits at or above the surface everywhere, so it overlaps the per-tile geometry beside it
+ * rather than cutting under it -- and because the lift does not depend on the width, two chunks
+ * that merged differently still put their shared seam corners at one radius.
+ */
+COOPA_TEST(the_merge_lift_clears_the_chord_at_every_width_and_does_not_vary_with_it) {
+    TerrainParams params = make_test_params(32);
+    params.planet      = true;
+    params.face_tiles  = 192;
+    params.tile_size   = 1.0f;
+    params.height_step = 1.0f;
+    params.max_merge   = params.planet_max_merge();
+
+    const PlanetLayout layout = params.layout();
+    const float        radius = layout.radius();
+    const double       height = 4.0;                 // the quad's terrace, in world units
+    const double       truth  = radius + height;     // where the surface actually is
+    const float        lift   = params.planet_merge_lift(static_cast<float>(height));
+
+    std::printf("    cap %d tiles -> one lift of %.5f for every run, at height %.0f\n",
+                params.max_merge, lift, height);
+
+    for (std::int32_t width = 1; width <= params.max_merge; ++width) {
+        const double x0 = 0.5 * static_cast<double>(params.face_tiles) * params.tile_size;
+        const auto   corner = [&](double dx, double raise) {
+            return layout.to_planet(0, x0 + dx, x0, height + raise);
+        };
+        const double span = static_cast<double>(width) * params.tile_size;
+
+        const double bare_mid   = glm::length((corner(0.0, 0.0) + corner(span, 0.0)) * 0.5);
+        const double lifted_mid = glm::length((corner(0.0, lift) + corner(span, lift)) * 0.5);
+        const double own_sag =
+            params.planet_merge_sag(static_cast<float>(span), static_cast<float>(height));
+
+        std::printf("      width %2d: own sag %.5f, unlifted mid %.5f under, lifted mid %+.5f\n",
+                    width, own_sag, truth - bare_mid, lifted_mid - truth);
+
+        expect(bare_mid < truth, "an unlifted merged run's mid-span really does fall under the sphere");
+        expect(std::abs(truth - bare_mid - own_sag) < 0.02 * own_sag + 1e-6,
+               "and it falls by the sagitta planet_merge_sag() predicts, to within 2%");
+        // At the cap width the lift exactly equals the sag, so the mid-span lands ON the surface
+        // to within the next term of the chord's own expansion; narrower runs clear it outright.
+        expect(lifted_mid >= truth - 1e-3 * lift - 1e-6,
+               "the cap-derived lift clears the chord at this width too -- at or above the surface");
+    }
+
+    // The property the seam rests on: the lift is a function of the terrace, not of the run.
+    expect(params.planet_merge_lift(static_cast<float>(height)) == lift,
+           "the lift does not vary with a run's width, so two chunks agree at their shared seam");
+}
+
+/**
+ * @brief Two neighbouring PLANET chunks still meet at one surface along their shared edge, now
+ *        that each merges runs independently and lifts them.
+ *
+ * The regression `max_merge = 1` used to make impossible by construction. The seam of each chunk
+ * is driven by the same two tile columns -- its own edge column and the neighbour's, both read
+ * from the shared pad -- so the set of heights appearing on the boundary plane must be the same
+ * from both sides. A lift that varied with a run's own width would break exactly this, because
+ * the two chunks' runs meeting there are rarely the same width.
+ */
+COOPA_TEST(two_planet_chunks_agree_on_their_shared_seam) {
+    const TileMeshLibrary library = make_tile_library({"soft", "rock"});
+    TerrainParams params = make_test_params(32);
+    params.planet      = true;
+    params.face_tiles  = 192;
+    params.tile_size   = 1.0f;
+    params.height_step = 1.0f;
+    params.max_merge   = params.planet_max_merge();
+
+    const std::int32_t n = params.chunk_size;
+    const float span = static_cast<float>(n) * params.tile_size;
+    const ColumnPad wide = busy_pad(2 * n, 9);
+    auto pad_at = [&](std::int32_t cx) {
+        ColumnPad out;
+        out.resize(n);
+        for (std::int32_t y = -1; y <= n; ++y) {
+            for (std::int32_t x = -1; x <= n; ++x) out.at(x, y) = wide.at(cx * n + x, y);
+        }
+        return out;
+    };
+
+    // Face space, before the warp: a vertex's z becomes its radius, so agreement here is
+    // agreement on the globe.
+    auto seam_heights = [&](const ChunkMeshData& mesh, float plane_x) {
+        std::vector<float> zs;
+        for (const auto& v : mesh.vertices) {
+            if (std::abs(v.position.x - plane_x) > 1e-3f) continue;
+            zs.push_back(v.position.z);
+        }
+        std::sort(zs.begin(), zs.end());
+        zs.erase(std::unique(zs.begin(), zs.end(),
+                             [](float a, float b) { return std::abs(a - b) < 1e-4f; }),
+                 zs.end());
+        return zs;
+    };
+
+    ChunkMeshData left, right;
+    mesh_chunk_styled(pad_at(0), library, params, left);
+    mesh_chunk_styled(pad_at(1), library, params, right);
+    const std::vector<float> a = seam_heights(left, span);
+    const std::vector<float> b = seam_heights(right, 0.0f);
+
+    auto unmatched = [](const std::vector<float>& xs, const std::vector<float>& ys) {
+        std::vector<float> out;
+        for (const float x : xs) {
+            bool found = false;
+            for (const float y : ys) {
+                if (std::abs(x - y) < 1e-3f) { found = true; break; }
+            }
+            if (!found) out.push_back(x);
+        }
+        return out;
+    };
+    const std::vector<float> only_left  = unmatched(a, b);
+    const std::vector<float> only_right = unmatched(b, a);
+
+    std::printf("    seam heights: left %zu, right %zu, left-only %zu, right-only %zu\n",
+                a.size(), b.size(), only_left.size(), only_right.size());
+    if (!only_left.empty())  std::printf("      first left-only  z = %.5f\n", only_left[0]);
+    if (!only_right.empty()) std::printf("      first right-only z = %.5f\n", only_right[0]);
+
+    expect(a.size() > 4, "the seam carries a range of heights -- the pad is busy there");
+    expect(only_left.empty() && only_right.empty(),
+           "both chunks put the same surface heights on their shared seam -- no step to see through");
+}
+
+/**
+ * @brief What the derived merge width is worth: a FLAT planet chunk, which `max_merge = 1` meshed
+ *        one quad per tile where a flat terrain chunk is a single rectangle.
+ */
+COOPA_TEST(merging_a_flat_planet_chunk_costs_far_less_than_per_tile) {
+    const TileMeshLibrary library = make_tile_library({"soft", "rock"});
+
+    ColumnPad flat;
+    flat.resize(32);
+    for (std::int32_t y = -1; y <= 32; ++y) {
+        for (std::int32_t x = -1; x <= 32; ++x) {
+            TileColumn& c = flat.at(x, y);
+            c.steps     = 4;
+            c.top_kind  = TileKind::Grass;
+            c.side_kind = TileKind::Dirt;
+        }
+    }
+
+    std::size_t per_tile = 0, derived = 0;
+    for (const bool curvature : {false, true}) {
+        TerrainParams params = make_test_params(32);
+        params.planet      = true;
+        params.face_tiles  = 192;
+        params.tile_size   = 1.0f;
+        params.height_step = 1.0f;
+        params.max_merge   = curvature ? params.planet_max_merge() : 1;
+
+        ChunkMeshData mesh;
+        mesh_chunk_styled(flat, library, params, mesh);
+        coopa::gfx::engine::data::Mesh::weld_and_optimize(mesh.vertices, mesh.indices);
+        const std::size_t tris = mesh.indices.size() / 3;
+        std::printf("    flat planet chunk, max_merge %2d: %5zu verts, %5zu tris\n",
+                    params.max_merge, mesh.vertices.size(), tris);
+        if (curvature) derived = tris; else per_tile = tris;
+    }
+
+    expect(per_tile > 0 && derived > 0, "a flat planet chunk meshes either way");
+    std::printf("    -> %.1fx fewer triangles on flat ground\n",
+                static_cast<double>(per_tile) / static_cast<double>(derived));
+    expect(derived * 4 < per_tile, "the derived width is worth at least 4x on flat ground");
+}
+
+/**
+ * @brief What a `field` level costs at each stride, against the chunk it stands in for.
+ *
+ * The headline measurement for the tier: unlike a `ratio` level, its cost is a function of
+ * `chunk_size / stride` and nothing else -- not of how busy the terrain is, and not of a
+ * simplifier that may decline to produce it at all.
+ */
+COOPA_TEST(field_level_cost_falls_with_stride) {
+    const TileMeshLibrary library = make_tile_library({"soft", "rock"});
+    const TerrainParams   params  = make_test_params(32);
+    const ColumnPad       pad     = busy_pad(params.chunk_size, 7);
+
+    ChunkMeshData full;
+    mesh_chunk_styled(pad, library, params, full);
+    coopa::gfx::engine::data::Mesh::weld_and_optimize(full.vertices, full.indices);
+    const std::size_t full_tris = full.indices.size() / 3;
+    std::printf("  LOD 0 (soft, busy 32-tile chunk): %zu verts, %zu tris\n", full.vertices.size(), full_tris);
+
+    std::size_t previous = full_tris;
+    for (const std::int32_t stride : {1, 2, 4, 8, 32}) {
+        ChunkMeshData field;
+        const auto t0 = std::chrono::steady_clock::now();
+        mesh_chunk_field(pad, params, stride, 1, field);
+        const double ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        coopa::gfx::engine::data::Mesh::weld_and_optimize(field.vertices, field.indices);
+        const std::size_t tris = field.indices.size() / 3;
+        std::printf("    field stride %2d, native_border 1: %5zu verts, %5zu tris (%.1f%% of LOD 0) in %.2f ms\n",
+                    stride, field.vertices.size(), tris,
+                    100.0 * static_cast<double>(tris) / static_cast<double>(full_tris), ms);
+        expect(tris > 0, "a field level of a busy chunk has geometry");
+        expect(tris <= previous, "a coarser stride is never more triangles than a finer one");
+        previous = tris;
+    }
+    // The same strides with no full-resolution rim, which is what the coarsest tier uses.
+    for (const std::int32_t stride : {8, 32}) {
+        ChunkMeshData field;
+        mesh_chunk_field(pad, params, stride, 0, field);
+        coopa::gfx::engine::data::Mesh::weld_and_optimize(field.vertices, field.indices);
+        std::printf("    field stride %2d, native_border 0: %5zu verts, %5zu tris (%.2f%% of LOD 0)\n",
+                    stride, field.vertices.size(), field.indices.size() / 3,
+                    100.0 * static_cast<double>(field.indices.size() / 3) / static_cast<double>(full_tris));
+    }
+
+    ChunkMeshData coarse;
+    mesh_chunk_field(pad, params, 8, 1, coarse);
+    coopa::gfx::engine::data::Mesh::weld_and_optimize(coarse.vertices, coarse.indices);
+    expect(coarse.indices.size() / 3 < full_tris / 5,
+           "a stride-8 field level is a small fraction of the chunk it stands in for");
+}
+
+/**
+ * @brief The invariant the whole seam argument rests on: a field level's surface sits at or
+ *        ABOVE the full mesh everywhere, never below it.
+ *
+ * A block takes the height of its tallest column, so the coarse surface can only ever be too
+ * high. That is what makes two chunks at different levels overlap along their shared edge
+ * instead of opening a hole, and it is also why nothing the full mesh carries can poke through a
+ * coarse chunk.
+ */
+COOPA_TEST(field_level_never_sinks_below_the_full_mesh) {
+    const TerrainParams params = make_test_params(32);
+    const ColumnPad     pad    = busy_pad(params.chunk_size, 11);
+
+    for (const std::int32_t stride : {1, 4, 8}) {
+        ChunkMeshData field;
+        mesh_chunk_field(pad, params, stride, 1, field);
+        // Unwelded, so the mesher's quads are still groups of four consecutive vertices -- which
+        // is what lets each tile be tested against the quad that actually covers it. (Testing a
+        // top VERTEX against the tile its coordinate floors to is wrong: a corner is shared by up
+        // to four tiles, and the lowest of them owns it.)
+        std::size_t checked = 0, below = 0;
+        float worst = 0.0f;
+        for (std::int32_t ty = 0; ty < params.chunk_size; ++ty) {
+            for (std::int32_t tx = 0; tx < params.chunk_size; ++tx) {
+                const float cx = (static_cast<float>(tx) + 0.5f) * params.tile_size;
+                const float cy = (static_cast<float>(ty) + 0.5f) * params.tile_size;
+                float surface = -1e9f;
+                for (std::size_t q = 0; q + 3 < field.vertices.size(); q += 4) {
+                    if (field.vertices[q].normal.z < 0.9f) continue;   // tops only
+                    float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+                    for (std::size_t k = q; k < q + 4; ++k) {
+                        const glm::vec3& p = field.vertices[k].position;
+                        x0 = std::min(x0, p.x); x1 = std::max(x1, p.x);
+                        y0 = std::min(y0, p.y); y1 = std::max(y1, p.y);
+                    }
+                    if (cx < x0 || cx > x1 || cy < y0 || cy > y1) continue;
+                    surface = std::max(surface, field.vertices[q].position.z);
+                }
+                const float true_z = static_cast<float>(pad.at(tx, ty).steps) * params.height_step;
+                ++checked;
+                if (surface < true_z - 1e-3f) { ++below; worst = std::max(worst, true_z - surface); }
+            }
+        }
+        std::printf("    field stride %d: %zu tiles covered, %zu where the coarse surface sinks below "
+                    "the true ground (worst %.3f)\n", stride, checked, below, worst);
+        expect(checked == static_cast<std::size_t>(params.chunk_size) *
+                              static_cast<std::size_t>(params.chunk_size),
+               "every tile is covered by a top quad -- the field level has no holes in plan");
+        expect(below == 0, "no part of a field level's surface sinks below the ground it stands in for");
+    }
+}
+
+/**
+ * @brief Two neighbouring chunks at DIFFERENT field strides leave no vertical gap at the seam.
+ *
+ * The cross-chunk guarantee nothing tested before this: each chunk's boundary wall descends to
+ * the neighbour's own column height read from the shared pad, while its own surface sits at or
+ * above that height, so the two chunks' z-coverage at the seam always overlaps. Checked per tile
+ * row, from the meshes themselves rather than from the model that produced them.
+ */
+COOPA_TEST(two_field_chunks_overlap_on_their_shared_seam) {
+    TerrainParams params = make_test_params(32);
+    const std::int32_t n = params.chunk_size;
+    const float span = static_cast<float>(n) * params.tile_size;
+
+    // One source field, sampled into two adjacent pads: chunk (0,0) and chunk (1,0). Each pad's
+    // skirt therefore holds the other chunk's true edge columns, which is the real situation.
+    const ColumnPad wide = busy_pad(2 * n, 5);
+    auto pad_at = [&](std::int32_t cx) {
+        ColumnPad out;
+        out.resize(n);
+        for (std::int32_t y = -1; y <= n; ++y) {
+            for (std::int32_t x = -1; x <= n; ++x) out.at(x, y) = wide.at(cx * n + x, y);
+        }
+        return out;
+    };
+
+    ChunkMeshData left, right;
+    mesh_chunk_field(pad_at(0), params, 8, 1, left);    // coarse
+    mesh_chunk_field(pad_at(1), params, 1, 1, right);   // fine, a different level
+
+    // z-coverage on the shared plane, per tile row. Left's seam is its local x == span; right's
+    // is its local x == 0. Walked QUAD by quad (the mesh is unwelded, so a quad is four
+    // consecutive vertices) and spread over every row the quad spans -- a coarse block's top has
+    // vertices only at its band edges, so collecting bare vertices per row would leave most rows
+    // of a strided chunk looking empty.
+    auto coverage = [&](const ChunkMeshData& mesh, float plane_x) {
+        std::vector<std::pair<float, float>> rows(static_cast<std::size_t>(n), {1e9f, -1e9f});
+        for (std::size_t q = 0; q + 3 < mesh.vertices.size(); q += 4) {
+            float y_lo = 1e9f, y_hi = -1e9f, z_lo = 1e9f, z_hi = -1e9f;
+            int on_plane = 0;
+            for (std::size_t k = q; k < q + 4; ++k) {
+                const glm::vec3& p = mesh.vertices[k].position;
+                if (std::abs(p.x - plane_x) > 1e-3f) continue;
+                ++on_plane;
+                y_lo = std::min(y_lo, p.y); y_hi = std::max(y_hi, p.y);
+                z_lo = std::min(z_lo, p.z); z_hi = std::max(z_hi, p.z);
+            }
+            // A top quad meets the plane along one edge (two corners); a wall quad lies in it
+            // (four). Fewer than two corners means the quad does not reach the seam at all.
+            if (on_plane < 2) continue;
+            const std::int32_t first = std::clamp(
+                static_cast<std::int32_t>(std::floor(y_lo / params.tile_size + 1e-4f)), 0, n - 1);
+            const std::int32_t last = std::clamp(
+                static_cast<std::int32_t>(std::ceil(y_hi / params.tile_size - 1e-4f)) - 1, 0, n - 1);
+            for (std::int32_t y = first; y <= last; ++y) {
+                auto& row = rows[static_cast<std::size_t>(y)];
+                row.first  = std::min(row.first, z_lo);
+                row.second = std::max(row.second, z_hi);
+            }
+        }
+        return rows;
+    };
+    const auto lo = coverage(left, span);
+    const auto hi = coverage(right, 0.0f);
+
+    std::size_t rows_checked = 0, gaps = 0;
+    float worst_gap = 0.0f;
+    for (std::int32_t y = 0; y < n; ++y) {
+        const auto& a = lo[static_cast<std::size_t>(y)];
+        const auto& b = hi[static_cast<std::size_t>(y)];
+        if (a.second < a.first || b.second < b.first) continue;   // a row neither side reaches
+        ++rows_checked;
+        // Overlapping or touching intervals leave nothing to see through.
+        const float gap = std::max(0.0f, std::max(a.first - b.second, b.first - a.second));
+        if (gap > 1e-3f) { ++gaps; worst_gap = std::max(worst_gap, gap); }
+    }
+    std::printf("    seam rows checked %zu of %d, gaps %zu (worst %.4f)\n", rows_checked, n, gaps, worst_gap);
+    expect(rows_checked == static_cast<std::size_t>(n),
+           "every seam row has geometry on both sides -- each rim block's top reaches the seam");
+    expect(gaps == 0, "a coarse chunk and a fine neighbour overlap at every seam row -- no hole");
+}
+
+/**
+ * @brief A `field` level appends its own vertices like a `style` level -- and, unlike one, is
+ *        built on a PLANET, where it lands on the sphere.
+ */
+COOPA_TEST(field_lod_level_is_appended_and_works_on_a_planet) {
+    const TileMeshLibrary library = make_tile_library({"soft", "rock"});
+
+    for (const bool planet : {false, true}) {
+        TerrainParams params = make_test_params(32);
+        params.chunk_lods    = {};
+        params.chunk_lods[0] = {0.40f, 0.33f};                 // one ordinary ratio level
+        params.chunk_lods[1].field_stride = 8;                 // and one field level behind it
+        params.chunk_lods[1].screen_size  = 0.10f;
+        params.chunk_lods[1].native_border = 1;
+        params.planet     = planet;
+        params.face_tiles = 64;
+        if (planet) params.max_merge = 1;   // what register.cpp forces for a planet
+
+        // LOD 0 is left in face space here (ChunkBuildJob::run() is what warps it, and
+        // warp_chunk_to_planet() is private to terrain_chunk.cpp). What this checks is that
+        // build_chunk_lods() warps the FIELD level it re-meshes, which is the new behaviour.
+        const ColumnPad pad = busy_pad(params.chunk_size, 3);
+        ChunkMeshData mesh;
+        mesh_chunk_styled(pad, library, params, mesh);
+        coopa::gfx::engine::data::Mesh::weld_and_optimize(mesh.vertices, mesh.indices);
+        const std::size_t lod0_vertices = mesh.vertices.size();
+
+        const std::vector<coopa::gfx::engine::data::MeshLod> table =
+            build_chunk_lods(params, ChunkCoord{0, 0}, pad, library, mesh);
+
+        std::printf("    planet=%d: %zu levels, LOD 0 %zu verts, field level %u tris\n",
+                    planet ? 1 : 0, table.size(), lod0_vertices,
+                    table.size() >= 3 ? table[2].index_count / 3 : 0u);
+        expect(table.size() == 3, "LOD 0, one ratio level and one field level -- on a planet too");
+        expect(table[2].vertex_offset == static_cast<std::int32_t>(lod0_vertices),
+               "the field level's own vertices start where LOD 0's left off");
+        expect(table[2].index_count > 0, "the field level has geometry");
+
+        bool in_range = true;
+        const std::size_t appended = mesh.vertices.size() - lod0_vertices;
+        for (std::size_t k = table[2].first_index; k < table[2].first_index + table[2].index_count; ++k) {
+            if (mesh.indices[k] >= appended) { in_range = false; break; }
+        }
+        expect(in_range, "the field level's indices are local to its own appended vertex range");
+
+        if (!planet) continue;
+        // On a planet the level must have been bent onto the globe with LOD 0, not left flat in
+        // face space -- every one of its vertices stands off the planet's centre.
+        const float radius = params.layout().radius();
+        float lowest = 1e9f, highest = 0.0f;
+        for (std::size_t v = lod0_vertices; v < mesh.vertices.size(); ++v) {
+            const float r = glm::length(mesh.vertices[v].position);
+            lowest  = std::min(lowest, r);
+            highest = std::max(highest, r);
+        }
+        std::printf("      field level radii %.2f..%.2f (planet radius %.2f)\n", lowest, highest, radius);
+        expect(lowest > radius * 0.5f,
+               "a planet's field level is warped onto the globe, not left flat in face space");
+        expect(highest < radius + static_cast<float>(mesh.max_steps + 2) * params.height_step,
+               "and it does not fly off it");
+    }
+}

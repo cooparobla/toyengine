@@ -117,6 +117,38 @@ public:
     float min_distance  = 0.5f;   /**< Lower zoom clamp. */
     float max_distance  = 100.0f; /**< Upper zoom clamp. */
 
+    /**
+     * @brief Zoom-coupled pitch: with either set, `pitch_deg` is driven entirely from `distance`
+     *        (linearly between these two, at `min_distance`/`max_distance`) instead of the mouse
+     *        or keys -- a planet held whole in frame at `max_distance` and a ground-level look
+     *        at `min_distance` need different elevations, not a user's drag to find them. Only
+     *        one needs setting; the other end holds whatever pitch_deg already is (the seed
+     *        transform's, or the other field, if both are set). kUnset (the default) leaves
+     *        pitch entirely to the mouse/keys, as before.
+     */
+    float pitch_at_min_distance_deg = kUnset;
+    /** @brief The other end of the zoom-coupled pitch range; see pitch_at_min_distance_deg. */
+    float pitch_at_max_distance_deg = kUnset;
+
+    /**
+     * @brief Zoom-coupled LOOK direction: how far the view tilts off the target toward the
+     *        local horizon, 0 = straight at the target, 1 = along the surface tangent.
+     *
+     * `pitch_at_*_distance_deg` moves the camera around the orbit sphere but the view still
+     * points at the target, so close up a planet is always seen straight down. These two tilt
+     * the view itself, interpolated by `distance` exactly as the pitch pair is: set
+     * `tangent_at_min_distance: 1` with `tangent_at_max_distance: 0` and zooming in swings the
+     * camera from holding the whole globe to looking out along its horizon, which is the
+     * difference between a map and standing on a world.
+     *
+     * The tilt is a rotation of 90 degrees * this amount in the orbit's own meridian plane, so
+     * it composes with a gravity field's frame the same way the rest of the orbit pose does.
+     * kUnset (the default) on both leaves the view pointed at the target, as before.
+     */
+    float tangent_at_min_distance = kUnset;
+    /** @brief The other end of the zoom-coupled tangent range; see tangent_at_min_distance. */
+    float tangent_at_max_distance = kUnset;
+
     // --- Orbit input tuning ---
     float mouse_sensitivity      = 0.15f; /**< Degrees of yaw/pitch per pixel of mouse motion. */
     bool  invert_x               = false; /**< Flips yaw direction. */
@@ -272,6 +304,9 @@ private:
      *        as CharacterController does). Returns false (and the orbit stays in the world frame,
      *        exactly as without a field) when there is no field.
      */
+    /** @brief The 0..1 look tilt for the current smoothed distance; see tangent_at_min_distance. */
+    float tangent_amount_() const;
+
     bool field_frame_(const glm::vec3& target, glm::mat3& out);
     bool      field_ = false;
     glm::vec3 field_up_{0.0f, 0.0f, 1.0f};

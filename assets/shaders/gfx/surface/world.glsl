@@ -48,7 +48,8 @@ layout(set = GFX_WORLD_SET, binding = 0) uniform SurfaceWorldUBO {
     vec4  field;          // z cell, w 1 = trench field valid
     ivec4 field_dims;     // x n, yz window min cell index
     vec4  snow_style;     // x 1 = hard-edged patches, y patch size (m)
-    vec4  wind_gust;      // x gust strength, y gust clock (s) -- gfx_world_wind_at()
+    vec4  wind_gust;      // x gust strength, y gust clock (s), z LAST frame's gust clock, w LAST
+                          // frame's renderer clock -- gfx_world_wind_at(), gfx_world_time()
     ivec4 terrain_count;  // x heightmap terrains in use, y local env sources in use
     GfxTerrain terrain[4];
     // Appended AFTER terrain[] to match SurfaceWorldUBO: inserting ahead of it would shift
@@ -58,6 +59,29 @@ layout(set = GFX_WORLD_SET, binding = 0) uniform SurfaceWorldUBO {
 
 layout(std430, set = GFX_WORLD_SET, binding = 1) readonly buffer GfxOcclusionHeights { float gfx_occl_heights[]; };
 layout(std430, set = GFX_WORLD_SET, binding = 2) readonly buffer GfxSnowTrench { uint gfx_snow_trench[]; };
+
+// 1 while a backbone is re-evaluating a vertex-displacement hook at LAST frame's pose (see
+// gfx/surface/gbuffer_vs.glsl's GFX_SURFACE_PREV_POSE): every world CLOCK below then answers
+// with last frame's value instead of this frame's, so a hook re-run on in_prev_model reproduces
+// exactly where it put the vertex last frame -- which is what makes the G-buffer's velocity
+// attachment true for a vertex-animated surface (wind-swayed foliage, hair) rather than zero.
+// Unreal does the same thing: a World Position Offset material opted into motion vectors
+// evaluates its WPO a second time at PrevFrameGameTime.
+//
+// Everything else a hook reads -- the mean wind vector, turbulence, every local EnvInfluence's
+// position and strength -- stays CURRENT frame regardless of this flag; only the two clocks
+// rewind. See the limitation note at gbuffer_vs.glsl's GFX_SURFACE_PREV_POSE block for why that
+// is an acceptable approximation.
+//
+// Deliberately NOT referenced from any accessor that a tessellation CONTROL stage could reach --
+// several .tesc files include this header without declaring gfx_time, so nothing here may read
+// it; both clocks below come straight out of the UBO instead.
+int gfx_prev_pose_ = 0;
+
+/// The renderer clock (s) a displacement hook should animate on. Equal to gfx_time.x when no
+/// hook is mid-re-evaluation; gfx_world.snow.w carries that same value, so this is a read of
+/// data already uploaded rather than new plumbing.
+float gfx_world_time() { return gfx_prev_pose_ != 0 ? gfx_world.wind_gust.w : gfx_world.snow.w; }
 
 // ---------------------------------------------------------------------------------------
 // Local environmental influences -- the SAME fold as toyengine/env/env_field.h's
@@ -209,7 +233,7 @@ vec3 gfx_world_global_wind_at(vec3 p) {
     float speed = length(wind.xy);
     float gust = gfx_world.wind_gust.x;
     if (speed < 1e-4 || gust <= 0.0) return wind;
-    float t = gfx_world.wind_gust.y;
+    float t = gfx_prev_pose_ != 0 ? gfx_world.wind_gust.z : gfx_world.wind_gust.y;
     vec2 dir = wind.xy / speed;
     float along = dot(p.xy, dir);
     float cross_ = dot(p.xy, vec2(-dir.y, dir.x));

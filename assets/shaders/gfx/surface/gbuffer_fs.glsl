@@ -39,7 +39,7 @@ layout(push_constant) uniform PushConstants {
     float ao;
     float alpha_cutoff; // 0.0 disables the alpha test below
     vec4  emissive;     // xyz = pre-multiplied emissive radiance, w reserved
-    vec4  gfx_time;     // x=time, y=delta_time, z=frame_index, w=spare
+    vec4  gfx_time;     // x=time, y=delta_time, z=frame_index, w=the water clock (WaterFrameState::time)
     vec4  gfx_params;   // four author-defined floats; see the surface shader's own doc
     uvec4 surface_ext; // x/y packed tess params, z flags (0: no snow, 1: wet, 2: burning), w toon code
 } material;

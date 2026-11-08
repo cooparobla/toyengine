@@ -259,3 +259,20 @@ COOPA_TEST(view_offsets_into_the_world) {
     expect(w.kind == WaterKind::Lake, "view: the water kind comes through");
     expect_near(w.level, 9.0f, 1e-5f, "view: and its level is in world space");
 }
+
+/**
+ * @brief height_range() answers the whole plane's min/max in BOTH modes, not just the
+ *        heightmap one -- it used to silently return (0,0) for tiles, since minmax() bails
+ *        out whenever !has_heights() and tiles mode has no float plane for it to scan.
+ */
+COOPA_TEST(height_range_covers_the_whole_plane_in_both_modes) {
+    const TerrainField t = tiled();
+    const glm::vec2 tr = t.data()->height_range();
+    expect_near(tr.x, 0.0f, 1e-6f, "tiles: the low terrace is the plane's minimum");
+    expect_near(tr.y, 1.0f, 1e-6f, "tiles: two 0.5 m steps is the plane's maximum");
+
+    const TerrainField s = smooth();
+    const glm::vec2 sr = s.data()->height_range();
+    expect_near(sr.x, 0.0f, 1e-6f, "heightmap: i=0 is the plane's minimum");
+    expect_near(sr.y, 8.0f, 1e-6f, "heightmap: i=16, 0.5 * 16, is the plane's maximum");
+}

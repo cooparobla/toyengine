@@ -98,9 +98,15 @@ void CameraController::update_orbit_(coopa::util::Transform& t, float dt) {
         if (glm::length(desired - smoothed_target_) < 1e-4f) smoothed_target_ = desired;
     }
 
+    // Zoom-coupled pitch (see the field's own doc) replaces manual pitch control entirely: a
+    // planet scene wants elevation to track how far the camera has zoomed out, not wherever the
+    // last drag left it.
+    const bool zoom_coupled_pitch =
+        pitch_at_min_distance_deg != kUnset || pitch_at_max_distance_deg != kUnset;
+
     yaw_deg += mouse_delta.x * mouse_sensitivity * (invert_x ? -1.0f : 1.0f);
     yaw_deg += auto_rotate_deg_per_sec * dt;
-    pitch_deg += mouse_delta.y * mouse_sensitivity * (invert_y ? -1.0f : 1.0f);
+    if (!zoom_coupled_pitch) pitch_deg += mouse_delta.y * mouse_sensitivity * (invert_y ? -1.0f : 1.0f);
     if (key_orbit_speed_deg_per_sec != 0.0f) {
         // WASD and the arrow keys add into the same two angles the mouse drives, so a scene can
         // offer both and they stay one camera rather than two fighting rigs. Clamped, not scaled:
@@ -108,7 +114,7 @@ void CameraController::update_orbit_(coopa::util::Transform& t, float dt) {
         const float keys_x = glm::clamp(move_input.x + look_input.x, -1.0f, 1.0f);
         const float keys_y = glm::clamp(move_input.y + look_input.y, -1.0f, 1.0f);
         yaw_deg += keys_x * key_orbit_speed_deg_per_sec * dt * (invert_x ? -1.0f : 1.0f);
-        pitch_deg += keys_y * key_orbit_speed_deg_per_sec * dt * (invert_y ? -1.0f : 1.0f);
+        if (!zoom_coupled_pitch) pitch_deg += keys_y * key_orbit_speed_deg_per_sec * dt * (invert_y ? -1.0f : 1.0f);
     }
     if (key_pan_speed != 0.0f && tracker.empty()) {
         // Slides the static target in the camera's own horizontal plane: right/left along the
@@ -120,11 +126,22 @@ void CameraController::update_orbit_(coopa::util::Transform& t, float dt) {
         const glm::vec3 up(0.0f, 0.0f, 1.0f);
         target += (right * look_input.x + up * look_input.y) * key_pan_speed * dt;
     }
-    pitch_deg = glm::clamp(pitch_deg, min_pitch_deg, max_pitch_deg);
-
     if (scroll_input != 0.0f) {
         distance = glm::clamp(distance - scroll_input * zoom_speed, min_distance, max_distance);
     }
+
+    if (zoom_coupled_pitch) {
+        // Either end left at kUnset holds whatever pitch_deg already is (the seed transform's
+        // start() derived it from, or the other end's explicit value) -- so a scene only has to
+        // author the one end it cares about.
+        const float lo = pitch_at_min_distance_deg != kUnset ? pitch_at_min_distance_deg : pitch_deg;
+        const float hi = pitch_at_max_distance_deg != kUnset ? pitch_at_max_distance_deg : pitch_deg;
+        const float t  = max_distance > min_distance
+            ? glm::clamp((distance - min_distance) / (max_distance - min_distance), 0.0f, 1.0f)
+            : 0.0f;
+        pitch_deg = glm::mix(lo, hi, t);
+    }
+    pitch_deg = glm::clamp(pitch_deg, min_pitch_deg, max_pitch_deg);
 
     // Drag: yaw_deg/pitch_deg/distance above are the raw targets input just set;
     // smoothed_* is what's actually applied below, chasing those targets at a rate
@@ -188,13 +205,33 @@ void CameraController::update_orbit_(coopa::util::Transform& t, float dt) {
     }
     if (smoothed_distance_ > 1e-4f) offset *= applied / smoothed_distance_;
 
+    // Elevation of the VIEW, which is the orbit's own elevation only while the camera looks at
+    // the target. Tilting a further 90 degrees puts the view perpendicular to the camera's up
+    // vector -- that is the surface tangent, by definition -- so the whole "look at the target
+    // vs look at the horizon" blend is this one subtraction.
+    const float look_x = 90.0f * (1.0f + tangent_amount_()) - smoothed_pitch_deg_;
+
     t.set_position(smoothed_target_ + offset);
     if (field) {
         t.set_rotation_quat(glm::quat_cast(frame) *
-                            glm::quat(glm::radians(glm::vec3(90.0f - smoothed_pitch_deg_, 0.0f, smoothed_yaw_deg_))));
+                            glm::quat(glm::radians(glm::vec3(look_x, 0.0f, smoothed_yaw_deg_))));
         return;
     }
-    t.set_rotation(glm::vec3(90.0f - smoothed_pitch_deg_, 0.0f, smoothed_yaw_deg_));
+    t.set_rotation(glm::vec3(look_x, 0.0f, smoothed_yaw_deg_));
+}
+
+float CameraController::tangent_amount_() const {
+    if (tangent_at_min_distance == kUnset && tangent_at_max_distance == kUnset) return 0.0f;
+    // Either end left at kUnset means "no tilt at that end", so a scene only has to author the
+    // one it cares about -- the same convenience the pitch pair above offers.
+    const float lo = tangent_at_min_distance != kUnset ? tangent_at_min_distance : 0.0f;
+    const float hi = tangent_at_max_distance != kUnset ? tangent_at_max_distance : 0.0f;
+    // Driven by the SMOOTHED distance, so the view swings with the zoom instead of snapping
+    // ahead of it (pitch gets the same treatment one step later, through smoothed_pitch_deg_).
+    const float t = max_distance > min_distance
+        ? glm::clamp((smoothed_distance_ - min_distance) / (max_distance - min_distance), 0.0f, 1.0f)
+        : 0.0f;
+    return glm::clamp(glm::mix(lo, hi, t), 0.0f, 1.0f);
 }
 
 bool CameraController::field_frame_(const glm::vec3& target, glm::mat3& out) {

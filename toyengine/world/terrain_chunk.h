@@ -85,6 +85,13 @@ struct ChunkMeshData {
     std::vector<coopa::gfx::engine::data::Vertex> vertices;
     std::vector<std::uint32_t>                    indices;
 
+    /**
+     * @brief The tallest column this chunk's pad held (its own tiles, not the neighbour skirt),
+     *        in steps -- a byproduct of mesh_chunk_styled()'s per-tile walk, not a second pass.
+     *        A planet's horizon cull reads this per chunk; see TerrainChunk::max_steps.
+     */
+    std::int32_t max_steps = 0;
+
     /** @brief True when there is nothing to draw -- an all-air chunk beyond the map, say. */
     bool empty() const { return vertices.empty() || indices.empty(); }
 

@@ -147,6 +147,16 @@ struct TerrainChunk {
     std::uint32_t mesh_serial = 0;
 
     /**
+     * @brief The tallest column (ChunkMeshData::max_steps) this chunk was last meshed at.
+     *
+     * Copied from the build job's output on every upload (TerrainSystem::upload_finished_chunks_()),
+     * so a planet's horizon cull (TerrainSystem::cull_planet_horizon_()) can bound how far round
+     * the limb THIS chunk's own peak stays visible from, instead of one global margin sized to
+     * the tallest column anywhere on the globe.
+     */
+    std::int32_t max_steps = 0;
+
+    /**
      * @brief chunk_water_hash() of the surfaces this chunk's water children were built from.
      *
      * A rebuild swaps the terrain mesh in the frame it lands, so the ground never blinks -- but

@@ -232,14 +232,16 @@ public:
      * @param top_anchored Use the cap tier's anchored vertical mapping.
      * @param out_v        Vertex buffer to append to.
      * @param out_i        Index buffer to append to; rebased onto `out_v`'s current end.
-     * @param stretch_axis World axis (0 = x, 1 = y) `stretch` lengthens.
-     * @param stretch      Length multiplier along `stretch_axis`, for a straight() run; only
-     *                     valid for geometry invariant along that axis.
+     * @param stretch      Per-axis length multiplier applied to the canonical cell before
+     *                     `origin`/`scale`; `{1,1,1}` is the unstretched piece. A component other
+     *                     than 1 is only valid where the geometry is invariant along that
+     *                     axis -- x/y for a straight() run, z for a plain (non-cap) wall tier
+     *                     merged vertically across several cells of equal surface code.
      */
     void append_styled(const SideGeometry& geometry, const glm::vec3& origin, const glm::vec3& scale,
                        float blend_code, bool top_anchored,
                        std::vector<Vertex>& out_v, std::vector<std::uint32_t>& out_i,
-                       int stretch_axis = 0, float stretch = 1.0f) const;
+                       const glm::vec3& stretch = glm::vec3(1.0f)) const;
 
 private:
     /// A mesh source flattened to a plain triangle list (three vertices per triangle).

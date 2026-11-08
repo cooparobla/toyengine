@@ -279,7 +279,7 @@ const std::vector<FieldDesc>& material_fields() {
                  "Draw the outline on this material. Needs Outline on and its mode set to Toon"),
         // Drawn by draw_material_block()'s Shader section (named per-shader params), not as
         // plain fields -- listed here so they count as known material keys and overrides.
-        f_enum("shader", {"", "triplanar", "foliage", "snow", "water"}),
+        f_enum("shader", {"", "triplanar", "foliage", "snow", "water", "planet_clouds"}),
         [] { FieldDesc f; f.key = "shader_params"; f.kind = FieldKind::Vec4; f.speed = 0.01f; return f; }(),
         [] { FieldDesc f; f.key = "shader_params_ext"; f.kind = FieldKind::Vec4; f.speed = 0.01f; return f; }(),
     };
@@ -345,6 +345,14 @@ const std::vector<SurfaceShaderInfo>& surface_shaders() {
         }},
         {"snow", "Deep snow", false, "Raised by the weather's lying snow, carved by SnowDeformers. Give the renderer tessellation.", false, {}},
         {"water", "Water", true, "Waves, depth colour and foam. Needs a WaterBody on the object.", true, {}},
+        {"planet_clouds", "Planet clouds", true,
+         "A cloud deck shell, just outside the ground and just inside the atmosphere shell above. The planet's centre and "
+         "a sunlit tint are set through shader_params_ext (xyz of each), not labelled below.", true, {
+            {"Shell radius", 136.0f, 1.0f, 100000.0f, 0.5f, {}},
+            {"Noise scale", 6.0f, 0.1f, 1000.0f, 0.05f, {}},
+            {"Coverage", 0.4f, 0.0f, 1.0f, 0.01f, {}},
+            {"Drift speed", 0.01f, 0.0f, 2.0f, 0.001f, {}},
+        }},
     };
     return shaders;
 }
@@ -1191,6 +1199,18 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             with_tip(f_float("max_pitch_deg", 85.0f, 0.5f, -89.0f, 89.0f), "Upper elevation clamp"),
             f_float("min_distance", 0.5f, 0.05f, 0.0f, 10000.0f),
             f_float("max_distance", 100.0f, 0.5f, 0.0f, 100000.0f),
+            with_tip(f_float("pitch_at_min_distance_deg", 0.0f, 0.5f, -89.0f, 89.0f),
+                     "Unset: pitch stays with the mouse/keys. Set either this or the max-distance one to make the whole "
+                     "orbit elevation track the zoom instead -- a planet held whole in frame when zoomed out, a "
+                     "ground-level look zoomed in"),
+            with_tip(f_float("pitch_at_max_distance_deg", 0.0f, 0.5f, -89.0f, 89.0f),
+                     "The zoomed-out end of the same zoom-coupled pitch; see pitch_at_min_distance_deg"),
+            with_tip(f_float("tangent_at_min_distance", 0.0f, 0.01f, 0.0f, 1.0f),
+                     "Zoom-coupled LOOK tilt, zoomed-in end. 0 looks straight at the target, 1 looks along the "
+                     "surface tangent. Pitch alone only moves the camera around the orbit -- this tilts the view "
+                     "itself, so zooming in swings from holding a planet whole to looking out along its horizon"),
+            with_tip(f_float("tangent_at_max_distance", 0.0f, 0.01f, 0.0f, 1.0f),
+                     "The zoomed-out end of the same zoom-coupled look tilt; see tangent_at_min_distance"),
             f_bool("invert_x", false),
             f_bool("invert_y", false),
             f_float("mouse_sensitivity", 0.15f, 0.005f, 0.0f, 10.0f),

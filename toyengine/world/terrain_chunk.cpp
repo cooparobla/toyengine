@@ -17,6 +17,7 @@ namespace world {
 void ChunkMeshData::clear() {
     vertices.clear();
     indices.clear();
+    max_steps = 0;
 }
 
 void sample_chunk_columns(const TerrainSampler& sampler, const TerrainParams& params,
@@ -112,15 +113,19 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
 
     // Straight halves are not stamped where they are met: they are collected, then merged along
     // each wall line into runs and stamped once per run (see the end of this function). A
-    // straight lip is an extrusion, so a run of twenty halves costs what one half does.
+    // straight lip is an extrusion, so a run of twenty halves costs what one half does. Each
+    // entry already represents a vertically-merged run of `cell_count` cells (see the per-tile
+    // walk below), collapsed before this horizontal pass ever sees it -- so a tall straight
+    // cliff costs one stamp both ways, not one per cell times one per tile.
     struct StraightHalf {
-        std::uint8_t turns;  // the face, as lateral_quarter_turns()
-        std::int32_t cell;
-        std::int32_t line;   // the column coordinate across the face
-        std::int32_t slot;   // half-tile index along the face's axis
+        std::uint8_t turns;       // the face, as lateral_quarter_turns()
+        std::int32_t cell_bottom; // lowest cell of the vertically-merged run
+        std::int32_t cell_count;  // cells spanned, bottom to top_cell-ward inclusive
+        std::int32_t line;        // the column coordinate across the face
+        std::int32_t slot;        // half-tile index along the face's axis
         std::uint8_t style;
-        bool         cap;
-        float        code;   // the cell's blend code (encode_surface_blend())
+        bool         cap;         // the lip tier (WallCapContinue) vs a plain wall (WallContinue)
+        float        code;        // the cell's blend code (encode_surface_blend())
     };
     std::vector<StraightHalf> straights;
     // Flat full quadrants (TileMeshLibrary::top_merges()), merged into rectangles after the walk
@@ -129,16 +134,23 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
     const std::int32_t qn = 2 * params.chunk_size;  // half-tile grid edge
     std::vector<std::uint8_t> full(static_cast<std::size_t>(qn) * static_cast<std::size_t>(qn), 0);
 
-    // A styled chunk runs ~20 triangles a tile; one up-front reservation saves the regrowth.
+    // A styled chunk runs ~20 triangles a tile on a flat plateau; one up-front reservation saves
+    // the regrowth. A cliff now costs a flat `soil_depth_steps + 1` wall bands a tile (vertical
+    // merging below), not one band a height step, so the per-edge allowance is a small constant
+    // rather than a function of height -- still only an estimate, not the exact size
+    // append_styled() itself must never be called with (that regression is documented at its own
+    // reserve-less loop).
     const std::size_t tiles = static_cast<std::size_t>(params.chunk_size) * static_cast<std::size_t>(params.chunk_size);
-    out.vertices.reserve(tiles * 48);
-    out.indices.reserve(tiles * 64);
+    const std::size_t wall_bands = static_cast<std::size_t>(std::max(1, params.soil_depth_steps + 1));
+    out.vertices.reserve(tiles * (48 + 8 * wall_bands));
+    out.indices.reserve(tiles * (64 + 12 * wall_bands));
 
     for (std::int32_t ly = 0; ly < params.chunk_size; ++ly) {
         for (std::int32_t lx = 0; lx < params.chunk_size; ++lx) {
             const glm::ivec2  c(lx, ly);
             const TileColumn& col       = pad.at(c);
             const std::int32_t top_cell = col.steps - 1;
+            out.max_steps = std::max(out.max_steps, col.steps);
             const std::uint8_t style    = style_at(c, col.top_kind);
             // A tile set may keep kind boundaries square (a blocky set): then no top is a blend
             // corner, and every quadrant is plain.
@@ -195,6 +207,45 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
                     bool      above_cap   = false;
                     WallEnd   end         = WallEnd::Continue;
 
+                    // A pending vertical run: consecutive cells of this same (tile, face, half)
+                    // sharing one piece and surface code, accumulated top-down and stamped once
+                    // when it breaks. `wall_kind()` only changes at the soil/stone boundary, so a
+                    // plain wall collapses to at most `soil_depth_steps + 1` runs whatever its
+                    // height -- the fix for height scaling the whole chunk's cost. Valid on a
+                    // planet too: these pieces are a vertical extrusion of the plan profile
+                    // (terrain/README.md), and a radial edge stays straight under
+                    // warp_chunk_to_planet()'s per-vertex map, unlike a horizontal merge, which
+                    // is why only this axis is open to `max_merge == 1`.
+                    bool         pending_active = false;
+                    TilePiece    pending_piece  = TilePiece::WallContinue;
+                    float        pending_code   = 0.0f;
+                    std::int32_t pending_bottom = 0;
+                    std::int32_t pending_count  = 0;
+
+                    auto flush_pending = [&]() {
+                        if (!pending_active) return;
+                        pending_active = false;
+                        if (pending_piece == TilePiece::WallContinue || pending_piece == TilePiece::WallCapContinue) {
+                            // Folds into the horizontal pass below exactly as an unmerged cell
+                            // would have: a cap run is always one cell (no lower cell shares its
+                            // piece), so this is a no-op widening for caps and the real collapse
+                            // for plain wall cells.
+                            const bool along_x = face == TileFace::North || face == TileFace::South;
+                            const std::int32_t t = along_x ? c.x : c.y;
+                            const bool upper = (along_x ? along.x : along.y) > 0;
+                            straights.push_back({lateral_quarter_turns(face), pending_bottom, pending_count,
+                                                 along_x ? c.y : c.x, 2 * t + (upper ? 1 : 0), style,
+                                                 pending_piece == TilePiece::WallCapContinue, pending_code});
+                        } else {
+                            // WallConvex / WallConcave: no horizontal counterpart (each occurs once
+                            // per corner tile), so stamp directly with only the vertical stretch.
+                            library.append_styled(library.piece(style, pending_piece, orient),
+                                                  origin_of(c, pending_bottom), scale, pending_code, false,
+                                                  out.vertices, out.indices,
+                                                  glm::vec3(1.0f, 1.0f, static_cast<float>(pending_count)));
+                        }
+                    };
+
                     for (std::int32_t cell = top_cell; cell >= lowest; --cell) {
                         end = classify_wall_end(pad, c, face, along, cell);
                         const bool      cap   = cell == top_cell;
@@ -225,13 +276,28 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
                                                     pad.at(c + along).steps > col.steps;
                         if (taper_continue) piece = TilePiece::WallTaperContinue;
 
-                        if (!no_merge && end == WallEnd::Continue && !taper_continue) {
-                            const bool along_x = face == TileFace::North || face == TileFace::South;
-                            const std::int32_t t = along_x ? c.x : c.y;
-                            const bool upper = (along_x ? along.x : along.y) > 0;
-                            straights.push_back({lateral_quarter_turns(face), cell, along_x ? c.y : c.x,
-                                                 2 * t + (upper ? 1 : 0), style, cap, code});
+                        // Eligible for the run merge: every plain tier (cap or not) at a straight
+                        // end, plus a non-cap corner (Convex/Concave) that is not the one-off
+                        // taper cell -- `lipped` is true there and only there among non-cap cells,
+                        // since `wall_kind()`'s soil/stone split is the only other thing that can
+                        // break a run and that already shows up as a `code` mismatch below.
+                        const bool run_eligible = !no_merge && !taper_continue &&
+                                                  (end == WallEnd::Continue || (!cap && !lipped));
+                        if (run_eligible) {
+                            if (pending_active && pending_piece == piece && pending_code == code &&
+                                pending_bottom == cell + 1) {
+                                pending_bottom = cell;
+                                ++pending_count;
+                            } else {
+                                flush_pending();
+                                pending_active = true;
+                                pending_piece  = piece;
+                                pending_code   = code;
+                                pending_bottom = cell;
+                                pending_count  = 1;
+                            }
                         } else {
+                            flush_pending();
                             stamp(library.piece(style, piece, orient), o, code, lipped);
                         }
 
@@ -269,6 +335,7 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
                         above_code  = code;
                         above_cap   = lipped;
                     }
+                    flush_pending();
 
                     if (lowest == nb.steps && end == WallEnd::Convex) {
                         stamp(library.foot(orient), origin_of(c, lowest), encode_surface_flat(nb.top_kind), false);
@@ -325,11 +392,17 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
     }
 
     // --- Straight runs ---
-    // Sorted into wall lines, then each maximal run of adjacent halves sharing style, tier and
-    // kinds becomes one stretched strip. The sort key is total, so the output stays deterministic.
+    // Sorted into wall lines, then each maximal run of adjacent halves sharing a vertical span,
+    // style, tier and kind becomes one strip stretched BOTH ways: horizontally across the halves
+    // it absorbs and vertically across the cells each of them already collapsed (see the pending
+    // run above). Two halves only merge horizontally if their vertical runs match exactly --
+    // `cell_bottom` and `cell_count` both sit in the key -- so a straight stretch can never cut
+    // across a boundary a neighbouring column's wall changes height at. The sort key is total, so
+    // the output stays deterministic.
     std::sort(straights.begin(), straights.end(), [](const StraightHalf& a, const StraightHalf& b) {
         if (a.turns != b.turns) return a.turns < b.turns;
-        if (a.cell != b.cell) return a.cell < b.cell;
+        if (a.cell_bottom != b.cell_bottom) return a.cell_bottom < b.cell_bottom;
+        if (a.cell_count != b.cell_count) return a.cell_count < b.cell_count;
         if (a.line != b.line) return a.line < b.line;
         return a.slot < b.slot;
     });
@@ -340,9 +413,9 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
         const std::size_t most = params.max_merge > 0 ? static_cast<std::size_t>(params.max_merge) * 2 : straights.size();
         while (j < straights.size() && j - i < most) {
             const StraightHalf& h = straights[j];
-            if (h.turns != first.turns || h.cell != first.cell || h.line != first.line ||
-                h.slot != first.slot + static_cast<std::int32_t>(j - i) || h.style != first.style ||
-                h.cap != first.cap || h.code != first.code) {
+            if (h.turns != first.turns || h.cell_bottom != first.cell_bottom || h.cell_count != first.cell_count ||
+                h.line != first.line || h.slot != first.slot + static_cast<std::int32_t>(j - i) ||
+                h.style != first.style || h.cap != first.cap || h.code != first.code) {
                 break;
             }
             ++j;
@@ -351,10 +424,12 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
         const float start   = 0.5f * static_cast<float>(first.slot) * params.tile_size;
         const float across  = static_cast<float>(first.line) * params.tile_size;
         const glm::vec3 origin(along_x ? start : across, along_x ? across : start,
-                               static_cast<float>(first.cell) * params.height_step);
+                               static_cast<float>(first.cell_bottom) * params.height_step);
+        const float h_stretch = 0.5f * static_cast<float>(j - i);
+        const float v_stretch = static_cast<float>(first.cell_count);
         library.append_styled(library.straight(first.style, first.cap, first.turns), origin, scale,
                               first.code, first.cap, out.vertices, out.indices,
-                              along_x ? 0 : 1, 0.5f * static_cast<float>(j - i));
+                              along_x ? glm::vec3(h_stretch, 1.0f, v_stretch) : glm::vec3(1.0f, h_stretch, v_stretch));
         i = j;
     }
 

@@ -33,6 +33,19 @@
 // flutters as one rigid blob. The scatter is applied to the flutter and the sideways swing only,
 // NOT to the lean or the swell: those two are what make a gust front visibly roll across a
 // field, and they have to stay spatially coherent to read as wind rather than as noise.
+//
+// A DISTANT or small-on-screen plant's flutter is also faded toward zero (gfx_foliage_detail_),
+// for the same reason: a 1-2 px feature moving sub-pixel amounts per frame is beyond what any
+// temporal filter can resolve, however correct its motion vector is. Only flutter and sideways
+// fade -- lean and swell stay full-strength at any distance, so a gust front keeps reading as
+// wind rolling over a field rather than vanishing with the detail it would otherwise alias into.
+//
+// gfx_surface_vertex() is RE-ENTRANT: foliage.vert/.tese define GFX_SURFACE_PREV_POSE, so the
+// backbone calls this hook twice per vertex, once at the current pose and once at last frame's
+// (gfx_prev_pose_, set by gbuffer_vs.glsl/gbuffer_tes.glsl around the second call), to give the
+// G-buffer a TRUE velocity for this displacement instead of a zero one. Every clock the hook
+// reads MUST therefore go through gfx_world_time() rather than the push constant's gfx_time.x,
+// or the two evaluations answer with the same clock and the "velocity" collapses back to zero.
 
 /**
  * @brief A stable 0..1 random from a world position -- one value per plant, constant over time.
@@ -53,25 +66,42 @@ float gfx_foliage_hash(vec2 p) {
 }
 
 /**
+ * @brief 0..1: how much high-frequency detail (flutter, sideways swing) a feature of this
+ *        projected pixel size should keep. Below ~2 px it is pure aliasing no temporal filter
+ *        can resolve; above ~8 px it is fully resolved and gets the full flutter.
+ *
+ * `gfx_world.tess_view.w` is already the pixel scale (0.5 * render height * proj[1][1]) every
+ * tessellated surface uses for its own edge factors, and `.xyz` the main camera position -- the
+ * SAME camera in the shadow passes too (world.glsl's file doc), so a plant and its shadow fade
+ * together and never drift out of lockstep.
+ */
+float gfx_foliage_detail_(float height_ws, vec3 root_ws) {
+    float dist = max(length(root_ws - gfx_world.tess_view.xyz), 1e-3);
+    float size_px = height_ws * gfx_world.tess_view.w / dist;
+    return smoothstep(2.0, 8.0, size_px);
+}
+
+/**
  * @brief One plant's wind offset in the ground plane, as a multiple of its own push distance.
  *
  * Shared by a plant and by anything pinned to it, so a leaf card can reproduce the exact
  * displacement of the twig it sits on. `root` is the plant's own root in world XY: it sets both
  * the travelling wave's phase and the plant's jitter, which is why a card must recover its
- * parent's root rather than substitute its own.
+ * parent's root rather than substitute its own. `detail` (gfx_foliage_detail_) fades the
+ * flutter and sideways terms only -- see this file's header doc for why lean/swell must not fade.
  */
-vec2 gfx_foliage_offset(vec2 root, vec2 dir, float s, float freq, float turbulence) {
+vec2 gfx_foliage_offset(vec2 root, vec2 dir, float s, float freq, float turbulence, float detail) {
     float jitter = gfx_foliage_hash(root);
     float rate = freq * (0.6 + 0.4 * min(s, 2.0)) * (1.0 + turbulence);
     float along = dot(root, dir);
     // Per-plant: a full random phase offset, and a rate within +/-25% of the material's, so
     // neighbours drift in and out of step instead of beating together forever.
-    float phase = gfx_time.x * rate * (0.75 + 0.5 * jitter) - along * 0.35 + jitter * 6.2831853;
+    float phase = gfx_world_time() * rate * (0.75 + 0.5 * jitter) - along * 0.35 + jitter * 6.2831853;
     // The swell keeps the SHARED phase: this is the slow wave that rolls downwind over everything.
-    float swell = 0.5 + 0.5 * sin(gfx_time.x * 0.6 - along * 0.05);
-    float flutter = sin(phase) * 0.35 + sin(phase * 2.3 + 1.7) * 0.15;
+    float swell = 0.5 + 0.5 * sin(gfx_world_time() * 0.6 - along * 0.05);
+    float flutter = (sin(phase) * 0.35 + sin(phase * 2.3 + 1.7) * 0.15) * detail;
     vec2 side = vec2(-dir.y, dir.x);
-    float sideways = sin(phase * 1.3 + dot(root, side) * 0.5 + jitter * 4.0) * 0.2;
+    float sideways = sin(phase * 1.3 + dot(root, side) * 0.5 + jitter * 4.0) * 0.2 * detail;
     // Light airs: mostly flutter (grass waves in place); strong wind: mostly a sustained lean.
     float lean = mix(0.25, 0.6, clamp(s, 0.0, 1.0));
     return dir * (lean + 0.4 * swell + flutter * 1.4) + side * sideways;
@@ -111,7 +141,8 @@ void gfx_surface_vertex(inout GfxSurfaceVertex v) {
     // plus a slower swell, so a field ripples instead of swaying in unison (the gust fronts in
     // the wind itself add the big, slow waves).
     float turbulence = gfx_env_turbulence_at(v.model[3].xyz);
-    vec2 offset = gfx_foliage_offset(base, dir, s, gfx_params.y, turbulence) * push * bend;
+    float detail = gfx_foliage_detail_(height_ws, v.model[3].xyz);
+    vec2 offset = gfx_foliage_offset(base, dir, s, gfx_params.y, turbulence, detail) * push * bend;
     v.position_ws.xy += offset;
 
     // The PARENT's displacement, for a card pinned to a plant whose mesh bends (see
@@ -143,7 +174,8 @@ void gfx_surface_vertex(inout GfxSurfaceVertex v) {
             float parent_response = sqrt(ps) / (1.0 + 0.25 * max(ps - 1.0, 0.0));
             vec2 parent_offset = gfx_foliage_offset(parent_pos.xy, parent_dir, ps,
                                                     gfx_instance_foliage.y,
-                                                    gfx_env_turbulence_at(parent_pos))
+                                                    gfx_env_turbulence_at(parent_pos),
+                                                    gfx_foliage_detail_(parent_height, parent_pos))
                                  * (gfx_instance_foliage.x * parent_response);
             v.position_ws.xy += parent_offset;
             // Its leaning tip drops a little, exactly as the trunk's own does.

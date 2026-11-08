@@ -61,7 +61,7 @@ layout(push_constant) uniform PushConstants {
     float ao;
     float alpha_cutoff;
     vec4  emissive;
-    vec4  gfx_time;    // x=time, y=delta_time, z=frame_index, w=spare
+    vec4  gfx_time;    // x=time, y=delta_time, z=frame_index, w=the water clock (WaterFrameState::time)
     vec4  gfx_params;  // four author-defined floats; see the surface shader's own doc
     uvec4 surface_ext; // x/y packed tessellation params, z flags (bit 0: no snow), w toon code
 } material;
@@ -142,12 +142,44 @@ void main() {
 
     gfx_surface_vertex(v);
 
-    // Previous-frame position: last frame's model matrix, plus THIS frame's hook displacement
-    // (wind sway etc.) applied to both poses. Rigid object motion is therefore carried exactly;
-    // the hook's own animation is not (it would need the hook re-run at last frame's time),
-    // and reads as sub-pixel noise the consumers' dead-zone and variance clip absorb.
+    // THIS frame's hook displacement, world space -- used below by the snow anchor (pattern
+    // stability, not velocity: it must stay keyed to the CURRENT displacement regardless of
+    // which path frag_prev_world_pos takes).
     vec3 disp = v.position_ws - world_pos.xyz;
+
+#ifdef GFX_SURFACE_PREV_POSE
+    // A TRUE previous-frame position: the SAME hook, re-run on last frame's model matrix and
+    // last frame's clocks (gfx_prev_pose_, world.glsl's gfx_world_time()) -- exactly what Unreal
+    // does for a World Position Offset material opted into motion vectors (re-evaluating WPO at
+    // PrevFrameGameTime). Opted into per shader (foliage.vert, hair.vert #define this) because it
+    // runs the hook twice per vertex; a rigid shader's cheap #else path below is already exact.
+    //
+    // Limitation: only the two clocks rewind. gfx_world.wind.xyz, gfx_env_turbulence_at() and
+    // every gfx_world.env[] source's position/strength stay CURRENT frame, so a MOVING
+    // EnvInfluence leaves a residual velocity error bounded by one frame's change in the wind
+    // field -- zero for a static gust source, and far below taa.frag's 0.05px dead zone for one
+    // that is itself moving. Carrying a previous env[] snapshot would double EnvSourceGpu's UBO
+    // footprint; not worth it here.
+    GfxSurfaceVertex pv;
+    pv.position_os   = in_position;
+    pv.normal_os     = in_normal;
+    pv.tangent_os    = in_tangent;
+    pv.uv            = in_uv;
+    pv.model         = in_prev_model;
+    pv.normal_matrix = transpose(inverse(mat3(in_prev_model)));
+    pv.position_ws   = (in_prev_model * vec4(in_position, 1.0)).xyz;
+    pv.normal_ws     = normalize(pv.normal_matrix * in_normal);
+    pv.tangent_ws    = normalize(pv.normal_matrix * in_tangent.xyz);
+    gfx_prev_pose_ = 1;
+    gfx_surface_vertex(pv);
+    gfx_prev_pose_ = 0;
+    frag_prev_world_pos = pv.position_ws;
+#else
+    // Last frame's model matrix, plus THIS frame's hook displacement applied to both poses.
+    // Rigid object motion is carried exactly this way; a time-animated hook needs
+    // GFX_SURFACE_PREV_POSE above instead, or its own animation reads as zero velocity.
     frag_prev_world_pos = (in_prev_model * vec4(in_position, 1.0)).xyz + disp;
+#endif
     // inverse(mat3(model)) == transpose(normal_matrix): world up into the object, then out into
     // the anchor pose.
     frag_snow_pos = (in_snow_anchor * vec4(in_position, 1.0)).xyz + disp;

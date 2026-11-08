@@ -21,6 +21,10 @@ scene:
   settings:
     render:
       ambient_intensity: 0.85
+      # TAA, deliberately: this demo is the reference case for GFX_SURFACE_PREV_POSE (the
+      # foliage/hair shaders writing a true motion vector for their clock-driven sway) -- with
+      # AA off, as it ships by default, nothing here exercises the thing the demo is for.
+      aa_mode: taa
     # A steady breeze, because the foliage shader returns early in dead air: no wind, no sway.
     # The bark and the leaf cards both ride it, with very different flexibilities.
     weather:

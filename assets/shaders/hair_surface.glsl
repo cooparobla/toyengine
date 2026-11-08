@@ -30,6 +30,10 @@
 // is nothing in the transform to tell two strands apart. The per-strand random that
 // hair_data.cpp bakes into `uv.y` is what decorrelates them, and without it a whole head of hair
 // would flutter as one rigid sheet.
+//
+// gfx_surface_vertex() is RE-ENTRANT, same as foliage_surface.glsl: hair.vert defines
+// GFX_SURFACE_PREV_POSE, so the backbone calls this hook twice per vertex to give the G-buffer a
+// true velocity. The clock MUST go through gfx_world_time(), not gfx_time.x directly.
 
 void gfx_surface_vertex(inout GfxSurfaceVertex v) {
     // uv.x is 0 at the root and 1 at the tip. It is the one channel every backbone declares,
@@ -68,7 +72,7 @@ void gfx_surface_vertex(inout GfxSurfaceVertex v) {
     // rather than pulsing everywhere at once; uv.y then offsets each strand within that.
     float jitter = v.uv.y;
     float rate = freq * (0.6 + 0.4 * min(s, 2.0));
-    float phase = gfx_time.x * rate * (0.8 + 0.4 * jitter)
+    float phase = gfx_world_time() * rate * (0.8 + 0.4 * jitter)
                 - dot(v.model[3].xy, dir) * 0.35
                 + jitter * 6.2831853;
     float flutter = sin(phase) * 0.3 + sin(phase * 2.3 + 1.7) * 0.12;

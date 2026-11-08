@@ -177,6 +177,12 @@ void ToyRenderPipeline::build_geometry_passes_() {
         // A shader with its own shadow vertex stage may displace over time (foliage wind):
         // its shadow can never be cached as static (see gather_meshes_()'s static_ok).
         if (!sd.shadow_vert.empty()) animated_shadow_shaders_.insert(sd.name);
+        // The shaders whose G-buffer vertex entry point #defines GFX_SURFACE_PREV_POSE (see
+        // foliage.vert / hair.vert) -- their sway is clock-driven, so a wind-animated surface
+        // must keep scene_moved_ true even though its matrix never moves (gather_meshes_()).
+        // No SurfaceShaderDesc field carries this; a GLSL #define can't be read from here, so
+        // the name list is kept in step by hand with the two opted-in entry points.
+        if (sd.name == "foliage" || sd.name == "hair") wind_animated_shaders_.insert(sd.name);
         // Tessellated twins: a shader with the stock vertex stage uses the stock evaluation
         // stages; one with its own vertex stage needs its own `tese` (its hook compiled
         // against the evaluation backbone) or draws untessellated -- see SurfaceShaderDesc.

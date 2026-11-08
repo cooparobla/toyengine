@@ -19,6 +19,7 @@
 #include <toyengine/core/engine.h>
 #include <toyengine/env/env_preset.h>
 #include <toyengine/render/toy_render_pipeline.h>
+#include <toyengine/scene/camera_controller.h>
 #include <toyengine/water/water_body.h>
 #include <toyengine/weather/weather_system.h>
 #include <toyengine/world/terra_store.h>
@@ -235,9 +236,80 @@ std::string wind_variant(const char* tag, float wind) {
     });
 }
 
+/** @brief `wind_variant`, plus one large `nature/grass_tuft` MeshRenderer -- not a ParticleSystem
+ *         scatter instance -- planted directly in the demo camera's view. The scene's own
+ *         scattered grass is real but too sparse and distant at this camera framing to measure
+ *         reliably (confirmed separately: its own lit-image check only ever clears ~60 of its
+ *         500-pixel threshold, a pre-existing fixture limitation unrelated to wind sway). A
+ *         controlled, close, deliberately large plant isolates the one thing this test needs to
+ *         prove -- a real previous-frame pose for a time-animated hook -- without depending on
+ *         scatter density or distance. flexibility 1.0 and height 2 m at 10x scale give a
+ *         canopy any camera motion or discretization noise can't hide. */
+std::string velocity_test_scene(const char* tag, float wind) {
+    return scene_variant(k_demo, tag, [wind](fkyaml::node& doc) {
+        fkyaml::node& w = doc["scene"]["settings"]["weather"];
+        fkyaml::node c = fkyaml::node::mapping();
+        c["name"] = std::string("test_wind");
+        c["wind_strength"] = static_cast<double>(wind);
+        c["wind_heading"] = 30.0;
+        c["wind_gust"] = 0.0;
+        c["fog_density"] = 0.0;
+        fkyaml::node list = fkyaml::node::sequence();
+        list.as_seq().push_back(c);
+        w["conditions"] = list;
+        w["condition"] = std::string("test_wind");
+        w["schedule"] = std::string("fixed");
+
+        // The demo camera's CameraController has no explicit `tracker`/`target`, which means
+        // it follows the "player" object BY NAME, by convention -- removing that object (an
+        // earlier version of this fixture did, to silence its animation as scene-motion noise)
+        // leaves the controller's orbit target undefined and the camera drifts off its authored
+        // pose over a multi-second capture. Keep the player: its identical, deterministic
+        // animation is present in both the calm and windy copies of this scene and cancels out
+        // in the comparison below exactly as it already does for foliage_sways_in_the_weather_wind.
+
+        fkyaml::node obj = fkyaml::node::mapping();
+        obj["name"] = std::string("velocityTestPlant");
+        fkyaml::node xform = fkyaml::node::mapping();
+        xform["type"] = std::string("Transform");
+        fkyaml::node pos = fkyaml::node::mapping();
+        // The demo's own player stands at (60,10,45), clearly centred and well-framed by the
+        // demo camera (60,2,52) -- reusing that spot avoids placing a huge scaled mesh so close
+        // to camera that the view clips into one of its faces (a flat, textureless fill with no
+        // sway-vs-no-sway distinction, which is what (60,6,48) at 10x scale produced).
+        pos["x"] = 60.0; pos["y"] = 10.0; pos["z"] = 45.0;
+        xform["position"] = pos;
+        fkyaml::node scale = fkyaml::node::mapping();
+        scale["x"] = 3.0; scale["y"] = 3.0; scale["z"] = 3.0;
+        xform["scale"] = scale;
+        fkyaml::node mr = fkyaml::node::mapping();
+        mr["type"] = std::string("MeshRenderer");
+        mr["mesh_path"] = std::string("nature/grass_tuft");
+        fkyaml::node mat = fkyaml::node::mapping();
+        mat["shader"] = std::string("foliage");
+        fkyaml::node params = fkyaml::node::sequence();
+        params.as_seq().push_back(fkyaml::node(1.0));  // flexibility
+        params.as_seq().push_back(fkyaml::node(1.5));  // frequency (rad/s)
+        params.as_seq().push_back(fkyaml::node(2.0));  // height (mesh units)
+        params.as_seq().push_back(fkyaml::node(0.0));  // up axis: +Z
+        mat["shader_params"] = params;
+        mat["alpha_mode"] = std::string("CUTOUT");
+        mat["alpha_cutoff"] = 0.4;
+        mr["material"] = mat;
+        fkyaml::node comps = fkyaml::node::sequence();
+        comps.as_seq().push_back(xform);
+        comps.as_seq().push_back(mr);
+        obj["components"] = comps;
+        obj["children"] = fkyaml::node::sequence();
+        doc["scene"]["root_objects"].as_seq().push_back(obj);
+    });
+}
+
 /** @brief One capture of a wind variant after 120 frames, the sun held still and the
- *         frame-varying stylization off, so runs differ only by what the wind moved. */
-Frame wind_capture(const std::string& scene) {
+ *         frame-varying stylization off, so runs differ only by what the wind moved.
+ *         `debug_view`, when non-empty, replaces the image with that channel (e.g. "velocity")
+ *         before the final capture -- debug_view is runtime-tunable, so this needs no rebuild. */
+Frame wind_capture(const std::string& scene, const char* debug_view = "") {
     toy::world::TerraStore::instance().clear();
     toy::core::Engine engine(make_test_config(scene, 320, 180, 320, 180));
     tick_frames(engine, 8);
@@ -246,14 +318,56 @@ Frame wind_capture(const std::string& scene) {
     rc.dither_enabled = false;
     rc.palette_enabled = false;
     rc.outline_enabled = false;
+    if (debug_view[0] != '\0') rc.debug_view = debug_view;
     tick_frames(engine, 112);
     Frame f = engine.capture_image();
     toy::world::TerraStore::instance().clear();
     return f;
 }
 
-/** @brief Changed pixels in the lower (ground / grass) part of two same-frame captures. */
-long long ground_diff(const Frame& a, const Frame& b) {
+/** @brief Like wind_capture, but pins the demo's CameraController to a fixed orbit target
+ *         instead of following its authored `tracker: player` -- the established pattern for a
+ *         deterministic camera (see temporal_reprojection_test.cpp's ssao_follows_a_moving_object).
+ *         Orbit mode re-derives yaw/pitch from the seed Transform relative to `target` at
+ *         start(): with the default target (world origin) and this scene's explicit `distance:
+ *         10`, a missing or unexpected tracker relocates the camera to ~10 units from ORIGIN
+ *         along that seed direction -- nowhere near the terrain's playable area -- which is
+ *         what an earlier version of this fixture hit after removing the tracked "player" object
+ *         outright. Pinning the target directly sidesteps tracker resolution entirely. */
+Frame pinned_capture(const std::string& scene, const glm::vec3& target, const char* debug_view = "",
+                     uint32_t settle_ticks = 112) {
+    toy::world::TerraStore::instance().clear();
+    toy::core::Engine engine(make_test_config(scene, 320, 180, 320, 180));
+    if (auto* cc = engine.scene().find_first_component<toy::scene::CameraController>()) {
+        cc->tracker            = "";
+        cc->target             = target;
+        cc->target_offset      = glm::vec3(0.0f);
+        cc->distance           = 6.0f;
+        cc->pitch_deg          = 20.0f;
+        cc->yaw_deg            = 0.0f;
+        cc->follow_smoothing   = 0.0f;
+        cc->movement_smoothing = 0.0f;
+    }
+    tick_frames(engine, 8);
+    if (auto* w = engine.weather()) w->set_clock_paused(true);
+    auto& rc = engine.render_config();
+    rc.dither_enabled = false;
+    rc.palette_enabled = false;
+    rc.outline_enabled = false;
+    if (debug_view[0] != '\0') rc.debug_view = debug_view;
+    tick_frames(engine, settle_ticks);
+    Frame f = engine.capture_image();
+    toy::world::TerraStore::instance().clear();
+    return f;
+}
+
+/** @brief Changed pixels (by more than `threshold`, max over RGB) in the lower (ground / grass)
+ *         part of two same-frame captures. The lit image's own motion clears a wide margin over
+ *         its default threshold (10); the `velocity` debug channel encodes a per-frame screen
+ *         DELTA rather than a swing's full amplitude, so a plant's frame-to-frame motion can be
+ *         a fraction of a pixel of UV -- a few 8-bit levels, not tens -- and needs a far smaller
+ *         threshold to detect at all. */
+long long ground_diff(const Frame& a, const Frame& b, int threshold = 10) {
     if (!same_extent(a, b)) return -1;
     long long n = 0;
     for (uint32_t y = a.height * 55 / 100; y < a.height; ++y) {
@@ -261,7 +375,26 @@ long long ground_diff(const Frame& a, const Frame& b) {
             const std::size_t k = (static_cast<std::size_t>(y) * a.width + x) * a.channels;
             int d = 0;
             for (int c = 0; c < 3; ++c) d = std::max(d, std::abs(int(a.pixels[k + c]) - int(b.pixels[k + c])));
-            n += d > 10;
+            n += d > threshold;
+        }
+    }
+    return n;
+}
+
+/** @brief Changed pixels (by more than `threshold`, max over RGB) anywhere in two same-frame
+ *         captures -- unlike ground_diff, not windowed to the lower "ground" rows, so it does
+ *         not miss a tall test object whose swaying TIP (bend grows with height fraction
+ *         squared, foliage_surface.glsl) sits above that crop while only its near-static root
+ *         would fall inside it. */
+long long full_diff(const Frame& a, const Frame& b, int threshold = 1) {
+    if (!same_extent(a, b)) return -1;
+    long long n = 0;
+    for (uint32_t y = 0; y < a.height; ++y) {
+        for (uint32_t x = 0; x < a.width; ++x) {
+            const std::size_t k = (static_cast<std::size_t>(y) * a.width + x) * a.channels;
+            int d = 0;
+            for (int c = 0; c < 3; ++c) d = std::max(d, std::abs(int(a.pixels[k + c]) - int(b.pixels[k + c])));
+            n += d > threshold;
         }
     }
     return n;
@@ -298,6 +431,73 @@ COOPA_TEST(foliage_sways_in_the_weather_wind) {
     if (swayed <= 500) {
         dump_frame(calm_a, "calm");
         dump_frame(windy, "windy");
+    }
+}
+
+/** @brief Wind-swayed foliage writes a TRUE motion vector, not the zero one a G-buffer that
+ *         cancels the hook's own displacement out of frag_prev_world_pos would produce (TAA then
+ *         ghosts it: see gfx/surface/gbuffer_vs.glsl's GFX_SURFACE_PREV_POSE). A calm run's
+ *         velocity channel is the exact-zero baseline a windy run must differ from over the
+ *         plant, since nothing else in the frame moves (static camera, sun, terrain). */
+COOPA_TEST(foliage_carries_a_real_motion_vector) {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+    const std::string calm_scene = velocity_test_scene("heightmap_terrain_velocity_calm", 0.0f);
+    const std::string windy_scene = velocity_test_scene("heightmap_terrain_velocity_windy", 12.0f);
+    const glm::vec3 plant(60.0f, 10.0f, 46.0f);
+    const Frame velocity_calm_a = pinned_capture(calm_scene, plant, "velocity");
+    const Frame velocity_calm_b = pinned_capture(calm_scene, plant, "velocity");
+    const Frame velocity_windy = pinned_capture(windy_scene, plant, "velocity");
+    // full_diff, not ground_diff: the test plant is scaled tall enough that its swaying tip
+    // rises above ground_diff's "ground" window, leaving only its near-static root (bend ~ 0
+    // there) inside it. A per-frame velocity also encodes a DELTA, not a swing's full
+    // amplitude, so this needs a much smaller threshold than the lit-image checks above.
+    const long long same = full_diff(velocity_calm_a, velocity_calm_b, 1);
+    const long long moved = full_diff(velocity_calm_a, velocity_windy, 1);
+    // Proves it is the HOOK producing the signal, not camera jitter or capture noise: two calm
+    // runs must agree, exactly as the lit-image check above does.
+    expect(same < 50, "velocity: two calm runs agree (" + std::to_string(same) + " pixels)");
+    // Before GFX_SURFACE_PREV_POSE this was 0: frag_prev_world_pos cancelled the hook's own
+    // displacement out of the velocity attachment, so a windy run's velocity channel was
+    // identical to a calm one's over the swaying plant.
+    expect(moved > 300, "velocity: the wind writes a non-zero motion vector (" + std::to_string(moved) + " pixels differ from calm)");
+    if (moved <= 300) {
+        dump_frame(velocity_calm_a, "velocity_calm");
+        dump_frame(velocity_windy, "velocity_windy");
+    }
+}
+
+/** @brief A windy scene must not report itself still: wind-animated surfaces (foliage, hair)
+ *         move without their matrix moving, so pipeline_gather.cpp's wind_animated() keeps
+ *         scene_moved_ true while real wind reaches one. Observed through the temporal freeze's
+ *         effect on SSAO -- record_scene_()'s stillness block holds every stochastic resolve
+ *         verbatim once the scene has been still for kTemporalFreezeAfter frames. With the
+ *         camera pinned dead still, a CALM scene's SSAO channel settles and freezes (adjacent
+ *         frames agree); a WINDY one keeps resolving (adjacent frames differ) because the
+ *         swaying plant keeps scene_moved_ true. */
+COOPA_TEST(windy_scene_does_not_freeze_the_temporal_resolves) {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+    const std::string calm_scene = velocity_test_scene("heightmap_terrain_freeze_calm", 0.0f);
+    const std::string windy_scene = velocity_test_scene("heightmap_terrain_freeze_windy", 12.0f);
+    const glm::vec3 plant(60.0f, 10.0f, 46.0f);
+    // Two adjacent frames (settle_ticks N and N+1) of the SAME deterministic run: if the
+    // temporal freeze is holding, the SSAO channel is byte-identical between them.
+    const Frame calm_n   = pinned_capture(calm_scene, plant, "ssao", 112);
+    const Frame calm_n1  = pinned_capture(calm_scene, plant, "ssao", 113);
+    const Frame windy_n  = pinned_capture(windy_scene, plant, "ssao", 112);
+    const Frame windy_n1 = pinned_capture(windy_scene, plant, "ssao", 113);
+    const long long calm_delta = full_diff(calm_n, calm_n1, 1);
+    const long long windy_delta = full_diff(windy_n, windy_n1, 1);
+    expect(calm_delta < 10, "freeze: a calm scene's SSAO is byte-static once still (" +
+                                std::to_string(calm_delta) + " pixels differ)");
+    expect(windy_delta > 50, "freeze: a windy scene's SSAO keeps resolving (" +
+                                 std::to_string(windy_delta) + " pixels differ)");
+    if (calm_delta >= 10 || windy_delta <= 50) {
+        dump_frame(calm_n, "freeze_calm_n");
+        dump_frame(calm_n1, "freeze_calm_n1");
+        dump_frame(windy_n, "freeze_windy_n");
+        dump_frame(windy_n1, "freeze_windy_n1");
     }
 }
 

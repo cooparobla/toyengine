@@ -8,7 +8,7 @@
 # vanish depending on where you stand.
 #
 # It sways on the `foliage` shader, far faster and looser than the bark it hangs off (0.3 at
-# 2.6 rad/s against the bark's 0.012 at 0.7). Nearly all of this tree's visible movement is
+# 2.6 rad/s against the bark's 0.10 at 0.7). Nearly all of this tree's visible movement is
 # the leaves: the wood is held almost still on purpose -- see bark.yaml for why.
 #
 # Up axis 2 is +X: the card is authored along +X (gen_curve_tree_assets.py's `card`, since a

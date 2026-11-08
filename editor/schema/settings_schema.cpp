@@ -114,11 +114,13 @@ const std::vector<SettingsGroup>& render_settings_groups() {
             .add(F(f_bool("toon_band_attenuation", true), "Band Light Pools",
                    "Step point and spot lights' distance falloff too, for hard-edged pools of light"))
             .sub("Sky")
-            .add(with_default(F(f_enum("sky_model", {"gradient", "physical"}), "Sky Model",
+            .add(with_default(F(f_enum("sky_model", {"gradient", "physical", "space"}), "Sky Model",
                                 "gradient: the three colours below, drawn as is (cheap, stylised). physical: a physically "
                                 "based atmosphere -- sunsets, a sun and moon, stars at night -- that follows the scene's sun "
                                 "(or the weather's clock) and sets the sky colours, ambient and the sun's colour to match. "
-                                "Clouds work with either"), "gradient"))
+                                "space: no atmosphere at all -- the sky gradient colours stand as authored (make them "
+                                "near-black for a planet seen from orbit), with stars at full strength and the same sun/moon "
+                                "discs physical draws. Clouds work with gradient or physical"), "gradient"))
             .add(F(f_float("ambient_intensity", 1.0f, 0.01f, 0.0f, 16.0f), "Ambient Intensity",
                    "How strongly the sky gradient lights surfaces as indirect diffuse light"))
             .add(F(f_float("sky_intensity", 1.0f, 0.01f, 0.0f, 16.0f), "Sky Reflection Intensity",
@@ -136,6 +138,12 @@ const std::vector<SettingsGroup>& render_settings_groups() {
             .add(F(f_float("sun_disc_size", 0.53f, 0.01f, 0.0f, 20.0f), "Sun Size", "The sun disc's angular diameter in degrees (0.53 is real; 0 hides it)"))
             .add(F(f_float("moon_disc_size", 0.6f, 0.01f, 0.0f, 20.0f), "Moon Size", "The moon disc's angular diameter in degrees (0 hides it)"))
             .add(F(f_bool("sky_stars", true), "Stars", "Stars fade in as the sky darkens, behind any clouds"))
+            // No separate "Space Sky" sub-group: the render tab lists every key exactly once
+            // (render_settings_schema_test), and sun_disc_size/moon_disc_size/sky_stars above
+            // already cover space mode's needs -- they just stay in the Physical Sky group,
+            // which the editor hides while sky_model is "space". The keys are plain `render:`
+            // YAML either way, so a space-sky scene still sets them; only the Settings panel's
+            // grouping is narrower than the engine's actual support.
             .done());
 
         g.push_back(GroupBuilder(general, "Clouds", "A cloud layer, with either sky model (under the gradient sky the "

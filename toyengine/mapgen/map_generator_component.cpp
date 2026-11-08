@@ -210,6 +210,11 @@ bool MapGeneratorComponent::poll_apply() {
     }
     d->assign_baked(std::move(bake_->out));
     terrain->applied_map = sampler_;
+    // bake_params_() only ever wrote height_scale into the TEMPORARY copy the sampler baked
+    // with -- the live terrain.params this generator's `height_scale:` was meant to set never
+    // saw it, so anything reading it afterward (the planet horizon cull, most notably) read the
+    // unrelated TerrainParams default instead of what the world was actually baked at.
+    terrain->params.height_scale = height_scale;
     terrain->sync_field();
     bake_.reset();
     return true;

@@ -1,20 +1,7 @@
 scene:
   scene_name: planet_demo
-  # A globe to look at, not a world to walk on: the whole planet is in frame, and the controls
-  # are a model viewer's --
-  #   left-drag    spins the planet (Turntable, on the planet itself)
-  #   right-drag   orbits the camera round it
-  #   WASD/arrows  orbit the camera too (key_orbit_speed_deg_per_sec)
-  #   wheel        zooms, 155 m (just off the peaks) to 900 m
-  # Spinning the planet and orbiting the camera are different pictures, which is why both are
-  # here: spinning turns the continents under a sun that stays put on screen, orbiting carries
-  # the viewer round to the night side.
-  #
-  # Nothing here is a physics body, so the terrain carries no colliders and registers no
-  # gravity (`collision: false`, `gravity: 0`) -- 1176 chunks of welded collision mesh is what
-  # made this scene take tens of seconds to come up, and nothing in it would have stood on them.
   settings:
-    render: { fog_density: 0.0, shadow_distance: 7.0e+02, shadow_softness: 0.35 }
+    render: { ambient_intensity: 0.25, auto_exposure_enabled: false, fog_density: 0.0, shadow_distance: 7.0e+02, shadow_softness: 0.35, sky_ground: [0.008, 0.01, 0.015], sky_horizon: [0.008, 0.01, 0.015], sky_model: space, sky_zenith: [0.008, 0.01, 0.015], volumetrics_max_distance: 1.0e+03 }
   root_objects:
     - name: planet
       active: true
@@ -24,48 +11,66 @@ scene:
           rotation: { x: 0.0, y: 0.0, z: 0.0 }
           scale: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Terrain
-          mode: tiles
-          # 16 is load-bearing, not a default: the parser trims face_tiles to a multiple of it
-          # (216 -> 208 here), and terrain/planet.tiles is baked at that width. Changing it
-          # reads the stored tiles at the wrong size -- bands of missing sea -- until the world
-          # is regenerated. With the chunk LODs in, 24 measured faster (half the draws, a third
-          # less culling work); take it together with a re-bake, not on its own.
-          chunk_size: 16
+          chunk_size: 32
           collision: false
-          face_tiles: 216
+          face_tiles: 192
+          gravity: 0.0
+          height_step: 1.0
+          kind_tile_sets: { rock: objects/terrain/tileset_rock, stone: objects/terrain/tileset_rock }
+          max_wall_steps: 8
+          mode: tiles
+          planet: true
+          soil_depth_steps: 1
+          tile_set: objects/terrain/tileset_soft
+          tile_size: 1.0
+        - type: MapGenerator
           generator:
             grid_size: 40
             image_size: 2400
             seed: 315546511
             shape: { shape: archipelago }
-          gravity: 0.0
-          height_scale: 12.0
-          height_step: 1.0
-          kind_tile_sets: { rock: objects/terrain/tileset_rock, stone: objects/terrain/tileset_rock }
-          max_wall_steps: 8
-          planet: true
+          height_scale: 32.0
           river_inset: 0.2
-          soil_depth_steps: 1
-          tile_set: objects/terrain/tileset_soft
-          tile_size: 1.0
+          sphere: true
           water_inset: 0.5
           world_tiles: 160
-        # Drag to spin the globe, let go and it keeps turning; it drifts slowly on its own.
-        - type: Turntable
-          damping: 1.2
-          drag_button: left
-          idle_spin_deg_per_sec: 2.0
-          max_tilt_deg: 8.0e+01
-          min_tilt_deg: -8.0e+01
-          sensitivity: 0.25
-      children: []
+      children:
+        - name: clouds
+          active: true
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 0.0 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 165.0, y: 165.0, z: 165.0 }
+            - type: MeshRenderer
+              affects_reflection_probes: false
+              cast_shadows: false
+              material: { alpha: 0.12, alpha_mode: BLEND, cull_backfaces: false, roughness: 1.0, shader: planet_clouds, shader_params: [165.0, 5.0, 0.35, 0.015], shader_params_ext: [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0] }
+              mesh_path: sphere
+          children: []
+        - name: atmosphere
+          active: true
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 0.0 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: Volume
+              kind: fog
+              shape: shell
+              color: { r: 0.35, g: 0.55, b: 1.0 }
+              density: 0.007
+              falloff: 1.0
+              occlusion: 0.55
+              sun_amount: 0.9
+            - type: PlanetAtmosphere
+              thickness_scale: 1.8
+          children: []
     - name: camera
       active: true
       components:
-        # 420 m out from a planet of radius 2 * 216 / pi = 137.5 m: the globe sits inside the
-        # 50-degree frame with room around it. Elevated 18 degrees, as the orbit rig below.
         - type: Transform
-          position: { x: 0.0, y: -3.9944e+02, z: 1.2979e+02 }
+          position: { x: 0.0, y: -399.44, z: 129.79 }
           rotation: { x: 72.0, y: 0.0, z: 0.0 }
           scale: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Camera
@@ -74,23 +79,24 @@ scene:
           main: true
           near_clip_plane: 1.0
           projection: Perspective
-        # Orbits the planet's centre. The RIGHT button turns it, leaving the left one to the
-        # planet's own spin, and WASD / the arrow keys turn it as well. The cursor stays
-        # visible, since there is something here to drag with it.
         - type: CameraController
           capture_cursor: false
           collide: false
-          distance: 4.2e+02
+          distance: 7.0e+02
           key_orbit_speed_deg_per_sec: 6.0e+01
           look_button: right
-          max_distance: 9.0e+02
+          max_distance: 7.0e+02
           max_pitch_deg: 85.0
-          min_distance: 1.55e+02
+          min_distance: 165.0
           min_pitch_deg: -85.0
           mode: orbit
           mouse_sensitivity: 0.15
           movement_smoothing: 0.25
+          pitch_at_max_distance_deg: 70.0
+          pitch_at_min_distance_deg: 8.0
           pitch_deg: 18.0
+          tangent_at_max_distance: 0.0
+          tangent_at_min_distance: 0.5
           target: { x: 0.0, y: 0.0, z: 0.0 }
           yaw_deg: 0.0
           zoom_speed: 2.0e+01
@@ -102,24 +108,10 @@ scene:
           position: { x: 0.0, y: 0.0, z: 4.0e+01 }
           rotation: { x: 0.0, y: 0.0, z: 0.0 }
           scale: { x: 1.0, y: 1.0, z: 1.0 }
-        # Lighting the hemisphere the camera is on, from its upper left, so the terminator
-        # crosses the far right of the disc and the relief near it reads.
         - type: DirectionalLight
           cast_shadows: true
           color: { b: 0.9, g: 0.97, r: 1.0 }
           direction: { x: 0.35, y: 0.78, z: -0.52 }
           intensity: 1.35
           shadow_intensity: 0.75
-      children: []
-    - name: sky
-      active: true
-      components:
-        - type: Transform
-          position: { x: 0.0, y: 0.0, z: 0.0 }
-          rotation: { x: 0.0, y: 0.0, z: 0.0 }
-          scale: { x: 1.0, y: 1.0, z: 1.0 }
-        - type: EnvironmentLight
-          ground_color: { b: 0.17, g: 0.22, r: 0.24 }
-          sky_color: { b: 0.94, g: 0.7, r: 0.52 }
-          sky_intensity: 1.15
       children: []

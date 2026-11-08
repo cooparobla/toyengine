@@ -130,6 +130,49 @@ vec3 sky_physical(vec3 dir, vec2 uv) {
     return sky;
 }
 
+// The sky with no atmosphere at all (render sky_model: space): stars at full strength in every
+// direction -- there is no daytime air to wash them out of, which is why
+// Engine::sync_sky_render_state_()'s space branch sets sky_params.z (star_vis) to a flat 1 --
+// plus the same sun and moon discs sky_physical() draws, minus every atmosphere term (no
+// sky-view LUT lookup, no transmittance, no "above the shell" gate: in vacuum a disc is exactly
+// as bright looking straight at either pole as anywhere else). The near-black background itself
+// is whatever the scene authored in sky_zenith/horizon/ground -- this function only adds to it.
+vec3 sky_space(vec3 dir) {
+    vec3 sky = vec3(0.0);
+    float star_vis = lights.sky_params.z;
+    if (star_vis > 0.0) {
+        vec3 stars = sky_star_layer(dir, 260.0, 0.22, lights.sky_extra.w)
+                   + sky_star_layer(dir, 90.0, 0.25, lights.sky_extra.w * 0.7) * 2.5;
+        sky += stars * star_vis;
+    }
+    // Sun: a limb-darkened disc with an anti-aliased rim.
+    vec3 sun = lights.sky_sun.xyz;
+    float cs = dot(dir, sun);
+    float cos_r = lights.sky_sun.w;
+    if (cs > cos_r - (1.0 - cos_r)) {
+        float r = acos(clamp(cs, -1.0, 1.0)) / max(acos(clamp(cos_r, -1.0, 1.0)), 1e-5);   // 0 centre .. 1 rim
+        float edge = 1.0 - smoothstep(0.9, 1.1, r);
+        float mu = sqrt(max(1.0 - min(r, 1.0) * min(r, 1.0), 0.0));
+        float limb = 1.0 - 0.6 * (1.0 - pow(mu, 0.8));
+        sky += lights.sky_extra.x * edge * limb;
+    }
+    // Moon: a full disc (it is always opposite the sun) with darker maria.
+    vec3 moon = lights.sky_moon.xyz;
+    float cm = dot(dir, moon);
+    float cos_m = lights.sky_moon.w;
+    if (lights.sky_extra.y > 0.0 && cm > cos_m - (1.0 - cos_m)) {
+        float rad = max(acos(clamp(cos_m, -1.0, 1.0)), 1e-5);
+        float r = acos(clamp(cm, -1.0, 1.0)) / rad;
+        float edge = 1.0 - smoothstep(0.92, 1.08, r);
+        vec3 side = normalize(cross(moon, abs(moon.z) < 0.99 ? vec3(0, 0, 1) : vec3(1, 0, 0)));
+        vec3 upv = cross(side, moon);
+        vec2 local = vec2(dot(dir - moon, side), dot(dir - moon, upv)) / rad;
+        float maria = sky_moon_maria(local);
+        sky += lights.sky_extra.y * edge * mix(1.0, 0.62, maria) * vec3(0.95, 0.96, 1.0);
+    }
+    return sky;
+}
+
 // A sky pixel's colour with the volumetric cloud layer over it (sky_params.y > 0: the fraction
 // of the cloud target the march filled), whichever sky model drew `sky`.
 vec3 sky_with_clouds(vec3 sky, vec2 uv) {

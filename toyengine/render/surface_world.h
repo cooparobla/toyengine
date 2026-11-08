@@ -163,7 +163,11 @@ struct alignas(16) SurfaceWorldUBO {
     glm::vec4  field{0.0f};           ///< z cell, w 1 = trench field valid
     glm::ivec4 field_dims{0};         ///< x n, yz window min cell index
     glm::vec4  snow_style{0.0f};      ///< x 1 = hard-edged patches, y patch size (m)
-    glm::vec4  wind_gust{0.0f};       ///< x gust strength, y gust clock (s) -- see toyengine/weather/wind.h
+    glm::vec4  wind_gust{0.0f};       ///< x gust strength, y gust clock (s), z LAST frame's gust
+                                      ///< clock, w LAST frame's renderer clock (world.glsl's
+                                      ///< gfx_world_time() / gfx_prev_pose_ read z/w when a
+                                      ///< vertex hook is re-evaluating its previous-frame pose
+                                      ///< -- see gfx/surface/gbuffer_vs.glsl's GFX_SURFACE_PREV_POSE)
     glm::ivec4 terrain_count{0};      ///< x terrains in use, y local env sources in use
     TerrainGpuParams terrain[kMaxSurfaceTerrains]{};
     /// Appended AFTER terrain[] on purpose: inserting ahead of it would shift every terrain
@@ -209,6 +213,13 @@ private:
     std::vector<uint64_t> trench_versions_;
     std::vector<float> scratch_;
     SurfaceWorldUBO last_{};
+    // The clocks the PREVIOUS upload() saw -- well-defined because upload() runs exactly once
+    // per frame, from one call site (ToyRenderPipeline::render()). Carried here rather than in
+    // SurfaceFrameState because the renderer already owns "what I uploaded last frame"; the
+    // weather system's own gust_clock_ advances on the scene's delta, not frame_dt_, so it is
+    // not otherwise derivable at the point a vertex hook needs it.
+    float prev_wind_time_ = 0.0f;
+    float prev_time_ = 0.0f;
 };
 
 } // namespace render

@@ -15,7 +15,7 @@ physics:
   parallel_threshold: 16
   solver: { position_iterations: 4, relax_iterations: 2, velocity_iterations: 16 }
 render:
-  aa_mode: "off"
+  aa_mode: taa
   ambient_intensity: 1.0
   atmosphere_density: 1.0
   auto_exposure_compensation: 1.0

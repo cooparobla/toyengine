@@ -267,6 +267,20 @@ void TerrainSystem::advance_water_settles_(TerrainComponent& terrain) {
     }
 }
 
+glm::vec3 TerrainSystem::planet_eye_direction_(const TerrainComponent& terrain) const {
+    CameraComponent* camera = CameraComponent::main();
+    if (camera == nullptr || camera->owner == nullptr || camera->owner->get_transform() == nullptr) {
+        return glm::vec3(0.0f);
+    }
+    glm::mat4 to_local(1.0f);
+    if (terrain.owner != nullptr) {
+        if (auto* tc = terrain.owner->get_transform()) to_local = glm::inverse(tc->transform().get_world_matrix());
+    }
+    const glm::vec3 eye = glm::vec3(to_local * camera->owner->get_transform()->transform().get_world_matrix()[3]);
+    const float distance = glm::length(eye);
+    return distance > 1e-4f ? eye / distance : glm::vec3(0.0f);
+}
+
 void TerrainSystem::cull_planet_horizon_(TerrainComponent& terrain) {
     if (!terrain.params.planet || terrain.chunks().empty()) return;
     CameraComponent* camera = CameraComponent::main();
@@ -292,18 +306,19 @@ void TerrainSystem::cull_planet_horizon_(TerrainComponent& terrain) {
 
     const glm::vec3 view = eye / distance;
     // How far round the globe anything can still be seen from here, as an angle from the camera's
-    // own direction: `alpha` to the horizon itself (where the view grazes the sphere), plus
-    // `beta` for the terrain standing on it -- a peak `height_scale` tall sits on the tangent
-    // line that much further round -- plus half a chunk's angular width, since the test below
-    // asks about a chunk's CENTRE and its near edge reaches closer.
+    // own direction: `alpha` to the horizon itself (where the view grazes the sphere), plus a
+    // PER-CHUNK `beta` for that chunk's own tallest column standing on it -- it sits on the
+    // tangent line `beta` further round than a bare sphere would -- plus half a chunk's angular
+    // width, since the test below asks about a chunk's CENTRE and its near edge reaches closer.
+    // Reading each chunk's own TerrainChunk::max_steps (its height at the last mesh, in world
+    // units via height_step) instead of one global height_scale margin means an archipelago
+    // planet's sea-level majority draws the tight, correct cap, and only the chunks that are
+    // actually tall widen their own -- rather than every chunk paying for the globe's tallest
+    // peak. A chunk never meshed yet (max_steps == 0) still gets a 1-step floor, so a chunk that
+    // has not finished its first build is not drawn as if it were flat.
     const float alpha = std::acos(std::clamp(radius / distance, -1.0f, 1.0f));
-    const float beta = std::acos(std::clamp(radius / (radius + std::max(0.0f, terrain.params.height_scale)), -1.0f, 1.0f));
     const float chunk_angle = 0.75f * terrain.params.chunk_world_size() / radius;
-    const float limit = std::cos(std::min(alpha + beta + chunk_angle, 3.14159265f));
-    // Hidden a little further round than it is shown again, so a chunk sitting on the limb of a
-    // camera that is barely moving cannot toggle every frame.
-    const float hide_below = limit - 0.02f;
-    const float show_above = limit;
+    const float height_step = std::max(0.0f, terrain.params.height_step);
 
     const std::int32_t size = std::max(1, terrain.params.chunk_size);
     for (auto& [coord, chunk] : terrain.chunks()) {
@@ -311,9 +326,14 @@ void TerrainSystem::cull_planet_horizon_(TerrainComponent& terrain) {
         // The chunk's centre, as a direction out of the planet's centre.
         const glm::vec3 centre(layout.tile_direction(coord.x * size + size / 2, coord.y * size + size / 2));
         const float facing = glm::dot(centre, view);
+        const float chunk_height = static_cast<float>(std::max(1, chunk.max_steps)) * height_step;
+        const float beta = std::acos(std::clamp(radius / (radius + chunk_height), -1.0f, 1.0f));
+        const float limit = std::cos(std::min(alpha + beta + chunk_angle, 3.14159265f));
+        // Hidden a little further round than it is shown again, so a chunk sitting on the limb of
+        // a camera that is barely moving cannot toggle every frame.
         const bool visible = chunk.object->active();
-        if (visible && facing < hide_below) chunk.object->set_active(false);
-        else if (!visible && facing > show_above) chunk.object->set_active(true);
+        if (visible && facing < limit - 0.02f) chunk.object->set_active(false);
+        else if (!visible && facing > limit) chunk.object->set_active(true);
     }
 }
 
@@ -545,10 +565,25 @@ void TerrainSystem::upload_finished_chunks_(TerrainComponent& terrain, coopa::sc
     }
     if (finished_.empty()) return;
 
-    // Nearest the latched centre first: in hash order the chunk under the camera waits behind
-    // the horizon's whenever the budget bites.
+    // Nearest the camera first, whichever way "nearest" means for this terrain's shape -- a
+    // planet never sets stream_centre (latched_centre_()/want_chunks_() are flat-only), so
+    // sorting by chunk_distance() against it would order by storage-space distance from (0, 0),
+    // a corner of face 0, which has nothing to do with what the camera is looking at. There, sort
+    // by ANGULAR distance instead: the chunk centre direction dotted against the camera's own
+    // direction out of the planet, biggest dot (nearest the camera) first.
     const ChunkCoord centre = terrain.stream_centre.centre;
-    std::sort(finished_.begin(), finished_.end(), [&centre](const ChunkCoord& a, const ChunkCoord& b) {
+    const PlanetLayout layout = terrain.params.planet ? terrain.params.layout() : PlanetLayout{};
+    const std::int32_t size = std::max(1, terrain.params.chunk_size);
+    const glm::vec3 eye_dir = terrain.params.planet ? planet_eye_direction_(terrain) : glm::vec3(0.0f);
+    std::sort(finished_.begin(), finished_.end(), [&](const ChunkCoord& a, const ChunkCoord& b) {
+        if (terrain.params.planet) {
+            const glm::vec3 ca(layout.tile_direction(a.x * size + size / 2, a.y * size + size / 2));
+            const glm::vec3 cb(layout.tile_direction(b.x * size + size / 2, b.y * size + size / 2));
+            const float fa = glm::dot(ca, eye_dir), fb = glm::dot(cb, eye_dir);
+            if (fa != fb) return fa > fb;
+            if (a.y != b.y) return a.y < b.y;
+            return a.x < b.x;
+        }
         const std::int32_t da = chunk_distance(a, centre);
         const std::int32_t db = chunk_distance(b, centre);
         if (da != db) return da < db;
@@ -567,6 +602,9 @@ void TerrainSystem::upload_finished_chunks_(TerrainComponent& terrain, coopa::sc
         // time -- which the CounterPool asserts on, by design.
         chunk.job = coopa::job::JobHandle{};
         chunk.state = ChunkState::Live;
+        // Every build re-meshes (a collision-only pass included -- ChunkBuildJob::run() always
+        // calls mesh_chunk_styled() first), so this is current whichever branch below runs.
+        if (chunk.build) chunk.max_steps = chunk.build->mesh.max_steps;
 
         // A collider-only pass changes nothing that is drawn, so it touches nothing that is:
         // the shape goes onto the object the chunk is already on the tree with.
@@ -635,9 +673,24 @@ void TerrainSystem::submit_queued_chunks_(TerrainComponent& terrain, const Chunk
 
     // Nearest first, so the ground under the camera appears before the horizon does. The tie
     // break on coordinates keeps the order deterministic for a given camera position, which
-    // is what makes a scripted capture reproducible.
+    // is what makes a scripted capture reproducible. `centre` is a flat ChunkCoord a planet
+    // never derives one from (tick_terrain_() passes {0, 0}), so planets sort by ANGULAR
+    // distance from the camera instead -- see upload_finished_chunks_()'s identical reasoning.
+    const PlanetLayout layout = terrain.params.planet ? terrain.params.layout() : PlanetLayout{};
+    const std::int32_t chunk_size = std::max(1, terrain.params.chunk_size);
+    const glm::vec3 eye_dir = terrain.params.planet ? planet_eye_direction_(terrain) : glm::vec3(0.0f);
     std::sort(pending_.begin(), pending_.end(),
-              [&centre](const ChunkCoord& a, const ChunkCoord& b) {
+              [&](const ChunkCoord& a, const ChunkCoord& b) {
+                  if (terrain.params.planet) {
+                      const glm::vec3 ca(layout.tile_direction(a.x * chunk_size + chunk_size / 2,
+                                                               a.y * chunk_size + chunk_size / 2));
+                      const glm::vec3 cb(layout.tile_direction(b.x * chunk_size + chunk_size / 2,
+                                                               b.y * chunk_size + chunk_size / 2));
+                      const float fa = glm::dot(ca, eye_dir), fb = glm::dot(cb, eye_dir);
+                      if (fa != fb) return fa > fb;
+                      if (a.y != b.y) return a.y < b.y;
+                      return a.x < b.x;
+                  }
                   const std::int32_t da = chunk_distance(a, centre);
                   const std::int32_t db = chunk_distance(b, centre);
                   if (da != db) return da < db;
@@ -680,10 +733,18 @@ void TerrainSystem::submit_queued_chunks_(TerrainComponent& terrain, const Chunk
         // its own without disturbing its neighbours. The priority is what gets the ground
         // under the camera built first whatever order this queue was in -- and what keeps the
         // far ring from competing with the frame's own parallel work.
-        // A planet has no centre to be near: every one of its chunks is wanted at once.
-        const coopa::job::Priority priority =
-            terrain.params.planet ? coopa::job::Priority::Normal
-                                  : chunk_priority(chunk_distance(chunk.coord, centre), terrain.params.view_radius);
+        // A planet has no RESIDENT-SET centre (every one of its chunks is wanted at once), but
+        // it still has a camera: the hemisphere actually in view gets the same Normal floor the
+        // flat path gives its near ring, so a busy JobEngine beats the far side to a worker with
+        // the visible side, not with whichever half happened to queue first.
+        coopa::job::Priority priority = coopa::job::Priority::Normal;
+        if (terrain.params.planet) {
+            const glm::vec3 dir(layout.tile_direction(chunk.coord.x * chunk_size + chunk_size / 2,
+                                                       chunk.coord.y * chunk_size + chunk_size / 2));
+            if (glm::dot(dir, eye_dir) < 0.0f) priority = coopa::job::Priority::Low;
+        } else {
+            priority = chunk_priority(chunk_distance(chunk.coord, centre), terrain.params.view_radius);
+        }
         ctx.jobs->submit([build]() { build->run(); }, k_terrain_job_type, chunk.job, nullptr, 0u, priority);
     }
 }

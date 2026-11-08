@@ -60,7 +60,45 @@ double median(std::vector<double> xs) {
     return xs[xs.size() / 2];
 }
 
+/** @brief One straight, corner-free cliff: the lower half of the pad at `high_steps`, the rest
+ *         at 1. Every column's along-wall neighbour sits at the same height as itself, so the
+ *         whole wall classifies WallEnd::Continue -- the ordinary case a coastline or a terraced
+ *         plateau is mostly made of, and the one vertical wall-run merging exists for. */
+ColumnPad step_pad(std::int32_t chunk_size, std::int32_t high_steps) {
+    ColumnPad pad;
+    pad.resize(chunk_size);
+    for (std::int32_t y = -1; y <= chunk_size; ++y) {
+        for (std::int32_t x = -1; x <= chunk_size; ++x) {
+            TileColumn& c = pad.at(x, y);
+            c.steps     = (y < chunk_size / 2) ? high_steps : 1;
+            c.top_kind  = TileKind::Grass;
+            c.side_kind = TileKind::Dirt;
+        }
+    }
+    return pad;
+}
+
 } // namespace
+
+COOPA_TEST(straight_cliff_vertex_count_is_flat_in_height) {
+    // soil_depth_steps = 3 (make_test_params()): a plain wall collapses to at most a soil run
+    // and a stone run whatever its height, so raising the cliff should cost close to nothing.
+    const TileMeshLibrary library = make_tile_library({"soft"});
+    const TerrainParams   params  = make_test_params(32);
+    ChunkMeshData mesh;
+
+    mesh_chunk_styled(step_pad(params.chunk_size, 4), library, params, mesh);
+    const std::size_t low_vertices = mesh.vertices.size();
+
+    mesh_chunk_styled(step_pad(params.chunk_size, 40), library, params, mesh);
+    const std::size_t high_vertices = mesh.vertices.size();
+
+    std::printf("straight cliff: height 4 -> %zu vertices, height 40 -> %zu vertices\n",
+                low_vertices, high_vertices);
+    // A 10x taller cliff must not cost anywhere near 10x the vertices -- a loose 2x bound
+    // catches a regression back to one stamp a cell without being a brittle exact check.
+    expect(high_vertices < low_vertices * 2, "a taller straight cliff must not cost ~10x the vertices");
+}
 
 COOPA_TEST(a_demo_chunk_costs_what_the_readme_says) {
     // terrain_demo's shape: rounded (soft) tops over 32-tile chunks, unit cells.

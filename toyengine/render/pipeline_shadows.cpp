@@ -70,11 +70,19 @@ void ToyRenderPipeline::update_lights_(coopa::scene::Scene& scene) {
         ubo.dir_color     = glm::vec4(dir_light_color_(*dir), 0.0f);
     }
 
-    // The physical sky (sky_physical.glsl); all zero selects the gradient. sky_params.y, the
-    // fraction of the cloud target the march filled (0 = no clouds composited), applies to
-    // either sky model.
+    // The sky model, in sky_params.x: 0 gradient, 1 physical, 2 space (toy_lighting.frag). y is
+    // the fraction of the cloud target the march filled (0 = no clouds composited), and applies
+    // under any model.
     const float cloud_fill = volumetric_clouds_traced() ? cloud_quality_steps_().cloud_scale : 0.0f;
-    if (physical_sky_active()) {
+    if (config_.sky_model == "space" && sky_state_.active) {
+        const SkyFrameState& st = sky_state_;
+        // (On a planet the sky's directions are in the camera's own frame: see sky_frame_().)
+        const glm::mat3 frame = planet_ ? sky_frame_() : glm::mat3(1.0f);
+        ubo.sky_sun    = glm::vec4(planet_ ? frame * st.sun_to : st.sun_to, st.sun_disc_cos);
+        ubo.sky_moon   = glm::vec4(planet_ ? frame * st.moon_to : st.moon_to, st.moon_disc_cos);
+        ubo.sky_params = glm::vec4(2.0f, cloud_fill, st.star_visibility, st.sky_illuminance);
+        ubo.sky_extra  = glm::vec4(st.sun_disc_radiance, st.moon_disc_radiance, st.night_floor, st.time);
+    } else if (physical_sky_active()) {
         const SkyFrameState& st = sky_state_;
         // (On a planet the sky's directions are in the camera's own frame: see sky_frame_().)
         const glm::mat3 frame = planet_ ? sky_frame_() : glm::mat3(1.0f);

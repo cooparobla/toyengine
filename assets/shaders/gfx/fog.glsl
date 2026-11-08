@@ -174,6 +174,43 @@ float gfx_fog_sphere_point_weight(vec3 p_local, float radius, float falloff_frac
     return smoothstep(0.0, f, d);
 }
 
+/// Density weight of a POINT inside a SHELL volume (VolumeShape::Shell): 0 below `inner`,
+/// decaying exponentially as altitude -- `length(p_local) - inner` -- grows. The opposite
+/// sense from gfx_fog_sphere_point_weight (which peaks at the volume's own centre and fades
+/// toward its surface): a thin shell of gas sitting ON a sphere's surface, like a planet's
+/// atmosphere, needs the surface itself to be where density is highest, not where it is zero
+/// -- the solid sphere already occludes everything below `inner` anyway. Same formula as the
+/// engine's existing world-Z height falloff (gfx_volume_field, gfx/volumetrics.glsl) with
+/// `length(p_local)` standing in for `p.z`; the outer bound is `extent.x`, exactly like
+/// Sphere -- the caller's own ray/volume bounding test already treats the two alike.
+///
+/// `day_gate` is what makes it read as a SKY rather than a uniform haze: an atmosphere is only
+/// lit where the sun reaches it, so gating density (not just in-scatter) by the sun angle makes
+/// the lit hemisphere thicken into a daytime sky that hides the stars behind it, while the
+/// night hemisphere thins to nothing and lets them back through. Extinction has to follow the
+/// gate too -- an unlit medium that still blocked the sky would leave a grey hole where night
+/// should be -- which is why this scales the WEIGHT rather than only the scattered colour.
+///
+/// @param p_local   Sample point in the volume's local space (the sphere's centre at the origin).
+/// @param inner     Radius the shell starts just above (VolumeComponent::height_base, reused).
+/// @param falloff   Altitude decay scale, world units (VolumeComponent::height_falloff, reused);
+///                  `<= 0` holds the shell at full density out to the outer bound instead.
+/// @param sun_local Direction TOWARD the sun, in the volume's local space, normalized.
+/// @param day_gate  0 = no day/night gating (density is uniform around the sphere), 1 = full
+///                  (VolumeComponent::falloff, reused -- the edge softness Shell has no use for).
+float gfx_fog_shell_weight(vec3 p_local, float inner, float falloff, vec3 sun_local, float day_gate) {
+    float alt = length(p_local) - inner;
+    if (alt < 0.0) return 0.0;
+    float w = falloff > 0.0 ? exp(-alt / falloff) : 1.0;
+    if (day_gate > 0.0) {
+        // Soft terminator straddling the geometric one, so the day/night edge is a dusk band a
+        // few degrees wide rather than a hard line cutting across the limb.
+        float day = smoothstep(-0.25, 0.35, dot(normalize(p_local), sun_local));
+        w *= mix(1.0, day, clamp(day_gate, 0.0, 1.0));
+    }
+    return w;
+}
+
 float gfx_fog_sphere_edge_weight(vec3 p_local, vec3 rd_local, float falloff_frac) {
     float alignment = abs(dot(normalize(p_local), normalize(rd_local)));
     float f = clamp(falloff_frac, 1e-3, 1.0);

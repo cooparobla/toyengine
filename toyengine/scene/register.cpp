@@ -43,6 +43,7 @@
 #include <toyengine/water/water_body.h>
 #include <toyengine/water/water_yaml.h>
 #include <toyengine/world/heightmap_terrain.h>
+#include <toyengine/world/planet_atmosphere.h>
 #include <toyengine/world/terrain_yaml.h>
 #include <toyengine/world/terrain_component.h>
 #include <toyengine/mapgen/map_generator_component.h>
@@ -112,6 +113,10 @@ void register_scene_components() {
             read(node, "max_pitch_deg", cc->max_pitch_deg);
             read(node, "min_distance", cc->min_distance);
             read(node, "max_distance", cc->max_distance);
+            read(node, "pitch_at_min_distance_deg", cc->pitch_at_min_distance_deg);
+            read(node, "pitch_at_max_distance_deg", cc->pitch_at_max_distance_deg);
+            read(node, "tangent_at_min_distance", cc->tangent_at_min_distance);
+            read(node, "tangent_at_max_distance", cc->tangent_at_max_distance);
 
             if (node.contains("mouse_sensitivity")) {
                 cc->mouse_sensitivity = node.at("mouse_sensitivity").get_value<float>();
@@ -162,6 +167,16 @@ void register_scene_components() {
             read(node, "max_spin_deg_per_sec", tt->max_spin_deg_per_sec);
             read(node, "invert_x", tt->invert_x);
             read(node, "invert_y", tt->invert_y);
+        });
+
+    // Sizes a sibling Volume (VolumeShape::Shell) to the nearest ancestor planet terrain's
+    // actual measured peak (toyengine/world/planet_atmosphere.h) -- not a fixed guess.
+    SceneLoader::register_component_parser("PlanetAtmosphere",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* pa = obj.add_component<world::PlanetAtmosphere>();
+            read(node, "thickness_scale", pa->thickness_scale);
+            read(node, "min_thickness", pa->min_thickness);
+            read(node, "scale_height_fraction", pa->scale_height_fraction);
         });
 
     // A breakable mesh (toyengine/scene/destructible.h). DestructionSystem (order 70) does the

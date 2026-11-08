@@ -53,9 +53,19 @@ std::string small_planet() {
     std::string path = scene_variant("assets/scenes/terrain/planet_demo/scene.yaml", "small_planet", [](fkyaml::node& doc) {
         if (fkyaml::node* t = scene_component(doc, "planet", "Terrain")) {
             (*t)["face_tiles"] = fkyaml::node(32);
-            (*t)["height_scale"] = fkyaml::node(6.0);
             (*t)["collision"] = fkyaml::node(true);
             (*t)["gravity"] = fkyaml::node(9.81);
+        }
+        // The actual bake reads the MapGenerator's OWN height_scale (MapGeneratorComponent::
+        // bake_params_()), not the legacy top-level key on Terrain -- which only ever feeds a
+        // synthesised generator when the scene has none of its own (adopt_legacy_terrains_()).
+        // This scene carries an explicit MapGenerator alongside Terrain, so overriding the
+        // Terrain node alone baked the full 32.0 world from scene.yaml regardless, and every
+        // test below that derives a drop height from `params.height_scale` (now that it
+        // genuinely tracks what was baked, rather than a stale, never-applied override) dropped
+        // bodies from ~30 m too high to land gently within its frame budget.
+        if (fkyaml::node* g = scene_component(doc, "planet", "MapGenerator")) {
+            (*g)["height_scale"] = fkyaml::node(6.0);
         }
         auto& roots = doc["scene"]["root_objects"].as_seq();
         roots.erase(std::remove_if(roots.begin(), roots.end(), [](const fkyaml::node& o) {
@@ -266,7 +276,12 @@ COOPA_TEST(a_character_walks_on_the_planet) {
         return true;
     });
     require(glm::length(dir) > 0.5f, "walk: the planet has level land");
-    const float top = layout.radius() + p.terrain->params.height_scale + 2.0f;
+    // The actual ground height under the picked tile, not a global height_scale -- which bounds
+    // the whole globe's columns, not this one, and (now that params.height_scale genuinely
+    // tracks the generator's authored value rather than a stale default) can put the drop so far
+    // above a modest tile that 180 ticks of fall is not enough to land and settle.
+    const float ground = p.terrain->height_at(dir * layout.radius());
+    const float top = layout.radius() + ground + 2.0f;
     player->teleport(dir * top);
     tick_frames(engine, 180);
     expect(player->is_grounded(), "walk: the player lands on the planet");

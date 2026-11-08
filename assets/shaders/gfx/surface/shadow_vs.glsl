@@ -50,7 +50,7 @@ layout(push_constant) uniform ShadowPC {
     mat4 light_space_matrix;
     float alpha;
     float alpha_cutoff; // 0.0 disables shadow_fs.glsl's alpha-mask discard
-    vec4  gfx_time;     // x=time, y=delta_time, z=frame_index, w=spare
+    vec4  gfx_time;     // x=time, y=delta_time, z=frame_index, w=the water clock (WaterFrameState::time)
     vec4  gfx_params;   // must match the caster's G-Buffer surface block exactly
 } pc;
 

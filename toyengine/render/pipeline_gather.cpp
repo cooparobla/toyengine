@@ -119,6 +119,25 @@ ToyRenderPipeline::MeshGather ToyRenderPipeline::gather_meshes_(uint32_t frame_s
         return false;
     };
 
+    // Wind-animated surfaces (foliage, hair) move without their matrix moving -- the sway is
+    // entirely in the vertex shader, driven by the clock and the wind field (see
+    // gfx_surface_vertex() / GFX_SURFACE_PREV_POSE). A windy scene must therefore not report
+    // itself still, or the temporal freeze (record_scene_()'s stillness block) holds SSAO/SSR/
+    // contact-shadow history verbatim over visibly moving leaves. A CALM scene still freezes and
+    // stays byte-static -- which is the point of testing the wind at each item's own position
+    // rather than flipping one scene-wide flag on whenever ANY wind-animated shader is present.
+    const bool any_wind = env::is_windy(surface_state_.env);
+    auto wind_animated = [&](size_t i) -> bool {
+        if (!any_wind || wind_animated_shaders_.count(out.material(i).shader) == 0) return false;
+        if (out.material(i).shader_params[0] <= 0.0f) return false;   // flexibility 0: it cannot move
+        // Sampled where the shader itself samples: a plant's root (foliage_surface.glsl reads
+        // v.model[3].xyz). A multi/particle batch has no single matrix, so its bounds centre is
+        // an approximation across the chunk -- fine for a boolean.
+        const glm::vec3 p = out.multi[i] ? out.bounds[i].center : glm::vec3(out.world_matrices[i][3]);
+        const glm::vec3 w = env::wind_at(surface_state_.env, p);
+        return glm::dot(w, w) > 1e-6f;
+    };
+
     // world_matrix() is a pure read, safe for any number of concurrent readers (unlike
     // get_world_matrix()), because TransformSystem already resolved every dirty transform
     // earlier this frame. Each index writes only its own slot. prev_world_ is only READ
@@ -139,8 +158,9 @@ ToyRenderPipeline::MeshGather ToyRenderPipeline::gather_meshes_(uint32_t frame_s
                 // A simulated batch re-places its instances every frame, so its presence alone
                 // counts as scene motion. A static one whose buffer was reused did NOT move:
                 // calling it moved would hold the temporal freeze open for every frame a
-                // painted world is on screen, which is to say always.
-                out.moved[i] = multi_still[k] ? 0u : 1u;
+                // painted world is on screen, which is to say always -- UNLESS it is wind-
+                // animated and the wind reaching it is actually non-zero (painted grass/foliage).
+                out.moved[i] = (multi_still[k] == 0u || wind_animated(i)) ? 1u : 0u;
                 continue;
             }
             if (!mr->is_ready() || !mr->owner) continue;
@@ -153,9 +173,11 @@ ToyRenderPipeline::MeshGather ToyRenderPipeline::gather_meshes_(uint32_t frame_s
             const auto pit = prev_world_.find(mr);
             out.prev_world_matrices[i] = (pit != prev_world_.end()) ? pit->second : out.world_matrices[i];
             // A dynamic mesh re-uploads its vertices every frame under a fixed matrix
-            // (cloth, CPU skinning): its surface moves even though prev == cur.
+            // (cloth, CPU skinning): its surface moves even though prev == cur. A wind-animated
+            // shader (foliage, hair) is the same situation for a different reason: the matrix
+            // never moves, the clock-driven sway in the vertex shader does.
             const bool transform_moved = matrix_moved(out.prev_world_matrices[i], out.world_matrices[i]);
-            out.moved[i] = (transform_moved || mesh->is_dynamic()) ? 1 : 0;
+            out.moved[i] = (transform_moved || mesh->is_dynamic() || wind_animated(i)) ? 1 : 0;
             // Snow anchor: frozen once the transform has moved (the pose from just before it
             // first did, so the pattern it showed at rest carries on with it).
             const auto ait = snow_anchor_.find(mr);

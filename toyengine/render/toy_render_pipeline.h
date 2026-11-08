@@ -1929,6 +1929,14 @@ private:
     std::unordered_map<const coopa::gfx::engine::components::MeshRenderer*, uint32_t> still_frames_;
     /** Surface shaders with their own shadow vertex stage (possibly animated). */
     std::unordered_set<std::string> animated_shadow_shaders_;
+    /** Surface shaders whose vertex displacement is a function of TIME and the wind -- the ones
+     *  that #define GFX_SURFACE_PREV_POSE in their G-buffer entry point (gbuffer_vs.glsl). Keep
+     *  the two in step. NOT animated_shadow_shaders_: that set is "declares its own shadow_vert",
+     *  which also holds heightmap_terrain (a static height grid) and snow (depth over seconds) --
+     *  calling those "moved" in any windy scene would defeat the temporal freeze for whole
+     *  classes of scene that have nothing to do with wind. Used by gather_meshes_() to keep
+     *  scene_moved_ true while a wind-animated surface is actually swaying (see pipeline_gather.cpp). */
+    std::unordered_set<std::string> wind_animated_shaders_;
     /** Still frames before a caster's depth may be cached as static. */
     static constexpr uint32_t kStaticCasterFrames = 8;
     /** XY grid over this frame's items; every view's cull queries it instead of the flat list. */

@@ -375,6 +375,17 @@ private:
     /** @brief Keeps a planet's gravity source in the physics world, at its centre (and drops gone ones). */
     void sync_planet_gravity_(coopa::scene::Scene& scene);
 
+    /**
+     * @brief Unit direction from a planet's centre toward the main camera's eye, in the
+     *        terrain's own local frame; `{0, 0, 0}` with no camera or no transform.
+     *
+     * The one piece cull_planet_horizon_() and the planet branch of upload_finished_chunks_() /
+     * submit_queued_chunks_() all need: "which way is the camera" has no flat-terrain
+     * counterpart (a planet keeps every chunk loaded, so there is no resident-set centre to be
+     * near), but it still answers "which half of the globe is visible" for all three.
+     */
+    glm::vec3 planet_eye_direction_(const TerrainComponent& terrain) const;
+
     /** @brief Scene-tree name of a chunk object, e.g. `chunk_3_-2`. */
     static std::string chunk_object_name_(const ChunkCoord& coord) {
         return "chunk_" + std::to_string(coord.x) + "_" + std::to_string(coord.y);

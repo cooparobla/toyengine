@@ -310,7 +310,25 @@ glm::vec2 TerraData::chunk_minmax(int cx, int cy) const {
 
 glm::vec2 TerraData::height_range() const {
     if (height_range_revision_ != height_revision_) {
-        height_range_ = minmax(IRect{0, 0, height_nx(), height_ny()});
+        if (has_heights()) {
+            height_range_ = minmax(IRect{0, 0, height_nx(), height_ny()});
+        } else if (!empty()) {
+            // No float height plane: `steps` IS the height (the terraced read), the same case
+            // chunk_minmax() already handles per chunk -- this is that scan over the whole
+            // plane, not six separate calls even on a planet (its six faces are one contiguous
+            // 6N x N TerraData, planet.h).
+            float lo = std::numeric_limits<float>::max(), hi = std::numeric_limits<float>::lowest();
+            for (int y = 0; y < geometry_.tiles_y; ++y) {
+                for (int x = 0; x < geometry_.tiles_x; ++x) {
+                    const float h = static_cast<float>(at(x, y).steps) * geometry_.height_step;
+                    lo = std::min(lo, h);
+                    hi = std::max(hi, h);
+                }
+            }
+            height_range_ = glm::vec2(lo, hi);
+        } else {
+            height_range_ = glm::vec2(0.0f);
+        }
         height_range_revision_ = height_revision_;
     }
     return height_range_;

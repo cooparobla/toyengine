@@ -51,6 +51,7 @@
 #include <toyengine/scene/kinematic_control_system.h>
 #include <toyengine/scene/register.h>
 #include <toyengine/scene/scene_link.h>
+#include <toyengine/world/planet_atmosphere.h>
 #include <toyengine/world/snow_system.h>
 #include <toyengine/mapgen/map_generator_component.h>
 #include <toyengine/world/terrain_system.h>
@@ -591,6 +592,10 @@ void Engine::prepare_scene_(coopa::scene::Scene& scene, bool drain_assets) {
     // Order 59: a map that lands this frame is applied before the streamer decides what to
     // mesh, so the first chunks are never built from an empty grid. See toyengine/mapgen.
     mapgen::install_map_generator_system(scene);
+    // Order 61, just after TerrainSystem (60): a bake that lands this frame is already
+    // measurable when the atmosphere shell is sized from it. Runs in edit mode too, so the sky
+    // is visible while authoring rather than only under play.
+    world::install_planet_atmosphere_system(scene);
     world::install_terrain_system(scene, ctx_.device(), ctx_.allocator(), assets_);
     // Order 61: heightmap terrains -- their chunks, GPU grids and colliders, before Physics (100)
     // steps against them. See heightmap_terrain_system.h.
@@ -2070,6 +2075,25 @@ render::ToyRenderConfig Engine::make_render_config_(const AppConfig& config,
         /* cull */ coopa::gfx::CullMode::None,
         /* tesc */ "water.tesc",
         /* tese */ "water_planet.tese",
+    });
+    // The planet's atmosphere itself is a raymarched VolumeComponent (VolumeShape::Shell, sized
+    // by toyengine/world/planet_atmosphere.h) now, not a surface shader -- see that header for
+    // why a mesh shell couldn't give it the look a real volumetric glow needs.
+    // A cloud deck shell, just inside the atmosphere above (planet_clouds_surface.glsl): the
+    // vertex hook only passes object-space position through for the coverage noise, no
+    // displacement, so still no shadows and no tessellation.
+    rc.surface_shaders.add({
+        /* name  */ "planet_clouds",
+        /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Transparent,
+        /* vert  */ "planet_clouds.vert",
+        /* frag  */ "planet_clouds.frag",
+        /* shadow_vert */ "",
+        /* shadow_frag */ "",
+        /* shadow_cube_vert */ "",
+        /* shadow_cube_frag */ "",
+        /* cull */ coopa::gfx::CullMode::None,
+        /* tesc */ "",
+        /* tese */ "",
     });
 
     return rc;

@@ -149,7 +149,7 @@ const TileMeshLibrary::SideGeometry& TileMeshLibrary::section(std::uint8_t style
 void TileMeshLibrary::append_styled(const SideGeometry& geometry, const glm::vec3& origin, const glm::vec3& scale,
                    float blend_code, bool top_anchored,
                    std::vector<Vertex>& out_v, std::vector<std::uint32_t>& out_i,
-                   int stretch_axis, float stretch) const {
+                   const glm::vec3& stretch) const {
     if (geometry.empty()) return;
     const std::uint32_t base = static_cast<std::uint32_t>(out_v.size());
     const float tile   = scale.x;
@@ -174,7 +174,8 @@ void TileMeshLibrary::append_styled(const SideGeometry& geometry, const glm::vec
         }
         Vertex placed;
         glm::vec3 local(v.position.x * tile, v.position.y * scale.y, z);
-        local[stretch_axis] *= stretch;
+        local *= stretch;
+        s     *= stretch;
         placed.position = origin + local;
         placed.normal   = glm::normalize(v.normal / s);
         // Any tangent orthogonal to the normal, chosen from the normal alone: nothing samples

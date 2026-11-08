@@ -296,7 +296,9 @@ void ToyRenderPipeline::update_volumetrics_data_(coopa::scene::Scene& scene, con
             ? vc->owner->get_transform()->get_world_matrix() : glm::mat4(1.0f);
         gpu.inv_world    = glm::inverse(world);
         gpu.extent_shape = glm::vec4(vc->extent,
-                                     vc->shape == VolumeShape::Sphere ? 1.0f : 0.0f);
+                                     vc->shape == VolumeShape::Sphere ? 1.0f
+                                     : vc->shape == VolumeShape::Shell ? 2.0f
+                                                                       : 0.0f);
 
         // Normalized here, not in the shader: gfx_volume_field decomposes the
         // sample point against this vector, which is only a clean along/perp

@@ -125,7 +125,7 @@ layout(push_constant) uniform PushConstants {
     float ao;
     float alpha_cutoff;  // unused here -- BLEND materials never alpha-test
 
-    vec4  gfx_time;   // x=time, y=delta_time, z=frame_index, w=spare
+    vec4  gfx_time;   // x=time, y=delta_time, z=frame_index, w=the water clock (WaterFrameState::time)
     vec4  gfx_params; // four author-defined floats; see the surface shader's own doc
 
     vec4  refraction_tint_thickness; // rgb = tint, w = thickness
@@ -162,6 +162,12 @@ struct GfxTransparentSurface {
     float roughness;
     float thickness;  // refraction/Beer-Lambert path length
     float ior;        // refraction IOR (outside / inside); water's underside inverts it. Capture: unused
+    // Light the surface's own BRDF does not model: in-scattered radiance (an atmosphere shell's
+    // limb glow, a cloud layer's sunlit top) rather than a reflectance off incoming light. Added
+    // to the shaded colour BEFORE fog and refraction, so it still fogs and refracts like any
+    // other radiance leaving the surface. Zero by default -- every other transparent shader
+    // leaves this alone and stays bit-identical.
+    vec3  emission;
 };
 
 #ifdef GFX_SURFACE_FRAGMENT
@@ -196,6 +202,7 @@ void main() {
     s.roughness   = material.roughness * mr.y;
     s.ior         = material.refraction_ior_flags.x;
     s.thickness   = material.refraction_tint_thickness.w;
+    s.emission    = vec3(0.0);
     gfx_surface_fragment(s);
     N = normalize(s.normal_ws);
 
@@ -230,6 +237,7 @@ void main() {
     p.ssr_prev_frame       = forward_globals.ssr_mip.y;
 
     vec4 shaded = toy_forward_shade(frag_world_pos, N, camera.camera_pos, camera.view, camera.proj, mat, p);
+    shaded.rgb += s.emission;
 
     vec3 V = normalize(camera.camera_pos - frag_world_pos);
     vec3 F0 = mix(vec3(0.04), mat.albedo, mat.metallic);

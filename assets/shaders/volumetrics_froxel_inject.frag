@@ -80,7 +80,14 @@ vec4 vol_froxel_evaluate(vec3 p, vec3 view_dir, float dt) {
         vec3  lp   = (u_vol.volumes[v].inv_world * vec4(p, 1.0)).xyz;
         vec3  ext  = u_vol.volumes[v].extent_shape.xyz;
         float soft = u_vol.volumes[v].mode_params.z;
-        float vw   = (u_vol.volumes[v].extent_shape.w > 0.5)
+        // Shell (2.0): see the identical branch's comment in volumetrics_march.frag.
+        // Shell's sun direction is needed in the volume's OWN space, so a planet that rotates
+        // carries its day side with it instead of having it slide around the globe.
+        vec3  sun_l = normalize(mat3(u_vol.volumes[v].inv_world) * (-u_vol.sun_direction.xyz));
+        float vw   = (u_vol.volumes[v].extent_shape.w > 1.5)
+                   ? gfx_fog_shell_weight(lp, u_vol.volumes[v].shape_params.y, u_vol.volumes[v].shape_params.z,
+                                          sun_l, soft)
+                   : (u_vol.volumes[v].extent_shape.w > 0.5)
                    ? gfx_fog_sphere_point_weight(lp, ext.x, soft)
                    : gfx_fog_box_edge_weight(lp, ext, soft);
         if (vw <= 1e-4) continue;

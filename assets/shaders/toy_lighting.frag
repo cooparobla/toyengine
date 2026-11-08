@@ -189,10 +189,18 @@ void main() {
         vec3 ndc   = vec3(in_uv.x * 2.0 - 1.0, 1.0 - in_uv.y * 2.0, 1.0);
         vec4 world = params.sky_inv_view_proj * vec4(ndc, 1.0);
         vec3 dir   = normalize(world.xyz / world.w - camera.camera_pos);
-        // sky_params.x selects the physical sky (sky_physical.glsl); 0 keeps the gradient.
-        vec3 sky = lights.sky_params.x > 0.5
-            ? sky_physical(dir, in_uv)
-            : sky_gradient(dir, lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb);
+        // sky_params.x selects the sky model (sky_physical.glsl): 0 gradient, 1 physical,
+        // 2 space -- no atmosphere, stars and discs only, added to the scene's own near-black
+        // sky_zenith/horizon/ground.
+        vec3 sky;
+        if (lights.sky_params.x > 1.5) {
+            sky = sky_gradient(dir, lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb) +
+                  sky_space(dir);
+        } else if (lights.sky_params.x > 0.5) {
+            sky = sky_physical(dir, in_uv);
+        } else {
+            sky = sky_gradient(dir, lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb);
+        }
         out_color = vec4(sky_with_clouds(sky, in_uv), 1.0);
         return;
     }

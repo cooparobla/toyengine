@@ -48,7 +48,7 @@ layout(push_constant) uniform PushConstants {
     float roughness;
     float ao;
     float alpha_cutoff;
-    vec4  gfx_time;    // x=time, y=delta_time, z=frame_index, w=spare
+    vec4  gfx_time;    // x=time, y=delta_time, z=frame_index, w=the water clock (WaterFrameState::time)
     vec4  gfx_params;  // four author-defined floats; see the surface shader's own doc
 } material;
 

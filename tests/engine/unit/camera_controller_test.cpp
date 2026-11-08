@@ -121,6 +121,101 @@ COOPA_TEST(pitch_and_zoom_saturate_at_their_limits) {
 }
 
 /**
+ * @brief With either pitch_at_*_distance_deg set, elevation tracks the zoom linearly between
+ *        min_distance and max_distance instead of the mouse/keys -- a planet demo's "overhead
+ *        when far, ground-level when close" framing.
+ */
+COOPA_TEST(zoom_coupled_pitch_tracks_distance_when_set) {
+    CameraController* cc = nullptr;
+    auto scene = make_orbit_scene(&cc, glm::vec3(0.0f, -5.0f, 0.0f));
+    cc->min_distance = 10.0f;
+    cc->max_distance = 100.0f;
+    cc->pitch_at_min_distance_deg = 10.0f;
+    cc->pitch_at_max_distance_deg = 80.0f;
+    scene->start();
+
+    cc->scroll_input = -1000.0f; // zoom out hard -> max_distance
+    scene->update(1.0f / 60.0f);
+    expect(cc->distance == cc->max_distance, "zoom-coupled pitch: zoomed out to max_distance");
+    expect(std::abs(cc->pitch_deg - cc->pitch_at_max_distance_deg) < 1e-3f,
+           "zoom-coupled pitch: pitch tracks max_distance's angle when zoomed out");
+
+    cc->scroll_input = 1000.0f; // zoom in hard -> min_distance
+    scene->update(1.0f / 60.0f);
+    expect(cc->distance == cc->min_distance, "zoom-coupled pitch: zoomed in to min_distance");
+    expect(std::abs(cc->pitch_deg - cc->pitch_at_min_distance_deg) < 1e-3f,
+           "zoom-coupled pitch: pitch tracks min_distance's angle when zoomed in");
+
+    // Manual mouse pitch input is ignored entirely while zoom-coupled pitch is active.
+    const float before = cc->pitch_deg;
+    cc->mouse_delta = glm::vec2(0.0f, 100000.0f);
+    scene->update(1.0f / 60.0f);
+    expect(cc->pitch_deg == before,
+           "zoom-coupled pitch: a mouse drag does not move pitch while zoom-coupled");
+}
+
+/**
+ * @brief tangent_at_*_distance tilts the VIEW off the target toward the local horizon as the
+ *        zoom comes in, which pitch alone cannot do (it only moves the camera on the orbit
+ *        sphere, leaving the view pointed at the centre).
+ *
+ * Checked through the forward vector against the camera's own up (the direction from the target
+ * out to the camera): looking at the target means forward is antiparallel to up, looking along
+ * the tangent means it is perpendicular to it.
+ */
+COOPA_TEST(zoom_coupled_tangent_swings_the_view_to_the_horizon) {
+    CameraController* cc = nullptr;
+    auto scene = make_orbit_scene(&cc, glm::vec3(0.0f, -50.0f, 0.0f));
+    cc->min_distance = 10.0f;
+    cc->max_distance = 100.0f;
+    cc->movement_smoothing = 0.0f;        // apply the zoom in one frame, not over several
+    cc->tangent_at_min_distance = 1.0f;
+    cc->tangent_at_max_distance = 0.0f;
+    scene->start();
+
+    auto* t = cc->owner->get_component<TransformComponent>();
+    // The camera's -Z against the outward radial at its own position (target at the origin).
+    auto dot_forward_up = [&]() {
+        const glm::mat4 world = t->get_world_matrix();
+        const glm::vec3 up = glm::normalize(glm::vec3(world[3]));
+        return glm::dot(-glm::normalize(glm::vec3(world[2])), up);
+    };
+
+    cc->scroll_input = -1000.0f;  // zoom out hard -> max_distance, tangent 0
+    scene->update(1.0f / 60.0f);
+    expect(std::abs(dot_forward_up() + 1.0f) < 1e-2f,
+           "zoomed out: the view points straight back at the target, perpendicular to the surface");
+
+    cc->scroll_input = 1000.0f;   // zoom in hard -> min_distance, tangent 1
+    scene->update(1.0f / 60.0f);
+    expect(std::abs(dot_forward_up()) < 1e-2f,
+           "zoomed in: the view is perpendicular to the camera's up, i.e. along the surface tangent");
+}
+
+/**
+ * @brief Left unset (the default), the look tilt does nothing at all: the view keeps pointing
+ *        at the target at every zoom, exactly as every existing orbit scene expects.
+ */
+COOPA_TEST(tangent_look_is_inert_unless_a_scene_asks_for_it) {
+    CameraController* cc = nullptr;
+    auto scene = make_orbit_scene(&cc, glm::vec3(0.0f, -50.0f, 0.0f));
+    cc->min_distance = 10.0f;
+    cc->max_distance = 100.0f;
+    cc->movement_smoothing = 0.0f;
+    scene->start();
+
+    auto* t = cc->owner->get_component<TransformComponent>();
+    for (float scroll : {-1000.0f, 1000.0f}) {
+        cc->scroll_input = scroll;
+        scene->update(1.0f / 60.0f);
+        const glm::mat4 world = t->get_world_matrix();
+        const glm::vec3 up = glm::normalize(glm::vec3(world[3]));
+        expect(std::abs(glm::dot(-glm::normalize(glm::vec3(world[2])), up) + 1.0f) < 1e-2f,
+               "unset tangent: the view still points at the target at every zoom");
+    }
+}
+
+/**
  * @brief The keys turn the orbit only where a scene asked for it, at the rate it asked for, into
  *        the same clamps the mouse uses.
  *

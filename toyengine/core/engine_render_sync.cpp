@@ -222,6 +222,7 @@ void Engine::sync_sky_render_state_(coopa::scene::Scene& scene, float dt) {
     render::ToyRenderConfig& c = pipeline_->render_config_mut();
     weather::WeatherSystem* w = weather::find(scene);
     const bool physical = c.sky_model == "physical";
+    const bool space    = c.sky_model == "space";
     if (w) w->set_physical_sky(physical);
     const bool weather_live = w && w->enabled() && w->state().enabled;
 
@@ -243,6 +244,37 @@ void Engine::sync_sky_render_state_(coopa::scene::Scene& scene, float dt) {
     sky_time_ += std::max(dt, 0.0f);
 
     render::SkyFrameState st;
+    if (space) {
+        // A world seen from orbit: no atmosphere to scatter through, so no transmittance LUTs,
+        // no sky_atmosphere_ gradient, and the scene's own near-black sky_zenith/horizon/ground
+        // stand as authored (restore_sky_colours_() undoes a lingering physical/weather
+        // override from an earlier model switch; it is a no-op otherwise). Stars are full
+        // strength regardless of the sun's elevation -- there is no daytime sky to drown them
+        // out of -- and the sun/moon discs reuse the same cosine/radiance shape the physical
+        // sky uses, so toy_lighting.frag's sky_physical.glsl helpers draw identically either way.
+        restore_sky_colours_();
+        DirectionalLightComponent* light = nullptr;
+        for (DirectionalLightComponent* l : scene.get_components<DirectionalLightComponent>()) {
+            if (l->owner && l->owner->active()) { light = l; break; }
+        }
+        glm::vec3 sun_to = glm::normalize(glm::vec3(0.4f, 0.3f, 0.85f));
+        if (light && glm::length(light->direction) > 1e-6f) sun_to = -glm::normalize(light->direction);
+        st.active             = true;
+        st.sun_to             = sun_to;
+        st.moon_to            = -sun_to;
+        st.sky_illuminance    = 1.0f;
+        st.moon_ratio         = k_moon_ratio;
+        st.sun_disc_radiance  = c.sun_disc_size > 0.0f ? 40.0f : 0.0f;
+        st.moon_disc_radiance = 0.0f; // no atmosphere to scatter earthlight/moonlight through
+        st.sun_disc_cos       = std::cos(glm::radians(std::max(c.sun_disc_size, 0.0f) * 0.5f));
+        st.moon_disc_cos      = std::cos(glm::radians(std::max(c.moon_disc_size, 0.0f) * 0.5f));
+        st.star_visibility    = c.sky_stars ? 1.0f : 0.0f;
+        st.night_floor        = 0.0f;
+        st.time               = std::fmod(sky_time_, 3600.0f);
+        pipeline_->set_sky_state(st);
+        sync_cloud_state_(scene, nullptr);
+        return;
+    }
     if (!physical) {
         restore_sky_colours_();
         pipeline_->set_sky_state(st);

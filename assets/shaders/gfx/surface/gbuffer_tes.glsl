@@ -147,7 +147,33 @@ void main() {
     gfx_surface_vertex(v);
 
     vec3 disp = v.position_ws - world_pos.xyz;
+
+#ifdef GFX_SURFACE_PREV_POSE
+    // Same construction as gbuffer_vs.glsl's GFX_SURFACE_PREV_POSE: re-run the hook on last
+    // frame's model matrix and clocks for a TRUE previous-frame position. The displacement map
+    // push MUST be replayed here too (it is not part of gfx_surface_vertex()) -- skipping it
+    // would bake in a constant per-frame velocity error of normal * height * tp.displacement on
+    // every tessellated displaced surface, every frame, regardless of actual motion.
+    GfxSurfaceVertex pv;
+    pv.position_os   = pos_os;
+    pv.normal_os      = n_os;
+    pv.tangent_os     = v.tangent_os;
+    pv.uv             = uv;
+    pv.model          = tc_prev_model;
+    pv.normal_matrix  = transpose(inverse(mat3(tc_prev_model)));
+    pv.position_ws    = (tc_prev_model * vec4(pos_os, 1.0)).xyz;
+    pv.normal_ws      = normalize(pv.normal_matrix * n_os);
+    pv.tangent_ws     = normalize(pv.normal_matrix * pv.tangent_os.xyz);
+    if (tp.displacement != 0.0) {
+        pv.position_ws += pv.normal_ws * (textureLod(u_displacement, uv, 0.0).r * tp.displacement);
+    }
+    gfx_prev_pose_ = 1;
+    gfx_surface_vertex(pv);
+    gfx_prev_pose_ = 0;
+    frag_prev_world_pos = pv.position_ws;
+#else
     frag_prev_world_pos = (tc_prev_model * vec4(pos_os, 1.0)).xyz + disp;
+#endif
     frag_snow_pos = (tc_snow_anchor * vec4(pos_os, 1.0)).xyz + disp;
     frag_snow_up  = mat3(tc_snow_anchor) * (transpose(v.normal_matrix) * vec3(0.0, 0.0, 1.0));
 

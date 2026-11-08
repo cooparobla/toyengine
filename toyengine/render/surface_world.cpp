@@ -50,7 +50,7 @@ void SurfaceWorldData::upload(uint32_t frame_slot, const SurfaceFrameState& s, c
     u.tess_view = glm::vec4(camera_pos, px_scale);
     u.snow = glm::vec4(std::clamp(s.snow_cover, 0.0f, 1.0f), std::max(0.0f, s.snow_depth), s.wetness, time);
     u.wind = glm::vec4(s.wind, s.trench_scale);
-    u.wind_gust = glm::vec4(std::max(s.wind_gust, 0.0f), s.wind_time, 0.0f, 0.0f);
+    u.wind_gust = glm::vec4(std::max(s.wind_gust, 0.0f), s.wind_time, prev_wind_time_, prev_time_);
     const int cells = s.occl_nx * s.occl_ny;
     const bool occl_ok = s.occl_heights && cells > 0 && static_cast<uint32_t>(cells) <= kMaxOcclCells &&
                          s.occl_heights->size() >= static_cast<size_t>(cells);
@@ -101,6 +101,10 @@ void SurfaceWorldData::upload(uint32_t frame_slot, const SurfaceFrameState& s, c
 
     ubo_[k].upload(&u, sizeof(u));
     last_ = u;
+    // Remember this frame's clocks for the NEXT upload() to pack into wind_gust.zw -- the
+    // previous-frame pose a vertex hook re-evaluates itself at.
+    prev_wind_time_ = s.wind_time;
+    prev_time_ = time;
 }
 
 } // namespace render

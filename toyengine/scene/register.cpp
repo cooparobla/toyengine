@@ -176,7 +176,10 @@ void register_scene_components() {
             auto* pa = obj.add_component<world::PlanetAtmosphere>();
             read(node, "thickness_scale", pa->thickness_scale);
             read(node, "min_thickness", pa->min_thickness);
+            read(node, "base_altitude_scale", pa->base_altitude_scale);
             read(node, "scale_height_fraction", pa->scale_height_fraction);
+            read(node, "day_sky_altitude_scale", pa->day_sky_altitude_scale);
+            if (node.contains("day_sky_color")) pa->day_sky_color = parse_rgb(node.at("day_sky_color"), pa->day_sky_color);
         });
 
     // A breakable mesh (toyengine/scene/destructible.h). DestructionSystem (order 70) does the

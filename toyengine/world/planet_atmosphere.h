@@ -42,6 +42,8 @@
 
 #include <cstdint>
 
+#include <glm/glm.hpp>
+
 #include <coopa/scene/component.h>
 
 namespace coopa {
@@ -91,6 +93,16 @@ public:
     float min_thickness = 30.0f;
 
     /**
+     * @brief Altitude of the shell's BASE, as a multiple of the measured peak. 0 = on the ground.
+     *
+     * What lets one component serve both layers a planet wants: at 0 the shell starts at the
+     * datum and is an atmosphere, and at ~1 it starts just clear of the tallest peak and is a
+     * cloud deck floating over the terrain. Both then track the same measured height, so a
+     * re-bake that raises the mountains lifts the clouds with them instead of burying them.
+     */
+    float base_altitude_scale = 0.0f;
+
+    /**
      * @brief Exponential scale height, as a fraction of the total thickness.
      *
      * Density at altitude `a` above the datum is `exp(-a / (thickness * this))`. Small values
@@ -100,6 +112,46 @@ public:
      */
     float scale_height_fraction = 0.45f;
 
+    /**
+     * @brief Colour the star backdrop turns into in full daylight, deep inside the atmosphere.
+     *
+     * The raymarched shell alone cannot do this. A daytime sky hides the stars by being far
+     * BRIGHTER than them, not by being opaque -- and any shell thick enough to actually occlude
+     * them from inside is, by construction, at least as thick seen from orbit, which would veil
+     * the planet itself. So the backdrop is faded toward this colour instead, exactly where a
+     * real sky would be lit: see day_sky_factor().
+     */
+    glm::vec3 day_sky_color = glm::vec3(0.16f, 0.36f, 0.78f);
+
+    /**
+     * @brief Altitude at which the backdrop is FULLY daytime sky, as a multiple of the peak.
+     *
+     * 0 disables the backdrop fade entirely for this layer -- which is what a cloud deck wants:
+     * only the atmosphere itself should be deciding what the sky looks like.
+     *
+     * Above it the sky fades back to stars, reaching space at the shell's outer radius. The
+     * default just clears the tallest terrain, so anywhere a camera can sit on the ground reads
+     * as a full sky and climbing out of the world is what brings the stars back. Keyed to the
+     * peak rather than the scale height on purpose: the physical air column at a playable
+     * altitude on a planet this small is thin enough to show stars, and this is the knob that
+     * says "treat it as a sky anyway" instead of inflating the shell until orbit looks wrong.
+     */
+    float day_sky_altitude_scale = 1.2f;
+
+    /**
+     * @brief How much daytime sky lies between `camera_pos` and space, 0..1.
+     *
+     * The product of two terms: how deep the camera sits inside the shell (0 at the outer
+     * radius, 1 at the datum) and how lit its own patch of sky is (a soft terminator on the
+     * local up against the sun), so flying out of the atmosphere or around onto the night side
+     * each bring the stars back, and doing both brings them back faster.
+     *
+     * @param camera_pos Camera position, world space.
+     * @param sun_to     Unit direction TOWARD the sun, world space.
+     * @return 0 when the backdrop should stay the authored star field, 1 at full daylight.
+     */
+    float day_sky_factor(const glm::vec3& camera_pos, const glm::vec3& sun_to) const;
+
     /** @brief Recomputes the sibling Volume if the terrain's height has changed. Idempotent. */
     void apply();
 
@@ -107,6 +159,10 @@ private:
     /** @brief Nearest ancestor TerrainComponent, resolved lazily; null until one exists. */
     TerrainComponent* terrain_ = nullptr;
     std::uint64_t applied_height_revision_ = 0;
+    /** @brief Shell radii from the last apply(); outer_ <= 0 means nothing has been measured. */
+    float inner_ = 0.0f;
+    float outer_ = 0.0f;
+    float peak_  = 0.0f;
 };
 
 /**

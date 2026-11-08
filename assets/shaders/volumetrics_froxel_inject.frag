@@ -91,9 +91,13 @@ vec4 vol_froxel_evaluate(vec3 p, vec3 view_dir, float dt) {
                    ? gfx_fog_sphere_point_weight(lp, ext.x, soft)
                    : gfx_fog_box_edge_weight(lp, ext, soft);
         if (vw <= 1e-4) continue;
+        // See the identical note in volumetrics_march.frag: a Shell's falloff slot is a
+        // radius, so the field's world-Z height term must not read it.
+        vec4  fshape = u_vol.volumes[v].shape_params;
+        if (u_vol.volumes[v].extent_shape.w > 1.5) fshape.z = 0.0;
         float f = gfx_volume_field(p, u_vol.time_params.x, int(u_vol.volumes[v].mode_params.x),
                                    u_vol.volumes[v].direction_speed, u_vol.volumes[v].field_params,
-                                   u_vol.volumes[v].shape_params, u_vol.volumes[v].flow_params);
+                                   fshape, u_vol.volumes[v].flow_params);
         float s = f * vw * density;
         if (s <= 1e-5) continue;
         sigma    += s;

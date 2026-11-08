@@ -89,8 +89,8 @@ COOPA_TEST(sizes_the_shell_from_the_terrains_measured_peak) {
     const float thickness = Fixture::thickness_for(5.0f);   // 5 * 1.8 < 30, so the floor wins
 
     expect_near(thickness, 30.0f, 1e-3f, "a near-flat world falls back to min_thickness");
-    expect_near(f.volume->extent.x, radius + 5.0f + thickness, 1e-3f,
-                "the shell's outer radius clears the measured peak by the sky's thickness");
+    expect_near(f.volume->extent.x, radius + thickness, 1e-3f,
+                "the shell's outer radius is its base plus the sky's thickness");
     expect_near(f.volume->height_base, radius, 1e-3f,
                 "the shell's inner radius is the planet's own nominal datum");
     expect_near(f.volume->height_falloff, thickness * 0.45f, 1e-3f,
@@ -103,10 +103,24 @@ COOPA_TEST(a_tall_world_gets_a_proportionally_taller_sky) {
 
     const float radius = f.terrain->params.layout().radius();
     expect_near(Fixture::thickness_for(40.0f), 72.0f, 1e-3f, "thickness scales with the peak");
-    expect_near(f.volume->extent.x, radius + 40.0f + 72.0f, 1e-3f,
+    expect_near(f.volume->extent.x, radius + 72.0f, 1e-3f,
                 "mountains 8x taller than the flat case get far more air above them, not a fixed margin");
     expect_near(f.volume->height_falloff, 72.0f * 0.45f, 1e-3f,
                 "the scale height grows with the sky, so the air is never a dense skin at the datum");
+}
+
+COOPA_TEST(base_altitude_scale_floats_the_shell_clear_of_the_peak) {
+    Fixture f(40);
+    f.sizer->base_altitude_scale = 0.9f;      // a cloud deck, not an atmosphere
+    f.terrain->field.mark_all_dirty();        // re-fire with the new setting
+    f.scene.update(1.0f / 60.0f);
+
+    const float radius = f.terrain->params.layout().radius();
+    const float base   = radius + 40.0f * 0.9f;
+    expect_near(f.volume->height_base, base, 1e-3f,
+                "the shell starts above the terrain instead of on the datum");
+    expect_near(f.volume->extent.x, base + Fixture::thickness_for(40.0f), 1e-3f,
+                "and its outer radius follows that raised base");
 }
 
 COOPA_TEST(a_second_update_with_no_new_bake_is_a_no_op) {

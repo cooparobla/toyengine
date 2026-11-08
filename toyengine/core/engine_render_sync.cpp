@@ -35,6 +35,7 @@
 #include <sfxcoopa/sfx_yaml.h>
 #include <uicoopa/audio/sound_library.h>
 #include <toyengine/scene/camera_controller.h>
+#include <toyengine/world/planet_atmosphere.h>
 #include <toyengine/scene/free_mover.h>
 #include <toyengine/scene/kinematic_control_system.h>
 #include <toyengine/scene/register.h>
@@ -252,13 +253,47 @@ void Engine::sync_sky_render_state_(coopa::scene::Scene& scene, float dt) {
         // strength regardless of the sun's elevation -- there is no daytime sky to drown them
         // out of -- and the sun/moon discs reuse the same cosine/radiance shape the physical
         // sky uses, so toy_lighting.frag's sky_physical.glsl helpers draw identically either way.
-        restore_sky_colours_();
         DirectionalLightComponent* light = nullptr;
         for (DirectionalLightComponent* l : scene.get_components<DirectionalLightComponent>()) {
             if (l->owner && l->owner->active()) { light = l; break; }
         }
         glm::vec3 sun_to = glm::normalize(glm::vec3(0.4f, 0.3f, 0.85f));
         if (light && glm::length(light->direction) > 1e-6f) sun_to = -glm::normalize(light->direction);
+
+        // A PlanetAtmosphere turns the "no daytime sky to drown the stars out of" assumption
+        // above false: once the camera is down inside a lit atmosphere the backdrop has to read
+        // as sky, not as space. Brightness is what hides stars in daylight, not opacity, so the
+        // fade happens HERE on the backdrop rather than by thickening the shell -- a shell dense
+        // enough to occlude them from within would equally veil the planet seen from orbit.
+        float day = 0.0f;
+        glm::vec3 day_col(0.0f);
+        {
+            glm::vec3 cam(0.0f);
+            if (auto* cam_c = coopa::gfx::engine::components::CameraComponent::main()) {
+                cam = cam_c->get_world_position();
+            }
+            for (world::PlanetAtmosphere* a : scene.get_components<world::PlanetAtmosphere>()) {
+                const float f = a->day_sky_factor(cam, sun_to);
+                if (f > day) { day = f; day_col = a->day_sky_color; }
+            }
+        }
+        if (day > 1e-3f) {
+            render::ToyRenderConfig& rc = pipeline_->render_config_mut();
+            if (!sky_applied_) {
+                sky_base_ = {rc.indirect.sky_zenith, rc.indirect.sky_horizon, rc.indirect.sky_ground};
+                sky_applied_ = true;
+            }
+            // Only a slight lift toward white for horizon and ground. The gradient's zenith is
+            // WORLD +Z, not the planet's local up, so anywhere but the pole most of the visible
+            // sky falls in its horizon band -- lean on it for the look and the sky reads as a
+            // white wash everywhere except directly over the north pole.
+            const glm::vec3 pale = glm::mix(day_col, glm::vec3(1.0f), 0.12f);
+            rc.indirect.sky_zenith  = glm::mix(sky_base_[0], day_col, day);
+            rc.indirect.sky_horizon = glm::mix(sky_base_[1], pale, day);
+            rc.indirect.sky_ground  = glm::mix(sky_base_[2], pale, day);
+        } else {
+            restore_sky_colours_();
+        }
         st.active             = true;
         st.sun_to             = sun_to;
         st.moon_to            = -sun_to;
@@ -268,7 +303,7 @@ void Engine::sync_sky_render_state_(coopa::scene::Scene& scene, float dt) {
         st.moon_disc_radiance = 0.0f; // no atmosphere to scatter earthlight/moonlight through
         st.sun_disc_cos       = std::cos(glm::radians(std::max(c.sun_disc_size, 0.0f) * 0.5f));
         st.moon_disc_cos      = std::cos(glm::radians(std::max(c.moon_disc_size, 0.0f) * 0.5f));
-        st.star_visibility    = c.sky_stars ? 1.0f : 0.0f;
+        st.star_visibility    = c.sky_stars ? 1.0f - day : 0.0f;
         st.night_floor        = 0.0f;
         st.time               = std::fmod(sky_time_, 3600.0f);
         pipeline_->set_sky_state(st);

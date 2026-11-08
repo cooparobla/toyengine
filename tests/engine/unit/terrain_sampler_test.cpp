@@ -187,6 +187,65 @@ COOPA_TEST(the_floor_under_water_has_relief_and_grades_by_depth) {
 }
 
 /**
+ * @brief Ocean depth is capped by the WATERLINE, so `sea_level` is the knob that deepens seas.
+ *
+ * A generated map compresses everything underwater into `[0, sea_level)` and gives land the
+ * rest, and the bed can never bake below the ground plane (steps are heights, not signed
+ * depths). So the deepest water a world can hold is exactly `sea_level * height_scale` steps --
+ * at the default 0.25 that is a quarter of the range against three quarters for the land, which
+ * is why a default planet's seas read as puddles beside its mountains. Raising `sea_level`
+ * (with `height_scale` to keep the land's own relief) is the only thing that changes the ratio.
+ */
+COOPA_TEST(sea_level_sets_the_ceiling_on_how_deep_an_ocean_can_bake) {
+    using namespace toy::world;
+
+    QuietLogger logger;
+
+    /// Bakes a world at `sea_level` and reports (deepest water, waterline), both in steps.
+    auto sound = [&](double sea_level, float height_scale) {
+        coopa::maps::MapConfig config = toy::mapgen::default_generator();
+        config.seed      = 31;
+        config.grid_size = 32;
+        config.sea_level = sea_level;
+        config = coopa::maps::derived_config(config);
+        coopa::maps::MapGenerator generator(config, logger);
+        generator.generate();
+
+        TerrainParams params = make_test_params(16);
+        params.height_scale = height_scale;
+        params.world_tiles  = config.grid_size * 16;
+        TerrainSampler sampler;
+        sampler.build(config, std::move(generator.graph()), params);
+        TerraData tiles;
+        sampler.bake(tiles);
+
+        std::int32_t deepest = 0;
+        std::int32_t waterline = 0;
+        const float height_step = tiles.geometry().height_step;
+        for (std::int32_t y = 0; y < tiles.geometry().tiles_y; ++y) {
+            for (std::int32_t x = 0; x < tiles.geometry().tiles_x; ++x) {
+                const TileCell& t = tiles.at(x, y);
+                if (!t.wet() || static_cast<WaterKind>(t.water_kind) != WaterKind::Ocean) continue;
+                const std::int32_t w = static_cast<std::int32_t>(std::lround(t.water_level / height_step));
+                deepest   = std::max(deepest, w - t.steps);
+                waterline = std::max(waterline, w);
+            }
+        }
+        return std::pair<std::int32_t, std::int32_t>{deepest, waterline};
+    };
+
+    const auto shallow = sound(0.25, 32.0f);   // the default split: a quarter of the range
+    const auto deep    = sound(0.45, 56.0f);   // planet_demo's: a deeper sea that keeps its land
+    std::cerr << "         sea_level 0.25 -> deepest " << shallow.first << " of " << shallow.second
+              << " steps; 0.45 -> deepest " << deep.first << " of " << deep.second << "\n";
+
+    expect(shallow.first <= shallow.second,
+           "ocean depth: water can never be deeper than its own waterline is high");
+    expect(deep.first > shallow.first,
+           "ocean depth: a higher sea_level is what buys the bed room to sink into");
+}
+
+/**
  * @brief A field with a height plane bakes each wet tile's level at mapcoopa's exact surface,
  *        where a terraced field rounds it to a whole step.
  *

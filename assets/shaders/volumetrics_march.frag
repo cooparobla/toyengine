@@ -199,11 +199,18 @@ void main() {
                 continue;
             }
 
+            // Shell already applied its own RADIAL altitude profile above, and the field's
+            // own falloff term is a world-Z one reading the same two slots -- which for a
+            // Shell hold an inner radius, not a height. Zero it so a noisy Shell (a cloud
+            // deck on a planet) gets the shape from the shell and the detail from the noise,
+            // instead of a second, wrongly-oriented falloff stacked on top.
+            vec4  fshape = u_vol.volumes[v].shape_params;
+            if (u_vol.volumes[v].extent_shape.w > 1.5) fshape.z = 0.0;
             float f = gfx_volume_field(p, u_vol.time_params.x,
                                        int(u_vol.volumes[v].mode_params.x),
                                        u_vol.volumes[v].direction_speed,
                                        u_vol.volumes[v].field_params,
-                                       u_vol.volumes[v].shape_params,
+                                       fshape,
                                        u_vol.volumes[v].flow_params);
             float s = f * vw * u_vol.volumes[v].shape_params.x;
             if (s <= 1e-5) {

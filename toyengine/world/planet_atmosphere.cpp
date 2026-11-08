@@ -7,6 +7,7 @@
 
 #include <coopa/scene/scene.h>
 #include <coopa/scene/scene_object.h>
+#include <coopa/scene/components/transform_component.h>
 #include <coopa/scene/scene_system.h>
 #include <gfxcoopa/engine/components/volume.h>
 #include <toyengine/world/terrain_component.h>
@@ -38,14 +39,39 @@ void PlanetAtmosphere::apply() {
     // may fall well short of, or -- with enough noise detail -- exceed).
     const float peak = std::max(data->height_range().y, 0.0f);
     const float planet_radius = terrain_->params.layout().radius();
+    const float base = planet_radius + peak * std::max(base_altitude_scale, 0.0f);
     const float thickness = std::max(min_thickness, peak * thickness_scale);
-    const float outer = planet_radius + peak + thickness;
+    const float outer = base + thickness;
 
     volume->extent         = glm::vec3(outer, outer, outer);
-    volume->height_base    = planet_radius;   // VolumeShape::Shell's inner radius
+    volume->height_base    = base;            // VolumeShape::Shell's inner radius
     volume->height_falloff = std::max(thickness * scale_height_fraction, 0.1f);
 
+    inner_ = base;
+    outer_ = outer;
+    peak_  = peak;
     applied_height_revision_ = data->height_revision();
+}
+
+float PlanetAtmosphere::day_sky_factor(const glm::vec3& camera_pos, const glm::vec3& sun_to) const {
+    // A layer that is not the atmosphere (a cloud deck) has no business recolouring the sky.
+    if (day_sky_altitude_scale <= 0.0f) return 0.0f;
+    if (outer_ <= inner_ || owner == nullptr) return 0.0f;
+    auto* tf = owner->get_transform();
+    if (tf == nullptr) return 0.0f;
+    const glm::vec3 centre = glm::vec3(tf->get_world_matrix()[3]);
+    const glm::vec3 radial = camera_pos - centre;
+    const float r = glm::length(radial);
+    if (r < 1e-4f) return 0.0f;
+
+    // Full sky at or below day_sky_altitude, fading back to stars by the shell's outer radius.
+    const float span    = outer_ - inner_;
+    const float full    = glm::clamp(peak_ * day_sky_altitude_scale, 0.0f, span * 0.9f);
+    const float depth   = 1.0f - glm::smoothstep(full, span, r - inner_);
+    // The same soft terminator the shell's own density gate uses, so the backdrop and the
+    // volumetric glow fade in together instead of one leading the other across the dusk band.
+    const float day = glm::smoothstep(-0.25f, 0.35f, glm::dot(radial / r, sun_to));
+    return depth * depth * day;
 }
 
 namespace {

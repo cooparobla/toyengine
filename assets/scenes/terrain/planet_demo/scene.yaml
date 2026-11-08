@@ -27,9 +27,10 @@ scene:
           generator:
             grid_size: 40
             image_size: 2400
+            sea_level: 0.45
             seed: 315546511
             shape: { shape: archipelago }
-          height_scale: 32.0
+          height_scale: 56.0
           river_inset: 0.2
           sphere: true
           water_inset: 0.5
@@ -41,12 +42,30 @@ scene:
             - type: Transform
               position: { x: 0.0, y: 0.0, z: 0.0 }
               rotation: { x: 0.0, y: 0.0, z: 0.0 }
-              scale: { x: 165.0, y: 165.0, z: 165.0 }
-            - type: MeshRenderer
-              affects_reflection_probes: false
-              cast_shadows: false
-              material: { alpha: 0.12, alpha_mode: BLEND, cull_backfaces: false, roughness: 1.0, shader: planet_clouds, shader_params: [165.0, 5.0, 0.35, 0.015], shader_params_ext: [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0] }
-              mesh_path: sphere
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: Volume
+              kind: haze
+              shape: shell
+              color: { r: 1.0, g: 1.0, b: 1.0 }
+              coverage: 0.68
+              density: 0.16
+              direction: { x: 1.0, y: 0.25, z: 0.0 }
+              falloff: 0.0
+              flow_scale: 0.015
+              flow_warp: 9.0
+              gate_scale: 0.0
+              noise_scale: 0.14
+              occlusion: 0.9
+              octaves: 4
+              speed: 1.2
+              streak: 1.6
+              sun_amount: 0.45
+            - type: PlanetAtmosphere
+              base_altitude_scale: 1.02
+              day_sky_altitude_scale: 0.0
+              min_thickness: 5.0
+              scale_height_fraction: 0.6
+              thickness_scale: 0.09
           children: []
         - name: atmosphere
           active: true
@@ -59,12 +78,14 @@ scene:
               kind: fog
               shape: shell
               color: { r: 0.35, g: 0.55, b: 1.0 }
-              density: 0.007
-              falloff: 1.0
+              density: 0.0035
+              falloff: 0.75
               occlusion: 0.55
               sun_amount: 0.9
             - type: PlanetAtmosphere
-              thickness_scale: 1.8
+              day_sky_altitude_scale: 1.5
+              scale_height_fraction: 0.22
+              thickness_scale: 2.8
           children: []
     - name: camera
       active: true

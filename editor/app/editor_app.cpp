@@ -817,8 +817,16 @@ void EditorApp::frame_all() {
         else { lo = glm::vec3(-0.6f, -0.6f, -0.1f); hi = glm::vec3(0.6f, 0.6f, 1.1f); }
         any = true;
     } else {
-        for (ObjectId id : doc_.all_ids()) any |= object_bounds_(id, lo, hi, /*meshes_only=*/true);
+        for (ObjectId id : doc_.all_ids()) {
+            const bool got = object_bounds_(id, lo, hi, /*meshes_only=*/true);
+            auto* lv = sync_.live(id);
+            log_info("FRAMEDBG id=" + std::to_string(static_cast<unsigned long long>(id)) +
+                     " got=" + std::to_string(got ? 1 : 0) + " live=" + std::to_string(lv ? 1 : 0) +
+                     " terrain=" + std::to_string((lv && lv->get_component<toy::world::TerrainComponent>()) ? 1 : 0));
+            any |= got;
+        }
     }
+    log_info("FRAMEDBG any=" + std::to_string(any ? 1 : 0) + " diag=" + std::to_string(glm::length(hi - lo)));
     if (any && glm::length(hi - lo) < 1e5f) camera_.frame(lo, hi);
 }
 
@@ -1974,13 +1982,36 @@ bool EditorApp::object_bounds_(ObjectId id, glm::vec3& lo, glm::vec3& hi, bool m
         hi = glm::max(hi, o + glm::vec3(ht->field.geometry().size(), range.y));
         return true;
     }
-    // A tile terrain: its tile grid's box, up to its tallest column.
-    if (const auto* tt = live->get_component<toy::world::TerrainComponent>(); tt && !tt->field.empty()) {
-        int top = 1;
-        for (const auto& r : tt->field.data()->tiles()) top = std::max<int>(top, r.steps);
-        const glm::vec3 extent(static_cast<float>(tt->field.geometry().tiles_x) * tt->params.tile_size,
-                               static_cast<float>(tt->field.geometry().tiles_y) * tt->params.tile_size,
-                               static_cast<float>(top) * tt->params.height_step);
+    // A tile terrain: the box its authored extent occupies. Read from `params` first and from the
+    // baked field only to refine, because frame_all() runs when a scene OPENS -- before the
+    // generator has produced a field at all. Requiring the field here meant a terrain scene
+    // contributed no bounds on open, so nothing was framed and the camera kept its 12-unit
+    // default; on a planet of radius 122 that put the viewport inside the globe, looking at
+    // back-faces through the atmosphere shell.
+    if (const auto* tt = live->get_component<toy::world::TerrainComponent>()) {
+        const bool baked = !tt->field.empty() && tt->field.data() != nullptr;
+        // `height_scale` is the world height of the full elevation range -- already in world
+        // units, so it stands in for the tallest column until a bake gives the real one.
+        float height = std::max(tt->params.height_scale, tt->params.height_step);
+        if (baked) {
+            int top = 1;
+            for (const auto& r : tt->field.data()->tiles()) top = std::max<int>(top, r.steps);
+            height = static_cast<float>(top) * tt->params.height_step;
+        }
+        if (tt->params.planet) {
+            // A globe centred on the object -- NOT the flat `6N x N` slab the six faces are
+            // STORED as (planet.h), which is what the field's tiles_x/tiles_y would describe.
+            const float r = tt->params.layout().radius() + height;
+            const glm::vec3 centre(world[3]);
+            lo = glm::min(lo, centre - glm::vec3(r));
+            hi = glm::max(hi, centre + glm::vec3(r));
+            return true;
+        }
+        const float authored = static_cast<float>(tt->params.tiles_for_grid(0));
+        const float tiles_x  = baked ? static_cast<float>(tt->field.geometry().tiles_x) : authored;
+        const float tiles_y  = baked ? static_cast<float>(tt->field.geometry().tiles_y) : authored;
+        const glm::vec3 extent(tiles_x * tt->params.tile_size, tiles_y * tt->params.tile_size, height);
+        if (extent.x <= 0.0f || extent.y <= 0.0f) return false;
         for (int i = 0; i < 8; ++i) {
             const glm::vec3 c((i & 1) ? extent.x : 0.0f, (i & 2) ? extent.y : 0.0f, (i & 4) ? extent.z : 0.0f);
             const glm::vec3 w = glm::vec3(world * glm::vec4(c, 1.0f));

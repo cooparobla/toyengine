@@ -268,107 +268,13 @@ COOPA_TEST(style_lod_level_indexes_its_own_appended_vertices) {
 }
 
 /**
- * @brief A planet's merge width comes from its curvature, and the sag it permits is the bound
- *        that width was solved for.
+ * @brief Two neighbouring PLANET chunks put the same surface heights on their shared edge.
  *
- * `max_merge = 1` is what a planet used to be fixed at, on the grounds that a merged quad bent
- * onto the sphere cuts a chord under its neighbours. It does -- by `span^2 / (8 R)`, which is a
- * number, so the width can be solved for instead of given up.
- */
-COOPA_TEST(a_planet_derives_its_merge_width_from_curvature) {
-    for (const std::int32_t face_tiles : {64, 192, 1024}) {
-        TerrainParams params = make_test_params(32);
-        params.planet      = true;
-        params.face_tiles  = face_tiles;
-        params.tile_size   = 1.0f;
-        params.height_step = 1.0f;
-
-        const float        radius = params.layout().radius();
-        const std::int32_t width  = params.planet_max_merge();
-        const float        sag    = params.planet_merge_sag(static_cast<float>(width) * params.tile_size, 0.0f);
-        std::printf("    face_tiles %4d -> radius %7.1f, merge width %2d tiles, sag %.4f steps\n",
-                    face_tiles, radius, width, sag);
-
-        expect(width >= 1, "a planet always merges at least one tile");
-        expect(sag <= 0.02f + 1e-4f, "the derived width keeps the chord sag inside its tolerance");
-        // One tile wider would break the tolerance the width was solved for -- i.e. the bound is
-        // tight, not merely satisfied.
-        const float over = params.planet_merge_sag(static_cast<float>(width + 1) * params.tile_size, 0.0f);
-        expect(over > 0.02f * 0.5f, "the width is the largest the tolerance allows, not an arbitrary cap");
-    }
-
-    // A flat terrain is not a sphere and must keep merging without limit.
-    TerrainParams flat = make_test_params(32);
-    expect(flat.planet_merge_sag(32.0f, 4.0f) == 0.0f, "a flat terrain has no chord sag");
-    expect(flat.planet_max_merge() == 1, "planet_max_merge() is meaningless off a planet");
-}
-
-/**
- * @brief The lift clears the chord at EVERY width up to the merge cap, and is the same number
- *        whatever a run's own width -- the two properties a chunk seam depends on.
- *
- * Worked through PlanetLayout directly rather than through the mesher, because this is the
- * arithmetic the lift rests on. Unlifted, the chord between two on-sphere corners dips its
- * sagitta below the surface mid-span. Lifted by the CAP's sagitta, a run of any width up to the
- * cap sits at or above the surface everywhere, so it overlaps the per-tile geometry beside it
- * rather than cutting under it -- and because the lift does not depend on the width, two chunks
- * that merged differently still put their shared seam corners at one radius.
- */
-COOPA_TEST(the_merge_lift_clears_the_chord_at_every_width_and_does_not_vary_with_it) {
-    TerrainParams params = make_test_params(32);
-    params.planet      = true;
-    params.face_tiles  = 192;
-    params.tile_size   = 1.0f;
-    params.height_step = 1.0f;
-    params.max_merge   = params.planet_max_merge();
-
-    const PlanetLayout layout = params.layout();
-    const float        radius = layout.radius();
-    const double       height = 4.0;                 // the quad's terrace, in world units
-    const double       truth  = radius + height;     // where the surface actually is
-    const float        lift   = params.planet_merge_lift(static_cast<float>(height));
-
-    std::printf("    cap %d tiles -> one lift of %.5f for every run, at height %.0f\n",
-                params.max_merge, lift, height);
-
-    for (std::int32_t width = 1; width <= params.max_merge; ++width) {
-        const double x0 = 0.5 * static_cast<double>(params.face_tiles) * params.tile_size;
-        const auto   corner = [&](double dx, double raise) {
-            return layout.to_planet(0, x0 + dx, x0, height + raise);
-        };
-        const double span = static_cast<double>(width) * params.tile_size;
-
-        const double bare_mid   = glm::length((corner(0.0, 0.0) + corner(span, 0.0)) * 0.5);
-        const double lifted_mid = glm::length((corner(0.0, lift) + corner(span, lift)) * 0.5);
-        const double own_sag =
-            params.planet_merge_sag(static_cast<float>(span), static_cast<float>(height));
-
-        std::printf("      width %2d: own sag %.5f, unlifted mid %.5f under, lifted mid %+.5f\n",
-                    width, own_sag, truth - bare_mid, lifted_mid - truth);
-
-        expect(bare_mid < truth, "an unlifted merged run's mid-span really does fall under the sphere");
-        expect(std::abs(truth - bare_mid - own_sag) < 0.02 * own_sag + 1e-6,
-               "and it falls by the sagitta planet_merge_sag() predicts, to within 2%");
-        // At the cap width the lift exactly equals the sag, so the mid-span lands ON the surface
-        // to within the next term of the chord's own expansion; narrower runs clear it outright.
-        expect(lifted_mid >= truth - 1e-3 * lift - 1e-6,
-               "the cap-derived lift clears the chord at this width too -- at or above the surface");
-    }
-
-    // The property the seam rests on: the lift is a function of the terrace, not of the run.
-    expect(params.planet_merge_lift(static_cast<float>(height)) == lift,
-           "the lift does not vary with a run's width, so two chunks agree at their shared seam");
-}
-
-/**
- * @brief Two neighbouring PLANET chunks still meet at one surface along their shared edge, now
- *        that each merges runs independently and lifts them.
- *
- * The regression `max_merge = 1` used to make impossible by construction. The seam of each chunk
- * is driven by the same two tile columns -- its own edge column and the neighbour's, both read
- * from the shared pad -- so the set of heights appearing on the boundary plane must be the same
- * from both sides. A lift that varied with a run's own width would break exactly this, because
- * the two chunks' runs meeting there are rarely the same width.
+ * `max_merge = 1` makes this true by construction -- no run spans a tile, so every quad sits on
+ * the uniform half-tile lattice and nothing can displace a seam vertex. The test is the tripwire
+ * for changing that: a merged run bent onto the sphere is a chord whose edge leaves the surface
+ * its neighbours sit on, and raising it to compensate only converts the gap into a ledge. Either
+ * way the seam stops agreeing, which is what this catches.
  */
 COOPA_TEST(two_planet_chunks_agree_on_their_shared_seam) {
     const TileMeshLibrary library = make_tile_library({"soft", "rock"});
@@ -377,7 +283,7 @@ COOPA_TEST(two_planet_chunks_agree_on_their_shared_seam) {
     params.face_tiles  = 192;
     params.tile_size   = 1.0f;
     params.height_step = 1.0f;
-    params.max_merge   = params.planet_max_merge();
+    params.max_merge   = 1;   // what register.cpp forces for a planet
 
     const std::int32_t n = params.chunk_size;
     const float span = static_cast<float>(n) * params.tile_size;
@@ -434,48 +340,6 @@ COOPA_TEST(two_planet_chunks_agree_on_their_shared_seam) {
     expect(a.size() > 4, "the seam carries a range of heights -- the pad is busy there");
     expect(only_left.empty() && only_right.empty(),
            "both chunks put the same surface heights on their shared seam -- no step to see through");
-}
-
-/**
- * @brief What the derived merge width is worth: a FLAT planet chunk, which `max_merge = 1` meshed
- *        one quad per tile where a flat terrain chunk is a single rectangle.
- */
-COOPA_TEST(merging_a_flat_planet_chunk_costs_far_less_than_per_tile) {
-    const TileMeshLibrary library = make_tile_library({"soft", "rock"});
-
-    ColumnPad flat;
-    flat.resize(32);
-    for (std::int32_t y = -1; y <= 32; ++y) {
-        for (std::int32_t x = -1; x <= 32; ++x) {
-            TileColumn& c = flat.at(x, y);
-            c.steps     = 4;
-            c.top_kind  = TileKind::Grass;
-            c.side_kind = TileKind::Dirt;
-        }
-    }
-
-    std::size_t per_tile = 0, derived = 0;
-    for (const bool curvature : {false, true}) {
-        TerrainParams params = make_test_params(32);
-        params.planet      = true;
-        params.face_tiles  = 192;
-        params.tile_size   = 1.0f;
-        params.height_step = 1.0f;
-        params.max_merge   = curvature ? params.planet_max_merge() : 1;
-
-        ChunkMeshData mesh;
-        mesh_chunk_styled(flat, library, params, mesh);
-        coopa::gfx::engine::data::Mesh::weld_and_optimize(mesh.vertices, mesh.indices);
-        const std::size_t tris = mesh.indices.size() / 3;
-        std::printf("    flat planet chunk, max_merge %2d: %5zu verts, %5zu tris\n",
-                    params.max_merge, mesh.vertices.size(), tris);
-        if (curvature) derived = tris; else per_tile = tris;
-    }
-
-    expect(per_tile > 0 && derived > 0, "a flat planet chunk meshes either way");
-    std::printf("    -> %.1fx fewer triangles on flat ground\n",
-                static_cast<double>(per_tile) / static_cast<double>(derived));
-    expect(derived * 4 < per_tile, "the derived width is worth at least 4x on flat ground");
 }
 
 /**

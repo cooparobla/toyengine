@@ -779,22 +779,18 @@ See `assets/scenes/terrain/planet_demo` -- a globe held whole in frame, spun by 
 - **Meshing.** Each chunk is meshed in flat face space exactly as a flat chunk, then
   `warp_chunk_to_planet()` bends every vertex onto the globe and carries its normal through the
   map's Jacobian. Chunk objects sit at the planet's centre. A planet keeps every chunk loaded.
-- **Merging on a curve.** A merged quad bent onto the sphere is a **chord**: its corners sit
-  exactly on the globe (the per-tile geometry beside it shares them) and only its interior falls
-  away, by that chord's sagitta. So the merge width is *solved for* rather than given up —
-  `TerrainParams::planet_max_merge()` inverts the sagitta against a tolerance of 0.02 of a height
-  step, giving 2 tiles on a 40-unit globe, 4 on `planet_demo`'s 122, and 10 on a 652-unit one; a
-  bigger planet is flatter and merges wider. What sag remains is lifted out:
-  `planet_merge_lift()` raises every merged run radially, and deliberately by the *cap's* sagitta
-  rather than its own width, because two neighbouring chunks merge independently and a
-  width-dependent lift would leave their shared seam corners at different radii. One cap-derived
-  lift puts both sides at the same radius whatever they merged, and over-lifts anything narrower
-  into an overlap — which cannot open a hole, where the bare chord could.
-  A scene may still author `max_merge:` directly, and `max_merge: 1` restores the per-tile meshing
-  a planet used to be fixed at. Worth what it costs only where LOD 0 actually draws: measured on
-  `planet_demo` it is 16x off a *flat* chunk (2048 → 128 triangles) but about 5% of the shadow
-  triangles and 11% of load time on that archipelago, whose ground is terraced nearly everywhere —
-  and nothing at all when zoomed out, where no chunk draws LOD 0.
+- **Merging is off (`max_merge = 1`), and that is not a missed optimisation.** On flat ground a
+  merged rectangle is exactly coplanar with the per-tile geometry it borders, so only the
+  subdivision differs — a T-junction, whose cracks are sub-pixel. Bent onto a sphere the merged
+  quad becomes a **chord**, and its edge leaves the surface its neighbours lie on: at four tiles
+  on `planet_demo`'s 122-unit globe it deviates ~1.7 cm, which is a plainly visible seam on a 1 m
+  tile at ground level. Raising the quad by its sagitta does not rescue it — that converts the gap
+  into a ledge of the same size, which reads just as badly at a grazing angle. A width can be
+  solved for against a deviation tolerance, but no tolerance loose enough to be worth merging is
+  tight enough to be invisible. Measured before this was settled: a curvature-derived width bought
+  ~5% of the shadow triangles and ~11% of load near the surface, and **nothing at all zoomed out**,
+  where no chunk draws LOD 0. A planet's cost belongs to its `lods:` field tiers instead. A scene
+  can still author `max_merge:` explicitly if it wants to experiment.
 - **Water.** Each chunk's sea, lakes and rivers are WaterBodies in **their own frame** (local Z
   out from the planet at the chunk's centre, `WaterBody::local_frame`), so the water system's
   height-field queries, depth probes, flow and buoyancy still hold over a curved surface. Their

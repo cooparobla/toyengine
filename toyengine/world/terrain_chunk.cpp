@@ -381,15 +381,9 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
                 for (std::int32_t y = ly; y < ly + h; ++y)
                     for (std::int32_t x = lx; x < lx + w; ++x) at(x, y) = 2;
                 const TileColumn& col = pad.at(lx / 2, ly / 2);
-                // On a planet the merged rectangle is a chord under the sphere; lift it clear so
-                // it overlaps the per-tile geometry beside it instead of cutting under it and
-                // showing daylight along the join. The lift comes from the merge CAP, not from
-                // this run's own width -- see planet_merge_lift() for why that is what keeps two
-                // chunks' shared seam at one radius.
-                const float sag = params.planet_merge_lift(static_cast<float>(col.steps) * params.height_step);
                 const glm::vec3 origin = origin_of({lx / 2, ly / 2}, col.steps - 1) +
                     glm::vec3((lx & 1) ? 0.5f * params.tile_size : 0.0f,
-                             (ly & 1) ? 0.5f * params.tile_size : 0.0f, sag);
+                             (ly & 1) ? 0.5f * params.tile_size : 0.0f, 0.0f);
                 library.append_styled(library.full_top(), origin,
                                       glm::vec3(0.5f * scale.x * static_cast<float>(w),
                                                0.5f * scale.y * static_cast<float>(h), scale.z),
@@ -431,12 +425,8 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
         const float start   = 0.5f * static_cast<float>(first.slot) * params.tile_size;
         const float across  = static_cast<float>(first.line) * params.tile_size;
         const float h_stretch = 0.5f * static_cast<float>(j - i);
-        // Same chord correction as the merged tops above, measured at the strip's TOP -- the edge
-        // that has to clear the per-tile geometry beside it.
-        const float sag = params.planet_merge_lift(
-            static_cast<float>(first.cell_bottom + first.cell_count) * params.height_step);
         const glm::vec3 origin(along_x ? start : across, along_x ? across : start,
-                               static_cast<float>(first.cell_bottom) * params.height_step + sag);
+                               static_cast<float>(first.cell_bottom) * params.height_step);
         const float v_stretch = static_cast<float>(first.cell_count);
         library.append_styled(library.straight(first.style, first.cap, first.turns), origin, scale,
                               first.code, first.cap, out.vertices, out.indices,

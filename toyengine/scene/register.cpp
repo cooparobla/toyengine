@@ -781,13 +781,12 @@ void register_scene_components(coopa::gfx::core::Device& device,
                 params.max_merge = node.at("max_merge").get_value<std::int32_t>();
             }
             if (params.planet) {
+                // Every tile its own piece: a merged quad bent onto the sphere is a chord, and its
+                // edge then deviates from the per-tile geometry beside it by enough to see at
+                // ground level -- see TerrainParams::max_merge for the measurement.
+                if (!authored_max_merge) params.max_merge = 1;
                 params.face_tiles = std::max<std::int32_t>(params.chunk_size, params.face_tiles);
                 params.face_tiles -= params.face_tiles % std::max<std::int32_t>(1, params.chunk_size);
-                // After face_tiles, which sets the radius planet_max_merge() reads. A merged quad
-                // bent onto the sphere is a chord, so the run width is bounded by how far it may
-                // sag rather than fixed at one tile -- and what sag remains is lifted out in
-                // mesh_chunk_styled(). `max_merge: 1` still restores per-tile meshing exactly.
-                if (!authored_max_merge) params.max_merge = params.planet_max_merge();
             }
             read(node, "river_inset", params.river_inset);
             // The water's look: WaterBody's own keys, onto the terrain's stock look.

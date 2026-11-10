@@ -122,10 +122,12 @@ Write `tile_set:` in new scenes.
     - { field: 4,  screen_size: 0.12, native_border: 1 }
     - { field: 16, screen_size: 0.085 }
   ```
-- A planet also derives its own `max_merge` from its curvature rather than meshing every tile
-  separately, so flat ground costs it far less than it used to; leave the key unset. It is worth
-  16x on a genuinely flat chunk but only a few percent on terraced ground, and nothing when zoomed
-  out (no chunk draws LOD 0 there). `max_merge: 1` restores the old per-tile meshing.
+- **Don't try to make a planet merge flat ground** (`max_merge`). It is pinned to 1 deliberately:
+  bent onto a sphere a merged quad is a chord, and its edge leaves the surface the per-tile
+  geometry beside it sits on -- ~1.7 cm at four tiles on a 122-unit globe, a visible seam on a 1 m
+  tile. Lifting it only turns the gap into a ledge of the same size. Measured, a curvature-derived
+  width bought ~5% of shadow triangles near the surface and nothing at all zoomed out, so it is
+  not a trade worth making. Spend the effort on `field` tiers instead.
 - Every chunk mesh carries coarser LOD levels (`lods:`, coarsest last; `[]` turns them off).
   Seam vertices are pinned through every level, so chunks at different levels never crack. Three
   kinds of level, and the choice matters more than the thresholds:

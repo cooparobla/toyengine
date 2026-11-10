@@ -30,7 +30,15 @@ void PlanetAtmosphere::apply() {
     }
     if (terrain_->field.empty()) return;
     TerraData* data = terrain_->field.data();
-    if (data == nullptr || data->height_revision() == applied_height_revision_) return;
+    // The knobs as well as the bake: an inspector drag or a scene reload changes the profile
+    // with the terrain's height untouched, and would otherwise not be picked up at all.
+    const float settings_key = thickness_scale + 7.0f * min_thickness + 13.0f * base_altitude_scale +
+                               17.0f * scale_height_fraction + 23.0f * radius_thickness_scale +
+                               29.0f * radius_base_scale + 31.0f * moon_intensity;
+    if (data == nullptr ||
+        (data->height_revision() == applied_height_revision_ && settings_key == applied_settings_key_)) {
+        return;
+    }
 
     auto* volume = owner->get_component<coopa::gfx::engine::components::VolumeComponent>();
     if (volume == nullptr) return;
@@ -39,8 +47,14 @@ void PlanetAtmosphere::apply() {
     // may fall well short of, or -- with enough noise detail -- exceed).
     const float peak = std::max(data->height_range().y, 0.0f);
     const float planet_radius = terrain_->params.layout().radius();
-    const float base = planet_radius + peak * std::max(base_altitude_scale, 0.0f);
-    const float thickness = std::max(min_thickness, peak * thickness_scale);
+    // The largest of the three terms, so one set of authored numbers serves a planet of any
+    // size: relief-keyed where the terrain is tall, radius-keyed where the globe is large or
+    // its relief is low, and an absolute floor for a small near-flat world. See the header.
+    const float thickness = std::max({min_thickness,
+                                      peak * thickness_scale,
+                                      planet_radius * std::max(radius_thickness_scale, 0.0f)});
+    const float base = planet_radius + std::max(peak * std::max(base_altitude_scale, 0.0f),
+                                                planet_radius * std::max(radius_base_scale, 0.0f));
     const float outer = base + thickness;
 
     volume->extent         = glm::vec3(outer, outer, outer);
@@ -51,6 +65,7 @@ void PlanetAtmosphere::apply() {
     outer_ = outer;
     peak_  = peak;
     applied_height_revision_ = data->height_revision();
+    applied_settings_key_ = settings_key;
 }
 
 float PlanetAtmosphere::day_sky_factor(const glm::vec3& camera_pos, const glm::vec3& sun_to) const {

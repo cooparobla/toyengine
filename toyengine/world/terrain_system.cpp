@@ -930,6 +930,17 @@ std::string TerrainSystem::chunk_asset_id_(const TerrainComponent& terrain, cons
            std::to_string(chunk.coord.y) + "_" + std::to_string(chunk.mesh_serial);
 }
 
+env::PlanetFrame find_planet_frame(coopa::scene::Scene& scene) {
+    for (const TerrainComponent* terrain : scene.get_components<TerrainComponent>()) {
+        // `params` is the Tiles half, and a planet is a Tiles-only shape.
+        if (terrain->mode != TerrainMode::Tiles || !terrain->params.planet) continue;
+        if (terrain->owner == nullptr || terrain->owner->get_transform() == nullptr) continue;
+        return env::PlanetFrame{glm::vec3(terrain->owner->get_transform()->get_world_matrix()[3]),
+                                terrain->params.layout().radius()};
+    }
+    return env::PlanetFrame{};   // no planet: the flat Z-up world
+}
+
 TerrainSystem* install_terrain_system(coopa::scene::Scene& scene,
                                              coopa::gfx::core::Device& device,
                                              coopa::gfx::memory::Allocator& allocator,

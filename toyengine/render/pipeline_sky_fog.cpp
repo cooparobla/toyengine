@@ -7,6 +7,8 @@
  * (and the rules that govern them) are in toy_render_pipeline.h.
  */
 
+#include <cmath>
+
 #include <toyengine/render/toy_render_pipeline.h>
 #include <glm/gtx/quaternion.hpp>
 
@@ -110,6 +112,23 @@ void ToyRenderPipeline::record_clouds_(coopa::gfx::command::CommandBuffer& cmd, 
     const glm::vec2 drift = glm::vec2(cs.offset - cloud_prev_offset_);
     cp.drift = glm::length(drift) < 1000.0f ? drift : glm::vec2(0.0f);
     cloud_prev_offset_ = cs.offset;
+    // On a planet the deck turns instead of sliding: the shell is the real globe and the wind
+    // rotates the whole field about the planet's pole. Engine accumulates the angle (so a wind
+    // speed edit never jumps the clouds) and hands over this frame's step for the temporal
+    // reconstruction to reproject the history by. A flat scene leaves all of this zero.
+    cp.planet = cs.planet;
+    cp.spin_axis = cs.spin_axis;
+    // Wrapped to one turn before it reaches a float: the field is exactly periodic in 2*pi, so
+    // this is lossless, and it keeps the angle's precision constant however long the session
+    // runs. The same reason the flat path wraps its offset to whole noise periods above.
+    {
+        constexpr double k_turn = 6.283185307179586;
+        const double a = cs.spin_angle - std::floor(cs.spin_angle / k_turn) * k_turn;
+        cp.spin_angle = static_cast<float>(a);
+    }
+    cp.spin_delta = cs.spin_delta;
+    cp.day_fill = cs.day_fill;
+    cp.night_fill = cs.night_fill;
     cp.time = cs.time;
     cp.frame = frame_index_;
     cp.light_dir = cs.light_to;

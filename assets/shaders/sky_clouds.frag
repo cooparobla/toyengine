@@ -21,6 +21,7 @@
 // plus a narrow silver-lining lobe, a powder term, and the deck's statistical self-shadowing at a
 // low sun -- plus the sky's ambient (the gradient's colours, or the physical sky's matched ones).
 
+#include <gfx/planet.glsl>
 #include <gfx/spot_light.glsl>
 #include "sky_atmosphere.glsl"
 
@@ -99,10 +100,21 @@ void main() {
     vec4 world = cf.inv_view_proj * vec4(ndc, 1.0);
     vec3 rd = normalize(world.xyz / world.w - cf.camera.xyz);
     vec3 ro = cf.camera.xyz / scale;
-    g_center = vec3(ro.xy, -PLANET_R);
+    // The shell's geometry. On a PLANET it is the real globe, so the deck curves to the real
+    // horizon and the ground sphere below occludes it; everything from here down is unchanged
+    // and simply becomes correct. On a flat world the fake planet stays pinned under the camera
+    // at the atmosphere's own radius, exactly as before -- so flat scenes render identically.
+    if (cf.planet.w > 0.0) {
+        g_center = cf.planet.xyz / scale;
+        g_radius = cf.planet.w / scale;
+    } else {
+        g_center = vec3(ro.xy, -ATMO_BOTTOM_R);
+        g_radius = ATMO_BOTTOM_R;
+    }
+    g_spin = cf.planet.w > 0.0 ? vec4(normalize(cf.spin.xyz), cf.spin.w) : vec4(0.0, 0.0, 1.0, 0.0);
 
     // The part of the ray inside the layer's shell (camera below, inside or above it).
-    float r_in = PLANET_R + cf.slab.x, r_out = r_in + cf.slab.y;
+    float r_in = g_radius + cf.slab.x, r_out = r_in + cf.slab.y;
     float a0, a1, b0, b1, g0, g1;
     bool hit_out = sphere_hits(ro, rd, g_center, r_out, b0, b1);
     const vec4 CLEAR = vec4(0.0, 0.0, 0.0, cloud_pack(FAR_DEPTH, 1.0));
@@ -113,7 +125,7 @@ void main() {
     if (cam_r < r_in) {
         // Below: from leaving the inner sphere to leaving the outer one -- unless the ground
         // is in the way.
-        if (sphere_hits(ro, rd, g_center, PLANET_R, g0, g1) && g0 > 0.0) { out_color = CLEAR; return; }
+        if (sphere_hits(ro, rd, g_center, g_radius, g0, g1) && g0 > 0.0) { out_color = CLEAR; return; }
         t_start = a1;
         t_end = b1;
     } else if (cam_r < r_out) {
@@ -156,7 +168,11 @@ void main() {
 
     // Sunlight arriving at the layer: through the atmosphere from the layer's mid height.
     SkyAtmosphere atmo;
-    atmo.ozone.w = PLANET_R * 0.001;
+    // ATMO_BOTTOM_R, never g_radius: this is the transmittance table's own bottom radius in km.
+    // A toy planet's 122-unit radius here would index the LUT far outside the domain it was
+    // built over and the deck's sunlight would be garbage. The layer's real altitude still
+    // reaches the lookup through `mid_r` below, which is what physically matters.
+    atmo.ozone.w = ATMO_BOTTOM_R * 0.001;
     atmo.ground.w = atmo.ozone.w + 100.0;
     vec3 mid = ro + rd * (0.5 * (t_start + t_end));
     vec3 up = normalize(mid - g_center);
@@ -166,16 +182,46 @@ void main() {
     // the gradient sky light_color is the scene's light as it already reaches the ground.
     vec3 sun_light = cf.light_color.rgb;
     if (cf.look.z > 0.5) sun_light *= sky_transmittance(u_transmittance, atmo, mid_r, dot(up, L));
-    if (dot(up, L) < -0.2) sun_light = vec3(0.0);
-    // A low sun crosses the deck sideways, through many other clouds the shadow march never
-    // reaches: attenuate it by the deck's expected transmittance along that slanted path
-    // (coverage x path length in layer thicknesses). Without it a sunset deck is lit as if
-    // each cloud stood alone -- uniformly glowing, and bright enough to crush the exposure.
-    float slant = max(1.0 / max(dot(up, L), 0.03) - 1.5, 0.0);
-    sun_light *= exp(-cf.slab.z * cf.slab.w * 0.3 * slant);
-    // Ambient: the sky dome above (the CPU's matched zenith colour) and darker light from below.
-    vec3 amb_top = lights.sky_zenith.rgb * 0.9 + lights.sky_horizon.rgb * 0.3;
-    vec3 amb_bottom = lights.sky_horizon.rgb * 0.2 + lights.sky_ground.rgb * 0.6;
+    float mu = dot(up, L);
+    vec3  moon_light = vec3(0.0);
+    vec3  amb_top, amb_bottom;
+    if (cf.planet.w > 0.0) {
+        // The deck wraps a real globe, so "how far does sunlight travel through it" is a chord,
+        // and "is it day here" is the planet's own terminator -- the two things the flat path
+        // below can only approximate.
+        bool  blocked;
+        float airmass = gfx_planet_airmass(length(mid - g_center), mu, r_in, r_out, blocked);
+        float day = gfx_planet_day(up, L);
+        // Same shoulder constant as the flat path: airmass is 1 overhead, exactly as 1/mu was.
+        sun_light *= blocked ? 0.0 : day * exp(-cf.slab.z * cf.slab.w * 0.3 * max(airmass - 1.5, 0.0));
+
+        // The moon. Opposite the sun, so the direction toward it is -L, and the phase function
+        // is the sun's evaluated at -cos_t. No shadow march: it is a dim fill, and a second
+        // 5-step march per sample to self-shadow it would not be visible. `sky_extra.z` is 0
+        // unless a PlanetAtmosphere authors a moon_intensity, so this costs nothing by default.
+        moon_light = vec3(0.55, 0.75, 1.3) * lights.sky_extra.z * (1.0 - day);
+
+        // Ambient from the planet's OWN atmosphere, blended across the same terminator: blue
+        // overhead at noon, moonlit at night. The scene's sky_zenith family cannot serve here --
+        // under `sky_model: space` it is the near-black STAR backdrop, which leaves the day side
+        // lit by direct sun alone (hence its hard white look) and the night side at nothing.
+        vec3 fill = mix(cf.night_fill.rgb, cf.day_fill.rgb, day);
+        amb_top    = fill;
+        amb_bottom = fill * 0.6;      // less sky reaches a cloud's underside
+    } else {
+        if (mu < -0.2) sun_light = vec3(0.0);
+        // A low sun crosses the deck sideways, through many other clouds the shadow march never
+        // reaches: attenuate it by the deck's expected transmittance along that slanted path
+        // (coverage x path length in layer thicknesses). Without it a sunset deck is lit as if
+        // each cloud stood alone -- uniformly glowing, and bright enough to crush the exposure.
+        float slant = max(1.0 / max(mu, 0.03) - 1.5, 0.0);
+        sun_light *= exp(-cf.slab.z * cf.slab.w * 0.3 * slant);
+        // Ambient: the sky dome above (the CPU's matched zenith colour) and darker light from below.
+        amb_top = lights.sky_zenith.rgb * 0.9 + lights.sky_horizon.rgb * 0.3;
+        amb_bottom = lights.sky_horizon.rgb * 0.2 + lights.sky_ground.rgb * 0.6;
+    }
+    // The moon's phase, the sun's lobes seen from the opposite side (see moon_light above).
+    float moon_phase = mix(hg(0.3, -cos_t), hg(-0.2, -cos_t), 0.3);
 
     const float SIGMA = CLOUD_SIGMA;
     float light_len = cf.slab.y * 0.9;
@@ -227,7 +273,8 @@ void main() {
         // thin fringe, seen against the sun).
         float powder = 1.0 - exp(-d * SIGMA * 240.0);
         float beer = body * mix(powder, 1.0, 0.35) + exp(-od) * silver;
-        vec3 direct = sun_light * beer * (4.0 * SKY_PI * 0.6);
+        vec3 direct = sun_light * beer * (4.0 * SKY_PI * 0.6)
+                    + moon_light * moon_phase * (4.0 * SKY_PI * 0.6);
         vec3 ambient = mix(amb_bottom, amb_top, clamp(h * 1.4, 0.0, 1.0)) * mix(0.55, 1.0, powder);
         vec3 s = (direct + ambient) * 0.9;   // 0.9: cloud single-scattering albedo
 

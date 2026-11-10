@@ -11,6 +11,9 @@
  * (toyengine/core/engine.h), split by concern.
  */
 
+#include <coopa/debug/logger.h>
+#include <glm/gtc/constants.hpp>
+
 #include <toyengine/core/engine.h>
 
 #include <toyengine/env/env_system.h>
@@ -71,6 +74,64 @@
 
 namespace toy {
 namespace core {
+
+namespace {
+
+/**
+ * @struct CloudDeck
+ * @brief Where a planet's cloud layer sits and how big its field is -- all derived.
+ */
+struct CloudDeck {
+    float altitude = 0.0f;   ///< Base, as an altitude above the datum (world units).
+    float thickness = 0.0f;  ///< Radial depth (world units).
+    float scale = 1.0f;      ///< render cloud_scale: world metres per cloud-space metre.
+};
+
+/**
+ * @brief Sizes a planet's cloud deck from the globe itself, so any radius just works.
+ *
+ * The point of deriving rather than authoring: `cloud_altitude` and `cloud_thickness` are
+ * absolute metres tuned for an Earth-sized sky (their defaults are 1500), and on a 122-unit
+ * planet they would put the deck ten radii out in space. A scene should say `planet: true` and
+ * `clouds: true` and get a working deck at whatever size it generated.
+ *
+ * The base clears the terrain's measured peak, with a radius-keyed floor so a low-relief or
+ * ocean world still gets its clouds off the ground; the depth is keyed to the radius so the
+ * deck reads as a layer rather than a film from orbit.
+ *
+ * `scale` must be derived too, and is the one that is not obvious: the field's noise periods are
+ * FIXED cloud-space lengths (WEATHER_PERIOD below, 13 km), so at scale 1 a globe whose whole
+ * circumference is under a kilometre of cloud space reads one constant weather value
+ * everywhere and the deck comes out featureless. Scaling to a few periods per revolution is
+ * what gives a planet distinct weather systems around it.
+ *
+ * @param scene  Scene to measure the planet terrain's baked height from.
+ * @param planet The scene's planet frame; must be active().
+ * @return The derived deck.
+ */
+CloudDeck planet_cloud_deck(coopa::scene::Scene& scene, const env::PlanetFrame& planet) {
+    /// Must match sky_cloud_density.glsl's WEATHER_PERIOD.
+    constexpr float k_weather_period = 13000.0f;
+    /// Weather systems around the globe: enough for distinct fronts, few enough to read as
+    /// continent-sized rather than as noise.
+    constexpr float k_periods = 3.0f;
+
+    float peak = 0.0f;
+    for (const world::TerrainComponent* t : scene.get_components<world::TerrainComponent>()) {
+        if (t->mode != world::TerrainMode::Tiles || !t->params.planet || t->field.empty()) continue;
+        if (const world::TerraData* d = t->field.data()) peak = std::max(d->height_range().y, 0.0f);
+        break;
+    }
+
+    CloudDeck deck;
+    deck.altitude  = std::max(peak * 1.05f, planet.radius * 0.01f);
+    deck.thickness = std::max(planet.radius * 0.04f, deck.altitude * 0.5f);
+    const float deck_radius = planet.radius + deck.altitude + deck.thickness * 0.5f;
+    deck.scale = std::max(2.0f * glm::pi<float>() * deck_radius / (k_periods * k_weather_period), 1e-4f);
+    return deck;
+}
+
+} // namespace
 
 void Engine::sync_overlay_layers_() {
     std::vector<coopa::scene::Scene*> scenes;
@@ -239,6 +300,21 @@ void Engine::sync_sky_render_state_(coopa::scene::Scene& scene, float dt) {
         cloud_speed *= std::clamp(ws / 5.0f, 0.25f, 4.0f);
     }
     cloud_offset_ += glm::dvec2(wind_dir) * static_cast<double>(cloud_speed * std::max(dt, 0.0f));
+    // On a planet the deck cannot slide: a translation stretches at one pole and piles up at
+    // the other. It TURNS instead, rigidly, about the planet's pole -- a zonal wind, which is
+    // both what a real atmosphere does and the only motion a sphere admits without distortion.
+    // The axis is the pole rather than the camera's local wind on purpose: derived per frame
+    // from where the camera happens to be, the whole globe's deck would lurch as it orbited.
+    // Speed is converted to an angular rate at the deck's own radius, and accumulated, so
+    // editing cloud_wind_speed changes the rate without jumping the clouds.
+    if (planet_frame_.active()) {
+        const float deck_r = std::max(planet_frame_.radius + c.cloud_altitude, 1.0f);
+        const float signed_speed = wind_dir.x >= 0.0f ? cloud_speed : -cloud_speed;
+        cloud_spin_delta_ = signed_speed * std::max(dt, 0.0f) / deck_r;
+        cloud_spin_ += static_cast<double>(cloud_spin_delta_);
+    } else {
+        cloud_spin_delta_ = 0.0f;
+    }
     // The flat clouds' morph: a phase through the shape volume's (repeating) depth, at the
     // layer's evolve rate -- accumulated, so changing the rate never jumps the shapes.
     cloud_flat_phase_ = std::fmod(cloud_flat_phase_ + 0.0015 * std::max(c.flat_cloud_evolve, 0.0f) * std::max(dt, 0.0f), 1.0);
@@ -267,6 +343,11 @@ void Engine::sync_sky_render_state_(coopa::scene::Scene& scene, float dt) {
         // enough to occlude them from within would equally veil the planet seen from orbit.
         float day = 0.0f;
         glm::vec3 day_col(0.0f);
+        // The planet's own lighting, as distinct from the backdrop fade above: how strong its
+        // moon is, and the two colours its cloud deck's ambient blends between.
+        float moon_intensity = 0.0f;
+        glm::vec3 night_col(0.0f);
+        glm::vec3 day_fill(0.0f);
         {
             glm::vec3 cam(0.0f);
             if (auto* cam_c = coopa::gfx::engine::components::CameraComponent::main()) {
@@ -275,6 +356,15 @@ void Engine::sync_sky_render_state_(coopa::scene::Scene& scene, float dt) {
             for (world::PlanetAtmosphere* a : scene.get_components<world::PlanetAtmosphere>()) {
                 const float f = a->day_sky_factor(cam, sun_to);
                 if (f > day) { day = f; day_col = a->day_sky_color; }
+                // The brightest moon wins, and brings its own night colour with it. Taken from
+                // whichever layer authored one rather than from the day_sky_factor winner: a
+                // cloud deck sets day_sky_altitude_scale to 0 to keep out of the backdrop's
+                // business, which makes its factor permanently 0.
+                if (a->moon_intensity > moon_intensity) {
+                    moon_intensity = a->moon_intensity;
+                    night_col = a->night_sky_color;
+                }
+                if (a->day_sky_color != glm::vec3(0.0f)) day_fill = a->day_sky_color;
             }
         }
         if (day > 1e-3f) {
@@ -304,9 +394,21 @@ void Engine::sync_sky_render_state_(coopa::scene::Scene& scene, float dt) {
         st.sun_disc_cos       = std::cos(glm::radians(std::max(c.sun_disc_size, 0.0f) * 0.5f));
         st.moon_disc_cos      = std::cos(glm::radians(std::max(c.moon_disc_size, 0.0f) * 0.5f));
         st.star_visibility    = c.sky_stars ? 1.0f - day : 0.0f;
-        st.night_floor        = 0.0f;
+        // The moon. A world lit by one sun has a hemisphere facing away from it that nothing
+        // else lights: the clouds' sun term is gated off past the terminator and a space sky's
+        // authored sky_zenith family is near-black, so the dark side comes out a void with the
+        // cloud deck still in it, unlit, occluding the stars at the limb. This is the fill for
+        // it, and 0 (the default) is exactly the black night side the engine had before.
+        //
+        // night_floor is the slot because it already means "the night sky is not pure black"
+        // and already reaches every shader through LightUBO::sky_extra.z. The DIRECTION is not
+        // sent at all: the moon sits opposite the sun, so in world space it is the sun's own
+        // travel direction, which the lighting pass already has as dir_direction.
+        st.night_floor        = moon_intensity;
         st.time               = std::fmod(sky_time_, 3600.0f);
         pipeline_->set_sky_state(st);
+        planet_day_fill_ = day_fill;
+        planet_night_fill_ = night_col * moon_intensity;
         sync_cloud_state_(scene, nullptr);
         return;
     }
@@ -403,6 +505,43 @@ void Engine::sync_cloud_state_(coopa::scene::Scene& scene, const render::SkyFram
     cs.offset = cloud_offset_;
     cs.time = std::fmod(sky_time_, 3600.0f);
     cs.shadows = c.cloud_shadows;
+    cs.planet = planet_frame_;
+    cs.spin_axis = glm::vec3(0.0f, 0.0f, 1.0f);   // the planet's pole; see the drift above
+    cs.spin_angle = cloud_spin_;
+    cs.spin_delta = cloud_spin_delta_;
+    cs.day_fill = planet_day_fill_;
+    cs.night_fill = planet_night_fill_;
+    if (planet_frame_.active()) {
+        // A cloud-deck PlanetAtmosphere sizes the layer, so a planet of ANY radius gets a sane
+        // deck without the scene authoring absolute metres -- the same service it performs for
+        // the atmosphere shell's radii. With none, derive it from the radius alone so a
+        // hand-written `planet: true` + `clouds: true` scene still works.
+        const CloudDeck deck = planet_cloud_deck(scene, planet_frame_);
+        cs.altitude = deck.altitude;
+        cs.thickness = deck.thickness;
+        // cloud_scale MUST be derived here. The noise periods are fixed cloud-space lengths
+        // (WEATHER_PERIOD is 13 km), so at scale 1 a 768-unit circumference would read a single
+        // constant weather value over the whole globe and the deck would be featureless.
+        cs.scale = deck.scale;
+        // Cloud shadows are still a flat XY square around the camera, which covers only a small
+        // cap of a globe -- worse than none when the whole planet is in frame. Off until the
+        // sun-orthographic map lands.
+        cs.shadows = false;
+        // The toon layer is a fullscreen raymarch of INFINITE world-Z slabs over a 2D field
+        // (flat_clouds.frag); there is no sphere in it to bend, so on a planet it would draw a
+        // flat sheet through the globe. Fall back to the volumetric layer, which is a real
+        // shell march, rather than render something plainly wrong.
+        if (cs.type == render::CloudType::Flat) {
+            cs.type = render::CloudType::Volumetric;
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                coopa::debug::Logger("clouds").warn(
+                    "cloud_type: flat is not supported on a planet (its layer is a flat world-Z "
+                    "slab); drawing volumetric clouds instead.");
+            }
+        }
+    }
     cs.shadow_strength = std::clamp(c.cloud_shadow_strength, 0.0f, 1.0f);
     cs.shadow_distance = std::max(c.cloud_shadow_distance, 1.0f);
     cs.flat_size = std::max(c.flat_cloud_size, 0.5f);
@@ -416,7 +555,9 @@ void Engine::sync_cloud_state_(coopa::scene::Scene& scene, const render::SkyFram
     glm::vec3 cam_pos(0.0f);
     if (auto* cam = coopa::gfx::engine::components::CameraComponent::main()) cam_pos = cam->get_world_position();
     if (c.cloud_camera_fade) {
-        const float above = cam_pos.z - (cs.altitude + cs.thickness);
+        // Altitude above the deck's top. On a flat world altitude_at() IS cam_pos.z, so this
+        // is the same expression it always was; on a planet it is the radial height.
+        const float above = planet_frame_.altitude_at(cam_pos) - (cs.altitude + cs.thickness);
         const float end = std::max(c.cloud_fade_end, c.cloud_fade_start + 0.01f);
         const float f = std::clamp((above - c.cloud_fade_start) / (end - c.cloud_fade_start), 0.0f, 1.0f);
         cs.fade = f * f * (3.0f - 2.0f * f);
@@ -587,15 +728,11 @@ void Engine::sync_water_render_state_(coopa::scene::Scene& scene) {
     }
     pipeline_->set_water_state(std::move(state));
 
-    // A planet terrain gives the sky and fog a planet to be evaluated on (render::PlanetFrameState).
-    std::optional<render::PlanetFrameState> planet;
-    for (const world::TerrainComponent* terrain : scene.get_components<world::TerrainComponent>()) {
-        if (!terrain->params.planet || !terrain->owner || !terrain->owner->get_transform()) continue;
-        planet = render::PlanetFrameState{glm::vec3(terrain->owner->get_transform()->get_world_matrix()[3]),
-                                          terrain->params.layout().radius()};
-        break;
-    }
-    pipeline_->set_planet(planet);
+    // A planet terrain gives the sky and fog a planet to be evaluated on; Engine re-found it
+    // for this frame before the syncs ran, so the renderer gets the same centre and radius the
+    // weather and the surface state did. nullopt keeps the pipeline's `if (planet_)` idiom.
+    pipeline_->set_planet(planet_frame_.active() ? std::optional<render::PlanetFrameState>(planet_frame_)
+                                                : std::nullopt);
 }
 } // namespace core
 } // namespace toy

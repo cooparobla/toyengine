@@ -94,6 +94,7 @@
 
 #include <gfxcoopa/engine/components/camera_component.h>
 
+#include <toyengine/env/planet_frame.h>
 #include <toyengine/world/terrain_component.h>
 #include <toyengine/world/terrain_views.h>
 
@@ -428,6 +429,23 @@ private:
      *         them with advance_retiring_() even after they drop out of streamed_ entirely. */
     std::unordered_set<TerrainComponent*> releasing_;
 };
+
+/**
+ * @brief The scene's planet as an `env::PlanetFrame`, or a flat frame when it has no planet.
+ *
+ * The one place "what is this scene's planet" is answered. Scans for the first
+ * TerrainComponent with `params.planet` and reads its centre from the owner's world
+ * transform and its radius from `params.layout().radius()` -- a planet's radius is derived
+ * from `face_tiles * tile_size`, never authored, so there is nothing else to consult.
+ *
+ * One planet per scene, by design (see world/README.md): the first one found wins. A scene
+ * with none yields a default `PlanetFrame`, which *is* the flat Z-up world -- so a caller
+ * uses the result unconditionally rather than testing for a planet first.
+ *
+ * @param scene Scene to scan. Cheap: a cached component scan plus a matrix column read.
+ * @return The planet's frame, or a flat frame.
+ */
+env::PlanetFrame find_planet_frame(coopa::scene::Scene& scene);
 
 /**
  * @brief Constructs a TerrainSystem and registers it ahead of the physics phase.

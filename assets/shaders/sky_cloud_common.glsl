@@ -41,7 +41,18 @@ layout(set = CLOUD_UBO_SET, binding = CLOUD_UBO_BINDING) uniform CloudFrame {
     vec4 camera;          // xyz = camera position (world m), w = relative lighting change since last frame
     vec4 look;            // x = cloud scale (world m per cloud m), y = camera fade 0..1,
                           // z = 1: light_color is above the atmosphere (the physical sky's
-                          //     transmittance table colours it) / 0: use it as is, w = unused
+                          //     transmittance table colours it) / 0: use it as is,
+                          // w = this frame's spin step (rad), planet only
+    vec4 planet;          // xyz = the planet's centre (world m), w = its radius (world m).
+                          // w <= 0 is a FLAT world: the march pins a fake planet under the
+                          // camera as it always has, and `spin` below is unused.
+    vec4 spin;            // xyz = the axis the deck turns about (unit), w = total angle (rad).
+                          // A planet's wind ROTATES the deck; a flat world's slides the noise
+                          // domain by wind.xy instead. Only one is ever live.
+    vec4 day_fill;        // rgb = the sky's colour at noon: the deck's ambient on the day side.
+    vec4 night_fill;      // rgb = its night-side ambient, already scaled by the moon. Both are
+                          // zero on a flat world, where the scene's sky_zenith family is used
+                          // exactly as it always was.
 } cf;
 #endif
 

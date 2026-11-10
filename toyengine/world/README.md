@@ -816,10 +816,41 @@ See `assets/scenes/terrain/planet_demo` -- a globe held whole in frame, spun by 
 - **Editor.** The World Generator's Planet toggle, Add > Planet, and Tile Mode (hover marches the
   view ray through the columns; a brush or selection stays on the face it starts on).
 
+- **Clouds.** The volumetric cloud layer (`clouds: true`) works on a planet: it is a real
+  spherical shell about the planet's centre, so it curves to the horizon, the ground occludes
+  it, and it is visible from orbit and from the surface alike. `cloud_altitude`,
+  `cloud_thickness` and `cloud_scale` are **derived from the planet's radius** and should not
+  be authored on a planet scene -- their defaults are absolute metres tuned for an Earth-sized
+  sky, and `cloud_scale` in particular must be derived or the globe reads one constant weather
+  value everywhere (the field's noise periods are fixed cloud-space lengths). `cloud_type: flat`
+  is NOT supported on a planet -- its layer is an infinite world-Z slab -- and falls back to
+  the volumetric layer with a warning.
+- **The planet frame.** [`env/planet_frame.h`](../env/planet_frame.h) is the one authoritative
+  answer to "which way is up here, and how high up is this": `up_at()`, `altitude_at()`,
+  `tangent_at()` and `transport()`. A default-constructed `PlanetFrame` **is** the flat Z-up
+  world, so a caller asks it unconditionally rather than branching on whether a planet exists --
+  the same shape as `MoveOptions::up` in the character motor, which defaults to `+Z` and keeps
+  an exact fast path for it. `world::find_planet_frame(scene)` finds the scene's planet;
+  `render::PlanetFrameState` is an alias of the same type.
+
+- **Day and night.** The terminator is one shared soft band (`gfx_planet_day()` in
+  [`gfx/planet.glsl`](../../assets/shaders/gfx/planet.glsl)), so the atmosphere shell, the
+  cloud deck, the star backdrop's daylight fade and the ground all cross into night at the same
+  angle. `PlanetAtmosphere`'s `moon_intensity` lights the hemisphere facing away from the sun --
+  ground, water and clouds together -- and `night_sky_color` / `day_sky_color` are the two
+  colours the cloud deck's ambient blends between across that band. **`moon_intensity` defaults
+  to 0, which is a black night side**: without it nothing lights that hemisphere at all, and the
+  deck is still there and still occluding the stars at the limb while emitting nothing. The
+  moon sits opposite the sun (a full moon over the anti-solar point) and casts no shadows; an
+  independently placed moon and a `moon_color` would both need a direction and a colour plumbed
+  to the lighting pass and the cloud march, and are out of scope.
+
 **Not on planets yet:** moving platforms under a character, Mount/Rider, ragdoll recovery,
-navigation, the first-person camera, volumetric clouds,
-and sky reflections/ambient (they still read the world-oriented sky). Large or streamed planets
-and more than one planet per scene are out of scope for now.
+navigation, the first-person camera, cloud shadows (the map is still a flat XY square around
+the camera, so it is switched off on a planet), the global height fog (plain distance fog
+there), the weather system (its sun path, wind bearing and ground-height plane are all
+world-Z), and sky reflections/ambient (they still read the world-oriented sky gradient).
+Large or streamed planets and more than one planet per scene are out of scope for now.
 
 ## Heightmap terrain
 

@@ -85,7 +85,18 @@ layout(set = 1, binding = 0) uniform LightUBO {
     vec4 sky_sun;      // xyz = unit direction TO the sun, w = cos(disc angular radius)
     vec4 sky_moon;     // xyz = unit direction TO the moon, w = cos(disc angular radius)
     vec4 sky_params;   // x = 1 physical sky, y = cloud march scale (0 = no clouds composited), z = star visibility, w = sky illuminance
-    vec4 sky_extra;    // x = sun disc radiance, y = moon disc radiance, z = night floor, w = time (s)
+    vec4 sky_extra;    // x = sun disc radiance, y = moon disc radiance, z = night fill, w = time (s)
+                       //
+                       // sky_extra.z has two readings, and they can never both be live in one
+                       // frame, so no caller has to disambiguate:
+                       //  - physical sky: an airglow floor, scaled by 1e-3 where sky_physical()
+                       //    uses it, so a moonless night sky is not pure black.
+                       //  - PLANET (sky_model: space): the moon's radiance, in the same units as
+                       //    dir_color -- what lights the hemisphere facing away from the sun, for
+                       //    the ground (toy_lighting.frag) and the cloud deck (sky_clouds.frag)
+                       //    alike. Both of those gate on their own planet slot being set, and
+                       //    sky_physical() never runs under a space sky. 0 = a black night side,
+                       //    which is the default and what every scene without a moon gets.
 
     // Global exponential height fog -- see gfx/fog.glsl. Read by fog.frag (the opaque scene)
     // and by every forward shader, which fogs its own fragment at its own distance.

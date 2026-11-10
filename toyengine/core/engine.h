@@ -42,6 +42,7 @@
 
 #include <physxcoopa/system/nav_system.h>
 
+#include <toyengine/env/planet_frame.h>
 #include <toyengine/core/config.h>
 #include <toyengine/core/loading.h>
 #include <toyengine/core/runtime_paths.h>
@@ -1408,7 +1409,25 @@ private:
     bool sky_applied_ = false;                  ///< sky_base_ holds the gradient colours the physical sky overwrote.
     std::array<glm::vec3, 3> sky_base_{};       ///< The config's zenith / horizon / ground under the physical sky.
     glm::dvec2 cloud_offset_{0.0};              ///< Accumulated cloud drift, metres (unwrapped: the renderer wraps it per use).
+    /// The scene's planet, re-found once a frame (world::find_planet_frame) so the sky, the
+    /// clouds, the weather and the surface state all read ONE centre and radius rather than
+    /// scanning for the terrain separately. A flat scene's is the default frame, which is the
+    /// flat Z-up world -- so readers use it unconditionally. See toyengine/env/planet_frame.h.
+    env::PlanetFrame planet_frame_{};
     double cloud_flat_phase_ = 0.0;             ///< The flat clouds' evolution phase, 0..1.
+    /// Planet only: the angle the cloud deck has turned about the planet's pole (rad). A
+    /// globe's wind rotates the deck where a flat world slides `cloud_offset_` across it;
+    /// accumulated here so changing the wind's speed never jumps the clouds.
+    double cloud_spin_ = 0.0;
+    /// Planet only: this frame's step of cloud_spin_ (rad). The temporal reconstruction
+    /// reprojects its history by exactly this, so it has to be the step actually applied.
+    float cloud_spin_delta_ = 0.0f;
+    /// Planet only: the colours its cloud deck's ambient blends between across the
+    /// terminator -- the atmosphere's own daylight colour, and its night side already
+    /// scaled by the moon. Gathered in the sky sync (which already walks every
+    /// PlanetAtmosphere) and read by the cloud sync, which runs just after it.
+    glm::vec3 planet_day_fill_{0.0f};
+    glm::vec3 planet_night_fill_{0.0f};
     float sky_time_ = 0.0f;                     ///< Seconds the physical sky has run.
     /// Sky illuminance per unit of sun light intensity. Brighter than a real sky (about 1) to keep
     /// the engine's ambient-rich look; the sun disc, stars and the CPU gradient all scale with it.

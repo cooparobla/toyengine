@@ -21,6 +21,7 @@
 #include <toyengine/water/buoyancy.h>
 #include <toyengine/water/water_body.h>
 #include <toyengine/world/planet.h>
+#include <toyengine/world/planet_atmosphere.h>
 #include <toyengine/world/terra_store.h>
 #include <toyengine/world/terrain_component.h>
 #include <physxcoopa/components/box_collider.h>
@@ -306,3 +307,104 @@ COOPA_TEST(a_character_walks_on_the_planet) {
            "walk: ...upright, its up away from the planet (" + std::to_string(glm::dot(up, glm::normalize(end))) + ")");
 }
 
+
+/**
+ * @brief A planet's night hemisphere is lit by its moon -- and is black without one.
+ *
+ * The regression test for a globe whose dark half was simply missing. Nothing lit the hemisphere
+ * facing away from the sun: the cloud deck's sun term was gated to zero past the terminator and
+ * its only other fill was the scene's `sky_zenith` family, which a `space` sky leaves near-black.
+ * The deck was still marched and still occluded (a black bite out of the stars at the limb), but
+ * emitted nothing, so the planet read as a lit crescent.
+ *
+ * Framed so the terminator crosses the view: the shipped sun sits almost behind the shipped
+ * camera (`dot(camera_dir, sun_to) ~= 0.9`), which lights the whole visible disc and would hide
+ * the very thing under test. Turning the sun along -X puts day on the right of frame and night
+ * on the left, so the two halves can be measured against each other -- and measuring BOTH is the
+ * point: a moon term that leaked onto the day side would brighten both halves equally and pass a
+ * whole-image check.
+ */
+COOPA_TEST(the_night_hemisphere_is_moonlit_and_black_without_a_moon) {
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    const std::string scene = scene_variant(
+        "assets/scenes/terrain/planet_demo/scene.yaml", "night_side", [](fkyaml::node& doc) {
+            if (fkyaml::node* g = scene_component(doc, "planet", "MapGenerator")) {
+                (*g)["height_scale"] = fkyaml::node(6.0);
+            }
+            if (fkyaml::node* t = scene_component(doc, "planet", "Terrain")) {
+                (*t)["face_tiles"] = fkyaml::node(32);
+            }
+            // The camera has to shrink WITH the planet. A planet's radius is derived
+            // (2 N tile_size / pi), so cutting face_tiles from 192 to 32 takes it from ~122 to
+            // ~20 while the shipped orbit camera stays at 700 -- which frames the globe as a
+            // speck and leaves every band below measuring nothing but stars. Hold the shipped
+            // scene's distance-to-radius ratio (700 / 122.2) so the globe fills the frame the
+            // same way it does in the demo.
+            constexpr double k_shrink = 32.0 / 192.0;
+            if (fkyaml::node* c = scene_component(doc, "camera", "CameraController")) {
+                (*c)["distance"] = fkyaml::node(700.0 * k_shrink);
+                (*c)["max_distance"] = fkyaml::node(700.0 * k_shrink);
+                (*c)["min_distance"] = fkyaml::node(165.0 * k_shrink);
+            }
+            if (fkyaml::node* t = scene_component(doc, "camera", "Transform")) {
+                (*t)["position"] = fkyaml::node::deserialize(std::string("{ x: 0.0, y: -66.6, z: 21.6 }"));
+            }
+            if (fkyaml::node* c = scene_component(doc, "camera", "Camera")) {
+                (*c)["near_clip_plane"] = fkyaml::node(0.2);
+                (*c)["far_clip_plane"] = fkyaml::node(600.0);
+            }
+            // Day to the right of frame, night to the left.
+            if (fkyaml::node* l = scene_component(doc, "sun", "DirectionalLight")) {
+                (*l)["direction"] = fkyaml::node::deserialize(std::string("{ x: -1.0, y: 0.0, z: 0.0 }"));
+            }
+        });
+    std::error_code ec;
+    std::filesystem::remove_all(std::filesystem::path(scene).parent_path() / "terrain", ec);
+
+    toy::core::Engine engine(make_test_config(scene, 320, 180, 320, 180));
+    Planet p = bring_up(engine);
+    require(p.terrain != nullptr && !p.terrain->field.empty(), "night: the planet baked");
+
+    toy::world::PlanetAtmosphere* sky = nullptr;
+    for (toy::world::PlanetAtmosphere* a : p.scene->get_components<toy::world::PlanetAtmosphere>()) {
+        if (a->moon_intensity > 0.0f) { sky = a; break; }
+    }
+    require(sky != nullptr, "night: the demo authors a moon");
+    const float authored = sky->moon_intensity;
+
+    // Bands INSIDE the disc, one either side of the terminator. The globe spans roughly
+    // x 0.36..0.64 and y 0.22..0.72 of the frame at this distance-to-radius ratio, so anything
+    // wider measures the star field beside the planet -- which the moon does not touch, and
+    // which therefore reads as "the moon does nothing" however well it works.
+    const auto night_mean = [](const Frame& f) { return band_mean(f, 0.40f, 0.58f, 0.40f, 0.47f); };
+    const auto day_mean   = [](const Frame& f) { return band_mean(f, 0.40f, 0.58f, 0.55f, 0.62f); };
+    const auto luma = [](const glm::vec3& c) { return glm::dot(c, glm::vec3(0.2126f, 0.7152f, 0.0722f)); };
+
+    const Frame on = engine.capture_image(true);
+    sky->moon_intensity = 0.0f;
+    tick_frames(engine, 8);     // the cloud deck reconstructs temporally: let the history catch up
+    const Frame off = engine.capture_image(true);
+    require(same_extent(on, off), "night: both captures share an extent");
+
+    const float night_on = luma(night_mean(on)), night_off = luma(night_mean(off));
+    const float day_on   = luma(day_mean(on)),   day_off   = luma(day_mean(off));
+
+    if (!(night_on > night_off + 1.0f)) { dump_frame(on, "planet_moon_on"); dump_frame(off, "planet_moon_off"); }
+    expect(night_on > night_off + 1.0f,
+           "night: the moon lights the hemisphere facing away from the sun (" +
+               std::to_string(night_on) + " vs " + std::to_string(night_off) + ")");
+    // The day side is the sun's; a moon spilling onto it would mean the terminator is wrong.
+    expect(std::abs(day_on - day_off) < 1.0f,
+           "night: ...and leaves the lit hemisphere alone (" + std::to_string(day_on) + " vs " +
+               std::to_string(day_off) + ")");
+    expect(black_block_pixels(on) == 0, "night: no black (NaN) blocks");
+
+    // 0 is the documented default and has to be the black night side the engine had before, so
+    // no scene without a moon changes: restoring it must come back to the same image.
+    sky->moon_intensity = authored;
+    tick_frames(engine, 8);
+    const Frame back = engine.capture_image(true);
+    expect(luma(night_mean(back)) > night_off + 1.0f, "night: restoring the moon restores the fill");
+}

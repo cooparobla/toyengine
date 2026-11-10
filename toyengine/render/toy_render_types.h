@@ -20,21 +20,25 @@
 #include <gfxcoopa/engine/components/sdf_renderer.h>
 #include <gfxcoopa/engine/passes/transparent_pass.h>
 
+#include <toyengine/env/planet_frame.h>
 #include <toyengine/render/sdf_clip.h>
 
 namespace toy {
 namespace render {
 
 /**
- * @struct PlanetFrameState
  * @brief The scene's planet (a planet TileTerrain), handed over by Engine
  *        (ToyRenderPipeline::set_planet()): the sky and the fog are then evaluated in the
- *        camera's own frame on it -- up away from the centre, heights as altitude above `radius`.
+ *        camera's own frame on it -- up away from the centre, heights as altitude above
+ *        `radius`.
+ *
+ * An alias for `toy::env::PlanetFrame`, which is the whole engine's answer to "which way is
+ * up here, and how high up is this" -- see toyengine/env/planet_frame.h. The renderer shares
+ * that type rather than carrying its own copy so a planet's centre and radius cannot drift
+ * between the sky and the weather, and so the pipeline can ask `up_at()` / `altitude_at()`
+ * instead of re-deriving them. `env/` is a glm-only leaf, so this costs no new dependency.
  */
-struct PlanetFrameState {
-    glm::vec3 centre{0.0f};
-    float     radius = 1.0f;
-};
+using PlanetFrameState = env::PlanetFrame;
 
 /**
  * @struct WaterFrameState
@@ -102,8 +106,19 @@ struct ToyLightingPushConstants {
     /// (no separate skybox draw) and reconstructs their view ray from this, computed on the
     /// CPU.
     glm::mat4 sky_inv_view_proj = glm::mat4(1.0f);
+    /// The scene's planet: xyz = centre (world), w = radius. `w <= 0` is a FLAT world, which is
+    /// the default and what every flat scene uploads.
+    ///
+    /// The lighting pass needs it to answer "which way is up at this fragment", which is what
+    /// decides whether a point lies on the day or the night side of the globe. It cannot come
+    /// from the light UBO's `sky_moon`/`sky_sun`: those are pre-rotated into the CAMERA's frame
+    /// by sky_frame_() for the sky shaders (see pipeline_shadows.cpp), so shading a world-space
+    /// fragment with them would put the terminator in the wrong place everywhere but directly
+    /// under the camera. Push constants are the pass's own, in world space, and at 112 bytes
+    /// this block is still inside Vulkan's guaranteed 128.
+    glm::vec4 planet = glm::vec4(0.0f);
 };
-static_assert(sizeof(ToyLightingPushConstants) == 96, "must match toy_lighting.frag's ToyLightingParams");
+static_assert(sizeof(ToyLightingPushConstants) == 112, "must match toy_lighting.frag's ToyLightingParams");
 
 /**
  * @struct DebugViewPushConstants

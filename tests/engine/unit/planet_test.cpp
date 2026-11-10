@@ -13,6 +13,7 @@
 #include <coopa/debug/logger.h>
 #include <coopa/maps/map_generator.h>
 #include <coopa/maps/map_presets.h>
+#include <toyengine/env/planet_frame.h>
 #include <toyengine/world/planet.h>
 #include <toyengine/mapgen/terrain_sampler.h>
 
@@ -23,6 +24,7 @@ COOPA_TEST_SUITE("planet");
 
 using namespace toy::test;
 using toy::world::PlanetLayout;
+using toy::env::PlanetFrame;
 
 COOPA_TEST(every_tile_maps_to_its_own_direction_and_back) {
     PlanetLayout layout{24, 1.0f};
@@ -108,4 +110,78 @@ COOPA_TEST(a_planet_bakes_from_the_globe_with_water_never_above_its_banks) {
     }
     expect(wet > 0 && dry > 0, "the globe has land and sea");
     expect(over == 0, "no dry tile on any face lies under the water beside it (" + std::to_string(over) + ")");
+}
+
+// --- The planetary frame (toyengine/env/planet_frame.h) ---
+
+COOPA_TEST(a_default_frame_is_the_flat_z_up_world) {
+    const PlanetFrame flat{};
+    expect(!flat.active(), "a default frame is not a planet");
+    const glm::vec3 p(12.0f, -5.0f, 7.5f);
+    expect(flat.up_at(p) == glm::vec3(0.0f, 0.0f, 1.0f), "up is +Z anywhere");
+    expect(std::abs(flat.altitude_at(p) - 7.5f) < 1e-6f, "altitude is p.z");
+    expect(flat.tangent_at(p) == glm::mat3(1.0f), "the tangent basis is identity");
+    // The point at an altitude keeps xy and takes z from the altitude, so a flat caller's
+    // "put this at height h over there" reads the same as it always did.
+    const glm::vec3 at = flat.point_at(glm::vec3(3.0f, 4.0f, 0.0f), 9.0f);
+    expect(at == glm::vec3(3.0f, 4.0f, 9.0f), "point_at lays the altitude on z");
+    const glm::vec3 v(1.0f, 0.0f, 0.0f);
+    expect(transport(flat, v, p, glm::vec3(-40.0f, 60.0f, 3.0f)) == v, "transport is a no-op when flat");
+}
+
+COOPA_TEST(a_planet_frame_answers_up_altitude_and_a_tangent_basis) {
+    const PlanetFrame planet{glm::vec3(10.0f, 0.0f, 0.0f), 100.0f};
+    expect(planet.active(), "a positive radius is a planet");
+
+    // Straight out along +X from a centre offset to (10,0,0): up is +X, altitude is the
+    // distance past the datum. Both must be measured from the CENTRE, not the origin.
+    const glm::vec3 p = glm::vec3(10.0f + 130.0f, 0.0f, 0.0f);
+    expect(glm::length(planet.up_at(p) - glm::vec3(1.0f, 0.0f, 0.0f)) < 1e-5f, "up points away from the centre");
+    expect(std::abs(planet.altitude_at(p) - 30.0f) < 1e-4f, "altitude is the height above the datum");
+    expect(std::abs(planet.altitude_at(planet.centre + glm::vec3(0.0f, 0.0f, 100.0f))) < 1e-4f,
+           "a point on the datum is at altitude 0");
+    expect(planet.altitude_at(planet.centre) < 0.0f, "below the datum is negative");
+
+    // point_at inverts altitude_at for any direction.
+    const glm::vec3 dir = glm::normalize(glm::vec3(1.0f, 2.0f, -3.0f));
+    const glm::vec3 q = planet.point_at(dir, 17.0f);
+    expect(std::abs(planet.altitude_at(q) - 17.0f) < 1e-3f, "point_at and altitude_at invert");
+    expect(glm::length(planet.up_at(q) - dir) < 1e-5f, "point_at lies along its direction");
+
+    // The basis is orthonormal, right-handed, and its up agrees with up_at.
+    const glm::mat3 b = planet.tangent_at(q);
+    expect(glm::length(b[2] - planet.up_at(q)) < 1e-5f, "column 2 is up");
+    expect(std::abs(glm::dot(b[0], b[1])) < 1e-5f && std::abs(glm::dot(b[0], b[2])) < 1e-5f &&
+               std::abs(glm::dot(b[1], b[2])) < 1e-5f, "the basis is orthogonal");
+    expect(std::abs(glm::length(b[0]) - 1.0f) < 1e-5f && std::abs(glm::length(b[1]) - 1.0f) < 1e-5f,
+           "the basis is normalized");
+    expect(glm::length(glm::cross(b[0], b[1]) - b[2]) < 1e-5f, "east x north == up (right-handed)");
+}
+
+COOPA_TEST(the_tangent_basis_survives_both_poles) {
+    const PlanetFrame planet{glm::vec3(0.0f), 50.0f};
+    for (const float sign : {1.0f, -1.0f}) {
+        // Exactly on the pole, where north has no bearing: the basis must still be usable
+        // rather than a NaN, because a camera or a wind sample can land there.
+        const glm::mat3 b = planet.tangent_at(glm::vec3(0.0f, 0.0f, sign * 60.0f));
+        const bool finite = b[0] == b[0] && b[1] == b[1] && b[2] == b[2];
+        expect(finite, "the pole's basis is finite");
+        expect(std::abs(glm::length(b[0]) - 1.0f) < 1e-4f, "its east is still a unit vector");
+        expect(glm::length(glm::cross(b[0], b[1]) - b[2]) < 1e-4f, "it is still right-handed");
+    }
+}
+
+COOPA_TEST(transport_carries_a_tangent_wind_without_spinning_or_shrinking) {
+    const PlanetFrame planet{glm::vec3(0.0f), 100.0f};
+    const glm::vec3 from = planet.point_at(glm::vec3(1.0f, 0.0f, 0.0f), 0.0f);
+    // A wind blowing east at `from`, carried a quarter of the way round the globe.
+    const glm::vec3 wind = planet.tangent_at(from)[0] * 7.0f;
+    const glm::vec3 to = planet.point_at(glm::vec3(0.0f, 1.0f, 0.0f), 0.0f);
+    const glm::vec3 moved = transport(planet, wind, from, to);
+    expect(std::abs(glm::length(moved) - 7.0f) < 1e-3f, "transport keeps the wind's speed");
+    expect(std::abs(glm::dot(moved, planet.up_at(to))) < 1e-3f, "it stays tangent at the far point");
+    // Transporting back must return the original vector -- the property that stops a wind
+    // from drifting as it is carried from sample to sample.
+    const glm::vec3 back = transport(planet, moved, to, from);
+    expect(glm::length(back - wind) < 1e-3f, "transport there and back is the identity");
 }

@@ -177,9 +177,13 @@ void register_scene_components() {
             auto* pa = obj.add_component<world::PlanetAtmosphere>();
             read(node, "thickness_scale", pa->thickness_scale);
             read(node, "min_thickness", pa->min_thickness);
+            read(node, "radius_thickness_scale", pa->radius_thickness_scale);
             read(node, "base_altitude_scale", pa->base_altitude_scale);
+            read(node, "radius_base_scale", pa->radius_base_scale);
             read(node, "scale_height_fraction", pa->scale_height_fraction);
             read(node, "day_sky_altitude_scale", pa->day_sky_altitude_scale);
+            read(node, "moon_intensity", pa->moon_intensity);
+            if (node.contains("night_sky_color")) pa->night_sky_color = parse_rgb(node.at("night_sky_color"), pa->night_sky_color);
             if (node.contains("day_sky_color")) pa->day_sky_color = parse_rgb(node.at("day_sky_color"), pa->day_sky_color);
         });
 

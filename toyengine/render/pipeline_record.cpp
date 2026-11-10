@@ -287,6 +287,10 @@ void ToyRenderPipeline::record_scene_(coopa::gfx::command::CommandBuffer& cmd, c
     lighting_pc.sky_inv_view_proj    = glm::inverse(ctx.proj * ctx.view);
     // On a planet the sky is drawn in the camera's own frame there (sky_frame_()).
     if (planet_) lighting_pc.sky_inv_view_proj = glm::mat4(sky_frame_()) * lighting_pc.sky_inv_view_proj;
+    // World space, unrotated -- unlike the sky directions above, which sky_frame_() turns into
+    // the camera's frame. The lighting pass shades world-space fragments, so it needs the
+    // planet where it actually is to tell day from night at each of them.
+    lighting_pc.planet = planet_ ? glm::vec4(planet_->centre, planet_->radius) : glm::vec4(0.0f);
     // gfxcoopa's DeferredLightingPass::draw() pushes this internally (the templated
     // overload), after its own bind_pipeline() -- no separate push needed.
     toy_lighting_pass_->draw(cmd, current_camera_set(), current_light_set(), *shadow_set_, lighting_pc,

@@ -18,10 +18,17 @@
  * |------------------|-------------------------------------------|--------------------------------|
  * | `height_base`    | `R`                                       | inner radius: densest altitude |
  * | `height_falloff` | `thickness * scale_height_fraction`       | exponential scale height       |
- * | `extent`         | `R + peak + thickness`                    | outer radius: the march's bound |
+ * | `extent`         | `base + thickness`                        | outer radius: the march's bound |
  *
- * where `thickness = max(min_thickness, peak * thickness_scale)` -- so a mountainous world gets
- * a proportionally taller sky and a flat one still gets `min_thickness` of air.
+ * where
+ *
+ *     thickness = max(min_thickness, peak * thickness_scale, R * radius_thickness_scale)
+ *     base      = R + max(peak * base_altitude_scale, R * radius_base_scale)
+ *
+ * so a mountainous world gets a proportionally taller sky, a large or low-relief one gets a
+ * sky proportional to the globe it wraps, and a near-flat small one still gets
+ * `min_thickness` of air. Taking the LARGEST is what lets a planet of any radius work from
+ * the same authored numbers.
  *
  * Example YAML, as a child of the planet object, beside the `Volume` it drives:
  * @code
@@ -93,6 +100,26 @@ public:
     float min_thickness = 30.0f;
 
     /**
+     * @brief Sky height as a fraction of the PLANET'S RADIUS, taken when it is the largest.
+     *
+     * What makes a planet of any size work. `thickness_scale` keys the sky to the terrain's
+     * relief, which says nothing about how big the world is: a 2600-unit globe with 40-unit
+     * hills would get the same 72 units of air as a 100-unit one, a skin far too thin to read
+     * as a limb from orbit. The thickness is the LARGEST of the three terms, so a mountainous
+     * world still gets its peak-proportional sky and a large or low-relief one gets this.
+     */
+    float radius_thickness_scale = 0.12f;
+
+    /**
+     * @brief Altitude of the shell's BASE as a fraction of the planet's radius.
+     *
+     * The radius-keyed counterpart of `base_altitude_scale`, and 0 by default so an
+     * atmosphere still starts at the datum. A cloud deck on a low-relief planet wants it:
+     * keyed only to the peak, the deck of an ocean world would sit on the sea.
+     */
+    float radius_base_scale = 0.0f;
+
+    /**
      * @brief Altitude of the shell's BASE, as a multiple of the measured peak. 0 = on the ground.
      *
      * What lets one component serve both layers a planet wants: at 0 the shell starts at the
@@ -122,6 +149,41 @@ public:
      * real sky would be lit: see day_sky_factor().
      */
     glm::vec3 day_sky_color = glm::vec3(0.16f, 0.36f, 0.78f);
+
+    /**
+     * @brief Light the night side receives, relative to the sun. 0 = a black night (the default).
+     *
+     * A planet lit by one sun has a hemisphere facing away from it, and nothing in the engine
+     * lights that hemisphere: the clouds' sun term is gated to zero past the terminator and the
+     * only fill is the scene's `sky_zenith` family, which a `space` sky leaves near-black. The
+     * result is a globe that reads as a lit crescent with its dark half simply missing -- the
+     * cloud deck is still there, still occluding the stars at the limb, but emitting nothing.
+     *
+     * This is the moon. It lights the night hemisphere's ground, water and clouds together, so
+     * the dark side reads as a moonlit world rather than a void. **0 is the default and
+     * reproduces the black night side exactly**, so no existing scene changes until it asks.
+     *
+     * Reaches the shaders as `LightUBO::sky_extra.z` (the night floor), which both the lighting
+     * pass and the cloud march already bind.
+     *
+     * The moon sits opposite the sun -- a full moon over the anti-solar point, which lights the
+     * night hemisphere evenly and is the useful shape when the point is "the dark side is not a
+     * void". Its direction is therefore derived, not authored: in world space it is simply the
+     * sun's own travel direction. An independently placed moon, with a terminator of its own,
+     * would need a world-space direction plumbed to both the lighting pass and the cloud march
+     * and is deliberately out of scope here.
+     */
+    float moon_intensity = 0.0f;
+
+    /**
+     * @brief Colour the night sky fills the cloud deck with, scaled by `moon_intensity`.
+     *
+     * The ambient counterpart of `day_sky_color`: what a cloud sees looking around it on the
+     * night side, where `day_sky_color` is what it sees at noon. The deck blends between the
+     * two across the terminator, which is also what keeps the day/night edge a gradient rather
+     * than a line.
+     */
+    glm::vec3 night_sky_color = glm::vec3(0.04f, 0.06f, 0.12f);
 
     /**
      * @brief Altitude at which the backdrop is FULLY daytime sky, as a multiple of the peak.
@@ -159,6 +221,8 @@ private:
     /** @brief Nearest ancestor TerrainComponent, resolved lazily; null until one exists. */
     TerrainComponent* terrain_ = nullptr;
     std::uint64_t applied_height_revision_ = 0;
+    /** @brief Hash of the knobs apply() last used, so an edited one re-applies. */
+    float applied_settings_key_ = 0.0f;
     /** @brief Shell radii from the last apply(); outer_ <= 0 means nothing has been measured. */
     float inner_ = 0.0f;
     float outer_ = 0.0f;

@@ -21,6 +21,7 @@
 // Declares no uniforms, samplers, or blocks -- every input is a function parameter, since
 // different passes bind their sets at different indices.
 
+#include <gfx/planet.glsl>
 #include <gfx/sky.glsl>
 #include <gfx/fog_types.glsl>
 
@@ -203,9 +204,10 @@ float gfx_fog_shell_weight(vec3 p_local, float inner, float falloff, vec3 sun_lo
     if (alt < 0.0) return 0.0;
     float w = falloff > 0.0 ? exp(-alt / falloff) : 1.0;
     if (day_gate > 0.0) {
-        // Soft terminator straddling the geometric one, so the day/night edge is a dusk band a
-        // few degrees wide rather than a hard line cutting across the limb.
-        float day = smoothstep(-0.25, 0.35, dot(normalize(p_local), sun_local));
+        // The engine's one terminator (gfx/planet.glsl), shared with the clouds, the star
+        // backdrop's daylight fade and the night-side ground light, so they all cross from day
+        // to night at the same angle.
+        float day = gfx_planet_day(normalize(p_local), sun_local);
         w *= mix(1.0, day, clamp(day_gate, 0.0, 1.0));
     }
     return w;

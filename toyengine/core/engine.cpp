@@ -1013,6 +1013,9 @@ bool Engine::tick() {
         // Lens blur (depth of field, tilt shift) is a play-time look: an editor's edit mode
         // draws sharp. Every frame, so it also holds across renderer rebuilds.
         pipeline_->set_lens_blur_suppressed(edit_mode_);
+        // Before every sync below: the sky, the clouds, the fog and the surface state all read
+        // this one frame, so it has to be the same value for all of them within a frame.
+        planet_frame_ = world::find_planet_frame(scene_mgr_.get_active_scene());
         sync_water_render_state_(scene_mgr_.get_active_scene());
         sync_weather_render_state_(scene_mgr_.get_active_scene());
         sync_sky_render_state_(scene_mgr_.get_active_scene(), dt);

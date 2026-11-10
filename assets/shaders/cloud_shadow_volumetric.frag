@@ -34,10 +34,15 @@ void main() {
     // view march uses (centred under the camera).
     vec2 xy = (pc.map.xy + (gl_FragCoord.xy / pc.light.w) * pc.map.z) / scale;
     vec3 cam = cf.camera.xyz / scale;
-    g_center = vec3(cam.xy, -PLANET_R);
-    float r_base = PLANET_R + cf.slab.x;
+    // Flat only. A planet's shadows are a sun-orthographic map of the whole deck instead of an
+    // XY square around the camera, and are switched off until that lands -- see
+    // Engine::sync_cloud_state_(). So this keeps the camera-pinned shell it always had.
+    g_center = vec3(cam.xy, -ATMO_BOTTOM_R);
+    g_radius = ATMO_BOTTOM_R;
+    g_spin   = vec4(0.0, 0.0, 1.0, 0.0);
+    float r_base = ATMO_BOTTOM_R + cf.slab.x;
     vec2 dxy = xy - cam.xy;
-    float z = sqrt(max(r_base * r_base - dot(dxy, dxy), 0.0)) - PLANET_R;
+    float z = sqrt(max(r_base * r_base - dot(dxy, dxy), 0.0)) - ATMO_BOTTOM_R;
     vec3 p0 = vec3(xy, z);
 
     // Up through the slab toward the light (capped at a few thicknesses for a low sun).

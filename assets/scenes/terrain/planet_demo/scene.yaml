@@ -4,6 +4,11 @@ scene:
     render:
       ambient_intensity: 0.25
       auto_exposure_enabled: false
+      cloud_density: 1.0
+      cloud_quality: high
+      cloud_type: volumetric
+      cloud_wind_speed: 4.0
+      clouds: true
       fog_density: 0.0
       shadow_distance: 7.0e+02
       shadow_softness: 0.35
@@ -51,37 +56,6 @@ scene:
           water_inset: 0.5
           world_tiles: 160
       children:
-        - name: clouds
-          active: true
-          components:
-            - type: Transform
-              position: { x: 0.0, y: 0.0, z: 0.0 }
-              rotation: { x: 0.0, y: 0.0, z: 0.0 }
-              scale: { x: 1.0, y: 1.0, z: 1.0 }
-            - type: Volume
-              color: { b: 1.0, g: 1.0, r: 1.0 }
-              coverage: 0.68
-              density: 0.16
-              direction: { x: 1.0, y: 0.25, z: 0.0 }
-              falloff: 0.0
-              flow_scale: 0.015
-              flow_warp: 9.0
-              gate_scale: 0.0
-              kind: haze
-              noise_scale: 0.14
-              occlusion: 0.9
-              octaves: 4
-              shape: shell
-              speed: 1.2
-              streak: 1.6
-              sun_amount: 0.45
-            - type: PlanetAtmosphere
-              base_altitude_scale: 1.02
-              day_sky_altitude_scale: 0.0
-              min_thickness: 5.0
-              scale_height_fraction: 0.6
-              thickness_scale: 0.09
-          children: []
         - name: atmosphere
           active: true
           components:
@@ -99,6 +73,8 @@ scene:
               sun_amount: 0.9
             - type: PlanetAtmosphere
               day_sky_altitude_scale: 1.5
+              moon_intensity: 0.045
+              night_sky_color: { b: 0.14, g: 0.07, r: 0.045 }
               scale_height_fraction: 0.22
               thickness_scale: 2.8
           children: []

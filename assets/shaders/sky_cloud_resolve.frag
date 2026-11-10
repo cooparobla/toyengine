@@ -85,7 +85,21 @@ void main() {
     vec4 wp = cf.inv_view_proj * vec4(ndc, 1.0);
     vec3 ro = cf.camera.xyz;
     vec3 rd = normalize(wp.xyz / wp.w - ro);
-    vec3 p = ro + rd * (depth * cf.look.x) + vec3(cf.history.xy, 0.0);
+    vec3 p = ro + rd * (depth * cf.look.x);
+    // Where that point's cloud was LAST frame. A flat world's deck slid across the world, so
+    // the history lies one drift vector away; a planet's deck TURNED, so it lies one spin step
+    // back around the planet instead. Getting this wrong does not merely ghost: a
+    // mis-reprojection raises `motion` below, which loosens the anti-flicker cap and lets the
+    // raw per-frame march noise through -- the very sparkle the deck exists to avoid.
+    if (cf.planet.w > 0.0) {
+        vec3 d = p - cf.planet.xyz;
+        float a = -cf.look.w;                      // this frame's spin step, backwards
+        float c = cos(a), sn = sin(a);
+        vec3  k = normalize(cf.spin.xyz);
+        p = cf.planet.xyz + d * c + cross(k, d) * sn + k * (dot(k, d) * (1.0 - c));
+    } else {
+        p += vec3(cf.history.xy, 0.0);
+    }
     vec4 pc = cf.prev_view_proj * vec4(p, 1.0);
     bool hv = cf.history.z > 0.5 && pc.w > 1e-4;
     vec4 hist = vec4(0.0);

@@ -1,0 +1,10 @@
+# Build output
+build/
+
+# Generated screenshots / captured frames
+output/
+
+.docs/
+
+# Any build directory (build-tests/, build-asan/, ...)
+build*/

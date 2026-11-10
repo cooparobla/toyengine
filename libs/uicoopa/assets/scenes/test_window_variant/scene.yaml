@@ -1,0 +1,17 @@
+format: uicoopa
+# Demonstrates scene-level inherit_from: this whole scene is test_window's
+# scene.yaml with a new name, one recolored panel, and one panel removed.
+# Everything else (Title/Paragraph/Bar/HoverHalo/ButtonPanel/StatusLine/
+# ModalDialog and all their reactors) comes through unchanged.
+scene:
+  inherit_from: ../test_window/scene.yaml
+  scene_name: test_window_variant
+  root_objects:
+    - name: Canvas
+      children:
+        - name: TopLeft
+          components:
+            - type: Image
+              color: { r: 0.90, g: 0.30, b: 0.30, a: 0.95 }
+        - name: BottomRight
+          remove: true

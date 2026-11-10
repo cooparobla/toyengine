@@ -1,0 +1,13 @@
+format: prefab
+# Base for the three colored boxes in the bottom HorizontalLayoutGroup bar
+# (Box0/Box1/Box2 in assets/scenes/test_window/scene.yaml). Each instance
+# only overrides Image.color.
+object:
+  name: BarBox
+  active: true
+  components:
+    - type: RectTransform
+      size_delta: { x: 80.0, y: 40.0 }
+    - type: Image
+      color: { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }
+  children: []

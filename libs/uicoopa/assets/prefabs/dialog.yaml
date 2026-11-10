@@ -1,0 +1,101 @@
+format: prefab
+# The whole modal-dialog subtree from assets/scenes/test_window/scene.yaml,
+# lifted out so it can be reused (or overridden per-field) without
+# copy-pasting all four nested objects. The two SetActiveOnSignal reactors
+# and the DialogClose Button reference "ButtonPanel"/"DialogClose" by name;
+# those are resolved by Scene::find_object() against the whole scene at
+# Scene::start() time, not against this file, so this prefab works
+# regardless of which scene includes it as long as that scene has a
+# ButtonPanel object somewhere (see coopa::scene::Scene::find_object and
+# uicoopa/reactors/signal_reactor.h's resolve_target()).
+#
+# Stays active: true — see the ordering-contract comment this block carried
+# in test_window/scene.yaml: Scene::start() (run inline by SceneLoader::load())
+# must reach DialogClose's Button::start() and this object's own
+# SetActiveOnSignal::start() before the consuming app hides it post-load.
+object:
+  name: ModalDialog
+  active: true
+  components:
+    - type: RectTransform
+      anchor_preset: StretchAll
+    - type: Image
+      color: { r: 0.02, g: 0.02, b: 0.04, a: 0.62 }
+    - type: SetActiveOnSignal
+      listen_object: ButtonPanel
+      listen_signal: click
+      active_value: true
+    - type: SetActiveOnSignal
+      listen_object: DialogClose
+      listen_signal: click
+      active_value: false
+  children:
+
+    - name: DialogPanel
+      active: true
+      components:
+        - type: RectTransform
+          anchor_preset: MiddleCenter
+          size_delta: { x: 480.0, y: 260.0 }
+        - type: Image
+          color: { r: 0.14, g: 0.15, b: 0.20, a: 1.0 }
+      children:
+
+        - name: DialogTitle
+          active: true
+          components:
+            - type: RectTransform
+              anchor_preset: TopCenter
+              anchored_position: { x: 0.0, y: -34.0 }
+              size_delta: { x: 420.0, y: 44.0 }
+            - type: Text
+              font: ../fonts/DejaVuSans.ttf
+              text: "Modal Dialog"
+              font_size: 36
+              color: { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }
+              horizontal_align: Center
+              vertical_align: Middle
+              raycast_target: false
+          children: []
+
+        - name: DialogBody
+          active: true
+          components:
+            - type: RectTransform
+              anchor_preset: TopCenter
+              anchored_position: { x: 0.0, y: -90.0 }
+              size_delta: { x: 420.0, y: 96.0 }
+            - type: Text
+              font: ../fonts/DejaVuSans.ttf
+              text: "Opened by a Signal-driven Button::on_click slot. This panel and its Close button below are an ordinary inactive SceneObject subtree, shown and hidden with set_active()."
+              font_size: 16
+              color: { r: 0.85, g: 0.85, b: 0.88, a: 1.0 }
+              horizontal_align: Center
+              vertical_align: Top
+              overflow: Wrap
+              raycast_target: false
+          children: []
+
+        - name: DialogClose
+          active: true
+          components:
+            - type: RectTransform
+              anchor_preset: BottomCenter
+              anchored_position: { x: 0.0, y: 26.0 }
+              size_delta: { x: 160.0, y: 44.0 }
+            - type: Image
+              color: { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }
+            - type: Button
+              colors:
+                normal:      { r: 0.55, g: 0.30, b: 0.35, a: 1.0 }
+                highlighted: { r: 0.70, g: 0.40, b: 0.45, a: 1.0 }
+                pressed:     { r: 0.40, g: 0.20, b: 0.25, a: 1.0 }
+            - type: Text
+              font: ../fonts/DejaVuSans.ttf
+              text: "Close"
+              font_size: 16
+              color: { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }
+              horizontal_align: Center
+              vertical_align: Middle
+              raycast_target: false
+          children: []

@@ -1,0 +1,284 @@
+format: uicoopa
+scene:
+  scene_name: test_window
+  auto_transform: false
+  root_objects:
+
+    # -----------------------------------------------------------------------
+    # Canvas root — carries CanvasComponent (scale-with-screen-size, 1280x720)
+    # -----------------------------------------------------------------------
+    - name: Canvas
+      active: true
+      components:
+        - type: Canvas
+          reference_resolution: { x: 1280.0, y: 720.0 }
+          match_width_or_height: 0.5
+      children:
+
+        # Full-screen background panel
+        - name: Background
+          active: true
+          components:
+            - type: RectTransform
+              anchor_preset: StretchAll
+            - type: Image
+              color: { r: 0.08, g: 0.09, b: 0.12, a: 1.0 }
+          children: []
+
+        # ---- Corner-anchored panels ----
+
+        - name: TopLeft
+          inherit_from: ../../prefabs/corner_panel.yaml
+          components:
+            - type: RectTransform
+              anchor_preset: TopLeft
+              anchored_position: { x: 20.0, y: -20.0 }
+            - type: Image
+              color: { r: 0.20, g: 0.55, b: 0.60, a: 0.95 }
+            - type: Text
+              text: "Top Left"
+
+        - name: TopRight
+          inherit_from: ../../prefabs/corner_panel.yaml
+          components:
+            - type: RectTransform
+              anchor_preset: TopRight
+              anchored_position: { x: -20.0, y: -20.0 }
+            - type: Image
+              color: { r: 0.75, g: 0.45, b: 0.20, a: 0.95 }
+            - type: Text
+              text: "Top Right"
+
+        - name: BottomLeft
+          inherit_from: ../../prefabs/corner_panel.yaml
+          components:
+            - type: RectTransform
+              anchor_preset: BottomLeft
+              anchored_position: { x: 20.0, y: 20.0 }
+            - type: Image
+              color: { r: 0.45, g: 0.25, b: 0.55, a: 0.95 }
+            - type: Text
+              text: "Bottom Left"
+
+        - name: BottomRight
+          inherit_from: ../../prefabs/corner_panel.yaml
+          components:
+            - type: RectTransform
+              anchor_preset: BottomRight
+              anchored_position: { x: -20.0, y: 20.0 }
+            - type: Image
+              color: { r: 0.65, g: 0.25, b: 0.40, a: 0.95 }
+            - type: Text
+              text: "Bottom Right"
+
+        # ---- Title + Paragraph ----
+
+        - name: Title
+          active: true
+          components:
+            - type: RectTransform
+              anchor_preset: TopCenter
+              anchored_position: { x: 0.0, y: -140.0 }
+              size_delta: { x: 600.0, y: 50.0 }
+            - type: Text
+              font: ../../fonts/DejaVuSans.ttf
+              text: "uicoopa"
+              font_size: 36
+              color: { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }
+              horizontal_align: Center
+              vertical_align: Middle
+              raycast_target: false
+          children: []
+
+        - name: Paragraph
+          active: true
+          components:
+            - type: RectTransform
+              anchor_preset: TopCenter
+              anchored_position: { x: 0.0, y: -200.0 }
+              size_delta: { x: 460.0, y: 90.0 }
+            - type: Text
+              font: ../../fonts/DejaVuSans.ttf
+              text: "A Unity-style RectTransform UI system: anchored panels, layout groups, buttons, and word-wrapped text, all composited on top of a Vulkan swapchain."
+              font_size: 16
+              color: { r: 0.85, g: 0.85, b: 0.88, a: 1.0 }
+              horizontal_align: Center
+              vertical_align: Top
+              overflow: Wrap
+              raycast_target: false
+          children: []
+
+        # ---- Bottom bar with HorizontalLayoutGroup ----
+
+        - name: Bar
+          active: true
+          components:
+            - type: RectTransform
+              anchor_preset: StretchBottom
+              anchored_position: { x: 0.0, y: 20.0 }
+              size_delta: { x: -40.0, y: 60.0 }
+            - type: Image
+              color: { r: 0.15, g: 0.15, b: 0.18, a: 0.9 }
+            - type: HorizontalLayoutGroup
+              spacing: 12.0
+              padding:
+                left:   12.0
+                right:  12.0
+                top:    8.0
+                bottom: 8.0
+              child_control_width:       true
+              child_control_height:      true
+              child_force_expand_width:  true
+          children:
+            - name: Box0
+              inherit_from: ../../prefabs/bar_box.yaml
+              components:
+                - type: Image
+                  color: { r: 0.85, g: 0.35, b: 0.35, a: 1.0 }
+
+            - name: Box1
+              inherit_from: ../../prefabs/bar_box.yaml
+              components:
+                - type: Image
+                  color: { r: 0.35, g: 0.75, b: 0.45, a: 1.0 }
+
+            - name: Box2
+              inherit_from: ../../prefabs/bar_box.yaml
+              components:
+                - type: Image
+                  color: { r: 0.35, g: 0.55, b: 0.85, a: 1.0 }
+
+        # ---- Halo (drawn before ButtonPanel so it renders behind it) ----
+
+        - name: HoverHalo
+          active: true
+          components:
+            - type: RectTransform
+              anchor_preset: MiddleCenter
+              size_delta: { x: 300.0, y: 110.0 }
+            - type: Image
+              color: { r: 0.42, g: 0.70, b: 1.00, a: 0.0 }
+              raycast_target: false
+            - type: ColorOnSignal
+              listen_object: ButtonPanel
+              listen_signal: hover_enter
+              color: { r: 0.42, g: 0.70, b: 1.00, a: 0.35 }
+              fade_duration: 0.1
+            - type: ColorOnSignal
+              listen_object: ButtonPanel
+              listen_signal: hover_exit
+              color: { r: 0.42, g: 0.70, b: 1.00, a: 0.0 }
+              fade_duration: 0.1
+            - type: ColorOnSignal
+              listen_object: ButtonPanel
+              listen_signal: press
+              color: { r: 0.55, g: 0.80, b: 1.00, a: 0.55 }
+              fade_duration: 0.1
+            - type: ColorOnSignal
+              listen_object: ButtonPanel
+              listen_signal: release
+              color: { r: 0.42, g: 0.70, b: 1.00, a: 0.35 }
+              fade_duration: 0.1
+          children: []
+
+        # ---- Center button ----
+        #
+        # ColorTransition fades color AND opacity on hover/press (normal.a <
+        # highlighted.a/pressed.a) purely from Button's own per-frame lerp.
+        # Everything else -- the halo, the status line, the modal dialog -- reacts
+        # to Button's named EventBus signals via SignalReactor components declared
+        # right here in the scene (see uicoopa/reactors/), not in test_window.cpp.
+
+        - name: ButtonPanel
+          active: true
+          components:
+            - type: RectTransform
+              anchor_preset: MiddleCenter
+              size_delta: { x: 260.0, y: 70.0 }
+            - type: Image
+              color: { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }
+            - type: Button
+              colors:
+                normal:      { r: 0.30, g: 0.55, b: 0.90, a: 0.55 }
+                highlighted: { r: 0.42, g: 0.70, b: 1.00, a: 1.00 }
+                pressed:     { r: 0.20, g: 0.40, b: 0.70, a: 1.00 }
+            - type: Text
+              font: ../../fonts/DejaVuSans.ttf
+              text: "Click Me"
+              font_size: 16
+              color: { r: 0.92, g: 0.92, b: 0.95, a: 1.0 }
+              horizontal_align: Center
+              vertical_align: Middle
+              raycast_target: false
+            - type: ColorOnSignal
+              listen_object: ButtonPanel
+              listen_signal: hover_enter
+              target_component: Text
+              color: { r: 1.00, g: 0.95, b: 0.55, a: 1.0 }
+              fade_duration: 0.1
+            - type: ColorOnSignal
+              listen_object: ButtonPanel
+              listen_signal: hover_exit
+              target_component: Text
+              color: { r: 0.92, g: 0.92, b: 0.95, a: 1.0 }
+              fade_duration: 0.1
+            - type: LogOnSignal
+              listen_object: ButtonPanel
+              listen_signal: click
+              message: "Button clicked"
+          children: []
+
+        # ---- Status line readout ----
+
+        - name: StatusLine
+          active: true
+          components:
+            - type: RectTransform
+              anchor_preset: MiddleCenter
+              anchored_position: { x: 0.0, y: -80.0 }
+              size_delta: { x: 560.0, y: 28.0 }
+            - type: Text
+              font: ../../fonts/DejaVuSans.ttf
+              text: "idle"
+              font_size: 16
+              color: { r: 0.75, g: 0.80, b: 0.85, a: 1.0 }
+              horizontal_align: Center
+              vertical_align: Middle
+              raycast_target: false
+            - type: TextOnSignal
+              listen_object: ButtonPanel
+              listen_signal: hover_enter
+              text: "hover @ ({x}, {y})"
+            - type: TextOnSignal
+              listen_object: ButtonPanel
+              listen_signal: hover_exit
+              text: "idle"
+            - type: TextOnSignal
+              listen_object: ButtonPanel
+              listen_signal: press
+              text: "pressed (button {button})"
+            - type: TextOnSignal
+              listen_object: ButtonPanel
+              listen_signal: release
+              text: "hover"
+            - type: TextOnSignal
+              listen_object: ButtonPanel
+              listen_signal: click
+              once: true
+              text: "Tip: use the dialog's Close button to dismiss it."
+          children: []
+
+        # ---- Modal dialog ----
+        #
+        # Last child of Canvas = draws on top of everything else (see
+        # ui_scene.h's ordering contract). Stays active: true here so
+        # Scene::start() (run once, inline, by SceneLoader::load()) reaches
+        # DialogClose's Button::start() -- which discovers target_graphic AND
+        # applies colors.normal -- AND this object's own SetActiveOnSignal
+        # reactors' start() (registering their EventBus listeners) -- before
+        # test_window.cpp hides it right after load_scene() returns. A dialog
+        # built inactive from the outset would leave those uninitialized and
+        # flash white / never reopen on first open.
+
+        - name: ModalDialog
+          inherit_from: ../../prefabs/dialog.yaml

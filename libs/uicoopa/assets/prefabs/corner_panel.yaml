@@ -1,0 +1,23 @@
+format: prefab
+# Base for the four corner-anchored panels in assets/scenes/test_window/scene.yaml
+# (TopLeft/TopRight/BottomLeft/BottomRight): a 220x90 panel with a centered
+# label. Each instance only needs to override anchor_preset, anchored_position,
+# Image.color, and Text.text — everything else (font, size, alignment,
+# raycast_target) is shared here.
+object:
+  name: CornerPanel
+  active: true
+  components:
+    - type: RectTransform
+      size_delta: { x: 220.0, y: 90.0 }
+    - type: Image
+      color: { r: 1.0, g: 1.0, b: 1.0, a: 0.95 }
+    - type: Text
+      font: ../fonts/DejaVuSans.ttf
+      text: "Corner"
+      font_size: 16
+      color: { r: 0.98, g: 0.98, b: 0.98, a: 1.0 }
+      horizontal_align: Center
+      vertical_align: Middle
+      raycast_target: false
+  children: []

@@ -1,0 +1,51 @@
+# Sample item catalog for test_hud_builder.cpp -- loaded via
+# coopa::item::ItemDatabaseLoader (coopa/item/item_database_loader.h).
+#
+# Ids deliberately match InventorySlot::update_visuals()'s built-in id-keyed
+# color fallback table (uicoopa/widgets/inventory_grid.h), so the demo still
+# reads correctly even with no icon sheet loaded for these particular names.
+items:
+  - id: potion_health
+    name: Health Potion
+    description: "Restores 25 health."
+    icon: potion
+    max_stack: 16
+    category: consumable
+    rarity: common
+    tint: { r: 0.92, g: 0.28, b: 0.32, a: 0.95 }
+
+  - id: potion_mana
+    name: Mana Potion
+    description: "Restores 25 mana."
+    icon: potion
+    max_stack: 16
+    category: consumable
+    rarity: common
+    tint: { r: 0.25, g: 0.55, b: 0.98, a: 0.95 }
+
+  - id: sword_iron
+    name: Iron Sword
+    description: "A dependable blade."
+    icon: sword
+    max_stack: 1
+    category: weapon
+    rarity: uncommon
+    tint: { r: 0.70, g: 0.80, b: 0.92, a: 0.95 }
+
+  - id: coin_gold
+    name: Gold Coin
+    description: "Currency."
+    icon: coin
+    max_stack: 999
+    category: material
+    rarity: common
+    tint: { r: 0.98, g: 0.82, b: 0.22, a: 0.95 }
+
+  - id: gem_ruby
+    name: Ruby
+    description: "A gleaming red gem."
+    icon: gem
+    max_stack: 99
+    category: material
+    rarity: rare
+    tint: { r: 0.90, g: 0.20, b: 0.55, a: 0.95 }

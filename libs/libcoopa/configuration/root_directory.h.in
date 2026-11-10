@@ -1,0 +1,5 @@
+// Config.h.in
+#pragma once
+
+#define ROOT_DIR "@CMAKE_SOURCE_DIR@"
+#define PROJ_DIR "@ROOT_DIR_PARENT@"

@@ -20,8 +20,6 @@ fi
 
 brew install cmake glfw vulkan-loader vulkan-headers molten-vk vulkan-validationlayers shaderc
 
-cd "$(dirname "$0")/.."
-git submodule update --init --recursive
 
 cat <<'EOF'
 

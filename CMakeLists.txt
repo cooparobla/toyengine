@@ -28,9 +28,9 @@ endforeach()
 # therefore TOYENGINE_DIR, never CMAKE_SOURCE_DIR -- which, in a project build, is the project.
 set(TOYENGINE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 
-# --- Vendored coopa libraries (libs/, git submodules) ---
-# ROOT_DIR_PARENT is "the directory the coopa repos live in" -- the pinned libs/
-# submodule tree, so the build never depends on what happens to be checked out
+# --- Vendored coopa libraries (libs/, committed in this repository) ---
+# ROOT_DIR_PARENT is "the directory the coopa repos live in" -- this repository's
+# own libs/ tree, so the build never depends on what happens to be checked out
 # beside toyengine. configuration/root_directory.h.in exports it as PROJ_DIR,
 # which toyengine/core/runtime_paths.h uses to locate gfxcoopa's and uicoopa's shaders.
 set(ROOT_DIR_PARENT "${TOYENGINE_DIR}/libs")
@@ -57,8 +57,8 @@ set(GFX_SHADER_OUTPUT_ROOT "${TOY_SHADER_BUILD_DIR}")
 
 if(NOT EXISTS "${LIBCOOPA_DIR}/CMakeLists.txt")
     message(FATAL_ERROR
-        "libs/ is empty -- the coopa libraries are git submodules. "
-        "Run: git submodule update --init --recursive")
+        "libs/ is empty -- the coopa libraries are committed in this repository, so this "
+        "checkout is incomplete. Re-clone, or restore libs/ with: git checkout -- libs")
 endif()
 
 # !! ORDER IS LOAD-BEARING -- DO NOT REORDER !!

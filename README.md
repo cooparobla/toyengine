@@ -180,14 +180,12 @@ This walks you from a fresh clone to your own project running its first scene.
 
 ### 1. Clone
 
-The coopa libraries are pinned submodules under [`libs/`](libs/). Clone them recursively,
-because gfxcoopa has a nested submodule of its own:
+The coopa libraries live in [`libs/`](libs/), committed in this repository, so a plain clone
+is a complete checkout:
 
 ```bash
-git clone --recurse-submodules git@github.com:cooparobla/toyengine.git
+git clone git@github.com:cooparobla/toyengine.git
 cd toyengine
-# already cloned?
-git submodule update --init --recursive
 ```
 
 ### 2. Build the engine, editor and hub
@@ -561,9 +559,10 @@ declarations are `#include`d inside `EditorApp`'s class body. See
     and sort functions and builds with `-ffp-contract=off`.
 - **SMAA lookup textures** are fetched at configure time unless `SMAA_TEXTURES_DIR` points at
   a checkout.
-- **Working inside `libs/`.** Each library still builds standalone in place. Submodules check
-  out a detached HEAD, so run `git submodule foreach git checkout main` before committing to
-  one. A toyengine build compiles every shader -- the libraries' too -- into its own
+- **Working inside `libs/`.** Each library still builds standalone in place, and editing one is
+  an ordinary commit in this repository. Each library's own repo at `cooparobla/<lib>` stays its
+  home for other consumers; `git subtree push --prefix=libs/<lib> <url> main` sends changes
+  back to one and `git subtree pull` brings theirs in. A toyengine build compiles every shader -- the libraries' too -- into its own
   `build/shaders/<target>/`, never next to the sources; a library's standalone build still
   compiles in place (and uicoopa's commits its `.spv`).
 

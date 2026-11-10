@@ -45,13 +45,8 @@ if [[ -n "$link" ]]; then
     else
         echo "[setup] .libs/toyengine -> $link (linked)"
     fi
-    # The coopa libraries are submodules of the engine. Same rule: init them only when they are
-    # not there at all, never on a populated libs/.
-    if [[ ! -f "$link/libs/libcoopa/CMakeLists.txt" && -e "$link/.git" ]] && command -v git >/dev/null 2>&1; then
-        echo "[setup] initialising the engine's libs/ submodules"
-        git -C "$link" submodule update --init --recursive || true
-    fi
-    [[ -f "$link/libs/libcoopa/CMakeLists.txt" ]] || warn "$link/libs is empty: run 'git submodule update --init --recursive' there"
+    # The coopa libraries are committed inside the engine checkout, so they arrive with it.
+    [[ -f "$link/libs/libcoopa/CMakeLists.txt" ]] || warn "$link/libs is empty: that engine checkout is incomplete"
 else
     command -v git >/dev/null 2>&1 || die "git is needed to fetch the engine (or point engine.link in $(basename "$TOY_FILE") at a local checkout)"
     if [[ -L "$ENGINE_DIR" ]]; then rm "$ENGINE_DIR"; fi

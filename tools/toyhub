@@ -603,14 +603,11 @@ cmd_vendor() {
             echo "[toyhub] adding $sub to $(basename "$dir") as a submodule of $src"
             git -C "$dir" submodule add ${force:+"$force"} "$src" "$sub"
         fi
-        # Two calls, not one: `submodule add` leaves $sub already checked out, so an outer
-        # `submodule update` has nothing to do for it and never descends into its own
-        # submodules -- which is the whole of the engine's libs/ tree, without which configure
-        # fails outright. Running it again from inside $sub populates them. Both are no-ops
-        # when already done.
-        echo "[toyhub] initialising $sub and its libs/ submodules"
+        # A no-op when `submodule add` already left $sub checked out; it does the work when the
+        # engine arrived as a bare index entry (a reused .git/modules clone). The engine's libs/
+        # are committed inside it, so nothing is fetched beyond the engine itself.
+        echo "[toyhub] initialising $sub"
         git -C "$dir" submodule update --init -- "$sub"
-        git -C "$dir/$sub" submodule update --init --recursive
     fi
 
     # Only an explicit --ref moves the engine. Verify it first: `git checkout` on an unknown
@@ -624,7 +621,6 @@ cmd_vendor() {
         else
             die "engine ref '$ref' is not a branch, tag or commit in $src (pushed?)"
         fi
-        git -C "$dir/$sub" submodule update --init --recursive
     fi
 
     # Record what is actually checked out: the branch if HEAD is on one, else the commit.

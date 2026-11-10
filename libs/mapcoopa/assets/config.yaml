@@ -1,0 +1,641 @@
+# mapcoopa — world generation settings.
+#
+# Read by ./build/mapcoopa at startup (`cbuild && cplay`). Every key is optional and
+# falls back to the value compiled into MapConfig, so deleting a line is always safe;
+# unknown keys are ignored, so an older binary still reads a newer file.
+#
+# Precedence, lowest to highest:
+#
+#   1. MapConfig's in-struct defaults        coopa/maps/map_config.h
+#   2. the generator's own scene defaults    examples/map_generator.cpp
+#   3. this file
+#   4. command-line flags                    cplay --seed=42 --out=world
+#
+# So a flag always wins for one run, and trying something never means editing a
+# version-controlled file. `cplay --config=PATH` reads a different file entirely.
+#
+# A missing config.yaml is not an error — the generator warns and carries on with (2).
+# A config.yaml that exists but does not parse IS an error: generating a map that
+# quietly ignored your settings is worse than generating none.
+
+# --- World scale ------------------------------------------------------------
+#
+# Everything physical in this file is in METRES, and these two numbers are what
+# make that mean something.
+#
+#   world extent = grid_size x meters_per_grid_unit = 80 x 60 m = 4.8 km square
+#   render size  = world extent / meters_per_pixel  = 4800 / 1  = 4800 px square
+#
+# At meters_per_pixel: 1 a PNG is a literal one-pixel-per-metre map, so a pixel
+# count read off a render IS a measurement -- a 6 m road is 6 px wide. Raise it
+# to render the same world smaller and faster; --image-size does the same thing
+# from the other end, back-computing this value.
+
+meters_per_grid_unit: 60    # side length of one grid cell on the ground. A cell holds a
+                            # cluster of ten or so buildings, which is what a village is.
+elevation_range_m: 600      # metres of height the normalised [0,1] elevation field spans —
+                            # the VERTICAL scale, which the world had none of: a grid unit
+                            # had a size across the ground while height stayed a bare
+                            # fraction, so "a river one metre deep" had nowhere to land.
+                            # Sea floor at 0 m, waterline at sea_level * this, peak at this.
+                            # 600 m over 4.8 km is hilly without being alpine.
+meters_per_pixel: 1         # ground covered by one rendered pixel. ALWAYS 1 by default: a
+                            # PNG is then a literal one-pixel-per-metre map, so a pixel
+                            # count read off a render IS a measurement — a 6 m road is
+                            # 6 px wide because it is 6 m wide. Every size in this file is
+                            # in metres on that understanding. Raise it to render the same
+                            # world smaller and faster.
+
+# image_size: 4800          # side length in pixels of every PNG. The same knob from the
+                            # other end, and interchangeable with meters_per_pixel: set
+                            # EITHER and the other is computed from it, so the two can
+                            # never disagree about how much ground a pixel covers. Left
+                            # commented because meters_per_pixel: 1 above already yields
+                            # 4800 px here (80 cells × 60 m ÷ 1 m); uncomment it when you
+                            # want a fixed resolution instead of a fixed scale.
+                            #
+                            # image_size WINS if you set both. --image-size overrides
+                            # either. Worth knowing which you mean: at a fixed image_size,
+                            # changing grid_size or meters_per_grid_unit re-scales the
+                            # pixels; at a fixed meters_per_pixel it re-sizes the PNG.
+
+# --- Sampling ---------------------------------------------------------------
+
+seed: 42                  # master seed; a MapConfig plus its seed fully determines the
+                          # output, byte for byte. --seed overrides this. With neither,
+                          # the generator draws one from system entropy and prints it.
+grid_size: 80             # cells per axis; the point set is (grid_size + 1)^2 plus a
+                          # boundary ring. At 80 the YAML lands around 15 MB.
+jitter: 0.5               # how far a grid point may wander from its lattice position
+border_length: 1.0        # width of the band around the map edge forced to water
+
+# --- Rendering --------------------------------------------------------------
+
+composite_shading: elevation  # how the composite layer lights the biome colours:
+                          #   elevation — brightness follows HEIGHT, so high ground is pale.
+                          #               A function of altitude alone, so the same height
+                          #               reads the same everywhere on the map.
+                          #   hillshade — brightness follows SLOPE, lit from the north-west.
+                          #               Sculpts ridgelines and valley walls, but is blind
+                          #               to altitude: a slope at sea level and the same
+                          #               slope on a summit are drawn identically. Costs a
+                          #               second full-resolution pass plus a blur.
+                          # Only the composite is affected; the elevation layer is the raw
+                          # height field either way. --shading=MODE overrides for one run.
+
+elevation_surface: blended  # how the height field is drawn BETWEEN the cells it is
+                          # stored at, which is what decides how smooth a map looks:
+                          #   interpolated — barycentric over the Delaunay triangle, the
+                          #                  piecewise-linear surface through the cell sites.
+                          #                  Continuous by construction, so a map reads smooth
+                          #                  however rough the field is: at 1 px/m a 60 m cell
+                          #                  spans 60 px and a step between two cells is spread
+                          #                  over all of them.
+                          #   flat         — one height per cell, hard edge at every boundary.
+                          #                  The stored field with nothing interpolated over
+                          #                  it, Voronoi tessellation and all.
+                          #   blended      — flat, then BLURRED: the cells are drawn flat and
+                          #                  the finished raster is smoothed by a box blur
+                          #                  elevation_blend cells wide, with the river
+                          #                  channels cut back in afterwards so they keep
+                          #                  their contrast. A pass over the image, not a
+                          #                  sampling rule — blending each cell's own rim
+                          #                  instead just draws a bevel round every cell.
+                          # Rivers show under flat as well: the channel cut is a function of
+                          # position, not of the interpolation, so it subtracts from a flat
+                          # cell just as readily. Measured, 11.6 grey levels of contrast half a
+                          # cell from a centreline against 12.3 interpolated. River valleys are
+                          # there too, carved into the cell heights themselves, as stepped
+                          # cells rather than a smooth trough. Terrain roughness is the one
+                          # thing flat drops — that is surface texture, not a landform.
+                          # Affects the elevation layer and the composite's elevation shading
+                          # (and so hillshade, which is derived from the raster).
+                          # --surface=MODE overrides for one run.
+
+elevation_blend: 0.1      # `blended`'s blur radius, as a fraction of a cell — so 0.5 is half a
+                          # cell whatever the render size, and one number means the same at
+                          # 512 px as at 4800. 0 is flat byte for byte; 1 is the ceiling,
+                          # past which the blur is wider than the tessellation and erases
+                          # landforms along with facets. Measured at 512 px, the 99th-pct
+                          # adjacent-pixel step falls 34 → 12 → 8 → 6 grey levels at 0 /
+                          # 0.25 / 0.5 / 1. Unused by the other two modes.
+                          # NOT one of the elevation_smoothing_* knobs: those relax the heights
+                          # the graph STORES, this only changes how the drawn surface gets from
+                          # one stored height to the next. --blend=F overrides for one run.
+
+elevation_blend_variation: 0.5  # how much that radius VARIES from cell to cell, 0 to 1. A
+                          # single radius smooths everywhere equally, which is the one thing
+                          # real ground never does. This gives EVERY CELL ITS OWN radius,
+                          # drawn from noise_blend at that cell's site, so one cell keeps hard
+                          # edges while the cell beside it is fully smoothed. The factor is
+                          # `1 + variation × n` for n in [-1,1] — symmetric, so the MEAN
+                          # radius stays elevation_blend and turning this up makes a map more
+                          # varied rather than uniformly softer or sharper.
+                          # noise_blend.frequency below controls how soft and hard cells are
+                          # DISTRIBUTED — per-cell random through to broad patches.
+                          # 0 ignores the field entirely and is byte-identical to a single
+                          # blur. 1 is nominally a factor of 0 to 2, though an FBm field
+                          # seldom reaches its extremes — measured over a whole map it spans
+                          # about 0.35 to 1.8. The top of that can exceed the one-cell ceiling
+                          # elevation_blend is capped at, on purpose: clamping would
+                          # quietly make the knob one-sided. Costs one extra blur of the
+                          # raster whatever it is set to, and does nothing when
+                          # elevation_blend is 0, since there is no radius left to vary.
+                          # --blend-variation=F overrides for one run.
+
+png_compression_level: 8  # deflate effort when encoding a layer, 1-9. stb's own default
+                          # is 8. Lower is faster and larger; the difference is modest once
+                          # the export is threaded (level 1 is ~17% faster for ~2% bigger)
+                          # and pronounced when it is not. Pixels are identical at every
+                          # level. --png-level=N overrides for one run.
+
+draw_landmark_marks: false  # paint landmark diamonds into the landmarks and composite
+                          # layers. Off because a landmark is a label, not terrain:
+                          # the map viewer draws them as interactive markers that stay
+                          # legible at any zoom and carry the name. true restores the
+                          # old output byte for byte. Town marks and cave-mouth rings
+                          # are unaffected. NOT the same as enable_landmarks, which
+                          # decides whether the map has any landmarks at all.
+show_regions: true        # tint cells by the region claiming them, so borders are visible
+region_tint: 0.13         # how strongly that tint is mixed over the biome colour, [0, 1].
+                          # A tint and not a replacement: a political map that hides the
+                          # terrain under flat colour stops being a map of the world.
+                          # NOTE this is also why a pixel sampled from world_biomes.png
+                          # does not exactly equal the README legend's hex — see the
+                          # caveat there, and render with --no-regions for exact colours.
+
+# --- Noise fields -----------------------------------------------------------
+
+noise_island:             # the field the water pass thresholds to decide land from sea
+  # seed: NOT settable. Always overwritten with the master seed above, so one --seed
+  #       reproduces the whole map rather than just the pass ordering.
+  frequency: 0.08         # REFERENCE value at grid_size 40. Scaled by 40/grid_size at
+                          # startup, so --grid-size controls detail rather than the size
+                          # of the world. Held fixed instead, a bigger map comes out as an
+                          # archipelago of the same small islands rather than one resolved
+                          # more finely.
+  type: 0                 # FastNoiseLite::NoiseType; 0 = OpenSimplex2
+  fractal_type: 1         # FastNoiseLite::FractalType; 1 = FBm
+  octaves: 5
+  lacunarity: 2.0         # frequency multiplier between successive octaves
+  gain: 0.5               # amplitude multiplier between successive octaves
+  weighted_strength: 0.45
+
+noise_relief:             # the large-scale field terrain_relief shapes the highlands with
+  seed: 7717
+  frequency: 0.055        # low, because this makes massifs — a feature spans many cells
+  type: 0
+  fractal_type: 1
+  octaves: 5
+  lacunarity: 2.0
+  gain: 0.5
+  weighted_strength: 0.45
+
+noise_terrain:            # the detail field terrain_roughness displaces the surface with
+  # seed: settable here, unlike the two below — this field is texture, not landform,
+  #       so it is not tied to the master seed.
+  seed: 4919
+  frequency: 0.35         # deliberately finer than the fields below: cells are 60 m across,
+                          # so detail has to be smaller than that to read as detail
+  type: 0
+  fractal_type: 1
+  octaves: 5
+  lacunarity: 2.0
+  gain: 0.5
+  weighted_strength: 0.45
+
+noise_blend:              # gives each cell its own blur radius under
+                          # elevation_surface: blended. Read only when
+                          # elevation_blend_variation is above 0.
+  # seed: overridden from the master seed by the generator, as +2.
+  seed: 3571
+  frequency: 0.5          # sampled ONCE PER CELL, at the cell's site — and since sites sit one
+                          # grid unit apart and a grid unit IS a cell, this field's wavelength
+                          # (1 / frequency) is the patch size in cells. So this is the knob for
+                          # how the variation is DISTRIBUTED, where elevation_blend_variation
+                          # is how strong it is. Measured as the correlation between the
+                          # factors of two cells sharing an edge:
+                          #   0.5   → 2 cells,  r = -0.01 : every cell independent (default)
+                          #   0.33  → 3 cells,  r = 0.14  : mostly independent
+                          #   0.25  → 4 cells,  r = 0.35  : loose clumps
+                          #   0.2   → 5 cells,  r = 0.51  : clear patches
+                          #   0.125 → 8 cells,  r = 0.78  : broad regions
+                          #   0.045 → 22 cells, r = 0.97  : no visible variation at all
+                          # Note the knee: at or above 0.5 the field is already fully
+                          # decorrelated, so raising it further buys nothing. The useful range
+                          # is 0.5 down to 0.125.
+                          # At r = 0.97 every cell in a neighbourhood gets the same factor, so
+                          # the map comes out uniformly blurred. What varies has to vary at the scale of the thing it
+                          # varies.
+                          # Not rescaled by grid_size, unlike noise_island: a patch measured in
+                          # cells should be that many cells on any map.
+  type: 0
+  fractal_type: 1
+  octaves: 1              # not the usual 5, and it matters twice. Octaves above the first sit
+                          # below cell size, so point-sampling one value per cell picks up
+                          # near-white noise from them whatever the base frequency says. And
+                          # FBm's gain leaves the base octave only ~2/3 of the amplitude, so
+                          # dropping the rest widens the effect measurably: per-cell edge
+                          # sharpness spread 0.213 → 0.294, and adjacent cells land on opposite
+                          # sides of the uniform blur 2.3% → 3.5% of the time.
+  lacunarity: 2.0
+  gain: 0.5
+  weighted_strength: 0.45
+
+noise_shape:              # warps the coastline of the continent / archipelago shapes
+  seed: 5233
+  frequency: 0.03         # low: this bends the OUTLINE of a continent, so a feature is a
+                          # bay or a headland spanning many cells. Quoted against a grid
+                          # of 40 and rescaled, so --grid-size resolves the coast rather
+                          # than crumbling the continent.
+  type: 0
+  fractal_type: 1
+  octaves: 5
+  lacunarity: 2.0
+  gain: 0.5
+  weighted_strength: 0.45
+
+noise_temperature:        # the variation that keeps isotherms from running straight
+  # seed: NOT settable. Always derived from the master seed (master + 1).
+  frequency: 0.035
+  type: 0
+  fractal_type: 1
+  octaves: 5
+  lacunarity: 2.0
+  gain: 0.5
+  weighted_strength: 0.45
+
+# --- Landmass shape ---------------------------------------------------------
+#
+# The outline land may occupy. The CANVAS is always grid_size square; the shape is
+# inscribed in it and centred, and whatever margin is left over becomes open sea. So a
+# smaller shape means a smaller world on the same size of map, not a smaller image.
+#
+# Every dimension defaults to 0, meaning "fill the canvas" — which makes the default a
+# canvas-spanning rectangle, exactly what the generator did before shapes existed.
+# --shape, --shape-size, --shape-height and --shape-rot override for one run.
+#
+# rectangle, circle and triangle are exact geometry, and it shows: however organic the
+# island noise makes the interior, the silhouette is a hard edge. continent and
+# archipelago instead wander the outline — a fractal sum of harmonics around the centre,
+# warped by noise_shape — so coasts get bays, headlands and the odd offshore island.
+# archipelago scatters continent_count of them at varying sizes; two that land close
+# enough fuse, which is what stops it reading as a row of evenly spaced blobs.
+
+shape:
+  shape: continent        # rectangle | circle | triangle | continent | archipelago
+  width_m: 0              # rectangle
+  height_m: 0
+  diameter_m: 4600           # circle
+  edge_length_m: 4500        # equilateral triangle, apex up before rotation
+  rotation: 45.0           # radians about the centre; only the triangle is not symmetric
+                          # enough for this to show
+  continent_size_m: 0        # continent | archipelago: MEAN diameter of one landmass.
+                             # 0 sizes it to the canvas — one continent as wide as fits,
+                             # or an archipelago's worth spread across it.
+  continent_count: 4         # archipelago: landmasses to attempt. An upper bound, not a
+                             # promise: a close pair fuses into one larger continent.
+  irregularity: 0.35         # how far the outline wanders from a circle, 0 to 0.6.
+                             # 0 is a plain disc; past 0.6 a landmass would pinch in two.
+  size_variance: 0.35        # archipelago: spread of sizes about the mean, 0 to 0.9
+  coast_detail: 0.12         # coastal warp amplitude, as a fraction of the mean radius.
+                             # The radial outline alone is star-convex — this is what
+                             # buys fjords, fold-back headlands and offshore islands.
+
+# --- Terrain ----------------------------------------------------------------
+
+threshold_water: 0.3          # noise value above which a corner is water
+threshold_water_count: 2      # a cell becomes water once more than this many corners are
+elevation_smoothing_iterations: 3   # Laplacian relaxation passes over the height field:
+                                    # each pulls a corner, then a cell, toward the mean of
+                                    # its neighbours. They relax the STORED heights, which
+                                    # is the shape of the landform.
+                                    #
+                                    # They do NOT decide how smooth the picture looks, and
+                                    # setting them to 0 will not give you facets — the
+                                    # drawn surface is interpolated between the stored
+                                    # values whatever these say. See elevation_surface,
+                                    # which is the setting that turns interpolation off.
+elevation_smoothing_strength: 0.5   # how far toward the neighbour mean each pass moves
+sea_level: 0.25               # THE WATERLINE, in the normalised [0,1] height field, and a
+                              # real height rather than a convention. The sea bed occupies
+                              # everything below it and land everything above, so "this
+                              # ground is under water" is an honest comparison rather than
+                              # a vacuous one. Two consequences: the
+                              # elevation layer carries genuine bathymetry, and the sea's
+                              # surface is a visible mid-grey on the same scale as
+                              # everything else rather than black, which would be
+                              # indistinguishable from dry land.
+                              # Land therefore spans [sea_level, 1], and every threshold
+                              # that describes LAND — biome rows, town elevation penalty,
+                              # peak and canyon heights — is taken land-relative so moving
+                              # this does not silently shift them.
+terrain_relief: 0.65          # how much fractal relief reshapes the height field, 0 to 1.
+                              # Height is breadth-first DISTANCE FROM THE COAST, which models
+                              # how high land gets well and where badly: the maximum of a
+                              # distance field is its medial axis, so on its own it puts every
+                              # summit on a thin ridge equidistant between the bays either
+                              # side — bright closed loops around dark basins, which reads as
+                              # foam, not terrain. This blends toward noise instead, so the
+                              # interior becomes massifs and valleys. A coastal mask keeps the
+                              # shore the lowest land there is, and land is lifted clear of
+                              # water, so rivers still run off the land into the sea.
+                              # 0 restores the pure distance field. --relief=F overrides.
+terrain_roughness: 0.0        # how strongly the detail field displaces the SAMPLED surface,
+                              # 0 to 1. Zero leaves it exactly as the passes computed it.
+                              # Raising it adds jaggedness without touching cell or corner
+                              # heights, so biomes, rivers and roads still classify on the
+                              # smooth control field — only the surface roughens. Scaled by
+                              # local height, so coastlines stay at sea level however high.
+                              # Pair with elevation_smoothing_iterations: that sets how
+                              # smooth the landform is, this how rough the skin over it is.
+                              # --roughness=F overrides for one run.
+temperature_lapse_rate: 0.40  # how much a full unit of elevation cools the air; what puts
+                              # snow on equatorial peaks
+temperature_falloff: 1.7      # shapes the curve between the polar cap and the equator.
+                              # A straight ramp (1.0) leaves most of the map cold once the
+                              # lapse rate is taken off; above 1 holds the temperate band
+                              # wide. Where the frozen ground BEGINS is polar_extent_*.
+temperature_offset: 0.0       # shifts the whole world warmer or colder. Useful roughly
+                              # -0.5 to +0.5; an ice age and a hothouse are one number
+                              # apart on the same map. 0 changes nothing.
+polar_extent_north: 0.065     # fraction of the map at each edge that is frozen, 0 to 0.5,
+polar_extent_south: 0.065     # north and south independently. 0 means NO polar region on
+                              # that side: the cap vanishes and latitude alone never picks
+                              # ice, glacier or cold desert — altitude still can, which is
+                              # right, a mountain is cold at any latitude. The default
+                              # freezes the outer 6.5% at each edge.
+
+# --- Rivers -----------------------------------------------------------------
+
+river_count: 55               # river sources to attempt; fewer appear if the land refuses
+river_min_length: 6           # corners a watercourse must run before it counts. Most land is
+                              # near a coast, so a uniformly drawn source usually sits two
+                              # cells from the sea; rejecting the trickles and drawing again
+                              # is what leaves rivers that cross the map.
+river_source_min_elevation: 0.45  # the other half of the same problem: below this a "source"
+river_source_max_elevation: 0.9   # can appear on the plain it was meant to run down to
+river_smoothing_iterations: 2 # Chaikin corner-cutting passes per watercourse. Rounds the
+                              # joints without straightening the course — the meander is the
+                              # downslope chain itself and survives intact.
+river_width_base_m: 5         # width of a volume-zero stream, in metres
+river_width_per_volume_m: 2   # additional width per unit of river volume, in metres
+river_depth_m: 1.0            # how far a river's surface sits ABOVE the ground it runs over.
+river_depth_per_volume_m: 0.35 # A river is water standing in a channel, not a line painted
+                              # on the terrain — without this a mesh built from the ground
+                              # and the water fights itself along every watercourse.
+
+# Rivers erode. Elevation is computed BEFORE rivers are routed — it has to be, the routing
+# follows the downslope chain — so without this the height field has no idea a river pass
+# ever ran, and the elevation layer shows no trace of the rivers the water layer is full of.
+#
+# This cuts a VALLEY, not a channel, and the geometry forces that: the rendered surface
+# interpolates cell-site heights, while rivers run along cell boundaries, so the narrowest
+# thing it can express is about a cell across (60 m here) against a river 5–20 m wide. Which
+# is the right answer anyway — a river sits in a valley far wider than itself. The channel
+# within it is what river_width_base_m draws on the water layer.
+#
+# The three river depths are complementary, not duplicates. river_incision_m cuts the VALLEY
+# into the mesh (a landform, hundreds of metres across); river_channel_depth_m cuts the
+# CHANNEL into the surface sampled between the mesh vertices (metres across, and the one
+# that makes a river legible); river_depth_m floats the WATER SHEET above the mesh so a
+# mesh built from ground and water does not fight itself.
+river_channel_depth_m: 18     # how deep the CHANNEL is cut into the sampled ground, in
+river_channel_depth_per_volume_m: 4   # metres. The only one of the three river depths fine
+                              # enough to read as a river rather than as a dip in the ground:
+                              # the elevation layer interpolates between cell sites 60 m
+                              # apart, and a river is 5–20 m wide, so a channel cannot live
+                              # in the mesh — it is cut at sample time, like terrain
+                              # roughness. Width comes from river_width_base_m, so the
+                              # channel and the blue ribbon on the water layer register.
+                              # 0 leaves the sampled surface as the mesh describes it.
+river_mouth_blend_m: 250      # over this last stretch a river becomes an ESTUARY: the channel
+                              # deepens until its bed reaches the water it empties into, and
+                              # widens with a flat bed so the whole drawn ribbon sits on it.
+                              # Without it the ground at a mouth stands 9–70 m above the
+                              # waterline, so the river either ends on a lip or is drawn under
+                              # the terrain. The pull is downward only — a river entering a
+                              # lake standing above it keeps its own level rather than climbing.
+river_incision_m: 60          # how deep a river cuts the VALLEY it runs in, in metres.
+                              # 0 restores the uncarved height field exactly.
+river_incision_per_volume_m: 12  # a trunk river has had far longer to cut than its streams
+river_valley_width: 2         # corners out from the watercourse the valley opens. 1 is a
+                              # trench with nothing either side; 2 gives it banks.
+river_valley_falloff: 0.5     # depth multiplier per ring outward — what turns a step into a
+                              # slope. Matters for more than looks: a cliff at every
+                              # watercourse would push the mean elevation step between
+                              # neighbouring cells past what the smoothing holds down.
+water_edge_overlap_m: 1.0     # how far every water surface is extended past its own edge,
+                              # so it clips INTO the terrain rather than meeting it exactly.
+                              # Two surfaces sharing an edge exactly show a seam wherever the
+                              # meshes disagree by a rounding error, and along a coastline
+                              # they always do.
+
+# --- Roads ------------------------------------------------------------------
+
+trail_width_m: 3              # carriageway width of each road class, in METRES. A cart
+road_width_m: 6               # track, two carts abreast, and a trunk road. At 1 m/px they
+highway_width_m: 10           # draw 3, 6 and 10 px, because that is what 3, 6 and 10 metres
+                              # of ground are.
+
+roads:
+  hub_count: 32               # places the network is routed between. Every PAIR is routed,
+                              # so cost grows quadratically — 32 hubs is 496 routes.
+  hub_min_spacing_m: 360      # metres between two hubs; matches towns.min_spacing_m so a
+                              # road runs through most of the settlements placed later
+  slope_cost: 9.0             # cost per unit of elevation climbed. What produces
+                              # switchbacks: climbing straight up is dear, traversing a
+                              # slope is not, so a route crosses the contour shallowly and
+                              # doubles back.
+  elevation_cost: 1.5         # cost per unit of absolute height; puts a crossing on the saddle
+  rough_ground_cost: 2.0      # scales (1 - biome_habitability) into a terrain penalty
+  ford_cost: 0.6              # crossing a volume-zero stream. Deliberately small — pricing a
+                              # headwater like a bridge sends every route detouring to the
+                              # river's source.
+  bridge_cost_per_volume: 0.35  # added to ford_cost per unit of river volume
+  water_crossing_cost: 30.0   # stepping into a lake or ocean cell. High but finite, and
+                              # bounded by max_water_span: infinite would strand every
+                              # island with its own closed network.
+  max_water_span: 2           # consecutive water cells a causeway may span; longer is
+                              # impassable, which is what keeps the open sea uncrossable
+  reuse_discount: 0.40        # cost multiplier on ground an earlier route already used.
+                              # The whole reason the network has a shape: a later route
+                              # bends to join an existing road instead of cutting its own
+                              # parallel line a cell away, so trunks form and traffic
+                              # concentrates enough for the hierarchy to mean something.
+  highway_traffic_share: 0.30 # share of all routes an edge must carry to be a highway.
+  road_traffic_share: 0.10    # share that makes it a road; below that, a trail. Shares and
+                              # not counts — a dead-end spur always carries exactly
+                              # hub_count - 1 routes, so a fixed cutoff would reclassify the
+                              # whole map whenever hub_count moved.
+  smoothing_iterations: 2     # Chaikin corner-cutting passes per road run
+
+# --- Settlements ------------------------------------------------------------
+
+towns:
+  town_count: 28              # upper bound; fewer appear if the map lacks room
+  min_spacing_m: 360          # metres between two settlements, so they spread across a
+                              # continent instead of clustering on one river mouth
+  capital_count: 1            # rank cutoff: the first N sites become capitals
+  town_tier_count: 4          # rank cutoff: the next N become towns; the rest are villages
+  elevation_penalty_start: 0.6  # elevation above which a site is penalised for being remote
+  elevation_penalty_scale: 2.0  # score lost per unit of elevation above that
+  coast_bonus: 0.35           # score added for bordering the ocean
+  river_bonus: 0.45           # score added for bordering a river
+  road_bonus: 0.2             # score added for bordering a road
+  area_bonus: 0.5             # score for a roomy cell. Without it the best-scoring site can
+                              # be a cramped sliver and the capital ends up smaller than the
+                              # towns beneath it — a settlement cannot outgrow its cell.
+  score_jitter: 0.15          # seeded random wobble on each site score
+  capital_cells: 7            # cells a settlement claims, itself included. A 60 m cell is
+  town_cells: 3               # ~3,600 m2 and holds about ten 10 m buildings, so a capital
+  village_cells: 1            # confined to one cell is a hamlet and the tiers stop being
+                              # distinguishable. Claimed breadth-first over neighbouring
+                              # habitable land; a cell belongs to at most one settlement.
+  buildings_per_town: 70      # attempted in a capital across ALL its cells; lesser tiers get
+                              # a fraction. The packer stops early where the ground runs out.
+  town_building_scale: 0.7
+  village_building_scale: 0.4
+  building_size_min_m: 7      # side length of a building footprint, in metres: a cottage
+  building_size_max_m: 14     # up to a hall
+  water_clearance_m: 3        # clear ground kept between a building and any water. Without
+                              # it buildings stand in the channel: rivers are used as
+                              # streets, so the packer marches plots straight at them.
+  household_size_min: 3       # occupants per dwelling; population is counted from the
+  household_size_max: 7       # buildings actually placed, never invented
+  capital_density: 1.6        # population density multiplier by tier
+  town_density: 1.2
+  street_clearance_m: 1.5     # clear ground kept between a building and any roadway, added to
+                              # half its width — a lane's street_width_m, or a road's own width
+                              # by class. The counterpart of water_clearance_m, and needed for
+                              # the same reason: a street is a line the packer aims plots AT.
+  street_offset_m: 8          # metres from a street's centreline to a plot centre; clears a
+                              # 14 m footprint
+  street_spacing_m: 14        # metres along a street between successive plots, so they do
+                              # not touch
+  position_jitter_m: 1.5      # so rows read as built over time rather than surveyed
+  rotation_jitter: 0.25       # radians of yaw wobble about a street's bearing
+  infill_attempts: 200        # rejection draws before interior infill gives up. The yaw of an
+                              # infill plot comes from the street nearest it, not from a random
+                              # turn — a row is only legible if its neighbours agree with it.
+  plaza_radius_m: 26          # radius of the market square, in metres. Open ground the packer
+                              # keeps clear and the civic buildings front onto; trimmed to fit
+                              # the cell, and skipped entirely when there is no room.
+  plaza_min_cells: 2          # claimed cells a settlement needs before it gets a square. Two,
+                              # so a one-cell village stays a village rather than becoming a
+                              # hamlet with a hole in it.
+  capital_civic_count: 7      # civic buildings each tier is given, taken in order from one
+  town_civic_count: 4         # roster — well, hall, market, smithy, temple, inn, granary,
+  village_civic_count: 2      # barracks, warehouse — so a town reads as a smaller capital
+                              # rather than a different kind of place. They are handed to the
+                              # buildings nearest the square, so the core is central.
+  street_width_m: 4           # width a street is drawn at; a lane, narrower than the trail
+                              # that reaches the settlement, so the two read as different things
+
+# --- Political geography ----------------------------------------------------
+
+regions:
+  country_count: 5            # nations to place, terrain permitting
+  regions_per_country: 3      # provinces carved out of each
+  min_country_spacing: 8.0    # grid units between two country seeds
+  elevation_cost: 6.0         # how strongly a height difference resists expansion. Why
+                              # borders land on ridges: a claim spreads cheaply along a
+                              # valley and dearly over a mountain.
+  water_crossing_cost: 25.0   # high but finite, so a country can hold both banks of a
+                              # strait while still stopping at an ocean
+
+# --- Notable places ---------------------------------------------------------
+
+landmarks:
+  max_natural: 70             # cap on terrain features recorded
+  max_abandoned: 45           # cap on ruins and abandoned works
+  peak_elevation: 0.62        # elevation at or above which a local summit counts as a peak
+  waterfall_drop: 0.055       # height difference across a river edge that makes it a fall
+  canyon_elevation: 0.45      # elevation above which arid ground can be cut into a gorge
+  great_lake_cells: 8         # connected fresh-water cells before a lake is "great"
+  town_clearance: 2.5         # distance a ruin must keep from any living settlement
+  kind_share_numerator: 1     # no single kind may take more than this share of the budget.
+  kind_share_denominator: 5   # Ranking alone lets whichever signature is commonest swallow
+                              # every slot, and the result is forty hot springs and no coast.
+  cape_ocean_ratio_numerator: 3    # ocean-neighbour fraction that makes a cell a cape
+  cape_ocean_ratio_denominator: 2
+
+# --- Cell boundaries --------------------------------------------------------
+
+subdivide_noisy_edges: true   # wobble each cell boundary instead of drawing it straight.
+                              # Off reproduces the original generator's output, which
+                              # shipped with the subdivision call commented out.
+
+# --- Pass toggles -----------------------------------------------------------
+#
+# The fourteen stages, in the order MapGenerator runs them. The order is a dependency
+# chain, not a preference — moisture needs rivers, biomes need moisture, towns need
+# regions. Turning one off leaves the fields it would have written at their defaults
+# rather than reordering anything.
+
+caves:
+  cave_count: 18            # systems to open; clamped to the qualifying slopes available
+  min_grade: 0.25           # rise over run a slope must reach to bear a cave, dimensionless.
+                            # A floor beneath a ranking, not the selection itself: candidates
+                            # are taken steepest first, so the mouths land far above this.
+  min_spacing_m: 300.0      # how far apart two mouths must be
+  roof_clearance_m: 25.0    # rock left between a ceiling and the ground above it. The margin
+                            # the "a cave stays underground" invariant is enforced with,
+                            # measured against the surface the renderer draws -- terrain
+                            # detail and river channels included -- not the control mesh.
+  passage_height_m: 8.0     # floor to ceiling in ordinary passage. Worth choosing against
+                            # level_spacing_m: a passage taller than the drop between storeys
+                            # reaches into the level below and the two interpenetrate.
+  chamber_height_m: 20.0    # floor to ceiling in a chamber
+  max_depth_m: 260.0        # hard cap on how far below its mouth a system may reach
+  vadose_share: 0.6         # share of the relief beneath a mouth that is entrance series.
+                            # Where the water table goes, and so where a cave stops
+                            # descending and starts branching. A water table is a subdued
+                            # replica of the surface, not a flat sheet at sea level.
+                            # Sets where the *deepest* table sits; the abandoned levels
+                            # above it are stacked from there.
+  level_spacing_m: 38.0     # drop from one abandoned water table to the next. What makes a
+                            # cave multi-level: the valley downcuts, the table follows, and
+                            # the network cut at the old level is left dry above the new one.
+                            # Must stay well clear of chamber_height_m or two storeys
+                            # intersect where they cross, leaving no rock between the levels.
+                            # Also decides how many storeys a map gets -- a system needs this
+                            # much relief to spend per extra table.
+  max_levels: 4             # cap on abandoned levels per system; the count itself comes from
+                            # the relief beneath the mouth
+  level_budget: 0.7         # share of the trunk length a new level's network inherits. Buys
+                            # network only -- the climb down to the next table is added on top.
+  step_m: 30.0              # distance advanced per station
+  passage_length_m: 900.0   # length budget of the trunk; branches spend from it
+  descent_grade: 0.15       # how steeply the passage falls above the water table
+  massif_bias: 0.6          # how hard a passage steers toward thicker rock when the rock
+                            # ahead thins. Without it a head wanders out from under its own
+                            # hill within a few hundred metres and has to stop.
+  meander: 0.5              # how far a passage wanders from straight, 0 to 1
+  branch_chance_vadose: 0.06     # branches are rare in the entrance series
+  branch_chance_phreatic: 0.26   # and common at the water table, where maze cave forms
+  branch_budget: 0.55       # share of the parent's remaining length a branch inherits
+  max_branches: 6           # per system
+  max_nodes: 900            # per system, shared across its storeys; the hard bound on
+                            # how long growth can run
+  passage_width_m: 6.0      # width of ordinary passage
+  chamber_radius_m: 18.0    # half-width of a chamber
+  shaft_chance: 0.10        # chance a vadose station is a vertical pitch instead
+  shaft_drop_m: 45.0        # how far a pitch falls
+  smoothing_iterations: 2   # Chaikin passes per passage, matching rivers and roads
+
+passes:
+  enable_water: true
+  enable_coast: true
+  enable_elevation: true
+  enable_temperature: true
+  enable_rivers: true
+  enable_valleys: true      # cut the rivers into the terrain
+  enable_moisture: true
+  enable_biomes: true
+  enable_roads: true
+  enable_regions: true
+  enable_towns: true
+  enable_landmarks: true
+  enable_caves: true        # underground; never drawn into the composite
+  enable_noisy_edges: true

@@ -1,0 +1,18 @@
+#version 450
+// gfxcoopa test.cpp (test_compute_*): writes data[i] = i * 3 + seed for every i < count. One
+// invocation per element, 64 per work group; dispatched directly and through
+// dispatch_indirect() with group counts test_compute_args.comp wrote.
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) buffer Data { uint data[]; };
+
+layout(push_constant) uniform Push {
+    uint count;
+    uint seed;
+} pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+    data[i] = i * 3u + pc.seed;
+}

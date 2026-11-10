@@ -1,0 +1,23 @@
+#version 450
+// gfxcoopa test.cpp (test_compute_dispatch_indirect): writes VkDispatchIndirectCommand
+// {ceil(items / local), 1, 1} for a later dispatch_indirect(), plus a VkDrawIndirectCommand
+// {items, 1, 0, 0} after it -- the shape a GPU particle compaction pass hands its draw.
+layout(local_size_x = 1) in;
+
+layout(std430, set = 0, binding = 0) buffer Args { uint args[]; };
+
+layout(push_constant) uniform Push {
+    uint items;
+    uint local_size;
+} pc;
+
+void main() {
+    args[0] = (pc.items + pc.local_size - 1u) / pc.local_size;
+    args[1] = 1u;
+    args[2] = 1u;
+    args[3] = 0u;       // pad: the draw command starts 16-byte aligned
+    args[4] = pc.items; // vertexCount
+    args[5] = 1u;       // instanceCount
+    args[6] = 0u;       // firstVertex
+    args[7] = 0u;       // firstInstance
+}

@@ -1,0 +1,9 @@
+build/
+output/
+.docs/
+
+# Generated at demo runtime by test_playback.cpp, not checked-in fixture data.
+ex/*.import
+
+# Any build directory (build-tests/, build-asan/, ...)
+build*/

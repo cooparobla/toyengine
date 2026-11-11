@@ -8,11 +8,14 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 
 #include <glm/gtc/quaternion.hpp>
 
 #include <coopa/asset/asset_id.h>
 #include <coopa/asset/asset_manager.h>
+#include <coopa/debug/logger.h>
 #include <coopa/job/engine.h>
 #include <coopa/scene/components/transform_component.h>
 #include <coopa/scene/scene_object.h>
@@ -26,6 +29,7 @@
 #include <toyengine/world/terrain_detail_texture.h>
 #include <physxcoopa/geometry/triangle_mesh.h>
 #include <physxcoopa/system/physics_system.h>
+#include <toyengine/world/terra_store.h>
 #include <toyengine/world/terrain_chunk.h>
 #include <toyengine/world/tile_types.h>
 
@@ -57,12 +61,39 @@ coopa::job::Priority chunk_priority(std::int32_t distance, std::int32_t view_rad
 
 } // namespace
 
+/**
+ * @brief See terrain_system.h. Taking LOD 0's index count alone would under-report a planet
+ *        chunk by most of what it is actually holding, which is the quiet way to get this wrong.
+ */
+std::uint64_t mesh_bytes(std::uint32_t vertex_count, std::uint32_t lod0_index_count,
+                         const std::vector<coopa::gfx::engine::data::MeshLod>& lods) {
+    static_assert(sizeof(coopa::gfx::engine::data::Vertex) == 48,
+                  "mesh_bytes() reports the vertex buffer from sizeof(Vertex); keep the two in step.");
+    std::uint64_t indices = lod0_index_count;
+    for (const auto& lod : lods) {
+        indices = std::max<std::uint64_t>(indices, static_cast<std::uint64_t>(lod.first_index) +
+                                                       static_cast<std::uint64_t>(lod.index_count));
+    }
+    return sizeof(coopa::gfx::engine::data::Vertex) * static_cast<std::uint64_t>(vertex_count) +
+           sizeof(std::uint32_t) * indices;
+}
+
+std::uint64_t mesh_bytes(const coopa::gfx::engine::data::Mesh& mesh) {
+    return mesh_bytes(mesh.vertex_count(), mesh.index_count(), mesh.lods());
+}
+
+
 void TerrainSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameContext& ctx) {
     ++frame_;
     physics_dirty_ = false;
     wanted_chunks_ = 0;
     unfinished_chunks_ = 0;
     terrain_baking_ = false;
+    resident_mesh_bytes_ = 0;
+    resident_chunks_ = 0;
+    drawn_chunks_ = 0;
+    coarse_chunks_ = 0;
+    planet_peak_ = 0.0f;
     // Baked on the first frame that has terrain, not in the constructor: the bake submits a
     // one-shot upload, and a system is constructed before the device is necessarily ready to
     // take one. It registers itself with the asset manager, so this is one upload per run.
@@ -88,7 +119,40 @@ void TerrainSystem::execute(coopa::scene::Scene& scene, const coopa::scene::Fram
         // has been asked for -- a zero wanted count that must not read as "nothing left to do".
         if (!terrain->is_ready() || terrain->baking_) terrain_baking_ = true;
         tick_terrain_(*terrain, scene, ctx);
+        measure_(*terrain);
         live.insert(terrain);
+    }
+    // Timed here rather than per terrain: a scene may hold several, and what a loading screen and
+    // a cost comparison both want is when the LAST of them finished. Frozen once warm, so a
+    // later edit's re-mesh does not overwrite the figure the load is judged by.
+    if (!load_timing_ && load_ms_ == 0.0 && wanted_chunks_ > 0) {
+        load_timing_ = true;
+        load_start_ = std::chrono::steady_clock::now();
+    }
+    if (load_timing_ && !terrain_baking_ && unfinished_chunks_ == 0) {
+        load_timing_ = false;
+        load_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - load_start_).count();
+        // Logged as well as watched: the watch lines need the overlay up, and the figures a
+        // face_tiles or lods: change is judged against are wanted from a headless run too.
+        coopa::debug::Logger("terrain").info(
+            "loaded " + std::to_string(resident_chunks_) + " chunks, " +
+            std::to_string(resident_mesh_bytes_ / (1024 * 1024)) + " MB of mesh, in " +
+            std::to_string(static_cast<int>(load_ms_)) + " ms" +
+            (planet_peak_ > 0.0f ? " (planet peak " + std::to_string(planet_peak_) + ")" : ""));
+        // TOY_TERRAIN_SAVE: writes a freshly baked world to its `.terra` file once the load is
+        // done. Normally saving is the editor's business (its Terrain and Tile panels call
+        // TerraStore::save_dirty()), which leaves no way to regenerate a world from a headless
+        // run -- and regenerating is exactly what changing `face_tiles`, `chunk_size` or a
+        // generator setting forces, because none of those invalidates the stored file.
+        // Deliberately env-gated and off by default: a game run must never rewrite its assets.
+        if (const char* save = std::getenv("TOY_TERRAIN_SAVE");
+            save != nullptr && std::strcmp(save, "0") != 0) {
+            if (TerraStore::instance().any_dirty()) {
+                const int written = TerraStore::instance().save_dirty();
+                coopa::debug::Logger("terrain").info("TOY_TERRAIN_SAVE: wrote " +
+                                                     std::to_string(written) + " .terra file(s)");
+            }
+        }
     }
     // Anything streamed last frame but not this one went inactive (or an ancestor did): nothing
     // else will ever ask this terrain's chunks to go away, so release them now instead of
@@ -115,6 +179,22 @@ void TerrainSystem::execute(coopa::scene::Scene& scene, const coopa::scene::Fram
     }
 }
 
+void TerrainSystem::measure_(const TerrainComponent& terrain) {
+    // One pass over the chunk map, after it has been ticked. A handful of loads per chunk, so a
+    // 1536-chunk globe is tens of microseconds -- cheaper than gating it would be, and gating
+    // would need the debug overlay's state inside world/, which nothing here depends on.
+    for (const auto& [coord, chunk] : terrain.chunks()) {
+        (void)coord;
+        if (!chunk.mesh) continue;
+        ++resident_chunks_;
+        resident_mesh_bytes_ += mesh_bytes(*chunk.mesh);
+        if (chunk.object != nullptr && chunk.object->active()) ++drawn_chunks_;
+        if (chunk.coarse) ++coarse_chunks_;
+    }
+    // Qualified: the member accessor of the same name shadows the free function here.
+    if (terrain.params.planet) planet_peak_ = std::max(planet_peak_, world::planet_peak(terrain));
+}
+
 void TerrainSystem::tick_terrain_(TerrainComponent& terrain, coopa::scene::Scene& scene,
                    const coopa::scene::FrameContext& ctx) {
     terrain.set_jobs(ctx.jobs);
@@ -135,6 +215,7 @@ void TerrainSystem::tick_terrain_(TerrainComponent& terrain, coopa::scene::Scene
     if (terrain.params.planet) {
         // A planet is small and seen whole: every chunk stays loaded, nearest the camera first.
         want_planet_chunks_(terrain);
+        sync_planet_detail_(terrain);
         upload_finished_chunks_(terrain, scene);
         submit_queued_chunks_(terrain, ChunkCoord{0, 0}, ctx);
         cull_planet_horizon_(terrain);
@@ -242,7 +323,20 @@ void TerrainSystem::want_planet_chunks_(TerrainComponent& terrain) {
     for (std::int32_t cy = 0; cy * size < terrain.field.geometry().tiles_y; ++cy) {
         for (std::int32_t cx = 0; cx * size < terrain.field.geometry().tiles_x; ++cx) {
             const ChunkCoord coord{cx, cy};
-            if (terrain.chunks().find(coord) != terrain.chunks().end()) continue;
+            // Counted exactly as want_chunks_() counts the flat wanted square, and for the same
+            // two readers: warm_up_state(), which otherwise reports `participates = false` for a
+            // planet and lets the loading screen fade in on a half-built globe, and load_ms().
+            // Accumulated, not assigned -- execute() zeroes the pair.
+            ++wanted_chunks_;
+            auto it = terrain.chunks().find(coord);
+            if (it != terrain.chunks().end()) {
+                const TerrainChunk& chunk = it->second;
+                if (chunk.state != ChunkState::Live || chunk.stale || chunk.wants_collision) {
+                    ++unfinished_chunks_;
+                }
+                continue;
+            }
+            ++unfinished_chunks_;
             TerrainChunk chunk;
             chunk.coord = coord;
             chunk.state = ChunkState::Queued;
@@ -281,16 +375,21 @@ glm::vec3 TerrainSystem::planet_eye_direction_(const TerrainComponent& terrain) 
     return distance > 1e-4f ? eye / distance : glm::vec3(0.0f);
 }
 
-void TerrainSystem::cull_planet_horizon_(TerrainComponent& terrain) {
-    if (!terrain.params.planet || terrain.chunks().empty()) return;
+bool TerrainSystem::planet_eye_local_(const TerrainComponent& terrain, glm::vec3& eye) const {
     CameraComponent* camera = CameraComponent::main();
-    if (camera == nullptr || camera->owner == nullptr || camera->owner->get_transform() == nullptr) return;
-
+    if (camera == nullptr || camera->owner == nullptr || camera->owner->get_transform() == nullptr) return false;
     glm::mat4 to_local(1.0f);
     if (terrain.owner != nullptr) {
         if (auto* tc = terrain.owner->get_transform()) to_local = glm::inverse(tc->transform().get_world_matrix());
     }
-    const glm::vec3 eye = glm::vec3(to_local * camera->owner->get_transform()->transform().get_world_matrix()[3]);
+    eye = glm::vec3(to_local * camera->owner->get_transform()->transform().get_world_matrix()[3]);
+    return true;
+}
+
+void TerrainSystem::cull_planet_horizon_(TerrainComponent& terrain) {
+    if (!terrain.params.planet || terrain.chunks().empty()) return;
+    glm::vec3 eye(0.0f);
+    if (!planet_eye_local_(terrain, eye)) return;
     const float distance = glm::length(eye);
     const PlanetLayout layout = terrain.params.layout();
     const float radius = layout.radius();
@@ -334,6 +433,66 @@ void TerrainSystem::cull_planet_horizon_(TerrainComponent& terrain) {
         const bool visible = chunk.object->active();
         if (visible && facing < limit - 0.02f) chunk.object->set_active(false);
         else if (!visible && facing > limit) chunk.object->set_active(true);
+    }
+}
+
+void TerrainSystem::sync_planet_detail_(TerrainComponent& terrain) {
+    if (!terrain.params.planet || !terrain.planet_coarse_builds || terrain.chunks().empty()) return;
+    // A collider has to be the chunk's real shape; a quantised field tier that changes with the
+    // camera is not one. And with no `field` tier there is nothing to stand in for the native
+    // geometry, so there is nothing to decide.
+    if (terrain.collision) return;
+    const TerrainParams::ChunkLod* finest = first_field_lod(terrain.params);
+    if (finest == nullptr) return;
+
+    glm::vec3 eye(0.0f);
+    if (!planet_eye_local_(terrain, eye)) return;
+    CameraComponent* camera = CameraComponent::main();
+    if (camera == nullptr) return;
+
+    // The threshold IS the finest field tier's own screen_size -- the size at which the renderer
+    // starts asking for LOD 0, because select_lod() ignores thresholds[0] and draws level 0 for
+    // anything above thresholds[1]. Keying off the same number by construction is what stops the
+    // policy and the renderer disagreeing about what a chunk needs.
+    const float threshold = finest->screen_size;
+    if (threshold <= 0.0f) return;
+
+    const PlanetLayout layout = terrain.params.layout();
+    const float radius = layout.radius();
+    const std::int32_t size = std::max(1, terrain.params.chunk_size);
+    const float height_step = std::max(0.0f, terrain.params.height_step);
+    // The same bound cull_planet_horizon_() uses for a chunk's angular size, and the same
+    // projection the render gather's screen_height_fraction() uses: a sphere of radius `r` at
+    // depth `d` covers `r * cot(fov/2) / d` of the screen's height.
+    const float chunk_radius = 0.75f * terrain.params.chunk_world_size();
+    const float cot_half_fov = 1.0f / std::max(std::tan(glm::radians(std::max(camera->fov, 1.0f) * 0.5f)), 1e-4f);
+    const float eye_len = glm::length(eye);
+    const glm::vec3 view = eye_len > 1e-4f ? eye / eye_len : glm::vec3(0.0f, 0.0f, 1.0f);
+
+    for (auto& [coord, chunk] : terrain.chunks()) {
+        const glm::vec3 dir(layout.tile_direction(coord.x * size + size / 2, coord.y * size + size / 2));
+        // The far side of the globe: never promote something cull_planet_horizon_() is about to
+        // deactivate anyway. Cheap, and it halves the work every frame.
+        if (glm::dot(dir, view) <= 0.0f) {
+            if (!chunk.coarse) chunk.want_coarse = true;
+            continue;
+        }
+        const float chunk_height = static_cast<float>(std::max(0, chunk.max_steps)) * height_step;
+        const float depth = glm::length(eye - dir * (radius + chunk_height));
+        const float screen = depth > chunk_radius ? chunk_radius * cot_half_fov / depth : 1e9f;
+
+        // A dead band: promote well before the renderer needs the native geometry (the build has
+        // to land first), give it up well after. Inside the band the chunk keeps what it has.
+        bool want = chunk.want_coarse;
+        if (screen > threshold * k_planet_detail_promote) want = false;
+        else if (screen < threshold * k_planet_detail_demote) want = true;
+        if (want == chunk.want_coarse) continue;
+        // The dwell. A slow zoom crosses any band in a frame and can cross back, so the band
+        // alone does not stop churn -- this does, at the cost of one frame of coarser geometry.
+        if (chunk.state == ChunkState::Live && frame_ - chunk.detail_frame < k_planet_detail_dwell_frames) {
+            continue;
+        }
+        chunk.want_coarse = want;
     }
 }
 
@@ -602,9 +761,16 @@ void TerrainSystem::upload_finished_chunks_(TerrainComponent& terrain, coopa::sc
         // time -- which the CounterPool asserts on, by design.
         chunk.job = coopa::job::JobHandle{};
         chunk.state = ChunkState::Live;
-        // Every build re-meshes (a collision-only pass included -- ChunkBuildJob::run() always
-        // calls mesh_chunk_styled() first), so this is current whichever branch below runs.
+        // Every build re-meshes, so this is current whichever branch below runs. A coarse build
+        // (ChunkBuildJob::coarse_only) does not call mesh_chunk_styled() at all, but
+        // mesh_chunk_field() writes `max_steps` too -- so the horizon cull still gets this
+        // chunk's real height either way, which is what it bounds the limb margin with.
         if (chunk.build) chunk.max_steps = chunk.build->mesh.max_steps;
+        if (chunk.build && !chunk.build->collision_only) {
+            // What is actually on the GPU now, rather than what the policy last asked for.
+            chunk.coarse = chunk.build->coarse_only;
+            chunk.detail_frame = frame_;
+        }
 
         // A collider-only pass changes nothing that is drawn, so it touches nothing that is:
         // the shape goes onto the object the chunk is already on the tree with.
@@ -655,7 +821,11 @@ void TerrainSystem::submit_queued_chunks_(TerrainComponent& terrain, const Chunk
         if (c.state == ChunkState::Meshing) {
             ++in_flight;
         } else if (c.state == ChunkState::Queued ||
-                   (c.state == ChunkState::Live && (c.stale || c.wants_collision))) {
+                   (c.state == ChunkState::Live &&
+                    (c.stale || c.wants_collision || c.coarse != c.want_coarse))) {
+            // The detail mismatch joins the same queue under the same budget and the same
+            // nearest-first ordering, so a promotion near the camera naturally beats a demotion
+            // on the limb -- no second budget to tune against this one.
             pending_.push_back(entry.first);
         }
     }
@@ -716,6 +886,10 @@ void TerrainSystem::submit_queued_chunks_(TerrainComponent& terrain, const Chunk
         // and take the full rebuild instead.
         build->collision_only = chunk.state == ChunkState::Live && chunk.wants_collision &&
                                 !chunk.stale && build->collision;
+        // Resolved here rather than in the policy, so a planet that turns collision ON keeps
+        // the full build it has always had: a collider must be the chunk's real shape, not a
+        // quantised stand-in that changes with where the camera is.
+        build->coarse_only = chunk.want_coarse && !build->collision;
         // The job builds the chunk's GPU mesh as well as its geometry (see terrain_chunk.h):
         // all that is left for the frame it lands in is publishing it.
         build->device    = &device_;
@@ -938,15 +1112,29 @@ std::string TerrainSystem::chunk_asset_id_(const TerrainComponent& terrain, cons
            std::to_string(chunk.coord.y) + "_" + std::to_string(chunk.mesh_serial);
 }
 
-env::PlanetFrame find_planet_frame(coopa::scene::Scene& scene) {
-    for (const TerrainComponent* terrain : scene.get_components<TerrainComponent>()) {
+TerrainComponent* find_planet_terrain(coopa::scene::Scene& scene) {
+    for (TerrainComponent* terrain : scene.get_components<TerrainComponent>()) {
         // `params` is the Tiles half, and a planet is a Tiles-only shape.
         if (terrain->mode != TerrainMode::Tiles || !terrain->params.planet) continue;
-        if (terrain->owner == nullptr || terrain->owner->get_transform() == nullptr) continue;
-        return env::PlanetFrame{glm::vec3(terrain->owner->get_transform()->get_world_matrix()[3]),
-                                terrain->params.layout().radius()};
+        return terrain;
     }
-    return env::PlanetFrame{};   // no planet: the flat Z-up world
+    return nullptr;
+}
+
+float planet_peak(const TerrainComponent& terrain) {
+    if (terrain.field.empty()) return 0.0f;
+    const TerraData* data = terrain.field.data();
+    return data != nullptr ? std::max(data->height_range().y, 0.0f) : 0.0f;
+}
+
+env::PlanetFrame find_planet_frame(coopa::scene::Scene& scene) {
+    TerrainComponent* terrain = find_planet_terrain(scene);
+    // A planet with no transform has no centre to orbit, so it is no more use than none at all.
+    if (terrain == nullptr || terrain->owner == nullptr || terrain->owner->get_transform() == nullptr) {
+        return env::PlanetFrame{};   // no planet: the flat Z-up world
+    }
+    return env::PlanetFrame{glm::vec3(terrain->owner->get_transform()->get_world_matrix()[3]),
+                            terrain->params.layout().radius()};
 }
 
 TerrainSystem* install_terrain_system(coopa::scene::Scene& scene,

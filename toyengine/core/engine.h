@@ -68,6 +68,9 @@ namespace audio { class AudioSystem; }
 /// Pointer-only here (warm_saved_upload_ms_); defined in toyengine/world/terrain_component.h,
 /// included by the .cpp files that dereference it.
 namespace world { class TerrainComponent; }
+/// By const reference only (sync_cloud_state_'s parameter); defined in
+/// toyengine/world/planet_atmosphere.h, included by the .cpp that derives it.
+namespace world { struct CloudDeck; }
 /// Pointer-only here (warm_saved_chunk_budget_); defined in toyengine/instance/instance_painter.h,
 /// included by the .cpp files that dereference it.
 namespace instance { class InstancePainter; }
@@ -902,8 +905,14 @@ public:
      *        gradient it is the scene's directional light as the weather (or the scene) set it --
      *        already the moon's at night and warm at sunset -- and the gradient's colours light
      *        the clouds' ambient in the shader.
+     *
+     * `deck` is the planet cloud layer's derived geometry (world::planet_cloud_deck()), unused
+     * on a flat world. Passed in rather than derived here because sync_sky_render_state_() needs
+     * the same values earlier in the frame, for the deck's zonal spin rate -- deriving it twice
+     * would let the two drift.
      */
-    void sync_cloud_state_(coopa::scene::Scene& scene, const render::SkyFrameState* sky);
+    void sync_cloud_state_(coopa::scene::Scene& scene, const render::SkyFrameState* sky,
+                           const world::CloudDeck& deck);
 
     /**
      * @brief Hands the renderer this frame's surface world (render/surface_world.h): the lying
@@ -1211,6 +1220,8 @@ private:
      * either off at runtime never leaves last frame's overlay stuck.
      */
     void gather_debug_lines_(coopa::scene::Scene& scene);
+    /** @brief Publishes TerrainSystem's resident-mesh and load figures as overlay watch lines. */
+    void watch_terrain_(coopa::scene::Scene& scene);
 
     /**
      * @brief Feeds every CanvasComponent in the scene the per-frame state it cannot get for

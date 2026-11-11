@@ -392,3 +392,133 @@ COOPA_TEST(collision_mesh_is_the_drawn_surface) {
     }
     expect(build_chunk_collision(ChunkMeshData{}) == nullptr, "collision: an empty chunk has none");
 }
+
+// --- Coarse builds (ChunkBuildJob::coarse_only) ---------------------------------------------
+//
+// A planet never evicts a chunk, so every chunk's native tile geometry is otherwise resident for
+// the life of the scene -- including the overwhelming majority of a globe held in frame, where no
+// pixel ever draws it. A coarse build skips that pass and meshes the finest `field` tier in its
+// place. These pin the properties the rest of the system leans on; no device is needed, since a
+// ChunkBuildJob with a null device leaves the CPU arrays for the caller.
+
+namespace {
+
+/** @brief A planet chunk build job over a flat pad with one raised column, ready to run(). */
+toy::world::ChunkBuildJob make_planet_job(bool coarse, bool collision = false) {
+    using namespace toy::world;
+    toy::world::ChunkBuildJob job;
+    job.params = make_test_params(8);
+    job.params.planet     = true;
+    job.params.face_tiles = 32;
+    job.params.max_merge  = 1;        // as the parser forces on a planet
+    job.params.chunk_lods = {{{0.0f, 0.30f, -1, 1, 2, false},
+                              {0.0f, 0.14f, -1, 1, 8, true},
+                              {0.0f, 0.07f, -1, 0, 32, true},
+                              {}}};
+    job.pad = make_flat_pad(8, 2);
+    for (std::int32_t y = 2; y <= 5; ++y)
+        for (std::int32_t x = 2; x <= 5; ++x) job.pad.at(x, y).steps = 7;
+    job.coord       = ChunkCoord{0, 0};
+    job.library     = &voxel_library();
+    job.coarse_only = coarse;
+    job.collision   = collision;
+    return job;
+}
+
+} // namespace
+
+COOPA_TEST(a_coarse_build_skips_the_native_geometry) {
+    using namespace toy::world;
+    ChunkBuildJob full = make_planet_job(false);
+    full.run();
+    ChunkBuildJob coarse = make_planet_job(true);
+    coarse.run();
+
+    expect(!full.mesh.empty() && !coarse.mesh.empty(), "both builds produce geometry");
+    // A third of the vertices on this deliberately tiny 8-tile chunk with `field: 2`. The ratio
+    // is a function of chunk_size / field_stride, so it widens sharply at the sizes a large
+    // planet actually uses -- the point is that it is a fraction, not that it is this fraction.
+    expect(coarse.mesh.vertices.size() * 2 < full.mesh.vertices.size(),
+           "a coarse build is a fraction of the vertices (" +
+               std::to_string(coarse.mesh.vertices.size()) + " vs " +
+               std::to_string(full.mesh.vertices.size()) + ")");
+    expect(coarse.lods.size() + 1 == full.lods.size(),
+           "and carries one fewer level, the finest field tier having become the mesh itself");
+}
+
+COOPA_TEST(a_coarse_builds_lod_zero_is_the_finest_field_tier) {
+    using namespace toy::world;
+    ChunkBuildJob coarse = make_planet_job(true);
+    coarse.run();
+
+    require(!coarse.lods.empty(), "a coarse build still produces a LOD table");
+    expect_near(coarse.lods[0].screen_size, 0.30f, 1e-6f,
+                "table[0] carries the finest field tier's own screen_size, not LOD 0's");
+    expect(coarse.lods[0].first_index == 0 && coarse.lods[0].vertex_offset == 0,
+           "and starts at the beginning of the buffer");
+    // select_lod() ignores thresholds[0] and draws level 0 above thresholds[1], so this level
+    // stands in for native geometry with no renderer change at all.
+    expect(coarse.lods.size() >= 2 && coarse.lods[1].screen_size < coarse.lods[0].screen_size,
+           "with the coarser tiers behind it, so select_lod still has a ladder to walk");
+}
+
+COOPA_TEST(a_coarse_build_still_produces_the_chunks_water) {
+    using namespace toy::world;
+    // The property the no-blinking-ocean behaviour rests on: water is read from the pad, not the
+    // mesh, so the hash matches across a promotion and upload_finished_chunks_() carries the
+    // already-baked WaterBody children over instead of handing back fresh ones.
+    ChunkBuildJob full = make_planet_job(false);
+    full.pad = make_flat_pad(8, 2);
+    for (std::int32_t y = -1; y <= 8; ++y)
+        for (std::int32_t x = -1; x <= 3; ++x) { full.pad.at(x, y).water = 1; }
+    ChunkBuildJob coarse = make_planet_job(true);
+    coarse.pad = full.pad;
+
+    full.run();
+    coarse.run();
+    expect(full.water_hash != 0, "the pad really does carry water");
+    expect(coarse.water_hash == full.water_hash,
+           "a coarse and a full build of the same columns give the SAME water hash");
+}
+
+COOPA_TEST(a_coarse_build_reports_the_chunks_height) {
+    using namespace toy::world;
+    ChunkBuildJob full = make_planet_job(false);
+    full.run();
+    ChunkBuildJob coarse = make_planet_job(true);
+    coarse.run();
+
+    // The planet's horizon cull bounds each chunk's limb margin by its own max_steps, so a
+    // coarse build reporting 0 would hide chunks whose peaks should still show over the horizon.
+    expect(coarse.mesh.max_steps == full.mesh.max_steps,
+           "mesh_chunk_field() writes max_steps too, so the horizon cull is unaffected");
+    expect(coarse.mesh.max_steps > 0, "and it is the real height, not zero");
+}
+
+COOPA_TEST(a_collision_build_is_never_coarse) {
+    using namespace toy::world;
+    // A collider must be what the chunk is SHAPED like. A character walking on a quantised field
+    // tier -- a different surface depending on where the camera is -- is worse than no saving.
+    ChunkBuildJob job = make_planet_job(/*coarse=*/true, /*collision=*/true);
+    job.run();
+    ChunkBuildJob full = make_planet_job(false);
+    full.run();
+
+    expect(job.collision_mesh != nullptr && job.collision_mesh->triangle_count() > 0,
+           "asking for coarse AND a collider gives the collider");
+    expect(job.mesh.vertices.size() == full.mesh.vertices.size(),
+           "built from the full native geometry, exactly as it was before coarse builds existed");
+}
+
+COOPA_TEST(a_coarse_build_with_no_field_tier_falls_back_to_the_full_build) {
+    using namespace toy::world;
+    ChunkBuildJob job = make_planet_job(true);
+    job.params.chunk_lods = {};   // no field tier to stand in for the native geometry
+    job.run();
+    ChunkBuildJob full = make_planet_job(false);
+    full.params.chunk_lods = {};
+    full.run();
+
+    expect(job.mesh.vertices.size() == full.mesh.vertices.size(),
+           "a degradation, not a failure: it draws the real chunk rather than nothing");
+}

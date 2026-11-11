@@ -991,11 +991,19 @@ void smooth_field_normals(ChunkMeshData& mesh) {
     }
 }
 
+const TerrainParams::ChunkLod* first_field_lod(const TerrainParams& params) {
+    for (const TerrainParams::ChunkLod& lod : params.chunk_lods) {
+        if (lod.field_stride > 0) return &lod;
+    }
+    return nullptr;
+}
+
 std::vector<coopa::gfx::engine::data::MeshLod> build_chunk_lods(const TerrainParams& params,
                                                                 const ChunkCoord& coord,
                                                                 const ColumnPad& pad,
                                                                 const TileMeshLibrary& library,
-                                                                ChunkMeshData& mesh) {
+                                                                ChunkMeshData& mesh,
+                                                                int skip_field_levels) {
     std::vector<coopa::gfx::engine::data::LodRequest> levels;
     bool any_style = false;
     bool any_field = false;
@@ -1010,12 +1018,37 @@ std::vector<coopa::gfx::engine::data::MeshLod> build_chunk_lods(const TerrainPar
     static const bool no_lods = std::getenv("TOY_TERRAIN_NO_LODS") != nullptr;
     if ((levels.empty() && !any_style && !any_field) || mesh.empty() || no_lods) return {};
 
-    // Always goes through simplify_levels(), even with an empty `levels`: it is what supplies
-    // table[0], the full chunk -- a style-only table (no `ratio` entries) still needs that
-    // anchor before the style loop below appends behind it.
-    const std::vector<std::uint8_t> locks = chunk_seam_locks(params, coord, mesh);
-    std::vector<coopa::gfx::engine::data::MeshLod> result =
-        coopa::gfx::engine::data::Mesh::simplify_levels(mesh.vertices, mesh.indices, levels, false, &locks);
+    std::vector<coopa::gfx::engine::data::MeshLod> result;
+    if (skip_field_levels > 0) {
+        // A coarse build: `mesh` already holds the n-th finest `field` level instead of the
+        // native geometry, so table[0] is that level, carrying ITS screen_size rather than
+        // LOD 0's. No simplification -- a `ratio` level over a quantised field mesh has nothing
+        // meaningful to simplify, and its seam locks would be locks on the wrong surface.
+        const TerrainParams::ChunkLod* carried = first_field_lod(params);
+        coopa::gfx::engine::data::MeshLod base;
+        base.first_index = 0;
+        base.index_count = static_cast<std::uint32_t>(mesh.indices.size());
+        base.vertex_offset = 0;
+        base.screen_size = carried != nullptr ? carried->screen_size : 0.0f;
+        result.push_back(base);
+    } else {
+        // Always goes through simplify_levels(), even with an empty `levels`: it is what supplies
+        // table[0], the full chunk -- a style-only table (no `ratio` entries) still needs that
+        // anchor before the style loop below appends behind it.
+        //
+        // The seam locks are only read by simplify_levels(), and only when it has `ratio` levels
+        // to simplify -- so they are computed inside this branch rather than above it. A planet
+        // carries no `ratio` levels at all, and the walk is per-vertex with a planet-space to
+        // face-space read-back on every one of them.
+        if (!levels.empty()) {
+            const std::vector<std::uint8_t> locks = chunk_seam_locks(params, coord, mesh);
+            result = coopa::gfx::engine::data::Mesh::simplify_levels(mesh.vertices, mesh.indices,
+                                                                     levels, false, &locks);
+        } else {
+            result = coopa::gfx::engine::data::Mesh::simplify_levels(mesh.vertices, mesh.indices,
+                                                                     levels, false, nullptr);
+        }
+    }
     // Style levels re-mesh from the chunk's own columns and weld independently -- appended
     // behind every ratio level's vertices (simplify_levels() above has already read `ratio`
     // levels' extent off mesh.indices' size at entry, so this order is load-bearing). Skipped on
@@ -1025,8 +1058,13 @@ std::vector<coopa::gfx::engine::data::MeshLod> build_chunk_lods(const TerrainPar
     // planet: it is meshed in face space from the same columns LOD 0 used, so the one thing a
     // re-mesh here cannot otherwise do -- the planet warp -- applies to it unchanged.
     if (any_style || any_field) {
+        int fields_seen = 0;
         for (const TerrainParams::ChunkLod& lod : params.chunk_lods) {
             const bool field = lod.field_stride > 0;
+            // A coarse build's mesh IS the finest field level, so that one must not be appended
+            // behind itself; and a style/ratio level over it is meaningless (see the branch above).
+            if (field && skip_field_levels > 0 && fields_seen++ < skip_field_levels) continue;
+            if (!field && skip_field_levels > 0) continue;
             if (!field && lod.style < 0) continue;
             if (!field && params.planet) continue;   // style levels: see build_chunk_lods()'s doc
             ChunkMeshData level_mesh;
@@ -1088,6 +1126,31 @@ std::uint64_t chunk_water_hash(const ChunkWaterData& still, const ChunkWaterData
 
 void ChunkBuildJob::run() {
     if (library == nullptr) return;
+    // A coarse build skips mesh_chunk_styled() entirely -- which is nearly the whole of a planet
+    // chunk's cost -- and meshes the finest `field` tier in its place. Planet only: the flat
+    // streamer evicts what leaves view, so it has no permanently-resident far field to pay for.
+    // With no `field` tier to stand in, it falls through to a full build rather than drawing
+    // nothing.
+    const TerrainParams::ChunkLod* coarse = (coarse_only && params.planet && !collision)
+                                                ? first_field_lod(params)
+                                                : nullptr;
+    if (coarse != nullptr) {
+        mesh_chunk_field(pad, params, coarse->field_stride, coarse->native_border, mesh);
+        // Before the warp, as build_chunk_lods() does it: in face space the shared corners are
+        // exact grid values, and the warp carries the smoothed normals onto the globe.
+        if (coarse->smooth) smooth_field_normals(mesh);
+        // Water is NOT skipped. It is read from the `pad`, not from the mesh, so a coarse and a
+        // full build of the same columns give the same chunk_water_hash() -- which is what lets
+        // the publish carry the already-baked WaterBody children across a promotion instead of
+        // blinking every ocean on the globe each time one happens.
+        build_chunk_water(pad, params, water_still, water_flowing);
+        warp_chunk_to_planet(params, coord, mesh, water_still, water_flowing);
+        coopa::gfx::engine::data::Mesh::weld_and_optimize(mesh.vertices, mesh.indices);
+        lods = build_chunk_lods(params, coord, pad, *library, mesh, /*skip_field_levels=*/1);
+        water_hash = chunk_water_hash(water_still, water_flowing);
+        upload_chunk_mesh(*this);
+        return;
+    }
     mesh_chunk_styled(pad, *library, params, mesh);
     if (params.planet) {
         // A collider-only pass warps empty water along with the mesh: the chunk's surfaces are
@@ -1129,6 +1192,7 @@ void ChunkBuildJob::reset_outputs() {
     library        = nullptr;
     collision      = false;
     collision_only = false;
+    coarse_only    = false;
 }
 
 glm::vec3 chunk_origin(const TerrainParams& params, const ChunkCoord& coord) {

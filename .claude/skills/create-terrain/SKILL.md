@@ -106,9 +106,21 @@ Write `tile_set:` in new scenes.
   `2 * face_tiles * tile_size / pi`), `chunk_size` dividing it, and `gravity` (m/s^2). Everything
   stays loaded and the planet only starts pulling once every chunk is live, so bodies and the
   player can be placed above the surface at any side (position = direction * (radius + a few m)).
-  Keep `face_tiles` modest (<= 128): every chunk is built at load, and a planet gives every one
-  of them a collider -- `collision: false` (with `gravity: 0`) is most of the load time back for
-  a globe nothing stands on. Reference: `assets/scenes/terrain/planet_demo`, a globe spun by the
+  Nothing in the engine or the `.terra` format limits `face_tiles`; the cost is memory, and it
+  is `face_tiles` SQUARED, because a planet never evicts a chunk. Three things bound it, in
+  order of payoff: **`planet_coarse_builds: true`** (a chunk too small on screen to draw its
+  native geometry is built with only its coarsest `field` tier -- worth 2 GB on a 1024-tile
+  globe), **a `field` tier no finer than 2** (a `field: 1` tier is as dense as the native tops
+  AND carries its own vertices -- worth another 784 MB), and `collision: false` with
+  `gravity: 0` for a globe nothing stands on. Measured on `planet_demo` at `face_tiles: 1024`,
+  `chunk_size: 64`: 3413 MB of resident chunk mesh with none of them, **590 MB** with all three
+  -- less than the 802 MB its 512-tile version cost. `TerrainSystem` logs the figure when a
+  terrain finishes loading, so check it rather than guessing.
+  **Raising `face_tiles` adds no map detail**, only finer geometric resolution of the landforms
+  already there: `grid_size` (the editor's "Map Cells") is what sets detail, and at
+  `grid_size: 40` a sphere is 1681 Voronoi cells -- already ~936 tiles per cell at 512.
+  Changing `face_tiles` or `chunk_size` does NOT invalidate the stored `.terra`; delete it and
+  re-bake (`TOY_TERRAIN_SAVE=1` saves from a headless run). The bake is single-threaded. Reference: `assets/scenes/terrain/planet_demo`, a globe spun by the
   mouse (`Turntable` on the terrain object) in front of a fixed orbit camera that only zooms.
 - **A planet held whole in frame needs `field` LOD tiers, and nothing else comes close.** Every
   chunk of a globe stays resident, so with no `lods:` the camera draws all of them at full
@@ -126,6 +138,17 @@ Write `tile_set:` in new scenes.
   CENTRE. Check yours against the camera you actually have: `planet_demo` shipped 0.20/0.12/0.085,
   which engage past 268/447/630 units, and the surface sits at r~147 -- so nothing on screen was
   ever far enough and a capture at orbit 300 came back pixel-identical to `TOY_TERRAIN_NO_LODS=1`.
+
+  **The arithmetic**, which is the only way to get this right rather than by eye: a chunk covers
+  `0.75 * chunk_size * tile_size * cot(fov/2) / depth` of the screen's HEIGHT, and a tier draws
+  while the chunk is SMALLER than its `screen_size`. So the coarsest tier's threshold must be
+  ABOVE what a chunk subtends at full zoom-out, or it never engages. `planet_demo` today, at
+  `face_tiles: 1024`, `chunk_size: 64`, fov 50 and an orbit of 2800 from a 651.9 radius: a chunk
+  subtends `48 * 2.1445 / (2800 - 651.9) = 0.048`, so `0.30 / 0.14 / 0.07` works and `0.055`
+  would not have. Doubling `chunk_size` doubles what every chunk subtends, so its thresholds
+  roughly double with it. Verify, always: a full-zoom-out capture that matches
+  `TOY_TERRAIN_NO_LODS=1` means the table is doing nothing. The current demo measures
+  23.3 ms with the tiers against 67.5 ms without them.
 - **Don't try to make a planet merge flat ground** (`max_merge`). It is pinned to 1 deliberately:
   bent onto a sphere a merged quad is a chord, and its edge leaves the surface the per-tile
   geometry beside it sits on -- ~1.7 cm at four tiles on a 122-unit globe, a visible seam on a 1 m

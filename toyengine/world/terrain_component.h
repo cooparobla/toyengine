@@ -143,6 +143,35 @@ struct TerrainChunk {
      */
     bool wants_collision = false;
 
+    /**
+     * @brief This chunk's published mesh was built WITHOUT its native tile geometry.
+     *
+     * See ChunkBuildJob::coarse_only. Set from the finished job at the publish, so it describes
+     * what is actually on the GPU rather than what was last asked for.
+     */
+    bool coarse = false;
+
+    /**
+     * @brief What the detail policy currently wants; `coarse != this` on a Live chunk is a rebuild.
+     *
+     * Kept apart from `stale` for the same reason `wants_collision` is: the two mean different
+     * things about urgency. `stale` means the TILES changed, so what the chunk is drawing is
+     * wrong and the rebuild cannot be deferred. This means the CAMERA moved, so what the chunk
+     * is drawing is merely coarser or finer than ideal -- which is safe to leave for a frame,
+     * and must be, because a zoom crosses the threshold for hundreds of chunks at once.
+     */
+    bool want_coarse = false;
+
+    /**
+     * @brief The frame `coarse` last changed, so a camera drifting on the threshold cannot
+     *        re-mesh the same chunk every few frames.
+     *
+     * A dead band alone is not enough: a slow zoom crosses any band, however wide, in one frame
+     * and then crosses back. This is the dwell that turns that into one rebuild instead of a
+     * stream of them. See TerrainSystem::sync_planet_detail_().
+     */
+    std::uint64_t detail_frame = 0;
+
     /** @brief Bumped per upload; part of the published mesh's asset id, so a rebuild's new mesh never collides with the old one still in its grace period. */
     std::uint32_t mesh_serial = 0;
 
@@ -485,6 +514,28 @@ public:
      * a moment ago. A parked chunk costs its GPU mesh (a megabyte or two); 0 disables the tier.
      */
     int dormant_chunks = 32;
+
+    /**
+     * @brief Planet only: build a chunk's native tile geometry only while it is near enough to
+     *        draw it, and the coarsest `field` tier otherwise.
+     *
+     * A planet never evicts a chunk -- it is small and seen whole, so the whole globe stays
+     * resident -- and every chunk's full voxel geometry is otherwise built at load and kept for
+     * the life of the scene, even though at globe view not one pixel of it is ever drawn. That
+     * is most of a large planet's memory and most of its load time: measured on planet_demo at
+     * `face_tiles: 1024`, `chunk_size: 64`, 2.6 GB of resident chunk mesh and 4 s of meshing.
+     *
+     * With this on, a chunk past the finest `field` tier's `screen_size` is built coarse (see
+     * ChunkBuildJob::coarse_only) and promoted to a full build as the camera approaches, with a
+     * dead band and a dwell so a drifting camera cannot churn it. Rebuilds share the ordinary
+     * chunk budget, so a promotion near the camera naturally beats a demotion on the limb.
+     *
+     * Off by default: it changes what a planet holds in memory, and the terrain's own water,
+     * colliders and horizon cull all behave the same either way, so a scene opts in. Requires
+     * at least one `field` tier in `lods:` and `collision: false` -- a collider must be the
+     * chunk's real shape, not a quantised stand-in that changes with the camera.
+     */
+    bool planet_coarse_builds = false;
 
     // ------------------------------------------------------------------
     // Heightmap mode's authored half (`mode: heightmap`). Inert in Tiles mode.

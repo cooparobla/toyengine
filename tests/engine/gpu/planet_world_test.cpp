@@ -54,9 +54,18 @@ std::string small_planet() {
     std::string path = scene_variant("assets/scenes/terrain/planet_demo/scene.yaml", "small_planet", [](fkyaml::node& doc) {
         if (fkyaml::node* t = scene_component(doc, "planet", "Terrain")) {
             (*t)["face_tiles"] = fkyaml::node(32);
+            // chunk_size comes down with it: the parser trims face_tiles to a MULTIPLE of
+            // chunk_size, so the demo's 64 would quietly promote this 32 straight back to 64
+            // and the planet would be twice the radius every check below assumes.
+            (*t)["chunk_size"] = fkyaml::node(32);
             (*t)["collision"] = fkyaml::node(true);
             (*t)["gravity"] = fkyaml::node(9.81);
         }
+        // Taken off: PlanetCameraFit frames the camera to the planet's own radius, which on this
+        // deliberately tiny globe brings it from hundreds of metres out to about ninety -- and
+        // the_sea_floats_a_crate() depends on its crate being OUTSIDE the water system's
+        // sim_radius, which is the path that used to miss a local-frame sea.
+        remove_scene_component(doc, "camera", "PlanetCameraFit");
         // The actual bake reads the MapGenerator's OWN height_scale (MapGeneratorComponent::
         // bake_params_()), not the legacy top-level key on Terrain -- which only ever feeds a
         // synthesised generator when the scene has none of its own (adopt_legacy_terrains_()).
@@ -348,6 +357,7 @@ COOPA_TEST(the_night_hemisphere_is_moonlit_and_black_without_a_moon) {
             }
             if (fkyaml::node* t = scene_component(doc, "planet", "Terrain")) {
                 (*t)["face_tiles"] = fkyaml::node(32);
+                (*t)["chunk_size"] = fkyaml::node(32);   // see small_planet()
             }
             // The camera has to shrink WITH the planet. A planet's radius is derived
             // (2 N tile_size / pi), so cutting face_tiles from 192 to 32 takes it from ~122 to
@@ -356,6 +366,11 @@ COOPA_TEST(the_night_hemisphere_is_moonlit_and_black_without_a_moon) {
             // scene's distance-to-radius ratio (700 / 122.2) so the globe fills the frame the
             // same way it does in the demo.
             constexpr double k_shrink = 32.0 / 192.0;
+            // Taken off first: PlanetCameraFit derives the zoom range from the planet's own
+            // radius, so it would overwrite the three distances pinned below and reframe the
+            // globe -- which moves the measuring bands off the hemispheres they are aimed at.
+            // This test is about the moon, not about camera policy.
+            remove_scene_component(doc, "camera", "PlanetCameraFit");
             if (fkyaml::node* c = scene_component(doc, "camera", "CameraController")) {
                 (*c)["distance"] = fkyaml::node(700.0 * k_shrink);
                 (*c)["max_distance"] = fkyaml::node(700.0 * k_shrink);

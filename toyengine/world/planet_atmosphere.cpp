@@ -1,16 +1,21 @@
 #include <toyengine/world/planet_atmosphere.h>
 
 #include <algorithm>
+#include <cmath>
 #include <memory>
 
 #include <glm/glm.hpp>
 
+#include <coopa/debug/logger.h>
 #include <coopa/scene/scene.h>
 #include <coopa/scene/scene_object.h>
 #include <coopa/scene/components/transform_component.h>
 #include <coopa/scene/scene_system.h>
 #include <gfxcoopa/engine/components/volume.h>
+#include <glm/gtc/constants.hpp>
+
 #include <toyengine/world/terrain_component.h>
+#include <toyengine/world/terrain_system.h>
 
 namespace toy {
 namespace world {
@@ -34,7 +39,10 @@ void PlanetAtmosphere::apply() {
     // with the terrain's height untouched, and would otherwise not be picked up at all.
     const float settings_key = thickness_scale + 7.0f * min_thickness + 13.0f * base_altitude_scale +
                                17.0f * scale_height_fraction + 23.0f * radius_thickness_scale +
-                               29.0f * radius_base_scale + 31.0f * moon_intensity;
+                               29.0f * radius_base_scale + 31.0f * moon_intensity +
+                               37.0f * cloud_altitude_peak_scale + 41.0f * cloud_altitude_radius_scale +
+                               43.0f * cloud_thickness_radius_scale + 47.0f * cloud_thickness_altitude_scale +
+                               53.0f * limb_optical_depth;
     if (data == nullptr ||
         (data->height_revision() == applied_height_revision_ && settings_key == applied_settings_key_)) {
         return;
@@ -60,6 +68,16 @@ void PlanetAtmosphere::apply() {
     volume->extent         = glm::vec3(outer, outer, outer);
     volume->height_base    = base;            // VolumeShape::Shell's inner radius
     volume->height_falloff = std::max(thickness * scale_height_fraction, 0.1f);
+
+    // The density too, when the scene asks for a depth rather than a per-metre figure. Without
+    // this the one un-proportional number in the profile rides along unchanged from whatever
+    // globe it was tuned on, and the shaped atmosphere comes out either invisible or opaque.
+    // The divisor is the grazing-path integral through an exponential atmosphere,
+    // sqrt(2*pi * H * R) -- see the field's doc.
+    if (limb_optical_depth > 0.0f) {
+        const float grazing = std::sqrt(2.0f * glm::pi<float>() * volume->height_falloff * planet_radius);
+        volume->density = limb_optical_depth / std::max(grazing, 1e-3f);
+    }
 
     inner_ = base;
     outer_ = outer;
@@ -87,6 +105,67 @@ float PlanetAtmosphere::day_sky_factor(const glm::vec3& camera_pos, const glm::v
     // volumetric glow fade in together instead of one leading the other across the dusk band.
     const float day = glm::smoothstep(-0.25f, 0.35f, glm::dot(radial / r, sun_to));
     return depth * depth * day;
+}
+
+CloudDeck planet_cloud_deck(coopa::scene::Scene& scene, const env::PlanetFrame& planet) {
+    /// Must match sky_cloud_density.glsl's WEATHER_PERIOD.
+    constexpr float k_weather_period = 13000.0f;
+    /// Weather systems around the globe: enough for distinct fronts, few enough to read as
+    /// continent-sized rather than as noise.
+    constexpr float k_periods = 3.0f;
+
+    const TerrainComponent* terrain = find_planet_terrain(scene);
+    const float peak = terrain != nullptr ? planet_peak(*terrain) : 0.0f;
+
+    // The scene's atmosphere, not one of its cloud decks: `day_sky_altitude_scale > 0` is the
+    // existing "I am the air, and I decide what the sky looks like" marker (day_sky_factor()
+    // returns 0 below it), so this reuses that contract instead of adding a flag beside it.
+    const PlanetAtmosphere* atmos = nullptr;
+    for (const PlanetAtmosphere* a : scene.get_components<PlanetAtmosphere>()) {
+        if (a->day_sky_altitude_scale > 0.0f) { atmos = a; break; }
+    }
+    const PlanetAtmosphere defaults;
+    const PlanetAtmosphere& knobs = atmos != nullptr ? *atmos : defaults;
+
+    CloudDeck deck;
+    // The base clears the terrain's measured peak, with a radius-keyed floor so a low-relief or
+    // ocean world still gets its clouds off the ground; the depth is keyed to the radius so the
+    // deck reads as a layer rather than a film from orbit. The largest term wins in each, the
+    // same rule the shell's own thickness uses and for the same reason.
+    deck.altitude  = std::max(peak * std::max(knobs.cloud_altitude_peak_scale, 0.0f),
+                              planet.radius * std::max(knobs.cloud_altitude_radius_scale, 0.0f));
+    deck.thickness = std::max(planet.radius * std::max(knobs.cloud_thickness_radius_scale, 0.0f),
+                              deck.altitude * std::max(knobs.cloud_thickness_altitude_scale, 0.0f));
+    deck.thickness = std::max(deck.thickness, 0.1f);
+
+    // The deck lives INSIDE the air it is weather in. Two reasons, and the second is the one
+    // that bites: a layer of cloud above the atmosphere reads as cloud in vacuum, and the
+    // volumetric march bounds its ray by the shell's own outer radius (volumetrics_march.frag),
+    // so a deck beyond it gets none of the shell's in-scatter and sits in front of the limb
+    // instead of within it. Scaled down together, so raising one knob past the shell does not
+    // silently change the deck's proportions as well as its size.
+    if (atmos != nullptr && atmos->shell_outer() > atmos->shell_inner()) {
+        const float head = atmos->shell_outer() - planet.radius;   // air there is to put it in
+        const float want = deck.altitude + deck.thickness;
+        if (want > head && want > 0.0f) {
+            const float squeeze = head / want;
+            deck.altitude  *= squeeze;
+            deck.thickness = std::max(deck.thickness * squeeze, 0.1f);
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                coopa::debug::Logger("clouds").warn(
+                    "the cloud deck reached " + std::to_string(planet.radius + want) +
+                    " but the atmosphere ends at " + std::to_string(atmos->shell_outer()) +
+                    "; squeezed it back inside. Raise PlanetAtmosphere's radius_thickness_scale "
+                    "(or thickness_scale) to give it room.");
+            }
+        }
+    }
+
+    const float deck_radius = planet.radius + deck.altitude + deck.thickness * 0.5f;
+    deck.scale = std::max(2.0f * glm::pi<float>() * deck_radius / (k_periods * k_weather_period), 1e-4f);
+    return deck;
 }
 
 namespace {

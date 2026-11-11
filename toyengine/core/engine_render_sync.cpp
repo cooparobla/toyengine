@@ -75,64 +75,6 @@
 namespace toy {
 namespace core {
 
-namespace {
-
-/**
- * @struct CloudDeck
- * @brief Where a planet's cloud layer sits and how big its field is -- all derived.
- */
-struct CloudDeck {
-    float altitude = 0.0f;   ///< Base, as an altitude above the datum (world units).
-    float thickness = 0.0f;  ///< Radial depth (world units).
-    float scale = 1.0f;      ///< render cloud_scale: world metres per cloud-space metre.
-};
-
-/**
- * @brief Sizes a planet's cloud deck from the globe itself, so any radius just works.
- *
- * The point of deriving rather than authoring: `cloud_altitude` and `cloud_thickness` are
- * absolute metres tuned for an Earth-sized sky (their defaults are 1500), and on a 122-unit
- * planet they would put the deck ten radii out in space. A scene should say `planet: true` and
- * `clouds: true` and get a working deck at whatever size it generated.
- *
- * The base clears the terrain's measured peak, with a radius-keyed floor so a low-relief or
- * ocean world still gets its clouds off the ground; the depth is keyed to the radius so the
- * deck reads as a layer rather than a film from orbit.
- *
- * `scale` must be derived too, and is the one that is not obvious: the field's noise periods are
- * FIXED cloud-space lengths (WEATHER_PERIOD below, 13 km), so at scale 1 a globe whose whole
- * circumference is under a kilometre of cloud space reads one constant weather value
- * everywhere and the deck comes out featureless. Scaling to a few periods per revolution is
- * what gives a planet distinct weather systems around it.
- *
- * @param scene  Scene to measure the planet terrain's baked height from.
- * @param planet The scene's planet frame; must be active().
- * @return The derived deck.
- */
-CloudDeck planet_cloud_deck(coopa::scene::Scene& scene, const env::PlanetFrame& planet) {
-    /// Must match sky_cloud_density.glsl's WEATHER_PERIOD.
-    constexpr float k_weather_period = 13000.0f;
-    /// Weather systems around the globe: enough for distinct fronts, few enough to read as
-    /// continent-sized rather than as noise.
-    constexpr float k_periods = 3.0f;
-
-    float peak = 0.0f;
-    for (const world::TerrainComponent* t : scene.get_components<world::TerrainComponent>()) {
-        if (t->mode != world::TerrainMode::Tiles || !t->params.planet || t->field.empty()) continue;
-        if (const world::TerraData* d = t->field.data()) peak = std::max(d->height_range().y, 0.0f);
-        break;
-    }
-
-    CloudDeck deck;
-    deck.altitude  = std::max(peak * 1.05f, planet.radius * 0.01f);
-    deck.thickness = std::max(planet.radius * 0.04f, deck.altitude * 0.5f);
-    const float deck_radius = planet.radius + deck.altitude + deck.thickness * 0.5f;
-    deck.scale = std::max(2.0f * glm::pi<float>() * deck_radius / (k_periods * k_weather_period), 1e-4f);
-    return deck;
-}
-
-} // namespace
-
 void Engine::sync_overlay_layers_() {
     std::vector<coopa::scene::Scene*> scenes;
     scenes.reserve(overlay_layers_.size());
@@ -288,6 +230,12 @@ void Engine::sync_sky_render_state_(coopa::scene::Scene& scene, float dt) {
     if (w) w->set_physical_sky(physical);
     const bool weather_live = w && w->enabled() && w->state().enabled;
 
+    // Once per frame, before anything reads it: the deck's zonal spin rate below and
+    // sync_cloud_state_() further down both need the same altitude, and on a planet the config's
+    // own cloud_altitude/cloud_thickness/cloud_scale are discarded in favour of these.
+    const world::CloudDeck deck =
+        planet_frame_.active() ? world::planet_cloud_deck(scene, planet_frame_) : world::CloudDeck{};
+
     // Cloud drift and evolution (either sky model). With a live weather the clouds go the
     // wind's way, and cloud_wind_speed is their speed in a 5 m/s ground wind: a calm day
     // barely moves them (a quarter), a gale races them (up to 4x -- winds aloft are stronger).
@@ -308,7 +256,10 @@ void Engine::sync_sky_render_state_(coopa::scene::Scene& scene, float dt) {
     // Speed is converted to an angular rate at the deck's own radius, and accumulated, so
     // editing cloud_wind_speed changes the rate without jumping the clouds.
     if (planet_frame_.active()) {
-        const float deck_r = std::max(planet_frame_.radius + c.cloud_altitude, 1.0f);
+        // The DERIVED altitude, not c.cloud_altitude: a planet discards that key (see
+        // sync_cloud_state_()), so reading it here turned the deck at the rate a deck 1500 units
+        // up would turn at -- several times too slow on a globe a few hundred units across.
+        const float deck_r = std::max(planet_frame_.radius + deck.altitude, 1.0f);
         const float signed_speed = wind_dir.x >= 0.0f ? cloud_speed : -cloud_speed;
         cloud_spin_delta_ = signed_speed * std::max(dt, 0.0f) / deck_r;
         cloud_spin_ += static_cast<double>(cloud_spin_delta_);
@@ -409,13 +360,13 @@ void Engine::sync_sky_render_state_(coopa::scene::Scene& scene, float dt) {
         pipeline_->set_sky_state(st);
         planet_day_fill_ = day_fill;
         planet_night_fill_ = night_col * moon_intensity;
-        sync_cloud_state_(scene, nullptr);
+        sync_cloud_state_(scene, nullptr, deck);
         return;
     }
     if (!physical) {
         restore_sky_colours_();
         pipeline_->set_sky_state(st);
-        sync_cloud_state_(scene, nullptr);
+        sync_cloud_state_(scene, nullptr, deck);
         return;
     }
     if (weather_live && sky_applied_) {
@@ -488,10 +439,11 @@ void Engine::sync_sky_render_state_(coopa::scene::Scene& scene, float dt) {
 
     st.time = std::fmod(sky_time_, 3600.0f);
     pipeline_->set_sky_state(st);
-    sync_cloud_state_(scene, &st);
+    sync_cloud_state_(scene, &st, deck);
 }
 
-void Engine::sync_cloud_state_(coopa::scene::Scene& scene, const render::SkyFrameState* sky) {
+void Engine::sync_cloud_state_(coopa::scene::Scene& scene, const render::SkyFrameState* sky,
+                              const world::CloudDeck& deck) {
     using coopa::gfx::engine::components::DirectionalLightComponent;
     const render::ToyRenderConfig& c = pipeline_->render_config();
     render::CloudFrameState cs;
@@ -512,11 +464,12 @@ void Engine::sync_cloud_state_(coopa::scene::Scene& scene, const render::SkyFram
     cs.day_fill = planet_day_fill_;
     cs.night_fill = planet_night_fill_;
     if (planet_frame_.active()) {
-        // A cloud-deck PlanetAtmosphere sizes the layer, so a planet of ANY radius gets a sane
-        // deck without the scene authoring absolute metres -- the same service it performs for
-        // the atmosphere shell's radii. With none, derive it from the radius alone so a
-        // hand-written `planet: true` + `clouds: true` scene still works.
-        const CloudDeck deck = planet_cloud_deck(scene, planet_frame_);
+        // The deck is DERIVED on a planet, never authored: cloud_altitude and cloud_thickness
+        // are absolute metres tuned for an Earth-sized sky, and on a globe a few hundred units
+        // across they would put the layer radii out in space. world::planet_cloud_deck() sizes
+        // it from the planet itself, so any radius just works -- the same service PlanetAtmosphere
+        // performs for the shell's radii, and the same component's four `cloud_*` knobs decide
+        // where it sits (the scene's atmosphere being the one with day_sky_altitude_scale > 0).
         cs.altitude = deck.altitude;
         cs.thickness = deck.thickness;
         // cloud_scale MUST be derived here. The noise periods are fixed cloud-space lengths

@@ -53,6 +53,8 @@
 
 #include <coopa/scene/component.h>
 
+#include <toyengine/env/planet_frame.h>
+
 namespace coopa {
 namespace scene {
 class Scene;
@@ -129,6 +131,49 @@ public:
      */
     float base_altitude_scale = 0.0f;
 
+    // --- Cloud deck -------------------------------------------------------------------------
+    //
+    // The volumetric cloud layer (`clouds: true`) is DERIVED on a planet, never authored: the
+    // render config's `cloud_altitude` / `cloud_thickness` / `cloud_scale` are absolute metres
+    // tuned for an Earth-sized sky, and on a globe a few hundred units across they would put the
+    // deck radii out in space, so a planet scene's values are discarded. These four are how a
+    // scene moves it instead, and they are proportions for the same reason every other knob here
+    // is: one set of numbers has to work on a globe of any size.
+    //
+    //     altitude  = max(peak * cloud_altitude_peak_scale, R * cloud_altitude_radius_scale)
+    //     thickness = max(R * cloud_thickness_radius_scale, altitude * cloud_thickness_altitude_scale)
+    //
+    // The defaults reproduce the derivation exactly as it was before these existed, so no scene
+    // changes until it asks (planet_cloud_deck()'s own test asserts that). `cloud_scale` stays
+    // underivable from YAML -- see planet_cloud_deck().
+
+    /**
+     * @brief The deck's base as a multiple of the measured peak. Just clears the mountains at 1.05.
+     *
+     * The term that dominates on a world with real relief, and therefore the knob that moves
+     * these clouds: raise it to fly the deck well above the summits rather than just over them.
+     */
+    float cloud_altitude_peak_scale = 1.05f;
+
+    /**
+     * @brief The deck's base as a fraction of the planet's radius, taken when it is the larger.
+     *
+     * The floor that keeps an ocean or low-relief world's clouds off the water, where the peak
+     * term alone would lay them on it.
+     */
+    float cloud_altitude_radius_scale = 0.01f;
+
+    /**
+     * @brief The deck's depth as a fraction of the planet's radius, taken when it is the larger.
+     *
+     * Depth is what makes the layer read as weather rather than as a film painted on a sphere
+     * when the whole globe is in frame.
+     */
+    float cloud_thickness_radius_scale = 0.04f;
+
+    /** @brief The deck's depth as a fraction of its own altitude; see cloud_thickness_radius_scale. */
+    float cloud_thickness_altitude_scale = 0.5f;
+
     /**
      * @brief Exponential scale height, as a fraction of the total thickness.
      *
@@ -138,6 +183,29 @@ public:
      * as a gradient rather than a band.
      */
     float scale_height_fraction = 0.45f;
+
+    /**
+     * @brief How opaque the air is along a ray grazing the surface. 0 (default) leaves the
+     *        Volume's own `density` alone.
+     *
+     * The one quantity in this component that was NOT proportional before, and the reason a
+     * carefully-shaped atmosphere could come out invisible. `Volume::density` is per unit of
+     * LENGTH, so the same number means different things on different globes: the thickness and
+     * the scale height here scale with the planet, the path a ray takes through them scales with
+     * it too, and an authored density silently rides along. planet_demo carried 0.0006 from a
+     * 326-unit world, which is a limb optical depth of about 0.3 -- a haze you cannot see.
+     *
+     * Set this instead and the DEPTH is what stays fixed:
+     *
+     *     density = limb_optical_depth / sqrt(2*pi * scale_height * planet_radius)
+     *
+     * (the standard grazing-path integral through an exponential atmosphere). Around **2** reads
+     * as a clear bright limb with the disc still legible through it; 1 is a thin veil, 4 starts
+     * to look like a gas giant. Because the limb is `sqrt(2*pi*R/H)` times deeper than the view
+     * straight down, a SHORTER scale height (`scale_height_fraction`) sharpens the band and
+     * clears the disc, while a longer one spreads the glow further into space.
+     */
+    float limb_optical_depth = 0.0f;
 
     /**
      * @brief Colour the star backdrop turns into in full daylight, deep inside the atmosphere.
@@ -217,6 +285,19 @@ public:
     /** @brief Recomputes the sibling Volume if the terrain's height has changed. Idempotent. */
     void apply();
 
+    /**
+     * @brief The shell's inner radius from the last apply(): the datum plus whatever lifts it.
+     *
+     * `shell_outer() <= shell_inner()` means nothing has been measured yet -- the terrain is
+     * still baking, or this component has no planet above it -- so a caller reading these to
+     * size something else needs that test, not a zero check.
+     */
+    float shell_inner() const { return inner_; }
+    /** @brief The shell's outer radius: where the air ends and space begins. See shell_inner(). */
+    float shell_outer() const { return outer_; }
+    /** @brief The terrain's measured peak the last apply() sized the shell from. */
+    float measured_peak() const { return peak_; }
+
 private:
     /** @brief Nearest ancestor TerrainComponent, resolved lazily; null until one exists. */
     TerrainComponent* terrain_ = nullptr;
@@ -228,6 +309,43 @@ private:
     float outer_ = 0.0f;
     float peak_  = 0.0f;
 };
+
+/**
+ * @struct CloudDeck
+ * @brief The volumetric cloud layer's geometry on a planet, derived rather than authored.
+ *
+ * `cloud_altitude`, `cloud_thickness` and `cloud_scale` in the render config are absolute metres
+ * tuned for an Earth-sized sky; on a toy globe a few hundred units across they are meaningless,
+ * so a planet scene's values are discarded and these are used instead.
+ *
+ * `scale` is the one that is not obvious, and the one that must stay derived: the cloud field's
+ * noise periods are FIXED cloud-space lengths (13 km), so at scale 1 a globe whose whole
+ * circumference is under a kilometre of cloud space reads one constant weather value everywhere
+ * and the deck comes out featureless. Scaling to a few periods per revolution is what gives a
+ * planet distinct weather systems around it.
+ */
+struct CloudDeck {
+    float altitude = 0.0f;   /**< The deck's base, world units above the datum radius. */
+    float thickness = 0.0f;  /**< Its depth, world units. */
+    float scale = 1.0f;      /**< World metres per cloud-space metre. See the class doc. */
+};
+
+/**
+ * @brief Derives the cloud deck for `scene`'s planet.
+ *
+ * Reads the planet terrain's measured peak and the scene's `PlanetAtmosphere` -- its four
+ * `cloud_*` knobs decide where the deck sits, and its shell radii bound it, because a deck
+ * outside the air is cloud in vacuum and sits beyond the volumetric march's own ray bound. With
+ * no PlanetAtmosphere in the scene the knobs' defaults apply, so a hand-written
+ * `planet: true` + `clouds: true` scene still gets a sane deck.
+ *
+ * Lives here rather than in the Engine's render sync so it can be tested without a device.
+ *
+ * @param scene  Scene to measure; its planet terrain supplies the peak.
+ * @param planet The scene's planet frame; must be `active()`.
+ * @return The derived deck.
+ */
+CloudDeck planet_cloud_deck(coopa::scene::Scene& scene, const env::PlanetFrame& planet);
 
 /**
  * @brief Installs the system that drives every PlanetAtmosphere in `scene`.

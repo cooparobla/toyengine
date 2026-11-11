@@ -247,6 +247,19 @@ public:
      */
     float orbit_distance() const { return mode == CameraControlMode::Orbit ? collided_distance() : 0.0f; }
 
+    /**
+     * @brief Re-seeds the APPLIED pose from the raw `distance`/`yaw_deg`/`pitch_deg` targets.
+     *
+     * start() ends by doing exactly this, so that frame one draws at the authored pose with no
+     * drag lag. Anything that writes those three fields AFTER start() -- a sizer deriving them
+     * from the world, a Mount handing the camera over -- otherwise leaves the smoothed pose
+     * chasing from the authored value to the new one, visibly, at whatever rate
+     * `movement_smoothing` sets. Call this when the new pose should be where the camera already
+     * is, and do NOT call it when the chase is the point (a correction mid-play reads better
+     * easing in).
+     */
+    void snap_to_targets();
+
 private:
     /** @brief Sentinel meaning "not set in YAML, derive from the seed transform in start()". */
     static constexpr float kUnset = -10000.0f;

@@ -314,14 +314,40 @@ void apply_component_sections(std::map<std::string, ComponentSchema>& table) {
                       "budget that paces spawning chunks and folding their water in.")
                 .keys({"cast_shadows", "view_distance", "patch_resolution", "chunk_budget_ms"}).closed().done(),
             sec("Streaming", "Zoom").when("mode", {"tiles"})
-                .says("How many chunks stream around the camera, and the budgets that pace it.")
+                .says("How many chunks stream around the camera, and the budgets that pace it. A planet "
+                      "streams nothing -- it keeps every chunk -- so Planet coarse builds is what bounds "
+                      "what one holds instead.")
                 .keys({"max_chunk_jobs_per_frame", "max_chunks_in_flight", "upload_budget_ms",
-                       "collision_radius", "dormant_chunks"}).closed().done(),
+                       "collision_radius", "dormant_chunks", "planet_coarse_builds"}).closed().done(),
         };
     };
     layout("Terrain", terrain_sections());
     layout("TileTerrain", terrain_sections());
     layout("HeightmapTerrain", terrain_sections());
+
+    layout("PlanetAtmosphere", {
+        sec("Sky", "World")
+            .says("How much air the planet gets, and how it thins with altitude. Every term is a "
+                  "proportion -- of the terrain's measured peak or of the planet's radius -- and the "
+                  "largest wins, which is what lets one set of numbers work on a globe of any size.")
+            .keys({"thickness_scale", "radius_thickness_scale", "min_thickness",
+                   "scale_height_fraction", "limb_optical_depth"}).done(),
+        sec("Cloud deck", "World")
+            .says("Where the volumetric cloud layer sits. On a planet the render settings' "
+                  "cloud_altitude and cloud_thickness are absolute metres and are DISCARDED -- these "
+                  "four are how a scene moves the deck. It is always kept inside the sky above.")
+            .keys({"cloud_altitude_peak_scale", "cloud_altitude_radius_scale",
+                   "cloud_thickness_radius_scale", "cloud_thickness_altitude_scale"}).done(),
+        sec("Day & night", "Sun")
+            .says("The planet's own lighting: what its sky fades to at noon, and what lights the "
+                  "hemisphere facing away from the sun. Moon intensity at 0 is a black night side.")
+            .keys({"day_sky_color", "day_sky_altitude_scale", "night_sky_color",
+                   "moon_intensity"}).closed().done(),
+        sec("Shell base", "Move")
+            .says("Lifts the shell's inner radius off the datum. Left at 0 this layer is an "
+                  "atmosphere; raised, it becomes a fog deck floating over the terrain instead.")
+            .keys({"base_altitude_scale", "radius_base_scale"}).closed().done(),
+    });
 
     layout("Curve", {
         sec("Path", "World")

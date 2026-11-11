@@ -54,4 +54,27 @@ inline fkyaml::node* scene_component(fkyaml::node& doc, const std::string& objec
     return nullptr;
 }
 
+/**
+ * @brief Removes the first component of `type` from the root object named `object`.
+ *
+ * What a variant needs when a component would OVERRIDE the very fields it is pinning: a test
+ * that hand-sets a camera's zoom range, say, has to take PlanetCameraFit off first or the
+ * component derives them straight back from the planet.
+ *
+ * @return True when one was removed.
+ */
+inline bool remove_scene_component(fkyaml::node& doc, const std::string& object, const std::string& type) {
+    for (auto& obj : doc["scene"]["root_objects"].as_seq()) {
+        if (!obj.contains("name") || obj["name"].get_value<std::string>() != object) continue;
+        auto& comps = obj["components"].as_seq();
+        for (auto it = comps.begin(); it != comps.end(); ++it) {
+            if (it->contains("type") && (*it)["type"].get_value<std::string>() == type) {
+                comps.erase(it);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 } // namespace toy::test

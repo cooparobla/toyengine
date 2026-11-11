@@ -46,9 +46,16 @@ void CameraController::start() {
     pitch_deg = glm::clamp(pitch_deg, min_pitch_deg, max_pitch_deg);
 
     // The applied pose starts exactly at the raw seed -- no drag lag on frame one.
+    snap_to_targets();
+}
+
+void CameraController::snap_to_targets() {
     smoothed_yaw_deg_   = yaw_deg;
     smoothed_pitch_deg_ = pitch_deg;
     smoothed_distance_  = distance;
+    // Dropped too: a collided radius from the old distance would pull the snapped pose straight
+    // back in on the next frame, which looks exactly like the lag this is here to avoid.
+    collision_distance_ = -1.0f;
 }
 
 void CameraController::update(float dt) {

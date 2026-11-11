@@ -97,6 +97,11 @@ void ParticlePass::upload(uint32_t frame_slot, const std::vector<ParticleDrawBat
 
 void ParticlePass::build_reactive(VkRenderPass mask_render_pass) {
     coopa::gfx::pipeline::PipelineDesc d = desc_;
+    // desc_ is built for TransparentPass::draw_render_pass(), which carries the coverage
+    // attachment beside the colour one. The reactive mask is a single-attachment pass of its
+    // own, and a pipeline's blend state must match the render pass it is built against.
+    d.blend.color_attachment_count = 1;
+    d.blend.attachment_modes.clear();
     d.depth.test = false;
     d.depth.write = false;
     d.blend.mode = coopa::gfx::pipeline::BlendMode::Additive;

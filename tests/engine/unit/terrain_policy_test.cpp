@@ -10,6 +10,7 @@
 #include <coopa/testing/test.h>
 
 #include <toyengine/world/terrain_component.h>
+#include <toyengine/world/terrain_system.h>
 
 #include "engine/support/checks.h"
 
@@ -98,4 +99,31 @@ COOPA_TEST(the_collision_radius_is_a_ring_around_the_centre) {
     terrain.collision = false;
     expect(!toy::world::terrain_wants_collision(terrain, centre, centre),
            "collision off beats any radius");
+}
+
+/**
+ * The resident-mesh measurement. A chunk's coarser levels live in the SAME index buffer behind
+ * LOD 0, and a `field` level carries its own vertices there too, so counting LOD 0's index
+ * count alone under-reports a planet chunk by most of what it is holding -- the one way this
+ * goes wrong without anything on screen looking wrong.
+ */
+COOPA_TEST(mesh_bytes_counts_every_lod_level_in_the_buffer) {
+    using coopa::gfx::engine::data::MeshLod;
+    // Three levels behind LOD 0, laid out as build_chunk_lods() lays them out: each appended
+    // behind the last, so the buffer runs to the final level's end.
+    std::vector<MeshLod> lods;
+    lods.push_back(MeshLod{0, 600, 0, 0.0f});        // LOD 0
+    lods.push_back(MeshLod{600, 200, 100, 0.30f});   // field: 2
+    lods.push_back(MeshLod{800, 50, 140, 0.14f});    // field: 8
+    lods.push_back(MeshLod{850, 10, 160, 0.07f});    // field: 32
+
+    const std::uint64_t bytes = toy::world::mesh_bytes(170, 600, lods);
+    expect(bytes == 170ull * 48ull + 860ull * 4ull, "every level's indices are counted once");
+    expect(toy::world::mesh_bytes(170, 600, {}) < bytes,
+           "LOD 0's count alone under-reports what the buffer holds");
+}
+
+COOPA_TEST(mesh_bytes_of_a_mesh_with_no_lods_is_its_whole_buffer) {
+    expect(toy::world::mesh_bytes(9000, 33000, {}) == 9000ull * 48ull + 33000ull * 4ull,
+           "with no LOD table, LOD 0's index count IS the buffer's");
 }

@@ -52,6 +52,7 @@
 #include <toyengine/scene/register.h>
 #include <toyengine/scene/scene_link.h>
 #include <toyengine/world/planet_atmosphere.h>
+#include <toyengine/world/planet_camera_fit.h>
 #include <toyengine/world/snow_system.h>
 #include <toyengine/mapgen/map_generator_component.h>
 #include <toyengine/world/terrain_system.h>
@@ -596,6 +597,10 @@ void Engine::prepare_scene_(coopa::scene::Scene& scene, bool drain_assets) {
     // measurable when the atmosphere shell is sized from it. Runs in edit mode too, so the sky
     // is visible while authoring rather than only under play.
     world::install_planet_atmosphere_system(scene);
+    // Order 65: frames the planet. After the terrain and the other sizers, and far ahead of the
+    // Behaviour walk (200) that ticks CameraController, so the camera reads this frame's values.
+    // Edit mode too -- a framing that only exists under play cannot be authored against.
+    world::install_planet_camera_fit_system(scene);
     world::install_terrain_system(scene, ctx_.device(), ctx_.allocator(), assets_);
     // Order 61: heightmap terrains -- their chunks, GPU grids and colliders, before Physics (100)
     // steps against them. See heightmap_terrain_system.h.
@@ -1007,6 +1012,7 @@ bool Engine::tick() {
             CpuTimer t(prof, CpuScope::DynamicMeshes);
             upload_dynamic_meshes_(scene_mgr_.get_active_scene());
             gather_debug_lines_(scene_mgr_.get_active_scene());
+            watch_terrain_(scene_mgr_.get_active_scene());
             gather_digger_hover_(scene_mgr_.get_active_scene());
         }
         if (hooks_.pre_render) hooks_.pre_render(dt);

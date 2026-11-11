@@ -45,6 +45,7 @@
 #include <toyengine/water/water_yaml.h>
 #include <toyengine/world/heightmap_terrain.h>
 #include <toyengine/world/planet_atmosphere.h>
+#include <toyengine/world/planet_camera_fit.h>
 #include <toyengine/world/terrain_yaml.h>
 #include <toyengine/world/terrain_component.h>
 #include <toyengine/mapgen/map_generator_component.h>
@@ -180,11 +181,31 @@ void register_scene_components() {
             read(node, "radius_thickness_scale", pa->radius_thickness_scale);
             read(node, "base_altitude_scale", pa->base_altitude_scale);
             read(node, "radius_base_scale", pa->radius_base_scale);
+            read(node, "cloud_altitude_peak_scale", pa->cloud_altitude_peak_scale);
+            read(node, "cloud_altitude_radius_scale", pa->cloud_altitude_radius_scale);
+            read(node, "cloud_thickness_radius_scale", pa->cloud_thickness_radius_scale);
+            read(node, "cloud_thickness_altitude_scale", pa->cloud_thickness_altitude_scale);
             read(node, "scale_height_fraction", pa->scale_height_fraction);
+            read(node, "limb_optical_depth", pa->limb_optical_depth);
             read(node, "day_sky_altitude_scale", pa->day_sky_altitude_scale);
             read(node, "moon_intensity", pa->moon_intensity);
             if (node.contains("night_sky_color")) pa->night_sky_color = parse_rgb(node.at("night_sky_color"), pa->night_sky_color);
             if (node.contains("day_sky_color")) pa->day_sky_color = parse_rgb(node.at("day_sky_color"), pa->day_sky_color);
+        });
+
+    // Frames the scene's planet (toyengine/world/planet_camera_fit.h). Authored on the camera
+    // object; writes the SCALE of the sibling CameraController and Camera, while the scene goes
+    // on authoring the rig's shape. Do not author min_distance/max_distance/zoom_speed beside it.
+    SceneLoader::register_component_parser("PlanetCameraFit",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* fit = obj.add_component<world::PlanetCameraFit>();
+            read(node, "frame_margin", fit->frame_margin);
+            read(node, "max_distance_scale", fit->max_distance_scale);
+            read(node, "min_clearance", fit->min_clearance);
+            read(node, "zoom_notches", fit->zoom_notches);
+            read(node, "far_clip_scale", fit->far_clip_scale);
+            read(node, "near_clip_ratio", fit->near_clip_ratio);
+            read(node, "set_distance", fit->set_distance);
         });
 
     // A breakable mesh (toyengine/scene/destructible.h). DestructionSystem (order 70) does the
@@ -789,6 +810,7 @@ void register_scene_components(coopa::gfx::core::Device& device,
                 // edge then deviates from the per-tile geometry beside it by enough to see at
                 // ground level -- see TerrainParams::max_merge for the measurement.
                 if (!authored_max_merge) params.max_merge = 1;
+                read(node, "planet_coarse_builds", terrain->planet_coarse_builds);
                 params.face_tiles = std::max<std::int32_t>(params.chunk_size, params.face_tiles);
                 params.face_tiles -= params.face_tiles % std::max<std::int32_t>(1, params.chunk_size);
             }

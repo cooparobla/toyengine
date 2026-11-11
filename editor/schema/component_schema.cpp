@@ -1233,6 +1233,31 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             with_tip(f_float("eye_height", 1.6f, 0.01f, -100.0f, 100.0f), "FirstPerson: camera height above the tracked object's origin"),
             f_float("first_person_pitch_limit", 85.0f, 0.5f, 0.0f, 89.0f),
         }});
+        // Defaults mirror toyengine/world/planet_camera_fit.h. Sits on the camera object beside
+        // the CameraController whose scale fields it writes.
+        add({"PlanetCameraFit", "Gameplay", {
+            with_tip(f_float("frame_margin", 1.1f, 0.01f, 0.0f, 10.0f, true),
+                     "Slack around the globe at full zoom-out. 1.0 fills the frame exactly; below it the limb "
+                     "is cropped. Max distance is radius / sin(fov/2) x this"),
+            with_tip(f_float("max_distance_scale", 1.0f, 0.01f, 0.0f, 100.0f, true),
+                     "Multiplies the fitted distance. Raise it to pull the far end of the zoom back into space, "
+                     "so the planet sits small in frame rather than filling it"),
+            with_tip(f_float("min_clearance", 4.0f, 0.05f, 0.0f, 10000.0f),
+                     "World units above the MEASURED peak at full zoom-in -- not above the datum, which on a "
+                     "globe with tall mountains puts the camera inside the terrain"),
+            with_tip(f_float("zoom_notches", 25.0f, 0.5f, 1.0f, 1000.0f),
+                     "Scroll notches the full zoom range takes. Keys zoom_speed to the planet's size, so the "
+                     "wheel feels the same on a globe of any radius"),
+            with_tip(f_float("far_clip_scale", 2.0f, 0.05f, 0.0f, 100.0f),
+                     "Sets the Camera's far clip to (max distance + radius) x this; 0 leaves the Camera alone. "
+                     "That sum is what clears the whole globe from the far end of the zoom"),
+            with_tip(f_float("near_clip_ratio", 0.0f, 1e-05f, 0.0f, 0.1f),
+                     "Near clip as a fraction of the far clip; 0 leaves it alone. A ratio because depth "
+                     "precision depends on near-to-far, not on either plane alone -- 2e-4 is the rule of thumb"),
+            with_tip(f_bool("set_distance", true),
+                     "Open with the globe held whole: sets distance to the fitted maximum on the first apply. "
+                     "A later re-derive eases into the new framing instead of jumping"),
+        }});
         // Defaults mirror toyengine/scene/character_controller.h.
         add({"CharacterController", "Gameplay", {
             f_float("radius", 0.3f, 0.005f, 0.01f, 10.0f, true),
@@ -1512,6 +1537,11 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                          "Milliseconds a frame may spend publishing finished chunks (at least one always lands)"),
                 with_tip(f_int("dormant_chunks", 32, 0, 512),
                          "Chunks kept whole after leaving view, so turning back re-attaches instead of rebuilding"),
+                with_tip(f_bool("planet_coarse_builds", false),
+                         "PLANET only: build a chunk's full tile geometry only while it is near enough to draw "
+                         "it, and the coarsest field LOD tier otherwise. A planet never evicts a chunk, so "
+                         "without this every chunk of the globe holds geometry no pixel ever draws at globe view. "
+                         "Needs a field tier in LODs and Collision off"),
                 with_tip(f_bool("collision", true), "Each chunk collides with exactly the surface it draws"),
                 with_tip(with_label(f_int("collision_radius", 4, 0, 64), "Collision radius (chunks)"),
                          "Chunks given a collider, around the camera; 0 = every loaded chunk. Ground outside it is not solid"),
@@ -1640,6 +1670,55 @@ std::map<std::string, ComponentSchema>& schema_table_() {
         add({"Terrain", "World", terrain_fields("tiles")});
         add({"TileTerrain", "World", terrain_fields("tiles")});
         add({"HeightmapTerrain", "World", terrain_fields("heightmap")});
+        // Defaults mirror toyengine/world/planet_atmosphere.h, field for field. Authored as a
+        // CHILD of the planet object, beside the shell Volume it sizes.
+        add({"PlanetAtmosphere", "World", {
+            with_tip(f_float("thickness_scale", 1.8f, 0.01f, 0.0f, 100.0f, true),
+                     "Sky height above the tallest peak, as a multiple of that peak's own height: the sky "
+                     "scales with the terrain's relief instead of a fixed margin"),
+            with_tip(f_float("radius_thickness_scale", 0.12f, 0.005f, 0.0f, 10.0f, true),
+                     "Sky height as a fraction of the PLANET'S RADIUS, taken when it is the largest term. "
+                     "What makes a large or low-relief globe get a limb you can see rather than a skin"),
+            with_tip(f_float("min_thickness", 30.0f, 0.5f, 0.0f, 100000.0f),
+                     "Absolute floor on the sky's height, so a near-flat world still gets an atmosphere"),
+            with_tip(f_float("limb_optical_depth", 0.0f, 0.01f, 0.0f, 20.0f),
+                     "How opaque the air is along a ray grazing the surface; 0 leaves the Volume's own Density "
+                     "alone. The Volume's density is per METRE, so the same number means different things on "
+                     "different globes -- set this and the DEPTH stays fixed at any radius. ~2 is a clear bright "
+                     "limb with the disc still legible; 4 looks like a gas giant"),
+            with_tip(as_slider(f_float("scale_height_fraction", 0.45f, 0.005f, 0.0f, 1.0f)),
+                     "Exponential scale height as a fraction of the thickness. Small values pack the air into a "
+                     "dense skin at sea level; the default spreads it, which is what makes the limb a gradient"),
+            with_tip(f_float("base_altitude_scale", 0.0f, 0.01f, 0.0f, 100.0f),
+                     "Lifts the shell's BASE by this multiple of the measured peak. 0 is an atmosphere starting "
+                     "at the datum; ~1 starts it clear of the summits, which is a cloud deck"),
+            with_tip(f_float("radius_base_scale", 0.0f, 0.005f, 0.0f, 10.0f),
+                     "The radius-keyed counterpart: lifts the base by a fraction of the radius, which is what an "
+                     "ocean world's deck wants"),
+            with_tip(f_float("cloud_altitude_peak_scale", 1.05f, 0.01f, 0.0f, 100.0f),
+                     "VOLUMETRIC CLOUD DECK (clouds: true), not the shell: its base as a multiple of the measured "
+                     "peak. The deck is derived on a planet -- the render settings' cloud_altitude is absolute "
+                     "metres and is discarded -- so this is the knob that raises these clouds"),
+            with_tip(f_float("cloud_altitude_radius_scale", 0.01f, 0.005f, 0.0f, 10.0f),
+                     "The deck's base as a fraction of the radius, taken when larger: the floor that keeps a "
+                     "low-relief or ocean world's clouds off the water"),
+            with_tip(f_float("cloud_thickness_radius_scale", 0.04f, 0.005f, 0.0f, 10.0f),
+                     "The deck's depth as a fraction of the radius. Depth is what makes the layer read as weather "
+                     "rather than as a film painted on a sphere"),
+            with_tip(f_float("cloud_thickness_altitude_scale", 0.5f, 0.01f, 0.0f, 10.0f),
+                     "The deck's depth as a fraction of its own altitude, taken when larger"),
+            with_tip(f_color("day_sky_color", glm::vec3(0.16f, 0.36f, 0.78f)),
+                     "Colour the star backdrop fades to in full daylight, deep inside the atmosphere. A daytime sky "
+                     "hides stars by being brighter than them, not by being opaque -- hence a fade, not a thicker shell"),
+            with_tip(f_float("day_sky_altitude_scale", 1.2f, 0.01f, 0.0f, 100.0f),
+                     "Altitude at which the backdrop is FULLY sky, as a multiple of the peak. 0 disables the fade "
+                     "for this layer, which is what a cloud deck wants -- and marks it as not being the atmosphere"),
+            with_tip(f_color("night_sky_color", glm::vec3(0.04f, 0.06f, 0.12f)),
+                     "Colour the cloud deck's ambient fills with on the night side, scaled by Moon intensity"),
+            with_tip(as_slider(f_float("moon_intensity", 0.0f, 0.005f, 0.0f, 1.0f)),
+                     "Light the hemisphere facing away from the sun receives. 0 (the default) is a black night side: "
+                     "nothing else in the engine lights it, so the globe reads as a lit crescent with its dark half missing"),
+        }});
         // Painted instances (toyengine/instance/). The records are NOT fields: they live in a
         // `.instances` file beside the scene, and `data:` is the only trace of them here.
         {

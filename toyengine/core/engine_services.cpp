@@ -293,6 +293,22 @@ void Engine::gather_debug_lines_(coopa::scene::Scene& scene) {
     }
 }
 
+void Engine::watch_terrain_(coopa::scene::Scene& scene) {
+    // The numbers themselves are TerrainSystem's; only the publishing is here, because nothing
+    // under toyengine/world/ depends on toyengine/debug/ and a measurement is not worth the
+    // first such edge. Free when the overlay is off -- watch() tests GameLines::accepting().
+    auto* ts = dynamic_cast<world::TerrainSystem*>(scene.find_system("Terrain"));
+    if (ts == nullptr) return;
+    if (ts->resident_chunks() == 0 && ts->planet_peak() <= 0.0f) return;
+    debug::watch("terrain.mesh_mb", static_cast<double>(ts->resident_mesh_bytes()) / (1024.0 * 1024.0));
+    debug::watch("terrain.chunks", std::to_string(ts->resident_chunks()) + "/" +
+                                       std::to_string(ts->drawn_chunks()) + " drawn/" +
+                                       std::to_string(ts->coarse_chunks()) + " coarse");
+    debug::watch("terrain.load_ms", ts->load_ms());
+    debug::watch("terrain.upload_ms", ts->last_upload_ms());
+    if (ts->planet_peak() > 0.0f) debug::watch("terrain.peak", ts->planet_peak());
+}
+
 std::string Engine::profile_path_from_env_() {
     const char* v = debug_env("PROFILE");
     if (!v || !*v || std::string(v) == "0") return {};

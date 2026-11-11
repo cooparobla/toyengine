@@ -83,6 +83,7 @@
 #define TOYENGINE_WORLD_TERRAIN_SYSTEM_H
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -148,6 +149,45 @@ public:
     std::int32_t unfinished_chunks() const { return unfinished_chunks_; }
 
     /**
+     * @brief Bytes of vertex and index buffer every live chunk mesh in the scene is holding.
+     *
+     * The number a `face_tiles`, `chunk_size` or `lods:` change is judged against, because none
+     * of the budgets in this system is a memory budget: `max_chunk_jobs_per_frame`,
+     * `max_chunks_in_flight` and `upload_budget_ms` all pace wall clock or counts, so a change
+     * that quadruples the geometry is simply paced into existence over more frames and then
+     * stays. A planet makes that sharper still -- it never evicts a chunk -- and the buffers are
+     * host-visible and persistently mapped (`memory::Buffer::vertex`), so this is system RAM,
+     * not VRAM.
+     *
+     * Counted per frame off the published meshes, including every LOD level behind LOD 0 (they
+     * share the chunk's one buffer pair), so it is what the process is actually holding rather
+     * than what LOD 0 would draw.
+     */
+    std::uint64_t resident_mesh_bytes() const { return resident_mesh_bytes_; }
+    /** @brief Chunks holding a published mesh, over every terrain in the scene. */
+    std::int32_t resident_chunks() const { return resident_chunks_; }
+    /** @brief Of those, the ones whose SceneObject is active -- what the renderer walks. */
+    std::int32_t drawn_chunks() const { return drawn_chunks_; }
+    /** @brief Of those, the ones built without their native tile geometry. 0 unless a planet asks. */
+    std::int32_t coarse_chunks() const { return coarse_chunks_; }
+
+    /**
+     * @brief Milliseconds from the first frame that wanted a chunk to the first with none
+     *        outstanding; frozen thereafter, and 0 until a terrain has asked for anything.
+     */
+    double load_ms() const { return load_ms_; }
+
+    /**
+     * @brief The scene planet's measured peak height above the datum, world units; 0 with none.
+     *
+     * The terrain's own baked height, NOT `params.height_scale` -- which is a nominal amplitude
+     * a bake can fall well short of, and which a scene authoring `height_scale:` on its
+     * `MapGenerator` (rather than on the Terrain) leaves at the default entirely. Anything
+     * sizing itself to a planet's relief wants this one. See PlanetAtmosphere::apply().
+     */
+    float planet_peak() const { return planet_peak_; }
+
+    /**
      * @brief Called from TerrainComponent::~TerrainComponent(): drops `terrain` out of
      *        `streamed_`/`releasing_` before it is freed.
      *
@@ -195,6 +235,20 @@ private:
     std::int32_t wanted_chunks_ = 0;      /**< See wanted_chunks(). */
     std::int32_t unfinished_chunks_ = 0;  /**< See unfinished_chunks(). */
     bool terrain_baking_ = false;         /**< Any terrain still baking its world or tile set. */
+
+    std::uint64_t resident_mesh_bytes_ = 0; /**< See resident_mesh_bytes(). */
+    std::int32_t resident_chunks_ = 0;      /**< See resident_chunks(). */
+    std::int32_t drawn_chunks_ = 0;         /**< See drawn_chunks(). */
+    std::int32_t coarse_chunks_ = 0;        /**< See coarse_chunks(). */
+    float planet_peak_ = 0.0f;              /**< See planet_peak(). */
+
+    /** @brief Accumulates the four resident_* counters and planet_peak_ over one frame's terrains. */
+    void measure_(const TerrainComponent& terrain);
+
+    double load_ms_ = 0.0;                  /**< See load_ms(). */
+    /** @brief Start of the load being timed; unset until a terrain first wants a chunk. */
+    std::chrono::steady_clock::time_point load_start_{};
+    bool load_timing_ = false;              /**< A load is in flight, so load_ms_ is not final. */
 
     /** @brief One terrain's whole frame: generate, then stream. */
     void tick_terrain_(TerrainComponent& terrain, coopa::scene::Scene& scene,
@@ -358,6 +412,34 @@ private:
 
     /** @brief A planet keeps every chunk: all six faces are always wanted. */
     void want_planet_chunks_(TerrainComponent& terrain);
+
+    /**
+     * @brief Decides which of a planet's chunks need their native tile geometry at all.
+     *
+     * Only with TerrainComponent::planet_coarse_builds. The threshold is the finest `field`
+     * tier's own `screen_size` -- EXACTLY the size at which the renderer starts asking for
+     * LOD 0, because select_lod() ignores `thresholds[0]` and draws level 0 above
+     * `thresholds[1]`. So the policy and the renderer key off one number by construction,
+     * instead of a tuned guess that can drift from it.
+     *
+     * Three guards against churn, because a zoom crosses any threshold for hundreds of chunks
+     * at once: a dead band (promote well before the renderer needs it, demote well after),
+     * a dwell in frames, and the ordinary chunk budget -- a detail rebuild joins `pending_`
+     * under the same per-frame cap and the same nearest-first ordering, so a promotion near the
+     * camera beats a demotion on the limb with no second budget to tune.
+     *
+     * Chunks on the far side are skipped outright: the policy never promotes something
+     * cull_planet_horizon_() is about to deactivate anyway.
+     */
+    void sync_planet_detail_(TerrainComponent& terrain);
+
+    /**
+     * @brief The camera's position in `terrain`'s local space; false when there is no camera.
+     *
+     * Shared by cull_planet_horizon_() and sync_planet_detail_(), which both need the eye
+     * relative to the planet's own frame and must agree about where it is.
+     */
+    bool planet_eye_local_(const TerrainComponent& terrain, glm::vec3& eye) const;
     /**
      * @brief Hides the chunks of a planet that the planet itself is in front of.
      *
@@ -407,6 +489,21 @@ private:
     /// Frames a retired chunk's collision mesh is kept alive (see the file doc).
     static constexpr std::uint64_t k_collision_keep_frames = 600;
 
+    /**
+     * @brief How far PAST the finest `field` tier's threshold a chunk must be before its full
+     *        build is started.
+     *
+     * Margin, not necessity: a chunk that gets close before its full build lands simply draws
+     * the coarse mesh's own finest tier, which select_lod() is already happy to use above
+     * `thresholds[1]`. The margin exists so the build is usually there by the time it is wanted,
+     * and it also absorbs the renderer's `mesh_lod_bias`, which this system cannot see.
+     */
+    static constexpr float k_planet_detail_promote = 1.5f;
+    /** @brief And how far below it before the native geometry is given back up. See above. */
+    static constexpr float k_planet_detail_demote = 0.9f;
+    /** @brief Frames a chunk holds its detail after changing it, whatever the policy then says. */
+    static constexpr std::uint64_t k_planet_detail_dwell_frames = 30;
+
     std::uint64_t frame_ = 0;          /**< execute() calls, for retiring collision meshes. */
     /** @brief Chunks meshed and published since this system was installed -- for the churn a
      *         streaming test measures, and for the debug overlay. */
@@ -429,6 +526,56 @@ private:
      *         them with advance_retiring_() even after they drop out of streamed_ entirely. */
     std::unordered_set<TerrainComponent*> releasing_;
 };
+
+/**
+ * @brief Vertex plus index bytes a chunk mesh holds, every LOD level included.
+ *
+ * What TerrainSystem::resident_mesh_bytes() is summed from, taken apart from `Mesh` so the
+ * arithmetic can be tested without a device. `Mesh::index_count()` is LOD 0's, not the
+ * buffer's -- the coarser levels live in the same index buffer behind it, and a `field` level
+ * carries its own vertices there too -- so this takes the furthest extent any level reaches.
+ *
+ * @param vertex_count     Vertices the buffer was allocated for.
+ * @param lod0_index_count LOD 0's index count, which is what `Mesh::index_count()` reports.
+ * @param lods             The mesh's LOD table; empty means LOD 0 is the whole buffer.
+ * @return Bytes of vertex and index buffer.
+ */
+std::uint64_t mesh_bytes(std::uint32_t vertex_count, std::uint32_t lod0_index_count,
+                         const std::vector<coopa::gfx::engine::data::MeshLod>& lods);
+
+/** @brief mesh_bytes() for a live mesh. */
+std::uint64_t mesh_bytes(const coopa::gfx::engine::data::Mesh& mesh);
+
+/**
+ * @brief The scene's planet terrain, or null when it has no planet.
+ *
+ * What find_planet_frame() and everything that sizes itself to a planet -- the atmosphere shell,
+ * the cloud deck, an orbit camera's framing -- scan with, so "which terrain is the planet" is
+ * answered in one place. A planet is a Tiles-only shape, so `params` is always the right half to
+ * read from the result.
+ *
+ * Returning null, rather than a neutral value, is the point: a default `env::PlanetFrame` is the
+ * FLAT world, which is a perfectly good answer to "which way is up" and a useless one to "is
+ * there a planet here". A caller that must no-op without one wants this.
+ *
+ * @param scene Scene to scan; one planet per scene by design, so the first found wins.
+ * @return The planet's TerrainComponent, or null.
+ */
+TerrainComponent* find_planet_terrain(coopa::scene::Scene& scene);
+
+/**
+ * @brief A planet terrain's measured peak height above the datum, world units.
+ *
+ * The terrain's own baked height (`TerraData::height_range()`), NOT `params.height_scale`. That
+ * field is a nominal amplitude a bake can fall well short of -- and a scene authoring
+ * `height_scale:` on its `MapGenerator` rather than on the Terrain leaves it at the default
+ * entirely, since it only reaches `params` on an apply, which never runs when the `.terra`
+ * already exists. Anything sizing itself to a planet's relief wants this one.
+ *
+ * @param terrain A terrain; need not be a planet, and need not have been baked.
+ * @return The peak, clamped at 0; 0 for an empty field.
+ */
+float planet_peak(const TerrainComponent& terrain);
 
 /**
  * @brief The scene's planet as an `env::PlanetFrame`, or a flat frame when it has no planet.

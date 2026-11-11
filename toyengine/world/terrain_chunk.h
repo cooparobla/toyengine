@@ -298,12 +298,32 @@ std::vector<std::uint8_t> chunk_seam_locks(const TerrainParams& params, const Ch
  *
  * @param pad     The chunk's columns, needed to re-mesh any `style` or `field` level.
  * @param library The chunk's baked tile library, needed to re-mesh any `style` level.
+ * @param skip_field_levels How many of the finest `field` levels `mesh` ALREADY holds, because a
+ *        coarse build (ChunkBuildJob::coarse_only) meshed one of them in place of the native
+ *        geometry. 0 -- the default, and what every full build passes -- behaves exactly as
+ *        before. Above 0, `table[0]` carries that level's own `screen_size` instead of LOD 0's,
+ *        the first `n` `field` levels are not appended again, and `ratio`/`style` levels are
+ *        ignored outright (simplifying a quantised field mesh is meaningless, and a planet
+ *        skips `style` anyway).
  */
 std::vector<coopa::gfx::engine::data::MeshLod> build_chunk_lods(const TerrainParams& params,
                                                                 const ChunkCoord& coord,
                                                                 const ColumnPad& pad,
                                                                 const TileMeshLibrary& library,
-                                                                ChunkMeshData& mesh);
+                                                                ChunkMeshData& mesh,
+                                                                int skip_field_levels = 0);
+
+/**
+ * @brief The finest configured `field` level, or null when the terrain has none.
+ *
+ * Its `screen_size` is the threshold a coarse build is decided by, and the same number the
+ * renderer starts asking for LOD 0 at -- so the two agree by construction rather than by a
+ * tuned guess. See ChunkBuildJob::coarse_only.
+ *
+ * @param params The terrain's params.
+ * @return The level, or null.
+ */
+const TerrainParams::ChunkLod* first_field_lod(const TerrainParams& params);
 
 /**
  * @brief A fingerprint of the two water surfaces a chunk was built with.
@@ -347,6 +367,32 @@ struct ChunkBuildJob {
      * see TerrainChunk::wants_collision. Meaningless without `collision`.
      */
     bool                   collision_only = false;
+    /**
+     * @brief Build only the `field` LOD tiers, skipping the chunk's native tile geometry.
+     *
+     * That skipped mesh_chunk_styled() pass is nearly the whole of a planet chunk's cost: a
+     * planet forces `max_merge = 1`, so every tile emits its own pieces and its own walls, and
+     * the result is resident for as long as the scene runs because a planet never evicts a
+     * chunk. For the overwhelming majority of a globe held in frame, no pixel ever draws it --
+     * the finest `field` tier's `screen_size` is the size at which the renderer starts asking
+     * for LOD 0, and most of a planet is far smaller than that.
+     *
+     * The finest `field` tier becomes the mesh, and therefore LOD 0's buffer region. The
+     * renderer needs no changes for that: select_lod() ignores `thresholds[0]` and draws level 0
+     * for anything above `thresholds[1]`, so the coarse mesh's own finest tier simply stands in.
+     *
+     * Water is still built -- it reads the `pad`, not the mesh, so a coarse and a full build of
+     * the same columns produce the SAME `water_hash`, which is what lets the publish carry the
+     * already-baked WaterBody children across a rebuild instead of blinking every ocean on the
+     * globe each time a chunk promotes.
+     *
+     * Meaningless with `collision`: a collider is what the chunk is SHAPED like, and a character
+     * walking on a quantised field tier -- a different surface depending on where the camera is
+     * -- is worse than no optimisation. TerrainSystem resolves this as `want_coarse &&
+     * !collision`, so a `collision: true` planet behaves exactly as it did before this existed.
+     * With no `field` tier configured it falls back to a full build: a degradation, not a failure.
+     */
+    bool                   coarse_only = false;
     /**
      * @brief Where `gpu_mesh`'s buffers are created. Null leaves `gpu_mesh` null and the CPU
      *        arrays for the caller to upload (what the pure `world` unit tests do).

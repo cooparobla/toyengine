@@ -498,9 +498,15 @@ void WorldGeneratorPanel::draw_world_generator_modal_(imm::Context& ctx) {
                     "gravity pulling toward the centre. Off: a flat map, as always");
         app_.test_rects_["world_generator:Planet"] = ctx.last_rect();
         if (wgen_planet_) {
-            ctx.drag_int("Face Size (tiles)", &wgen_face_tiles_, 0.5f, 16, 512);
+            // 4096, not 512: nothing in the engine or the .terra format ever limited this, and
+            // the flat path two lines below has always allowed 8192. What a big planet costs is
+            // memory -- every chunk of a globe stays resident -- which the Terrain component's
+            // `planet_coarse_builds` is what bounds. See toyengine/world/README.md's planet Cost.
+            ctx.drag_int("Face Size (tiles)", &wgen_face_tiles_, 0.5f, 16, 4096);
             ctx.tooltip("Face Size\nTiles along one edge of each of the six faces the globe is made of; the "
-                        "circumference is four of them");
+                        "circumference is four of them. Cost is this SQUARED -- a globe keeps every chunk "
+                        "it builds -- so turn on the Terrain's Planet coarse builds before going large, and "
+                        "raise Map Cells rather than this if what you want is more detail");
             ctx.drag_float("Gravity (m/s2)", &wgen_gravity_, 0.05f, 0.0f, 50.0f);
             ctx.tooltip("Gravity\nThe planet's pull at its surface (Earth: 9.81). 0: none");
         } else {

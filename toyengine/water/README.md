@@ -59,7 +59,16 @@ parameters) from this module to the renderer each frame.
 
 The material keeps its usual meaning: `albedo` is the deep-water colour, `alpha` the opacity of
 shallow water, `refraction_tint` the Beer-Lambert absorption. `clarity` (on the `WaterBody`) is
-the depth at which water reads ~63% opaque.
+the depth at which water reads ~63% opaque. A body with no `MeshRenderer` of its own -- a
+terrain chunk's water -- has no material to author, so its `deep_color` becomes the albedo of
+the one `WaterSystem` creates for it.
+
+Opacity grows along the water the view ray actually CROSSES, not the depth under the surface,
+so water seen at a glancing angle is as opaque as the same water seen straight down is deep.
+A planet's water (`local_frame`, the `water_planet` shader) goes all the way to opaque, and
+reads any pixel with no opaque geometry behind it -- its sea against open space at the limb --
+as unbounded depth rather than as a shoreline. Flat water stops at 0.94 and keys its opacity on
+the vertical column, as it always has.
 
 ## How it fits together
 

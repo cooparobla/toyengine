@@ -176,7 +176,8 @@ struct LodThreshold {
  * Hysteresis: moving to a COARSER level than `previous` requires size to drop
  * `hysteresis` (a fraction, e.g. 0.1) below that level's threshold, and moving finer
  * requires it to rise that far above -- so an object sitting on a threshold doesn't flicker
- * between two levels every frame. Pass previous = -2 for "no history".
+ * between two levels every frame. Pass previous = -2 for "no history", which resolves to the
+ * FINER side of the band -- see the comment at that branch for why it cannot be the coarse one.
  */
 inline int select_lod(float size, const std::vector<LodThreshold>& thresholds, float cull_size,
                       int previous, float hysteresis) {
@@ -193,7 +194,16 @@ inline int select_lod(float size, const std::vector<LodThreshold>& thresholds, f
     };
 
     const int raw = pick(size);
-    if (previous < -1 || raw == previous) return raw;
+    // No history: the frame an object is first gathered, or the first after it was pruned from
+    // the scene (a planet chunk over the horizon) and lost its entry. Take the FINER side of
+    // the dead band, not the coarse one. Inside the band BOTH levels are stable, so resolving
+    // it on the coarse side made the level depend on how the camera reached a pose rather than
+    // on the pose itself: an object first seen from far away came up coarse, and once the
+    // camera had been closer it could never coarsen back -- permanently, wherever the camera
+    // cannot pull further out than the distance it loaded at. Culling is still decided on the
+    // true size; the margin only shifts which level a visible object gets.
+    if (previous < -1) return raw < 0 ? raw : pick(size / (1.0f - hysteresis));
+    if (raw == previous) return raw;
 
     // Order levels by coarseness with "culled" (-1) coarsest of all.
     auto rank = [n](int level) { return level < 0 ? n : level; };

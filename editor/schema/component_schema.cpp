@@ -655,6 +655,7 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             f_float("flow_slope_gain", 4.0f, 0.05f, 0.0f, 100.0f),
             f_float("obstacle_radius", 1.5f, 0.02f, 0.0f, 50.0f),
             f_float("wake_length", 4.0f, 0.05f, 0.0f, 100.0f),
+            f_color("deep_color", glm::vec3(0.04f, 0.2f, 0.27f)),
             f_color("foam_color", glm::vec3(0.92f, 0.96f, 1.0f)),
             f_float("foam_amount", 1.0f, 0.01f, 0.0f, 4.0f),
             f_float("shore_foam_depth", 0.6f, 0.01f, 0.0f, 20.0f),
@@ -1468,6 +1469,18 @@ std::map<std::string, ComponentSchema>& schema_table_() {
         // filtered by the TileTerrain panel (editor/app/ui/tile_terrain_panel.h); the tooltips
         // here are what it shows. `kind_tile_sets:` is a map only the panel edits.
         auto tile_terrain_fields = [] {
+            // TerrainParams::chunk_lods' own defaults, so the inspector materialising an absent
+            // `lods:` describes what the terrain already does instead of changing it.
+            auto ratio_level = [](float ratio, float screen) {
+                Node n = Node::mapping();
+                n["ratio"] = ratio;
+                n["screen_size"] = screen;
+                return n;
+            };
+            Node lods_default = Node::sequence();
+            lods_default.as_seq().push_back(ratio_level(0.40f, 0.14f));
+            lods_default.as_seq().push_back(ratio_level(0.15f, 0.07f));
+            lods_default.as_seq().push_back(ratio_level(0.07f, 0.03f));
             return std::vector<FieldDesc>{
                 with_tip(f_string("tile_set", "objects/terrain/tileset_round", true),
                          "The tile-set object the terrain is built from -- its pieces shape every edge, corner and "
@@ -1504,9 +1517,29 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                          "Chunks given a collider, around the camera; 0 = every loaded chunk. Ground outside it is not solid"),
                 with_tip(f_float("shadow_distance", 0.0f, 1.0f, 0.0f, 10000.0f),
                          "Metres past which a chunk stops casting shadows; 0 = no limit"),
-                // `lods:` (the chunk meshes' coarser levels) is a list of mappings, which the
-                // inspector has no field kind for -- it stays YAML-only, and survives a save
-                // because the document keeps the component's own node (editor/core/scene_document.h).
+                // The chunk meshes' coarser levels, coarsest last (TerrainParams::ChunkLod). Each
+                // entry is ONE of three kinds, by which key it carries: `ratio` simplifies the full
+                // mesh, `field` re-meshes it as a grid of flat quads, `tile_set` re-stamps it in
+                // another tile set. At most 4 are read; the rest are ignored.
+                f_items("lods", {
+                    with_tip(f_float("screen_size", 0.0f, 0.005f, 0.0f, 2.0f),
+                             "Drawn while the chunk covers less than this fraction of the screen's height -- "
+                             "a BIGGER number takes over closer to the camera"),
+                    with_tip(f_int("field", 0, 0, 127),
+                             "Tiles per flat quad: 1 is one quad per tile (blocky), 16 is one per 16x16. "
+                             "0 = not a field level"),
+                    with_tip(f_float("ratio", 0.0f, 0.005f, 0.0f, 1.0f),
+                             "Fraction of the full mesh's triangles kept by the simplifier. 0 = not a ratio level. "
+                             "The costly kind, and the only one that can be rejected"),
+                    with_tip(f_string("tile_set", ""),
+                             "Re-stamp this level from another tile set (objects/terrain/...) instead. "
+                             "Empty = not a style level; not available on planets"),
+                    with_tip(f_int("native_border", 0, 0, 16),
+                             "Rim tiles kept at full detail, so the chunk's edge still matches its neighbour's"),
+                    with_tip(f_bool("smooth", false),
+                             "Shade this level as a rounded surface instead of hard-edged blocks. Normals only -- "
+                             "same triangles, same seams. Best left off on the first (closest) level"),
+                }, lods_default),
                 with_tip(f_string("physics_material", ""), "physics_materials/<name>.yaml for the colliders (friction, bounce)"),
                 f_material(),
             };

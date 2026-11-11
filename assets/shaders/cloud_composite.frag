@@ -2,13 +2,18 @@
 
 // The volumetric cloud layer over GEOMETRY pixels (CloudOverlayPass): a cloud between a high
 // camera and the ground, or in front of a mountain. Drawn over the lit, fogged and translucent
-// scene with premultiplied alpha (rgb = in-scattered light, a = 1 - transmittance). Sky pixels
-// are left alone: the lighting pass already composited the layer over the sky (sky_physical.glsl).
+// scene with premultiplied alpha (rgb = in-scattered light, a = 1 - transmittance). Bare sky
+// pixels are left alone: the lighting pass already composited the layer over the sky
+// (sky_physical.glsl).
 //
 // A depth-aware upsample of the half-resolution layer (sky_cloud_resolve.frag): each tap packs
 // the clouds' distance (cloud space, sky_cloud_common.glsl), and a tap whose clouds lie behind this
 // pixel's surface is dropped -- so the layer never bleeds onto a tower that rises into it from
 // the blocks around its silhouette, which were marched to the ground behind.
+//
+// Sky pixels are left alone ONLY when nothing transparent covers them: a water surface drawn
+// over open sky is still a surface the clouds belong in front of, and the water was drawn after
+// the lighting pass put the clouds on that sky. See the surface/coverage block in main().
 
 #include "sky_cloud_common.glsl"
 
@@ -18,16 +23,30 @@ layout(location = 0) out vec4 out_color;
 layout(set = 0, binding = 0) uniform sampler2D g_normal;     // nearest
 layout(set = 0, binding = 1) uniform sampler2D g_position;   // nearest: world position
 layout(set = 0, binding = 2) uniform sampler2D u_clouds;     // nearest: the reconstructed layer
+layout(set = 0, binding = 3) uniform sampler2D u_coverage;   // nearest: transparent coverage
 
 layout(push_constant) uniform CompositeParams {
     vec4 camera;   // xyz = camera position (world), w = cloud scale (world m per cloud m)
     vec4 region;   // x = the fraction of the cloud target the march filled
+                   // y = 1 when u_coverage holds this frame's transparent coverage, else 0
 } pc;
 
 void main() {
     vec3 N = texture(g_normal, in_uv).rgb;
-    if (dot(N, N) < 0.001) discard;
-    float surface = distance(texture(g_position, in_uv).xyz, pc.camera.xyz);
+    // The surface this pixel's clouds have to stay behind. Normally the opaque geometry. Where
+    // there is none, a TRANSPARENT surface covering the pixel instead (TransparentPass's
+    // coverage attachment: reciprocal camera distance, 0 = nothing there) -- a planet's sea at
+    // the limb is exactly that, a water surface over open sky, and because the lighting pass
+    // had already composited the clouds onto that sky the water then drew straight over them.
+    // With neither, this is bare sky and the lighting pass has already done the whole job.
+    float surface;
+    if (dot(N, N) >= 0.001) {
+        surface = distance(texture(g_position, in_uv).xyz, pc.camera.xyz);
+    } else {
+        float coverage = pc.region.y > 0.5 ? texture(u_coverage, in_uv).r : 0.0;
+        if (coverage <= 0.0) discard;
+        surface = 1.0 / coverage;
+    }
 
     ivec2 tsize = textureSize(u_clouds, 0);
     ivec2 size = clamp(ivec2(floor(vec2(tsize) * pc.region.x + 0.5)), ivec2(1), tsize);

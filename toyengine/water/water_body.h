@@ -74,6 +74,11 @@ public:
     float wake_length     = 4.0f;
 
     // --- Look (packed into PBRMaterial::shader_params_ext; see water_surface.glsl) ---
+    /// Deep-water colour: what the surface reads as once its depth has made it opaque. Only
+    /// reaches the GPU through the material WaterSystem creates for a body that has no
+    /// MeshRenderer of its own (a terrain chunk's water, or a bare authored body); a body with
+    /// an authored MeshRenderer takes its colour from that material's `albedo` instead.
+    glm::vec3 deep_color{0.04f, 0.2f, 0.27f};
     glm::vec3 foam_color{0.92f, 0.96f, 1.0f};
     float     foam_amount      = 1.0f;   ///< Overall foam multiplier.
     float     shore_foam_depth = 0.6f;   ///< Water depth (m) under which shore/contact foam forms.

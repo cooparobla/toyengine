@@ -399,6 +399,7 @@ void ToyRenderPipeline::record_scene_(coopa::gfx::command::CommandBuffer& cmd, c
         gpu_mark_(cmd, GpuScope::RefractionMips);
     }
 
+    bool coverage_valid = false;
     if (config_.transparency_enabled) {
         // Per-frame globals for the forward MESH pass, from the same config_ fields the SDF path's
         // own globals() fill uses -- in particular config_.indirect, shared with SsrPass::Params so
@@ -427,10 +428,15 @@ void ToyRenderPipeline::record_scene_(coopa::gfx::command::CommandBuffer& cmd, c
         if (transparent_ran) {
             transition_gbuffer_depth_to_shader_read_(cmd, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
         }
+        // ...and only when the device could give the coverage attachment its own blend state.
+        // Without independentBlend it shares the colour's Alpha and holds nothing meaningful.
+        coverage_valid = transparent_ran && device_.supports_independent_blend();
         gpu_mark_(cmd, GpuScope::Transparent);
     }
 
-    record_cloud_overlay_(cmd, ctx);
+    // transparent_coverage_ holds this frame's coverage only if the transparent pass actually
+    // ran; otherwise the overlay must fall back to the opaque geometry alone.
+    record_cloud_overlay_(cmd, ctx, coverage_valid);
 }
 
 void ToyRenderPipeline::record_post_chain_(coopa::gfx::command::CommandBuffer& cmd, const FrameContext& ctx) {
@@ -1181,9 +1187,15 @@ bool ToyRenderPipeline::record_transparent_(coopa::gfx::command::CommandBuffer& 
         return glm::dot(da, da) > glm::dot(db, db); // back-to-front (farthest first)
     });
 
+    // Bracket::Draw attaches the coverage image alongside the HDR colour, so every BLEND
+    // fragment records how far away it is (TransparentPass's file doc). The guests that reopen
+    // this bracket -- record_fog_(), record_cloud_overlay_() -- stay on the two-attachment
+    // pass, which is what lets the overlay SAMPLE what is written here.
     transparent_pass_->set_targets(hdr_target_view, gbuffer_target_.depth_view(),
-                                   render_extent_.width, render_extent_.height);
-    transparent_pass_->begin(cmd, gbuffer_target_.depth_image_handle(), depth_layout);
+                                   render_extent_.width, render_extent_.height,
+                                   transparent_coverage_->view());
+    transparent_pass_->begin(cmd, gbuffer_target_.depth_image_handle(), depth_layout,
+                             coopa::gfx::engine::passes::TransparentPass::Bracket::Draw);
 
     // Frame-level lighting/indirect/SSR/refraction tuning lives in forward_globals_'s UBO
     // (set 6, bound below via bind_extra()), filled and uploaded once per frame in
@@ -1470,6 +1482,10 @@ void ToyRenderPipeline::fill_forward_globals_(ForwardGlobals& g) const {
     }
     g.water_ripple_info = glm::vec4(static_cast<float>(n), static_cast<float>(water_state_.ripple_layers),
                                     water_state_.detail_distance, water_state_.ripple_range);
+    // The same submerged fact UnderwaterPass is driven by. A planet's water surface is a sphere,
+    // so the shader cannot decide "the camera is below this fragment" from world Z the way flat
+    // water does -- it reads this instead (see water_surface.glsl's underside branch).
+    g.water_view = glm::vec4(water_state_.underwater ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
 }
 
 passes::ParticlePass::PushConstants ToyRenderPipeline::particle_push_constants_(const ParticleDrawBatch& b) const {

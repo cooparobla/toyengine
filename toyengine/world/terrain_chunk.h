@@ -244,6 +244,21 @@ void mesh_chunk_field(const ColumnPad& pad, const TerrainParams& params, std::in
                       std::int32_t native_border, ChunkMeshData& out);
 
 /**
+ * @brief Averages `mesh`'s normals across the faces meeting at each position, so a level built
+ *        from flat quads shades as a rounded surface instead of a staircase.
+ *
+ * What `TerrainParams::ChunkLod::smooth` turns on, applied to a re-meshed level before it is
+ * welded. Positions, triangles and counts are untouched -- this only rewrites `normal` (and the
+ * tangent derived from it), so the level keeps the tallest-column seam rule that lets chunks at
+ * different levels overlap rather than crack. Faces are weighted by area, and a position whose
+ * faces cancel keeps the flat normal it already had.
+ *
+ * Call it in the level's own space, before any planet warp: shared corners are exact grid values
+ * there, and the warp carries the result onto the globe unchanged.
+ */
+void smooth_field_normals(ChunkMeshData& mesh);
+
+/**
  * @brief A static collision mesh of a chunk's drawn surface (welded, with adjacency and a BVH),
  *        or null for an empty chunk. Pure; run on the chunk's worker.
  */

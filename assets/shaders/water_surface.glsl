@@ -74,6 +74,12 @@
  * The constant is the LOD rule's ~8 px, with room for the coarser tiers' lod_bias.
  */
 const float WATER_BAKED_EDGE_PIXELS = 12.0;
+
+/// The water column read when nothing opaque lies behind a pixel, so there is no bed to measure
+/// against (a planet's sea at the limb -- see the fragment stage's depth block). Large enough
+/// that Beer-Lambert saturates and every depth-keyed band switches off, small enough to stay
+/// well inside fp32 once fwidth() has differenced it.
+const float WATER_UNBOUNDED_DEPTH = 1.0e6;
 vec2 water_baked_lod(float pixel_scale) {
     return vec2(WATER_BAKED_EDGE_PIXELS / max(pixel_scale, 1.0), 1.0e9);
 }
@@ -149,11 +155,17 @@ void gfx_surface_vertex(inout GfxSurfaceVertex v) {
         blend /= max(blend.x + blend.y + blend.z, 1e-4);
         float atten = water_depth_attenuation(depth, gfx_params.y);
         float view  = distance(camera.camera_pos, v.position_ws);
+        // The same mesh-LOD rule the flat path below uses. Handing water_gerstner() the raw
+        // gfx_tess_lod meant vec2(0) on an untessellated draw, which water_wave_mesh_fade()
+        // reads as "the mesh holds every wave": nothing was faded out of the displacement, so
+        // the fragment stage had nothing to shade back in and a planet's sea went smooth past
+        // the detail distance -- a mirror, at exactly the grazing angles where it fills the view.
+        vec2  mesh_lod = gfx_tess_lod.y > 0.0 ? gfx_tess_lod : water_baked_lod(camera.jitter_ndc.z);
         float h = 0.0, crest = 0.0;
         vec3  tilt = vec3(0.0);
         for (int k = 0; k < 3; ++k) {
             if (blend[k] < 0.02) continue;
-            WaterWave w = water_gerstner(wave_base, water_plane_coords(v.position_ws, k), gfx_time.w, atten, view, gfx_tess_lod);
+            WaterWave w = water_gerstner(wave_base, water_plane_coords(v.position_ws, k), gfx_time.w, atten, view, mesh_lod);
             h     += blend[k] * w.displacement.z;
             tilt  += blend[k] * water_plane_lift(w.normal.xy, k);
             crest += blend[k] * w.crest;
@@ -303,7 +315,10 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
     // pixel: a tessellated draw's own params (packed in refraction_ior_flags.zw), or the baked
     // tile LOD rule. Shading them here rather than displacing them is what keeps a tile's
     // surface the same whichever LOD it is drawn at -- see water_baked_lod().
-#ifndef WATER_LOCAL_FRAME
+    //
+    // A planet's sea takes the same treatment, through the one plane its ripples already use
+    // rather than all three: the dominant plane is what every other per-pixel term here is
+    // computed in, and following it keeps the residual consistent with them.
     {
         uvec2 tess_bits = floatBitsToUint(material.refraction_ior_flags.zw);
         vec2 mesh_lod = tess_bits.x != 0u
@@ -313,13 +328,36 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
         slope += water_gerstner_residual_slope(vec4(gfx_params.x * wave_scale, gfx_params.yzw), pos,
                                                gfx_time.w, view_dist, mesh_lod);
     }
-#endif
 #ifdef WATER_LOCAL_FRAME
     s.normal_ws = normalize(s.normal_ws - water_plane_lift(slope, plane));
 #else
     s.normal_ws = normalize(s.normal_ws - vec3(slope, 0.0));
 #endif
+    // Past the detail distance the ripples above are skipped, and the surface stands in for them
+    // by going rougher -- the filtered look of the detail it no longer draws.
+    //
+    // How rough matters for more than blur. The grazing Fresnel the sky reflection is weighted by
+    // tops out at max(1 - roughness, F0) (gfx/brdf.glsl's fresnel_schlick_roughness: at a grazing
+    // angle its (1 - cos)^5 term is 1), so the floor is directly how much sky a distant surface
+    // hands back. A planet's sea is seen edge-on all the way to its horizon, where 0.2 returned
+    // ~80% of a sky PlanetAtmosphere has already repainted pale -- opaque water reading as a
+    // continuation of the sky. 0.6 halves that, and is the better description anyway: a pixel of
+    // distant sea spans many waves, so the spread of normals inside it is wide, not mirror-flat.
+#ifdef WATER_LOCAL_FRAME
+    const float far_roughness = 0.6;
+    // Distance alone is the wrong measure of "too small to draw". What a pixel actually covers
+    // is the FORESHORTENED footprint, view_dist / NdotV, and on a sphere the horizon is grazing
+    // long before it is far: from a few metres up it sits ~60 m away, well inside the detail
+    // distance, so the surface kept its mirror roughness exactly where a pixel spans hundreds of
+    // metres of sea. Rough it by the footprint as well as by range -- whichever says the detail
+    // is unresolvable wins.
+    float ndv_f     = max(dot(s.normal_ws, normalize(camera.camera_pos - s.position_ws)), 1e-3);
+    float footprint = view_dist / ndv_f;
+    float filtered  = max(1.0 - detail, smoothstep(0.6 * detail_distance, detail_distance, footprint));
+    s.roughness = mix(s.roughness, max(s.roughness, far_roughness), filtered);
+#else
     s.roughness = mix(max(s.roughness, 0.2), s.roughness, detail);
+#endif
 
     // --- The underside, seen from below (water is two-sided; the backbone has already turned
     // the normal to face the viewer). Light leaving water refracts with the inverse IOR, so
@@ -331,7 +369,14 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
     // itself (tessellated water resolves those), which should read as more water, not as a dark
     // underside mirror.
 #ifdef WATER_LOCAL_FRAME
-    if (!gl_FrontFacing) {   // a planet's water has no world "below": its back faces are its underside
+    // A planet's water has no world "below" to compare against -- its surface is a sphere -- so
+    // the submerged test comes from the frame (forward_globals.water_view.x, the same fact that
+    // selects UnderwaterPass's look). Facing ALONE is not that test: seen from above, the far
+    // slope of every wave at a grazing angle, everything past the horizon tangent, and the
+    // un-occluded far-side sea (open ocean emits no bed faces to hide it) are all back-facing,
+    // and taking them for an underside turned the whole horizon band into a 0.12-alpha window
+    // onto the sky -- the case the comment above says must read as more water.
+    if (!gl_FrontFacing && forward_globals.water_view.x > 0.5) {
 #else
     if (!gl_FrontFacing && camera.camera_pos.z < s.position_ws.z) {
 #endif
@@ -373,18 +418,48 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
     float ray_len  = length(view_pos.xyz) * max(ratio - 1.0, 0.0); // water traversed by the view ray
     vec3  V        = normalize(camera.camera_pos - s.position_ws);
 #ifdef WATER_LOCAL_FRAME
+    // `depth` stays the water COLUMN: the shore, contact and foam bands below are about where
+    // the bed meets the surface, which is a vertical question however the pixel is viewed.
     float depth    = ray_len * abs(dot(V, s.normal_ws));          // ~depth along the surface's up
+    // Nothing opaque behind this pixel: the view ray crossed the sea and left the planet for
+    // space. A ring of the ocean does exactly that seen from orbit -- the sea's silhouette
+    // stands a sea level further out than the bed's, so over that ring there is no bed at all.
+    // Both lengths above are then meaningless (`ray_len` runs to the far plane, and the column
+    // it projects onto collapses as dot(V, N) goes to zero at the limb), so read the column as
+    // unbounded: fully deep, no edge fade, and no shore band mistaking it for a beach.
+    if (ndc_z >= 1.0 - 1e-6) {
+        depth   = WATER_UNBOUNDED_DEPTH;
+        ray_len = WATER_UNBOUNDED_DEPTH;
+    }
+    // Opacity integrates over the OPTICAL PATH, not the column: light crosses `ray_len` of
+    // water, and at a grazing angle that is far longer than the depth under the surface. Keyed
+    // on the column instead, the sea read thinnest exactly where it should go opaque.
+    float path     = ray_len;
 #else
     float depth    = ray_len * abs(V.z);                          // ~vertical water depth
+    float path     = depth;
 #endif
 
     // Shallow-to-deep: Beer-Lambert over the real depth, and opacity rising toward the
     // material's deep colour. `clarity` arrives in the (otherwise overwritten) thickness slot.
     float clarity = max(s.thickness, 1e-3);
-    float deep    = 1.0 - exp(-depth / clarity);
+    float deep    = 1.0 - exp(-path / clarity);
     float edge    = smoothstep(0.0, edge_depth, depth);
-    s.alpha       = mix(s.alpha, 0.94, deep) * edge;
-    s.thickness   = min(depth, clarity * 2.0) * edge;
+    // `edge` is the SHALLOW end's contact fade -- it hides the hard line where the surface meets
+    // its bed -- so it is applied to the shallow term rather than to the finished alpha. Keyed on
+    // the column, which a grazing ray over a CURVED sea can collapse toward zero even where the
+    // optical path is hundreds of metres (the flat-plane cancellation of ray_len's 1/cos against
+    // the cos does not hold across a long arc), multiplying it into the result let the horizon
+    // fade out of water that is anything but shallow. Where `deep` is 1 the fade cannot apply;
+    // where `deep` is 0 this is exactly what it always was.
+#ifdef WATER_LOCAL_FRAME
+    // Reaches 1.0, where a lake stops at 0.94: a planet's sea is seen against space, and a few
+    // percent of a transmitted star field is plainly visible through it (bloom then finds it).
+    s.alpha       = mix(s.alpha * edge, 1.0, deep);
+#else
+    s.alpha       = mix(s.alpha * edge, 0.94, deep);
+#endif
+    s.thickness   = min(path, clarity * 2.0) * edge;
 
     // --- Shore and contact foam: a broken band hugging every intersection ---
     // How far the measured depth moves across this pixel. `depth` is a single tap of the depth

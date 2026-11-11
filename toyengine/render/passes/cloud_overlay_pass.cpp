@@ -47,7 +47,8 @@ CloudOverlayPass::CloudOverlayPass(coopa::gfx::core::Device& device, coopa::gfx:
 
 void CloudOverlayPass::set_inputs(coopa::gfx::TextureView g_normal, coopa::gfx::TextureView g_position,
                 VkImageView weather, VkImageView shape, VkSampler noise_sampler,
-                coopa::gfx::TextureView volumetric_layer) {
+                coopa::gfx::TextureView volumetric_layer,
+                coopa::gfx::TextureView transparent_coverage) {
     for (uint32_t i = 0; i < frames_; ++i) {
         auto& f = flat_stage_.set(0, i);
         f.bind_image(0, g_normal, nearest_);
@@ -60,6 +61,7 @@ void CloudOverlayPass::set_inputs(coopa::gfx::TextureView g_normal, coopa::gfx::
     c.bind_image(0, g_normal, nearest_);
     c.bind_image(1, g_position, nearest_);
     c.bind_image(2, volumetric_layer, nearest_);
+    c.bind_image(3, transparent_coverage, nearest_);
 }
 
 void CloudOverlayPass::draw_flat(coopa::gfx::command::CommandBuffer& cmd, uint32_t frame_slot,
@@ -112,7 +114,8 @@ coopa::gfx::engine::passes::FullscreenStageDesc CloudOverlayPass::describe_compo
     d.owned_sets = {
         {{0, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
          {1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
-         {2, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},
+         {2, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
+         {3, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},
     };
     d.push_constants = {{ShaderStage::Fragment, 0, static_cast<uint32_t>(sizeof(CompositePush))}};
     d.blend = coopa::gfx::pipeline::BlendMode::PremultipliedAlpha;

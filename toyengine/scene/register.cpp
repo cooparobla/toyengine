@@ -986,21 +986,36 @@ void register_scene_components(coopa::gfx::core::Device& device,
                         if (i >= world::TerrainParams::k_max_chunk_lods) break;
                         if (!level.is_mapping()) continue;
                         world::TerrainParams::ChunkLod& out = params.chunk_lods[i++];
-                        if (level.contains("ratio")) out.ratio = level.at("ratio").get_value<float>();
-                        if (level.contains("screen_size")) out.screen_size = level.at("screen_size").get_value<float>();
-                        if (level.contains("tile_set")) {
+                        // Every numeric read is guarded on the node actually being a number: the
+                        // inspector's "Add lods" button seeds a new entry with EMPTY strings for
+                        // its sub-fields (editor/schema/inspector.cpp), which a scene can be saved
+                        // with before the user has touched them, and get_value<int>() on a string
+                        // throws. A blank field simply leaves that level at its default.
+                        auto num = [](const fkyaml::node& n) { return n.is_integer() || n.is_float_number(); };
+                        if (level.contains("ratio") && num(level.at("ratio"))) {
+                            out.ratio = level.at("ratio").get_value<float>();
+                        }
+                        if (level.contains("screen_size") && num(level.at("screen_size"))) {
+                            out.screen_size = level.at("screen_size").get_value<float>();
+                        }
+                        // Shading only -- see TerrainParams::ChunkLod::smooth.
+                        if (level.contains("smooth") && level.at("smooth").is_boolean()) {
+                            out.smooth = level.at("smooth").get_value<bool>();
+                        }
+                        if (level.contains("tile_set") && level.at("tile_set").is_string() &&
+                            !level.at("tile_set").get_value<std::string>().empty()) {
                             const std::string path = level.at("tile_set").get_value<std::string>();
                             int style = style_named(path);
                             if (style < 0) style = add_style(path, path);
                             out.style = static_cast<std::int8_t>(style);
                         }
-                        if (level.contains("native_border")) {
+                        if (level.contains("native_border") && num(level.at("native_border"))) {
                             out.native_border = static_cast<std::int8_t>(level.at("native_border").get_value<int>());
                         }
                         // A quantised heightfield level (mesh_chunk_field()): `field` tiles per
                         // cell, in place of `ratio`'s simplification or `tile_set`'s re-stamp.
                         // The one re-meshed level a planet can carry.
-                        if (level.contains("field")) {
+                        if (level.contains("field") && num(level.at("field"))) {
                             const int stride = level.at("field").get_value<int>();
                             out.field_stride = static_cast<std::int8_t>(
                                 std::clamp(stride, 1, std::min(127, std::max(1, params.chunk_size))));

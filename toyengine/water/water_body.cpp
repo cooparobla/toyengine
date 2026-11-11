@@ -46,6 +46,7 @@ void copy_water_settings(const WaterBody& from, WaterBody& to) {
     to.flow_slope_gain = from.flow_slope_gain;
     to.obstacle_radius = from.obstacle_radius;
     to.wake_length = from.wake_length;
+    to.deep_color = from.deep_color;
     to.foam_color = from.foam_color;
     to.foam_amount = from.foam_amount;
     to.shore_foam_depth = from.shore_foam_depth;

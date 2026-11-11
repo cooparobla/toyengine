@@ -10,6 +10,26 @@
  * a depth buffer this pass ever writes) -- pipeline::RenderPass hardcodes
  * VK_ATTACHMENT_LOAD_OP_CLEAR and does not support attaching an externally-owned depth
  * image.
+ *
+ * Two render passes, over the same colour and depth images:
+ *
+ *  - render_pass() -- colour + depth. What a GUEST opens (toyengine's FogPass before the
+ *    transparents, its CloudOverlayPass after them): a fullscreen stage that only needs the
+ *    HDR image and the opaque depth, and in the overlay's case SAMPLES the coverage
+ *    attachment below, which it therefore must not have attached.
+ *  - draw_render_pass() -- colour + COVERAGE + depth. What this pass's own geometry draws
+ *    into, and what a sibling drawing in the same bracket (SdfForwardPass, toyengine's
+ *    ParticlePass) builds its pipeline against.
+ *
+ * The coverage attachment answers a question the depth buffer cannot: transparents are
+ * depth-tested but never depth-WRITTEN (so they never occlude each other), which leaves
+ * every later pass unable to tell that a BLEND surface covers a pixel at all. A pass that
+ * composites something ordered against the scene -- the volumetric cloud layer -- then has
+ * only the opaque geometry behind the water to test against, and over water with no opaque
+ * geometry behind it at all (a planet's sea at the limb) nothing to test against whatever.
+ * Each fragment writes the RECIPROCAL of its camera distance, blended with BlendMode::Max,
+ * so the attachment ends up holding the nearest transparent surface per pixel regardless of
+ * draw order, and 0 -- the clear value -- means "no transparent surface here".
  */
 
 #ifndef GFXCOOPA_ENGINE_PASSES_TRANSPARENT_PASS_H
@@ -133,7 +153,8 @@ public:
         vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
 
-        create_render_pass_();
+        render_pass_      = build_render_pass_(/*with_mask=*/false);
+        draw_render_pass_ = build_render_pass_(/*with_mask=*/true);
 
         // Cached as a member: add_variant() below builds additional pipelines against this
         // exact descriptor set layout list -- a derived shader's own vertex/fragment pair
@@ -156,6 +177,9 @@ public:
 
     ~TransparentPass() {
         destroy_framebuffer_();
+        if (draw_render_pass_ != VK_NULL_HANDLE) {
+            vkDestroyRenderPass(device_.handle(), draw_render_pass_, nullptr);
+        }
         if (render_pass_ != VK_NULL_HANDLE) {
             vkDestroyRenderPass(device_.handle(), render_pass_, nullptr);
         }
@@ -163,6 +187,12 @@ public:
 
     TransparentPass(const TransparentPass&) = delete;
     TransparentPass& operator=(const TransparentPass&) = delete;
+
+    /// @brief Which of the pass's two render passes begin() opens -- see the file doc.
+    enum class Bracket {
+        Guest,  ///< colour + depth. A fullscreen guest, which may sample the coverage image.
+        Draw,   ///< colour + coverage + depth. This pass's own geometry, and its siblings'.
+    };
 
     /**
      * @brief Points the pass at the current frame's targets, rebuilding the framebuffer
@@ -173,32 +203,48 @@ public:
      * @param gbuffer_depth_view The G-Buffer's depth view, bound read-only.
      * @param width  Render width.
      * @param height Render height.
+     * @param coverage_view The coverage attachment (see the file doc), needed only to open
+     *                      Bracket::Draw. Null builds the guest framebuffer alone -- but pass
+     *                      it at EVERY site regardless, guests included: it is part of the
+     *                      cache key, so a caller alternating between null and a real view
+     *                      destroys and rebuilds both framebuffers on every call, one of which
+     *                      a previous frame may still be reading.
      */
     void set_targets(VkImageView color_view, VkImageView gbuffer_depth_view,
-                     uint32_t width, uint32_t height) {
+                     uint32_t width, uint32_t height,
+                     VkImageView coverage_view = VK_NULL_HANDLE) {
         if (framebuffer_ != VK_NULL_HANDLE &&
             color_view == color_view_ && gbuffer_depth_view == depth_view_ &&
-            width == width_ && height == height_) {
+            coverage_view == coverage_view_ && width == width_ && height == height_) {
             return;
         }
         destroy_framebuffer_();
-        color_view_ = color_view;
-        depth_view_ = gbuffer_depth_view;
-        width_      = width;
-        height_     = height;
-
-        VkImageView views[2] = { color_view_, depth_view_ };
+        color_view_    = color_view;
+        depth_view_    = gbuffer_depth_view;
+        coverage_view_ = coverage_view;
+        width_         = width;
+        height_        = height;
 
         VkFramebufferCreateInfo fb_info{};
         fb_info.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        fb_info.renderPass      = render_pass_;
-        fb_info.attachmentCount = 2;
-        fb_info.pAttachments    = views;
         fb_info.width           = width_;
         fb_info.height          = height_;
         fb_info.layers          = 1;
 
+        VkImageView guest_views[2] = { color_view_, depth_view_ };
+        fb_info.renderPass      = render_pass_;
+        fb_info.attachmentCount = 2;
+        fb_info.pAttachments    = guest_views;
         GFX_VK_CHECK(vkCreateFramebuffer(device_.handle(), &fb_info, nullptr, &framebuffer_));
+
+        if (coverage_view_ != VK_NULL_HANDLE) {
+            // Attachment order matches build_render_pass_(with_mask = true): colour, coverage, depth.
+            VkImageView draw_views[3] = { color_view_, coverage_view_, depth_view_ };
+            fb_info.renderPass      = draw_render_pass_;
+            fb_info.attachmentCount = 3;
+            fb_info.pAttachments    = draw_views;
+            GFX_VK_CHECK(vkCreateFramebuffer(device_.handle(), &fb_info, nullptr, &draw_framebuffer_));
+        }
     }
 
     /**
@@ -212,9 +258,11 @@ public:
      * @param cmd                 Command buffer to record into.
      * @param gbuffer_depth       The G-Buffer depth VkImage (for the barrier).
      * @param depth_current_layout The image's layout on entry.
+     * @param bracket             Which render pass to open -- see Bracket. Draw requires a
+     *                            coverage view to have been given to set_targets().
      */
     void begin(coopa::gfx::command::CommandBuffer& cmd, VkImage gbuffer_depth,
-              VkImageLayout depth_current_layout) {
+              VkImageLayout depth_current_layout, Bracket bracket = Bracket::Guest) {
         const bool from_shader_read = (depth_current_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
         VkImageMemoryBarrier barrier{};
@@ -240,7 +288,18 @@ public:
                              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
                              0, 0, nullptr, 0, nullptr, 1, &barrier);
 
-        cmd.begin_render_pass(render_pass_, framebuffer_, {width_, height_});
+        const bool draw = bracket == Bracket::Draw && draw_framebuffer_ != VK_NULL_HANDLE;
+        if (draw) {
+            // One entry per attachment, in attachment order. Colour and depth are LOAD, so
+            // their values are ignored and only the coverage clear matters: 0 = "no
+            // transparent surface" (the attachment holds reciprocal distance, file doc).
+            VkClearValue clears[3]{};
+            clears[1].color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+            clears[2].depthStencil = {1.0f, 0};
+            cmd.begin_render_pass(draw_render_pass_, draw_framebuffer_, {width_, height_}, clears, 3);
+        } else {
+            cmd.begin_render_pass(render_pass_, framebuffer_, {width_, height_});
+        }
 
         // Negative-height viewport for the Vulkan Y-flip, matching every other geometry
         // target in this engine (gbuffer_target.h, offscreen_target.h).
@@ -371,6 +430,17 @@ public:
     /// per item without ever closing and reopening the render pass).
     VkRenderPass render_pass() const { return render_pass_; }
 
+    /// @brief The render pass this pass's own GEOMETRY draws into: colour + coverage +
+    /// depth (see the file doc). A sibling drawing inside the same Bracket::Draw bracket
+    /// must build its pipelines against THIS one, with two colour attachments, and leave
+    /// the coverage attachment alone (BlendMode::NoWrite) unless its fragment shader
+    /// declares an output for it.
+    VkRenderPass draw_render_pass() const { return draw_render_pass_; }
+
+    /// @brief The coverage attachment's format, for a sibling building a pipeline or an
+    /// owner allocating the image.
+    static constexpr VkFormat coverage_format() { return VK_FORMAT_R16_SFLOAT; }
+
 private:
     struct Variant {
         std::unique_ptr<coopa::gfx::pipeline::Shader> vert_shader;
@@ -406,20 +476,33 @@ private:
         desc.blend.mode    = coopa::gfx::pipeline::BlendMode::Alpha;   // src-alpha-over (pipeline.h)
         // detail::RawRenderPass's Pipeline ctor has no RenderPass to read samples()/
         // color_attachment_count() from (see pipeline.h) -- this pass is always single-sampled,
-        // single-color-attachment, so BlendState's defaults (0 => derive from RenderPass) don't
-        // apply; set it explicitly.
-        desc.blend.color_attachment_count = 1;
+        // so BlendState's defaults (0 => derive from RenderPass) don't apply; set it explicitly.
+        // Two colour attachments: the HDR image, alpha-blended, and the coverage attachment,
+        // which must take the NEAREST of overlapping fragments rather than the last one drawn
+        // (see the file doc) -- hence Max over a reciprocal distance.
+        desc.blend.color_attachment_count = 2;
+        // Per-attachment modes need VkPhysicalDeviceFeatures::independentBlend; without it the
+        // spec requires every attachment to be identical, so the coverage attachment shares the
+        // colour's Alpha and its contents are meaningless -- ToyRenderPipeline then never tells
+        // the cloud composite to read them (see coverage_usable()).
+        if (device_.supports_independent_blend()) {
+            desc.blend.attachment_modes = { coopa::gfx::pipeline::BlendMode::Alpha,
+                                            coopa::gfx::pipeline::BlendMode::Max };
+        }
 
-        // render_pass_ is a hand-built raw VkRenderPass (LOAD_OP_LOAD on both attachments,
+        // draw_render_pass_ is a hand-built raw VkRenderPass (LOAD_OP_LOAD on colour and depth,
         // externally-owned depth -- see this class's file doc for why pipeline::RenderPass can't
         // express it), so the sealed Pipeline ctor's detail::RawRenderPass escape hatch is used
         // here instead of the normal pipeline::RenderPass overload.
         return std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device_, coopa::gfx::detail::RawRenderPass{render_pass_}, desc);
+            device_, coopa::gfx::detail::RawRenderPass{draw_render_pass_}, desc);
     }
 
-    void create_render_pass_() {
-        VkAttachmentDescription attachments[2]{};
+    /// @brief Builds one of the pass's two render passes (see the file doc). `with_mask`
+    /// inserts the coverage attachment between the colour and the depth.
+    VkRenderPass build_render_pass_(bool with_mask) {
+        VkAttachmentDescription attachments[3]{};
+        const uint32_t depth_index = with_mask ? 2u : 1u;
 
         // 0: the live HDR colour image. Both OffscreenTarget instances this pass can be
         // pointed at (the raw offscreen target and the SSR composite target) leave their
@@ -433,7 +516,24 @@ private:
         attachments[0].initialLayout  = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         attachments[0].finalLayout    = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-        // 1: the G-Buffer's own depth image, read-only -- this pass tests against it but
+        // 1 (with_mask only): the coverage attachment -- nearest transparent surface, as a
+        // reciprocal distance (file doc). CLEAR every frame, because what it must say is
+        // "what covers this pixel NOW" and a stale frame's coverage is worse than none.
+        // initialLayout UNDEFINED is what makes that free: it is legal whatever layout the
+        // image is actually in, so nothing has to barrier the image into place beforehand,
+        // and finalLayout hands it to the overlay that samples it already transitioned.
+        if (with_mask) {
+            attachments[1].format         = coverage_format();
+            attachments[1].samples        = VK_SAMPLE_COUNT_1_BIT;
+            attachments[1].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            attachments[1].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+            attachments[1].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            attachments[1].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+            attachments[1].finalLayout    = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+
+        // The LAST attachment: the G-Buffer's own depth image, read-only -- this pass tests against it but
         // never writes it.
         //
         // storeOp MUST be STORE, even though nothing here modifies depth. DONT_CARE does
@@ -459,22 +559,25 @@ private:
         // see a spurious WRITE_AFTER_WRITE. toyengine's
         // transition_gbuffer_depth_to_shader_read_() already covers that with a deliberately
         // conservative ALL_COMMANDS_BIT source stage -- see its own comment.
-        attachments[1].format         = VK_FORMAT_D32_SFLOAT;
-        attachments[1].samples        = VK_SAMPLE_COUNT_1_BIT;
-        attachments[1].loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
-        attachments[1].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
-        attachments[1].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        attachments[1].initialLayout  = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-        attachments[1].finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        attachments[depth_index].format         = VK_FORMAT_D32_SFLOAT;
+        attachments[depth_index].samples        = VK_SAMPLE_COUNT_1_BIT;
+        attachments[depth_index].loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
+        attachments[depth_index].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+        attachments[depth_index].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachments[depth_index].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[depth_index].initialLayout  = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        attachments[depth_index].finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 
-        VkAttachmentReference color_ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-        VkAttachmentReference depth_ref{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL};
+        VkAttachmentReference color_refs[2]{
+            {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
+            {1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
+        };
+        VkAttachmentReference depth_ref{depth_index, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL};
 
         VkSubpassDescription subpass{};
         subpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount    = 1;
-        subpass.pColorAttachments       = &color_ref;
+        subpass.colorAttachmentCount    = with_mask ? 2u : 1u;
+        subpass.pColorAttachments       = color_refs;
         subpass.pDepthStencilAttachment = &depth_ref;
 
         // Two dependencies: the tonemapper reads the colour image after we're done with
@@ -500,14 +603,16 @@ private:
 
         VkRenderPassCreateInfo rp_info{};
         rp_info.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        rp_info.attachmentCount = 2;
+        rp_info.attachmentCount = with_mask ? 3u : 2u;
         rp_info.pAttachments    = attachments;
         rp_info.subpassCount    = 1;
         rp_info.pSubpasses      = &subpass;
         rp_info.dependencyCount = 2;
         rp_info.pDependencies   = deps;
 
-        GFX_VK_CHECK(vkCreateRenderPass(device_.handle(), &rp_info, nullptr, &render_pass_));
+        VkRenderPass rp = VK_NULL_HANDLE;
+        GFX_VK_CHECK(vkCreateRenderPass(device_.handle(), &rp_info, nullptr, &rp));
+        return rp;
     }
 
     void destroy_framebuffer_() {
@@ -515,15 +620,22 @@ private:
             vkDestroyFramebuffer(device_.handle(), framebuffer_, nullptr);
             framebuffer_ = VK_NULL_HANDLE;
         }
+        if (draw_framebuffer_ != VK_NULL_HANDLE) {
+            vkDestroyFramebuffer(device_.handle(), draw_framebuffer_, nullptr);
+            draw_framebuffer_ = VK_NULL_HANDLE;
+        }
     }
 
     coopa::gfx::core::Device& device_;
     VkFormat                  color_format_;
 
-    VkRenderPass  render_pass_  = VK_NULL_HANDLE;
-    VkFramebuffer framebuffer_  = VK_NULL_HANDLE;
-    VkImageView   color_view_   = VK_NULL_HANDLE;
-    VkImageView   depth_view_   = VK_NULL_HANDLE;
+    VkRenderPass  render_pass_      = VK_NULL_HANDLE;   ///< colour + depth (guests)
+    VkRenderPass  draw_render_pass_ = VK_NULL_HANDLE;   ///< colour + coverage + depth (geometry)
+    VkFramebuffer framebuffer_      = VK_NULL_HANDLE;
+    VkFramebuffer draw_framebuffer_ = VK_NULL_HANDLE;
+    VkImageView   color_view_    = VK_NULL_HANDLE;
+    VkImageView   depth_view_    = VK_NULL_HANDLE;
+    VkImageView   coverage_view_ = VK_NULL_HANDLE;
     uint32_t      width_        = 0;
     uint32_t      height_       = 0;
 

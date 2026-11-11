@@ -762,10 +762,16 @@ private:
      * @brief The cloud layer over the finished HDR scene's geometry (after the translucent pass,
      *        so clouds below a high camera cover water too): the flat look, or the volumetric
      *        layer's depth-tested composite. Reopens the live HDR image through
-     *        transparent_pass_'s render pass like record_fog_() does; depth arrives and leaves
-     *        SHADER_READ_ONLY_OPTIMAL.
+     *        transparent_pass_'s GUEST render pass like record_fog_() does -- the two-attachment
+     *        one, so transparent_coverage_ can be sampled rather than attached; depth arrives
+     *        and leaves SHADER_READ_ONLY_OPTIMAL.
+     *
+     * @param coverage_valid Whether transparent_coverage_ holds THIS frame's coverage (the
+     *        transparent pass ran). False makes the volumetric composite ignore it and order
+     *        against the opaque geometry alone, as it did before the mask existed.
      */
-    void record_cloud_overlay_(coopa::gfx::command::CommandBuffer& cmd, const FrameContext& ctx);
+    void record_cloud_overlay_(coopa::gfx::command::CommandBuffer& cmd, const FrameContext& ctx,
+                               bool coverage_valid);
 
     /**
      * @brief Records the post-process chain: fog, volumetrics, DOF, bloom, the stylize pass
@@ -1849,6 +1855,11 @@ private:
     // Always constructed (mirrors ssr_pass_'s policy -- see render_features.h); render()
     // checks config_.transparency_enabled per frame and skips the whole pass when off.
     std::unique_ptr<coopa::gfx::engine::passes::TransparentPass> transparent_pass_;
+    /// TransparentPass's coverage attachment: the nearest transparent surface per pixel, as a
+    /// reciprocal camera distance (0 = none). Written by every BLEND draw, sampled by
+    /// cloud_overlay_pass_ so the cloud layer can be ordered against water that covers open
+    /// sky. Allocated once -- render_extent_ never changes.
+    std::unique_ptr<coopa::gfx::memory::Image> transparent_coverage_;
 
     // --- SSR/SSGI: always constructed; render() checks config_.ssr_enabled per frame ---
     std::unique_ptr<coopa::gfx::engine::passes::HiZPass>           hiz_pass_;

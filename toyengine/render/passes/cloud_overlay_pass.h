@@ -53,7 +53,7 @@ public:
     /// cloud_composite.frag's push constants.
     struct alignas(16) CompositePush {
         glm::vec4 camera{0.0f};   ///< xyz camera position, w cloud scale
-        glm::vec4 region{1.0f, 0.0f, 0.0f, 0.0f};   ///< x the fraction of the cloud target the march filled
+        glm::vec4 region{1.0f, 0.0f, 0.0f, 0.0f};   ///< x the fraction of the cloud target the march filled, y 1 when the coverage mask is this frame's
     };
 
     /// The periods (in puff sizes) of the flat field's reads -- flat_cloud_field.glsl's FLAT_*_PERIOD.
@@ -76,10 +76,18 @@ public:
     CloudOverlayPass(const CloudOverlayPass&) = delete;
     CloudOverlayPass& operator=(const CloudOverlayPass&) = delete;
 
-    /** @brief Binds the G-buffer, the cloud noise and the volumetric layer (once, at construction). */
+    /** @brief Binds the G-buffer, the cloud noise, the volumetric layer and the transparent
+     *         coverage mask (once, at construction).
+     *
+     * @param transparent_coverage TransparentPass's coverage attachment -- the nearest
+     *        transparent surface per pixel, as a reciprocal distance. It is what lets the
+     *        composite order the layer against water that covers open sky; `CompositePush::region.y`
+     *        says whether it holds this frame's coverage.
+     */
     void set_inputs(coopa::gfx::TextureView g_normal, coopa::gfx::TextureView g_position,
                     VkImageView weather, VkImageView shape, VkSampler noise_sampler,
-                    coopa::gfx::TextureView volumetric_layer);
+                    coopa::gfx::TextureView volumetric_layer,
+                    coopa::gfx::TextureView transparent_coverage);
 
     /// The flat layer's per-frame-slot buffer (CloudShadowPass's flat stage reads it too).
     const coopa::gfx::memory::Buffer& flat_buffer(uint32_t slot) const { return *flat_ubos_[slot % frames_]; }

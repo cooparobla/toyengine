@@ -121,6 +121,10 @@ public:
 
     /** @brief True when the tessellation stages are enabled (the device reports tessellationShader). */
     bool supports_tessellation() const { return tessellation_supported_; }
+    /// @brief Whether colour attachments may carry DIFFERENT blend states in one pipeline.
+    /// Without it the spec requires every element of pAttachments to be identical, so a pass
+    /// with a mask attachment beside its colour one must fall back to a single shared mode.
+    bool supports_independent_blend() const { return independent_blend_supported_; }
     /** @brief The device's maxTessellationGenerationLevel (64 on Apple GPUs); 0 without tessellation. */
     uint32_t max_tessellation_level() const { return tessellation_supported_ ? max_tessellation_level_ : 0u; }
 
@@ -382,6 +386,12 @@ private:
             // has both), never required -- a single draw with firstInstance 0 needs neither.
             features.multiDrawIndirect         = available.multiDrawIndirect;
             features.drawIndirectFirstInstance = available.drawIndirectFirstInstance;
+            // Per-attachment blend states, for a pass whose targets need different equations --
+            // an alpha-blended colour image beside a coverage mask that must take a min or max.
+            // Core Vulkan 1.0 and present on every desktop driver, but optional, so a device
+            // without it makes supports_independent_blend() false and those passes share one mode.
+            features.independentBlend          = available.independentBlend;
+            independent_blend_supported_       = available.independentBlend == VK_TRUE;
             query_compute_caps_(available, props);
         }
 
@@ -490,6 +500,7 @@ private:
 
     VkPhysicalDevice physical_device_ = VK_NULL_HANDLE; /**< Selected GPU. */
     bool             tessellation_supported_ = false;   /**< tessellationShader enabled (see supports_tessellation()). */
+    bool             independent_blend_supported_ = false; /**< independentBlend enabled (see supports_independent_blend()). */
     uint32_t         max_tessellation_level_ = 0;
     ComputeCaps      compute_caps_;                     /**< See compute_caps(). */
     VkDevice         device_          = VK_NULL_HANDLE; /**< Logical device. */

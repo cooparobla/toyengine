@@ -871,7 +871,7 @@ bool WaterSystem::active_in_hierarchy_(const coopa::scene::SceneObject& obj) {
 coopa::gfx::engine::components::MeshRenderer* WaterSystem::add_default_renderer_(WaterBody& body) {
     using namespace coopa::gfx::engine::components;
     auto* r = body.owner->add_component<MeshRenderer>();
-    r->material.albedo               = glm::vec3(0.04f, 0.2f, 0.27f);
+    r->material.albedo               = body.deep_color;
     r->material.alpha                = 0.55f;
     r->material.alpha_mode           = AlphaMode::Blend;
     r->material.roughness            = 0.06f;

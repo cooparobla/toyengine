@@ -185,12 +185,15 @@ ToyRenderPipeline::CloudQualitySteps ToyRenderPipeline::cloud_quality_steps_() c
     return {40, 4, 1.0f};
 }
 
-void ToyRenderPipeline::record_cloud_overlay_(coopa::gfx::command::CommandBuffer& cmd, const FrameContext& ctx) {
+void ToyRenderPipeline::record_cloud_overlay_(coopa::gfx::command::CommandBuffer& cmd, const FrameContext& ctx,
+                                              bool coverage_valid) {
     const CloudFrameState& cs = cloud_state_;
     const bool flat = cs.active && cs.type == CloudType::Flat && cs.fade > 0.0f;
     if (!flat && !volumetric_clouds_traced()) return;
     VkImageView hdr = config_.ssr_enabled ? ssr_pass_->output_view() : offscreen_target_.color_view();
-    transparent_pass_->set_targets(hdr, gbuffer_target_.depth_view(), render_extent_.width, render_extent_.height);
+    // Handed the coverage view like every other site, so set_targets' cache stays hit (see its doc).
+    transparent_pass_->set_targets(hdr, gbuffer_target_.depth_view(), render_extent_.width, render_extent_.height,
+                                   transparent_coverage_->view());
     transparent_pass_->begin(cmd, gbuffer_target_.depth_image_handle(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     if (flat) {
         // Jittered, like every surface: TAA then resolves the clouds' silhouettes with the scene's.
@@ -199,7 +202,7 @@ void ToyRenderPipeline::record_cloud_overlay_(coopa::gfx::command::CommandBuffer
     } else {
         passes::CloudOverlayPass::CompositePush p;
         p.camera = glm::vec4(ctx.cam_pos, std::max(cs.scale, 1e-4f));
-        p.region = glm::vec4(cloud_quality_steps_().cloud_scale, 0.0f, 0.0f, 0.0f);
+        p.region = glm::vec4(cloud_quality_steps_().cloud_scale, coverage_valid ? 1.0f : 0.0f, 0.0f, 0.0f);
         cloud_overlay_pass_->draw_composite(cmd, p, render_extent_.width, render_extent_.height);
     }
     transparent_pass_->end(cmd);
@@ -252,7 +255,9 @@ glm::mat3 ToyRenderPipeline::sky_frame_() const {
 
 void ToyRenderPipeline::record_fog_(coopa::gfx::command::CommandBuffer& cmd, const FrameContext& ctx) {
     VkImageView hdr = config_.ssr_enabled ? ssr_pass_->output_view() : offscreen_target_.color_view();
-    transparent_pass_->set_targets(hdr, gbuffer_target_.depth_view(), render_extent_.width, render_extent_.height);
+    // Handed the coverage view like every other site, so set_targets' cache stays hit (see its doc).
+    transparent_pass_->set_targets(hdr, gbuffer_target_.depth_view(), render_extent_.width, render_extent_.height,
+                                   transparent_coverage_->view());
     transparent_pass_->begin(cmd, gbuffer_target_.depth_image_handle(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     coopa::gfx::engine::passes::FogPass::PushConstants pc;
     // Unjittered: the fog reprojects nothing, and a jittered ray would swim against the

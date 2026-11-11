@@ -118,10 +118,14 @@ Write `tile_set:` in new scenes.
   chunk to build (x216 chunks at load) and its coarsest level can be rejected. Start from:
   ```yaml
   lods:
-    - { field: 1,  screen_size: 0.20, native_border: 1 }
-    - { field: 4,  screen_size: 0.12, native_border: 1 }
-    - { field: 16, screen_size: 0.085 }
+    - { field: 1,  screen_size: 0.45, native_border: 1 }
+    - { field: 4,  screen_size: 0.22, native_border: 1, smooth: true }
+    - { field: 16, screen_size: 0.10, smooth: true }
   ```
+  Those thresholds are for a 122-unit globe seen from an orbit rig spanning 165-700 from its
+  CENTRE. Check yours against the camera you actually have: `planet_demo` shipped 0.20/0.12/0.085,
+  which engage past 268/447/630 units, and the surface sits at r~147 -- so nothing on screen was
+  ever far enough and a capture at orbit 300 came back pixel-identical to `TOY_TERRAIN_NO_LODS=1`.
 - **Don't try to make a planet merge flat ground** (`max_merge`). It is pinned to 1 deliberately:
   bent onto a sphere a merged quad is a chord, and its edge leaves the surface the per-tile
   geometry beside it sits on -- ~1.7 cm at four tiles on a 122-unit globe, a visible seam on a 1 m
@@ -142,6 +146,11 @@ Write `tile_set:` in new scenes.
     quad per `field` x `field` tiles, no pieces, lip or rounding. **The cheapest by far and the
     only re-meshed tier a planet carries** -- 0.7% of LOD 0's triangles at `field: 8` and 0.01 ms
     to build. `native_border: 1` keeps the rim at one quad per tile. Prefer this for far tiers.
+    Add `smooth: true` to shade a level as a rounded surface instead of hard-edged blocks: it
+    averages the level's normals across the faces meeting at each position, so the geometry --
+    and with it the triangle count and the seam rule -- is untouched and only the staircase
+    shading goes. Leave it off on the FIRST coarse level, which is seen closest and where the
+    blocks genuinely are the terrain's shape.
 - **Threshold arithmetic, because getting it wrong gives you a tier that never draws.** A chunk's
   `screen_size` is its projected height, `radius * cot(fov/2) / depth`, where `radius` is roughly
   `0.71 * chunk_size * tile_size`. So a tier engages past `radius * cot(fov/2) / screen_size`

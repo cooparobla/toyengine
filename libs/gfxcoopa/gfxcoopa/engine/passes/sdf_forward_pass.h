@@ -4,7 +4,7 @@
  *        live HDR colour image.
  *
  * A second Pipeline built against TransparentPass's OWN render pass handle
- * (see TransparentPass::render_pass()) rather than a render pass of its own
+ * (see TransparentPass::draw_render_pass()) rather than a render pass of its own
  * -- render passes only need to be attachment-COMPATIBLE to share a
  * VkPipeline, and drawing both a BLEND mesh's pipeline and this one inside
  * the SAME begin()/end() bracket is what lets
@@ -63,7 +63,7 @@ public:
     /**
      * @param device        Logical device.
      * @param color_format  Format of the HDR colour image (matches TransparentPass's own).
-     * @param shared_render_pass TransparentPass::render_pass() -- see file doc.
+     * @param shared_render_pass TransparentPass::draw_render_pass() -- see file doc.
      * @param camera_layout Set 0.
      * @param light_layout  Set 1.
      * @param shadow_layout Set 2.
@@ -107,8 +107,16 @@ public:
         desc.depth.compare = coopa::gfx::CompareOp::Less;
         desc.blend.mode    = coopa::gfx::pipeline::BlendMode::Alpha;
         // Same RawRenderPass caveat TransparentPass's own ctor documents: no RenderPass to read
-        // color_attachment_count()/samples() from -- single-color-attachment, single-sampled.
-        desc.blend.color_attachment_count = 1;
+        // color_attachment_count()/samples() from -- single-sampled, and two colour
+        // attachments because this draws inside TransparentPass::draw_render_pass(). The
+        // second is that pass's coverage attachment; sdf_forward.frag declares no output for
+        // it, so NoWrite is what keeps the water's coverage intact rather than leaving the
+        // pixels an SDF covered UNDEFINED (see TransparentPass's file doc).
+        desc.blend.color_attachment_count = 2;
+        if (device.supports_independent_blend()) {   // see TransparentPass::create_pipeline_
+            desc.blend.attachment_modes = { coopa::gfx::pipeline::BlendMode::Alpha,
+                                            coopa::gfx::pipeline::BlendMode::NoWrite };
+        }
 
         pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
             device, coopa::gfx::detail::RawRenderPass{shared_render_pass}, desc);

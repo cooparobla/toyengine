@@ -162,3 +162,20 @@ COOPA_TEST(select_lod_applies_thresholds_with_hysteresis) {
     const std::vector<LodThreshold> single = {{0.0f}};
     expect(select_lod(0.0001f, single, 0.0f, -2, 0.1f) == 0, "no LODs and no cull -> always LOD0");
 }
+
+COOPA_TEST(select_lod_is_history_independent_inside_the_dead_band) {
+    using namespace toy::render;
+    const std::vector<LodThreshold> t = {{0.0f}, {0.25f}, {0.1f}};
+    // 0.24 sits inside LOD1's dead band: [0.9 * 0.25, 0.25). Both LOD0 and LOD1 are stable
+    // there, so the level must not depend on how the object arrived -- an object first seen at
+    // this size has to agree with one that has been closer, or it loads coarse and can never
+    // coarsen back once refined (a planet chunk at max zoom-out: no history gave LOD1, having
+    // been nearer gave LOD0, and nothing could clear the margin again).
+    expect(select_lod(0.24f, t, 0.0f, -2, 0.1f) == select_lod(0.24f, t, 0.0f, 0, 0.1f),
+           "inside the band, a fresh pick agrees with one held from the finer side");
+    expect(select_lod(0.24f, t, 0.0f, -2, 0.1f) == 0, "and that agreement is on the finer level");
+    // Outside the band it is still the threshold that decides, not the margin.
+    expect(select_lod(0.2f, t, 0.0f, -2, 0.1f) == 1, "clear of the band, a fresh pick is LOD1");
+    // Culling is decided on the true size, so the margin cannot resurrect a culled object.
+    expect(select_lod(0.0095f, t, 0.01f, -2, 0.1f) == -1, "just under cull size is still culled");
+}

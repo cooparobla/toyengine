@@ -41,6 +41,7 @@ enum class BlendMode {
     Additive,             ///< src*srcA + dst*1. Glow/particle-style accumulation.
     Multiply,             ///< src*dst (color), dst unchanged (alpha). Tinting/shadow-style darkening.
     Max,                  ///< max(src, dst) per channel, alpha included; blend factors are ignored. For accumulating a COVERAGE or MASK buffer, where overlapping draws must union rather than sum. The alternatives both misbehave there: Additive scales rgb by the source alpha and then sums, so coverage saturates and any ramp carried in a channel double-counts, while None leaves the result dependent on draw order.
+    NoWrite,              ///< The attachment is left exactly as it was: blending disabled AND an empty colorWriteMask. For a pipeline that shares a multi-target render pass but has no business in one of its attachments -- a fragment shader with no output for that location would otherwise leave it UNDEFINED, which is not the same as untouched, and a mask another pass depends on would come back as noise.
 };
 
 /**
@@ -62,6 +63,7 @@ struct PipelineConfig {
     VkSampleCountFlagBits  samples                = VK_SAMPLE_COUNT_1_BIT;               /**< MSAA sample count. */
     VkCompareOp             depth_compare_op       = VK_COMPARE_OP_LESS;                  /**< Depth comparison function. */
     uint32_t                color_attachment_count = 1;                                   /**< Color attachments sharing this blend state. */
+    std::vector<BlendMode>  color_attachment_modes;                                       /**< Per-attachment override of `blend_mode`; attachments past its end use `blend_mode`. */
     uint32_t                patch_control_points   = 0;                                   /**< > 0: a tessellation pipeline (PATCH_LIST of this many control points). */
 };
 
@@ -99,6 +101,11 @@ struct BlendState {
     /// the sealed Pipeline constructor never lets this mismatch the render
     /// pass it's built against, which an independently-set count could.
     uint32_t  color_attachment_count = 0;
+    /// @brief Overrides `mode` for individual attachments, by index; any attachment past
+    /// this list's end keeps `mode`. For a render pass whose targets need DIFFERENT
+    /// equations -- an HDR colour blended normally beside a coverage mask that must union,
+    /// or that this pipeline must not touch at all (BlendMode::NoWrite).
+    std::vector<BlendMode> attachment_modes;
 };
 
 /**
@@ -403,8 +410,94 @@ private:
         t.config.depth_write      = desc.depth.write;
         t.config.depth_compare_op = detail::to_vk(desc.depth.compare);
         t.config.blend_mode       = desc.blend.mode;
+        t.config.color_attachment_modes = desc.blend.attachment_modes;
         t.config.patch_control_points = desc.patch_control_points;
         return t;
+    }
+
+    /// @brief The Vulkan blend state one attachment gets for `mode`. Split out of
+    /// create_pipeline() because a render pass's attachments do not have to agree: see
+    /// PipelineConfig::color_attachment_modes.
+    static VkPipelineColorBlendAttachmentState blend_attachment_state_(BlendMode mode) {
+        VkPipelineColorBlendAttachmentState blend_attachment{};
+        switch (mode) {
+        case BlendMode::Alpha:
+            blend_attachment.blendEnable         = VK_TRUE;
+            blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            blend_attachment.colorBlendOp        = VK_BLEND_OP_ADD;
+            blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            blend_attachment.alphaBlendOp        = VK_BLEND_OP_ADD;
+            break;
+        case BlendMode::AlphaOver:
+            // Same colour equation as Alpha above -- the only difference is dstAlpha. Alpha's
+            // VK_BLEND_FACTOR_ZERO leaves the attachment's alpha equal to the LAST fragment's,
+            // which is meaningless as a coverage mask: an opaque glyph drawn under a translucent
+            // panel would end up stamping the panel's alpha over it. ONE_MINUS_SRC_ALPHA makes
+            // alpha accumulate the same way colour does, so the layer can be composited with a
+            // premultiplied "over" afterwards. Over an OPAQUE destination the two are identical
+            // (1*srcA + 1*(1-srcA) == 1), which is why switching an existing pass to this mode
+            // is a no-op unless it draws into a transparent-cleared target.
+            blend_attachment.blendEnable         = VK_TRUE;
+            blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            blend_attachment.colorBlendOp        = VK_BLEND_OP_ADD;
+            blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            blend_attachment.alphaBlendOp        = VK_BLEND_OP_ADD;
+            break;
+        case BlendMode::PremultipliedAlpha:
+            blend_attachment.blendEnable         = VK_TRUE;
+            blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            blend_attachment.colorBlendOp        = VK_BLEND_OP_ADD;
+            blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            blend_attachment.alphaBlendOp        = VK_BLEND_OP_ADD;
+            break;
+        case BlendMode::Additive:
+            blend_attachment.blendEnable         = VK_TRUE;
+            blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.colorBlendOp        = VK_BLEND_OP_ADD;
+            blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            blend_attachment.alphaBlendOp        = VK_BLEND_OP_ADD;
+            break;
+        case BlendMode::Max:
+            // Factors are not consulted by VK_BLEND_OP_MAX, but leave them at ONE rather than
+            // uninitialized: a later edit switching this case's op back to ADD would otherwise
+            // silently inherit whatever was here.
+            blend_attachment.blendEnable         = VK_TRUE;
+            blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.colorBlendOp        = VK_BLEND_OP_MAX;
+            blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.alphaBlendOp        = VK_BLEND_OP_MAX;
+            break;
+        case BlendMode::Multiply:
+            blend_attachment.blendEnable         = VK_TRUE;
+            blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
+            blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+            blend_attachment.colorBlendOp        = VK_BLEND_OP_ADD;
+            blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.alphaBlendOp        = VK_BLEND_OP_ADD;
+            break;
+        case BlendMode::NoWrite:
+        case BlendMode::None:
+        default:
+            blend_attachment.blendEnable = VK_FALSE;
+            break;
+        }
+        // NoWrite is the one mode that leaves the attachment alone rather than replacing it.
+        blend_attachment.colorWriteMask = mode == BlendMode::NoWrite
+            ? 0
+            : (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+               VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT);
+        return blend_attachment;
     }
 
     /**
@@ -506,86 +599,17 @@ private:
         depth_stencil.depthCompareOp   = config.depth_compare_op;
         depth_stencil.stencilTestEnable= VK_FALSE;
 
-        // Color blending. The same attachment state is replicated across
-        // config.color_attachment_count attachments (defaults to 1).
-        VkPipelineColorBlendAttachmentState blend_attachment{};
-        switch (config.blend_mode) {
-        case BlendMode::Alpha:
-            blend_attachment.blendEnable         = VK_TRUE;
-            blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-            blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-            blend_attachment.colorBlendOp        = VK_BLEND_OP_ADD;
-            blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-            blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-            blend_attachment.alphaBlendOp        = VK_BLEND_OP_ADD;
-            break;
-        case BlendMode::AlphaOver:
-            // Same colour equation as Alpha above -- the only difference is dstAlpha. Alpha's
-            // VK_BLEND_FACTOR_ZERO leaves the attachment's alpha equal to the LAST fragment's,
-            // which is meaningless as a coverage mask: an opaque glyph drawn under a translucent
-            // panel would end up stamping the panel's alpha over it. ONE_MINUS_SRC_ALPHA makes
-            // alpha accumulate the same way colour does, so the layer can be composited with a
-            // premultiplied "over" afterwards. Over an OPAQUE destination the two are identical
-            // (1*srcA + 1*(1-srcA) == 1), which is why switching an existing pass to this mode
-            // is a no-op unless it draws into a transparent-cleared target.
-            blend_attachment.blendEnable         = VK_TRUE;
-            blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-            blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-            blend_attachment.colorBlendOp        = VK_BLEND_OP_ADD;
-            blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-            blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-            blend_attachment.alphaBlendOp        = VK_BLEND_OP_ADD;
-            break;
-        case BlendMode::PremultipliedAlpha:
-            blend_attachment.blendEnable         = VK_TRUE;
-            blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
-            blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-            blend_attachment.colorBlendOp        = VK_BLEND_OP_ADD;
-            blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-            blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-            blend_attachment.alphaBlendOp        = VK_BLEND_OP_ADD;
-            break;
-        case BlendMode::Additive:
-            blend_attachment.blendEnable         = VK_TRUE;
-            blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-            blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
-            blend_attachment.colorBlendOp        = VK_BLEND_OP_ADD;
-            blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-            blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-            blend_attachment.alphaBlendOp        = VK_BLEND_OP_ADD;
-            break;
-        case BlendMode::Max:
-            // Factors are not consulted by VK_BLEND_OP_MAX, but leave them at ONE rather than
-            // uninitialized: a later edit switching this case's op back to ADD would otherwise
-            // silently inherit whatever was here.
-            blend_attachment.blendEnable         = VK_TRUE;
-            blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
-            blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
-            blend_attachment.colorBlendOp        = VK_BLEND_OP_MAX;
-            blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-            blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-            blend_attachment.alphaBlendOp        = VK_BLEND_OP_MAX;
-            break;
-        case BlendMode::Multiply:
-            blend_attachment.blendEnable         = VK_TRUE;
-            blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
-            blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
-            blend_attachment.colorBlendOp        = VK_BLEND_OP_ADD;
-            blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-            blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-            blend_attachment.alphaBlendOp        = VK_BLEND_OP_ADD;
-            break;
-        case BlendMode::None:
-        default:
-            blend_attachment.blendEnable = VK_FALSE;
-            break;
+        // Color blending. Each attachment takes config.color_attachment_modes[i] when the
+        // caller supplied one for it, and config.blend_mode otherwise -- so the common case
+        // (every attachment blended the same way) stays a single mode.
+        const uint32_t blend_count = std::max(1u, config.color_attachment_count);
+        std::vector<VkPipelineColorBlendAttachmentState> blend_attachments;
+        blend_attachments.reserve(blend_count);
+        for (uint32_t i = 0; i < blend_count; ++i) {
+            blend_attachments.push_back(blend_attachment_state_(
+                i < config.color_attachment_modes.size() ? config.color_attachment_modes[i]
+                                                         : config.blend_mode));
         }
-        blend_attachment.colorWriteMask =
-            VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-
-        std::vector<VkPipelineColorBlendAttachmentState> blend_attachments(
-            std::max(1u, config.color_attachment_count), blend_attachment);
 
         VkPipelineColorBlendStateCreateInfo color_blending{};
         color_blending.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;

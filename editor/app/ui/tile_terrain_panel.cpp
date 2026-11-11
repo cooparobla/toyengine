@@ -376,6 +376,15 @@ EditResult TileTerrainPanel::draw_tile_terrain_panel_(imm::Context& ctx, ObjectI
     }
     mark({"tile_size", "height_step", "soil_depth_steps", "max_wall_steps", "tiles"});
 
+    // --- Detail levels -----------------------------------------------------------------------
+    if (section("Detail Levels", I::Mesh,
+                "Coarser meshes a chunk falls back to as it shrinks on screen, coarsest last. Each level is one "
+                "kind: a flat-quad `field`, a simplified `ratio`, or a re-stamp in another `tile_set`.",
+                false)) {
+        fields({tfield("lods", "Levels")});
+    }
+    mark({"lods"});
+
     // --- Streaming ---------------------------------------------------------------------------
     if (section("Streaming", I::Monitor, "Chunks are built around the camera and dropped behind it -- the main cost control.",
                 false)) {

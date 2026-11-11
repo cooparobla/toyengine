@@ -881,6 +881,14 @@ void TerrainSystem::add_chunk_water_(const TerrainComponent& terrain, coopa::sce
         tc->transform().set_position(glm::vec3(water.frame[3]));
         tc->transform().set_rotation_quat(glm::quat_cast(glm::mat3(water.frame)));
         body->local_frame = true;
+        // A planet's sea is seen from orbit, where every ocean pixel is deep enough to read as
+        // fully opaque (water_surface.glsl's WATER_LOCAL_FRAME branch). The engine-wide default
+        // is a dark teal tuned for shallow lakes, which at full opacity reads near-black against
+        // space, so an ocean blue is the better default out here. Only when the scene left the
+        // colour alone -- an authored `water:` block on the terrain still wins.
+        if (body->deep_color == water::WaterBody{}.deep_color) {
+            body->deep_color = glm::vec3(0.03f, 0.15f, 0.28f);
+        }
     }
     body->mode = flowing ? water::WaterMode::Flowing : water::WaterMode::Planar;
     // Every body over a chunk keeps the SAME wave field, rivers included. A river and the lake

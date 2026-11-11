@@ -45,7 +45,15 @@ ParticlePass::ParticlePass(coopa::gfx::core::Device& device, coopa::gfx::memory:
     desc.depth.write = false;               // ...but never by each other (they are sorted)
     desc.depth.compare = CompareOp::Less;
     desc.blend.mode = pipeline::BlendMode::PremultipliedAlpha;
-    desc.blend.color_attachment_count = 1;
+    // Two colour attachments: particle quads draw inside TransparentPass::draw_render_pass(),
+    // whose second attachment is the transparent-coverage mask. particle.frag writes no output
+    // for it -- NoWrite leaves the coverage the water and glass wrote in place instead of
+    // leaving every pixel a quad covered UNDEFINED (see TransparentPass's file doc).
+    desc.blend.color_attachment_count = 2;
+    if (device.supports_independent_blend()) {   // see TransparentPass::create_pipeline_
+        desc.blend.attachment_modes = { pipeline::BlendMode::PremultipliedAlpha,
+                                        pipeline::BlendMode::NoWrite };
+    }
     desc.descriptor_layouts = {&camera_layout, &light_layout, &hiz_layout, &material_layout, &shadow_layout};
     desc.push_constants = {{ShaderStage::Vertex | ShaderStage::Fragment, 0, sizeof(PushConstants)}};
     pipeline_ = std::make_unique<pipeline::Pipeline>(device, detail::RawRenderPass{shared_render_pass}, desc);

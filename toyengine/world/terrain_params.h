@@ -219,6 +219,22 @@ struct TerrainParams {
          * ignored for it.
          */
         std::int8_t field_stride = 0;
+        /**
+         * @brief Shade this level as a smooth surface instead of hard-edged blocks.
+         *
+         * A `field` level is flat quads meeting vertical walls, so every edge between them is a
+         * hard shading crease -- correct up close, but at the range these levels draw it reads as
+         * a staircase where the real terrain is a rounded slope. With this set the level's
+         * normals are averaged across the faces meeting at each position (smooth_field_normals(),
+         * terrain_chunk.cpp) before it is welded: the GEOMETRY is untouched, so the level still
+         * costs the same triangles and keeps the tallest-column seam rule that stops chunks
+         * cracking -- only the shading stops breaking at every step.
+         *
+         * Off by default, which is the right choice for the FIRST coarse level: it is seen
+         * closest, where the blocks genuinely are the terrain's shape. Resolved from a `smooth:`
+         * entry under `lods:` in scene YAML (register.cpp).
+         */
+        bool smooth = false;
     };
 
     /** @brief Most levels a chunk mesh carries, past LOD 0. */

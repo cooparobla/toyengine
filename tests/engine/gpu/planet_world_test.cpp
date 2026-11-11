@@ -209,8 +209,21 @@ COOPA_TEST(the_sea_floats_a_crate) {
     require(p.terrain != nullptr && !p.terrain->field.empty(), "sea: the planet baked");
 
     int frame_bodies = 0;
-    for (const auto* body : p.scene->get_components<toy::water::WaterBody>()) frame_bodies += body->local_frame ? 1 : 0;
+    int ocean_blue = 0;
+    const glm::vec3 lake_default = toy::water::WaterBody{}.deep_color;
+    for (const auto* body : p.scene->get_components<toy::water::WaterBody>()) {
+        if (!body->local_frame) continue;
+        ++frame_bodies;
+        // A planet's sea reads as opaque from orbit (water_surface.glsl's WATER_LOCAL_FRAME
+        // branch takes its opacity to 1.0), so the engine-wide default -- a dark teal tuned
+        // for seeing a lake bed through shallow water -- would read as near-black against
+        // space. TerrainSystem::add_chunk_water_ gives a planet's water an ocean blue instead.
+        ocean_blue += body->deep_color != lake_default ? 1 : 0;
+    }
     expect(frame_bodies > 0, "sea: the planet's water bodies are local-frame bodies (" + std::to_string(frame_bodies) + ")");
+    expect(ocean_blue == frame_bodies,
+           "sea: every local-frame body took the planet ocean colour, not the shallow-lake default (" +
+               std::to_string(ocean_blue) + "/" + std::to_string(frame_bodies) + ")");
 
     // Deep, open sea: still water all round, at least two steps deep.
     const toy::world::PlanetLayout layout = p.terrain->params.layout();

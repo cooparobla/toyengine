@@ -96,6 +96,7 @@ layout(set = 6, binding = 0) uniform ForwardGlobalsBlock {
     // layers, .z = detail distance (m), .w = ring draw range (m); per ring
     // [2i] = (x, y, age, strength), [2i+1] = (start radius, -, -, -). Read by water_surface.glsl.
     vec4  water_ripple_info;
+    vec4  water_view;   // x = 1 while the camera is below the water surface, else 0
     vec4  water_ripples[2 * WATER_MAX_RIPPLES];
 } forward_globals;
 
@@ -142,6 +143,13 @@ vec4 gfx_params_ext0 = material.gfx_params_ext0;
 vec4 gfx_params_ext1 = material.gfx_params_ext1;
 
 layout(location = 0) out vec4 out_color;
+/// The transparent-coverage attachment (TransparentPass's file doc): the RECIPROCAL of this
+/// fragment's camera distance, so Max blending leaves the nearest transparent surface per
+/// pixel whatever order the draws arrived in, and the clear value 0 reads as "nothing here".
+/// A pass composited after this one -- the volumetric cloud layer -- needs it because
+/// transparents are depth-TESTED but never depth-written, so the depth buffer still describes
+/// the opaque geometry behind the water rather than the water.
+layout(location = 1) out float out_coverage;
 
 /// What a fragment-shading hook may edit before lighting/SSR/refraction consume it: the
 /// normal plus the albedo/alpha/roughness/thickness inputs of the SAME BRDF and refraction the
@@ -275,6 +283,7 @@ void main() {
     out_color = gfx_refraction_apply(shaded, frag_world_pos, N, V, mat.roughness, F0,
                                      camera.view, camera.proj, inverse(camera.proj), rmat, rp,
                                      forward_globals.ssr_mip.x);
+    out_coverage = 1.0 / max(length(frag_world_pos - camera.camera_pos), 1e-4);
 }
 
 #endif // GFX_SURFACE_TRANSPARENT_FS_GLSL

@@ -491,7 +491,17 @@ EditResult draw_field(imm::Context& ctx, const FieldDesc& f, Node& block, const 
             break;
         }
         case FieldKind::ItemList: {
-            if (!present || !block.at(f.key).is_sequence()) block[f.key] = f.def_node.is_sequence() ? f.def_node : Node::sequence();
+            // A key that is PRESENT but not a sequence is an authored value with its own meaning
+            // -- a terrain's `lods: false` turns its LOD table off -- so it is reported and left
+            // alone. Overwriting it with the default list silently changed the scene just by
+            // opening the inspector on it.
+            if (present && !block.at(f.key).is_sequence()) {
+                imm::Box row = ctx.property_row(f.display());
+                ctx.text_in(row, "set in YAML", ctx.style.text_dim);
+                ctx.tooltip("Not a list here. Edit this value in the YAML file; it is preserved on save.");
+                break;
+            }
+            if (!present) block[f.key] = f.def_node.is_sequence() ? f.def_node : Node::sequence();
             Node& list = block[f.key];
             ctx.label_dim(f.display());
             int remove = -1, move_up = -1;
@@ -523,10 +533,16 @@ EditResult draw_field(imm::Context& ctx, const FieldDesc& f, Node& block, const 
             if (ctx.button(("Add " + f.display()).c_str(), -1)) {
                 Node m = Node::mapping();
                 for (const auto& sub : f.item_fields) {
-                    if (sub.kind == FieldKind::Enum && !sub.options.empty()) m[sub.key] = Node(sub.options.front());
-                    else m[sub.key] = Node(sub.key == "label" ? std::string("Item ") + std::to_string(list.size() + 1)
-                                                               : sub.key == "name" ? std::string("Item") + std::to_string(list.size() + 1)
-                                                                                   : std::string());
+                    // Each key starts at its OWN default rather than at an empty string: a blank
+                    // in a numeric key is not something a scene parser can read back, and a list
+                    // can be saved before the user has touched the row.
+                    if (sub.kind == FieldKind::Enum && !sub.options.empty())      m[sub.key] = Node(sub.options.front());
+                    else if (sub.key == "label")  m[sub.key] = Node(std::string("Item ") + std::to_string(list.size() + 1));
+                    else if (sub.key == "name")   m[sub.key] = Node(std::string("Item") + std::to_string(list.size() + 1));
+                    else if (sub.kind == FieldKind::Bool)  m[sub.key] = sub.def.x != 0.0f;
+                    else if (sub.kind == FieldKind::Int)   m[sub.key] = static_cast<int>(sub.def.x);
+                    else if (sub.kind == FieldKind::Float) m[sub.key] = sub.def.x;
+                    else m[sub.key] = Node(sub.default_string);
                 }
                 list.as_seq().push_back(m);
                 r.key = f.key; r.changed = r.finished = true;

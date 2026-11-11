@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <unordered_map>
 
 #include <gfxcoopa/engine/data/mesh.h>
 #include <physxcoopa/geometry/triangle_mesh.h>
@@ -941,6 +942,55 @@ std::vector<std::uint8_t> chunk_seam_locks(const TerrainParams& params, const Ch
  * @param mesh   The welded chunk geometry; its `indices` gain each level's range.
  * @return The LOD table for Mesh::from_arrays(), [0] being the full chunk.
  */
+void smooth_field_normals(ChunkMeshData& mesh) {
+    if (mesh.indices.size() < 3 || mesh.vertices.empty()) return;
+    // Positions are chunk-local and land on the tile grid, so quantising is only insurance
+    // against two faces computing a shared corner by different expressions.
+    struct Key {
+        std::int64_t x, y, z;
+        bool operator==(const Key& o) const { return x == o.x && y == o.y && z == o.z; }
+    };
+    struct KeyHash {
+        std::size_t operator()(const Key& k) const {
+            std::size_t h = 1469598103934665603ull;
+            for (const std::int64_t v : {k.x, k.y, k.z}) {
+                h ^= static_cast<std::size_t>(v);
+                h *= 1099511628211ull;
+            }
+            return h;
+        }
+    };
+    const auto key_of = [](const glm::vec3& p) {
+        return Key{std::llround(p.x * 4096.0), std::llround(p.y * 4096.0), std::llround(p.z * 4096.0)};
+    };
+
+    // Cross products are left UNNORMALISED so each face weighs by its own area: a cell's wide top
+    // quad should pull a shared corner further than the sliver of wall beside it.
+    std::unordered_map<Key, glm::vec3, KeyHash> sums;
+    sums.reserve(mesh.vertices.size());
+    for (std::size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
+        const glm::vec3& a = mesh.vertices[mesh.indices[i + 0]].position;
+        const glm::vec3& b = mesh.vertices[mesh.indices[i + 1]].position;
+        const glm::vec3& c = mesh.vertices[mesh.indices[i + 2]].position;
+        const glm::vec3 face = glm::cross(b - a, c - a);
+        for (std::size_t k = 0; k < 3; ++k) sums[key_of(mesh.vertices[mesh.indices[i + k]].position)] += face;
+    }
+    for (coopa::gfx::engine::data::Vertex& v : mesh.vertices) {
+        const auto it = sums.find(key_of(v.position));
+        if (it == sums.end()) continue;
+        const float len = glm::length(it->second);
+        // Faces that cancel -- the two walls of a one-tile ridge against its top -- leave no
+        // direction to point. Keeping the flat normal there beats normalising noise.
+        if (len < 1e-9f) continue;
+        v.normal = it->second / len;
+        // The same deterministic tangent rule mesh_chunk_field()'s emit_quad() uses, so the weld
+        // after this still merges the corners this pass has just made identical.
+        const glm::vec3 axis = std::abs(v.normal.z) < 0.9f ? glm::vec3(0.0f, 0.0f, 1.0f)
+                                                           : glm::vec3(1.0f, 0.0f, 0.0f);
+        v.tangent = glm::vec4(glm::normalize(glm::cross(axis, v.normal)), 1.0f);
+    }
+}
+
 std::vector<coopa::gfx::engine::data::MeshLod> build_chunk_lods(const TerrainParams& params,
                                                                 const ChunkCoord& coord,
                                                                 const ColumnPad& pad,
@@ -982,6 +1032,9 @@ std::vector<coopa::gfx::engine::data::MeshLod> build_chunk_lods(const TerrainPar
             ChunkMeshData level_mesh;
             if (field) {
                 mesh_chunk_field(pad, params, lod.field_stride, lod.native_border, level_mesh);
+                // Before the warp: in face space the shared corners are exact grid values, and
+                // the warp carries the smoothed normals onto the globe like any others.
+                if (lod.smooth) smooth_field_normals(level_mesh);
                 if (params.planet) {
                     // Positions and normals only: a level carries no water of its own.
                     ChunkWaterData none_still, none_flowing;
@@ -989,6 +1042,7 @@ std::vector<coopa::gfx::engine::data::MeshLod> build_chunk_lods(const TerrainPar
                 }
             } else {
                 mesh_chunk_styled(pad, library, params, level_mesh, lod.style, lod.native_border);
+                if (lod.smooth) smooth_field_normals(level_mesh);
             }
             if (level_mesh.empty()) continue;
             coopa::gfx::engine::data::Mesh::weld_and_optimize(level_mesh.vertices, level_mesh.indices);

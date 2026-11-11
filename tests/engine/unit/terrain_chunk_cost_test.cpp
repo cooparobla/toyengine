@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <iterator>
 #include <tuple>
@@ -340,6 +341,53 @@ COOPA_TEST(two_planet_chunks_agree_on_their_shared_seam) {
     expect(a.size() > 4, "the seam carries a range of heights -- the pad is busy there");
     expect(only_left.empty() && only_right.empty(),
            "both chunks put the same surface heights on their shared seam -- no step to see through");
+}
+
+/**
+ * @brief `smooth` rounds a field level's shading without touching a triangle of it.
+ *
+ * The whole point of the flag: the level still costs exactly what it did and still carries the
+ * tallest-column geometry the seam rule depends on, so turning it on can never open a crack
+ * between chunks at different levels. Only the normals move -- off, every one of them is an axis
+ * (flat quads and vertical walls); on, the ones where a top meets a wall tilt between the two.
+ */
+COOPA_TEST(a_smooth_field_level_changes_only_its_normals) {
+    const TerrainParams params = make_test_params(32);
+    const ColumnPad     pad    = busy_pad(params.chunk_size, 7);
+
+    ChunkMeshData hard, soft;
+    mesh_chunk_field(pad, params, 4, 1, hard);
+    mesh_chunk_field(pad, params, 4, 1, soft);
+    smooth_field_normals(soft);
+
+    expect(!hard.vertices.empty(), "the field level has geometry to smooth");
+    expect(soft.vertices.size() == hard.vertices.size() && soft.indices == hard.indices,
+           "smoothing leaves the vertex count and every triangle exactly as they were");
+
+    bool positions_match = true;
+    for (std::size_t i = 0; i < hard.vertices.size(); ++i) {
+        positions_match = positions_match && soft.vertices[i].position == hard.vertices[i].position;
+    }
+    expect(positions_match, "smoothing moves no vertex, so the tallest-column seam rule still holds");
+
+    // An axis-aligned normal is one of +-X/+-Y/+-Z: what a flat quad or a vertical wall emits.
+    const auto axis_aligned = [](const glm::vec3& n) {
+        return std::abs(std::abs(n.x) + std::abs(n.y) + std::abs(n.z) - 1.0f) < 1e-3f &&
+               (std::abs(n.x) < 1e-3f || std::abs(n.y) < 1e-3f) &&
+               (std::abs(n.x) < 1e-3f || std::abs(n.z) < 1e-3f) &&
+               (std::abs(n.y) < 1e-3f || std::abs(n.z) < 1e-3f);
+    };
+    std::size_t hard_tilted = 0, soft_tilted = 0, unit_length = 0;
+    for (const auto& v : hard.vertices) hard_tilted += axis_aligned(v.normal) ? 0u : 1u;
+    for (const auto& v : soft.vertices) {
+        soft_tilted += axis_aligned(v.normal) ? 0u : 1u;
+        unit_length += std::abs(glm::length(v.normal) - 1.0f) < 1e-3f ? 1u : 0u;
+    }
+    std::printf("  field stride 4: %zu/%zu normals tilted hard, %zu/%zu smooth\n",
+                hard_tilted, hard.vertices.size(), soft_tilted, soft.vertices.size());
+    expect(hard_tilted == 0, "without the flag every normal is still an axis");
+    expect(soft_tilted > 0, "with it the normals where a top meets a wall tilt between them");
+    expect(unit_length == soft.vertices.size(), "every smoothed normal is still unit length");
 }
 
 /**

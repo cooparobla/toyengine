@@ -53,6 +53,11 @@ struct alignas(16) ForwardGlobals {
     /// WaterFrameState): x = count, y = flow-ripple layers, z = detail distance (m),
     /// w = ring draw range (m). Read by water_surface.glsl only.
     glm::vec4  water_ripple_info = glm::vec4(0.0f);
+    /// How the camera sits relative to the water this frame: x = 1 while it is BELOW the
+    /// surface (WaterFrameState::underwater, the same fact that selects UnderwaterPass's look),
+    /// else 0. A planet's water has no world "below" to test per fragment -- its surface is a
+    /// sphere -- so water_surface.glsl reads this instead of comparing world Z. yzw spare.
+    glm::vec4  water_view = glm::vec4(0.0f);
     /// Two vec4 per ring: [2i] = (x, y, age seconds, strength), [2i+1] = (start radius, 0, 0, 0).
     glm::vec4  water_ripples[2 * kMaxWaterRipples] = {};
 };

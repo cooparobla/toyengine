@@ -29,6 +29,7 @@
 #include <gfxcoopa/engine/targets/offscreen_target.h>
 #include <gfxcoopa/engine/util/sampler.h>
 #include <gfxcoopa/memory/allocator.h>
+#include <gfxcoopa/memory/image.h>
 #include <gfxcoopa/pipeline/descriptor.h>
 #include <gfxcoopa/pipeline/render_pass.h>
 #include <gfxcoopa/presentation/renderer.h>
@@ -523,6 +524,25 @@ void ToyRenderPipeline::build_transparency_passes_() {
             tese.empty() ? std::string() : config_.shaders(tese));
     }
 
+    // The transparent-coverage attachment (see TransparentPass's file doc): the nearest
+    // transparent surface per pixel, as a reciprocal camera distance. CloudOverlayPass samples
+    // it so the cloud layer can be ordered against water that covers open sky -- a planet's sea
+    // at the limb, which the water would otherwise paint straight over the sky's own clouds.
+    //
+    // render_extent_ never changes (see the SSAO binding comment above), so this is allocated
+    // once and bound once. The one-shot transition is what makes its layout unconditional:
+    // transparent_pass_'s draw render pass declares UNDEFINED -> SHADER_READ_ONLY_OPTIMAL for
+    // it, so after any Bracket::Draw it is sampleable -- but on a frame where the transparent
+    // pass never ran (transparency off, or no BLEND renderers in the scene) nothing would have
+    // moved it there, and the overlay's descriptor would point at an image in the wrong layout.
+    transparent_coverage_ = std::make_unique<coopa::gfx::memory::Image>(
+        device_, allocator_, render_extent_.width, render_extent_.height,
+        coopa::gfx::Format::R16_Sfloat,
+        coopa::gfx::ImageUsage::ColorAttachment | coopa::gfx::ImageUsage::Sampled);
+    cmd_pool_.submit_once([this](coopa::gfx::command::CommandBuffer& cmd) {
+        cmd.transition(*transparent_coverage_, coopa::gfx::TextureUsage::ShaderRead);
+    });
+
     // Global fog over the opaque scene -- drawn in place inside transparent_pass_'s render
     // pass (LOAD on the HDR image), before translucency; see record_fog_(). Always built,
     // gated per frame on fog_enabled.
@@ -539,7 +559,8 @@ void ToyRenderPipeline::build_transparency_passes_() {
         config_.shaders("fullscreen.vert"), config_.shaders("flat_clouds.frag"), config_.shaders("cloud_composite.frag"));
     cloud_overlay_pass_->set_inputs(gbuffer_target_.g1_view_typed(), gbuffer_target_.g2_view_typed(),
                                     sky_cloud_pass_->weather_view(), sky_cloud_pass_->shape_view(),
-                                    sky_cloud_pass_->noise_sampler(), sky_cloud_pass_->output_view());
+                                    sky_cloud_pass_->noise_sampler(), sky_cloud_pass_->output_view(),
+                                    transparent_coverage_->view_typed());
     {
         std::vector<const coopa::gfx::memory::Buffer*> cloud_frames, flat_frames;
         for (uint32_t i = 0; i < kCameraFrames; ++i) {
@@ -567,7 +588,7 @@ void ToyRenderPipeline::build_transparency_passes_() {
         cmd.bind_descriptor_set(ssr_pass_->scene_color_set(), first_set + 2);
     };
     sdf_forward_pass_ = std::make_unique<coopa::gfx::engine::passes::SdfForwardPass>(
-        device_, VK_FORMAT_R16G16B16A16_SFLOAT, transparent_pass_->render_pass(),
+        device_, VK_FORMAT_R16G16B16A16_SFLOAT, transparent_pass_->draw_render_pass(),
         *camera_layout_, *light_layout_, *shadow_layout_, sdf_data_.layout(),
         config_.shaders("sdf_quad.vert"),
         config_.shaders("sdf_forward.frag"),
@@ -578,7 +599,7 @@ void ToyRenderPipeline::build_transparency_passes_() {
     // particles), set 3 the material set (the sprite texture in its albedo slot), set 4 the
     // shadow maps (lit particles receive shadows).
     particle_pass_ = std::make_unique<passes::ParticlePass>(
-        device_, allocator_, transparent_pass_->render_pass(),
+        device_, allocator_, transparent_pass_->draw_render_pass(),
         *camera_layout_, *light_layout_, ssr_pass_->hiz_layout(), material_cache_->layout_object(),
         *shadow_layout_, config_.shaders("particle.vert"), config_.shaders("particle.frag"));
     // `simulation: gpu` particle systems: compute emit / simulate / sort, drawn by the pass

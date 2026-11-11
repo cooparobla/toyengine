@@ -37,6 +37,7 @@ void parse_water_settings(const fkyaml::node& node, WaterBody& w) {
     read(node, "obstacle_radius", w.obstacle_radius);
     read(node, "wake_length", w.wake_length);
 
+    if (node.contains("deep_color")) w.deep_color = parse_rgb(node.at("deep_color"), w.deep_color);
     if (node.contains("foam_color")) w.foam_color = parse_rgb(node.at("foam_color"), w.foam_color);
     read(node, "foam_amount", w.foam_amount);
     read(node, "shore_foam_depth", w.shore_foam_depth);

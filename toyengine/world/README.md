@@ -478,6 +478,12 @@ on a busy 32-tile `soft` chunk (`terrain_chunk_cost`), against LOD 0's 19.9k tri
 | `field: 8, native_border: 1` | 146 | 0.7% | 0.01 ms |
 | `field: 8, native_border: 0` | 82 | 0.41% | 0.01 ms |
 
+A `field` level is flat quads meeting vertical walls, so every edge between them is a hard shading
+crease. `smooth: true` on the level averages its normals across the faces meeting at each position
+(`smooth_field_normals()`), which reads as a rounded slope instead of a staircase. Geometry,
+triangle count and the tallest-column seam rule are all untouched -- only the normals move -- so it
+is free and cannot crack a seam. Best left off on the first coarse level, which is seen closest.
+
 Three properties `ratio` lacks. Its cost is a function of `chunk_size / field` and nothing else,
 not of how busy the terrain is. It cannot be rejected, so the tier exists on *every* chunk. And
 being built in face space from the same columns LOD 0 used, `warp_chunk_to_planet()` bends it onto

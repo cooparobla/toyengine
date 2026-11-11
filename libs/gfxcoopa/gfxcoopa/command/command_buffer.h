@@ -125,6 +125,38 @@ public:
     }
 
     /**
+     * @brief Begins a render pass whose clear values the caller supplies in full.
+     *
+     * The overload above builds exactly two -- a colour then a depth/stencil -- which no
+     * render pass with more than one colour attachment can describe. Pass one entry per
+     * attachment, in the render pass's own attachment order; entries for attachments whose
+     * loadOp is not CLEAR are ignored, but must still be present so the indices line up.
+     *
+     * @param render_pass       The render pass to begin.
+     * @param framebuffer       The framebuffer to render into.
+     * @param extent            Render area.
+     * @param clear_values      One entry per attachment, in attachment order.
+     * @param clear_value_count Number of entries.
+     */
+    void begin_render_pass(VkRenderPass        render_pass,
+                           VkFramebuffer       framebuffer,
+                           VkExtent2D          extent,
+                           const VkClearValue* clear_values,
+                           uint32_t            clear_value_count)
+    {
+        VkRenderPassBeginInfo rp_info{};
+        rp_info.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        rp_info.renderPass        = render_pass;
+        rp_info.framebuffer       = framebuffer;
+        rp_info.renderArea.offset = {0, 0};
+        rp_info.renderArea.extent = extent;
+        rp_info.clearValueCount   = clear_value_count;
+        rp_info.pClearValues      = clear_values;
+
+        vkCmdBeginRenderPass(cmd_, &rp_info, VK_SUBPASS_CONTENTS_INLINE);
+    }
+
+    /**
      * @brief Ends the current render pass.
      */
     void end_render_pass() {

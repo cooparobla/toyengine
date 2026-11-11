@@ -83,6 +83,7 @@ inline MapConfig derived_config(MapConfig authored) {
     authored.noise_plateau.seed = authored.seed + 6;
     authored.noise_warp.seed = authored.seed + 7;
     authored.noise_seabed.seed = authored.seed + 8;
+    authored.noise_biome.seed = authored.seed + 9;
     const double grid = authored.grid_size > 0 ? static_cast<double>(authored.grid_size) : k_reference_grid_size;
     authored.noise_island.frequency *= k_reference_grid_size / grid;
     // The natural landform fields keep their size against the world, not the cell, likewise.

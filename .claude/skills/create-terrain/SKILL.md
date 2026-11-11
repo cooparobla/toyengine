@@ -69,7 +69,7 @@ kinds grass, dirt, stone, sand, snow, rock, ice, moss, clay, ash, salt -- unlist
 use `tile_set`); generation (`generator:` -- any mapcoopa config key, see
 `libs/mapcoopa/assets/config.yaml`; plus `world_tiles` / `tiles_per_grid_unit`, `height_scale` -- bake only; the
 old flat keys `seed`, `shape`, `sea_level`... still load); tiling (`tile_size`, `height_step`,
-`chunk_size`, `view_radius`, `max_wall_steps`, `soil_depth_steps`, `max_chunk_jobs_per_frame`);
+`chunk_size`, `view_radius`, `soil_depth_steps`, `max_chunk_jobs_per_frame`);
 water (`water_inset`, `water:` WaterBody keys); collision (`collision`, `physics_material`); look
 (`material`, separate from the tile set).
 

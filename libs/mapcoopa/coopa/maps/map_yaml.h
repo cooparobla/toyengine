@@ -323,6 +323,12 @@ inline fkyaml::node config_to_node(const MapConfig& config) {
     node["border_length"] = config.border_length;
     node["sea_level"] = config.sea_level;
     node["terrain_relief"] = config.terrain_relief;
+    node["terrain_ridges"] = config.terrain_ridges;
+    node["erosion"] = config.erosion;
+    node["erosion_iterations"] = config.erosion_iterations;
+    node["beach_height_m"] = config.beach_height_m;
+    node["biome_dither"] = config.biome_dither;
+    node["biome_river_boundary"] = config.biome_river_boundary;
     node["terrain_roughness"] = config.terrain_roughness;
     node["threshold_water"] = config.threshold_water;
     node["threshold_water_count"] = config.threshold_water_count;
@@ -362,6 +368,7 @@ inline fkyaml::node config_to_node(const MapConfig& config) {
         node["natural"] = std::move(natural);
     }
     node["noise_hills"] = detail::noise_to_node(config.noise_hills);
+    node["noise_biome"] = detail::noise_to_node(config.noise_biome);
     node["noise_ridge"] = detail::noise_to_node(config.noise_ridge);
     node["noise_plateau"] = detail::noise_to_node(config.noise_plateau);
     node["noise_warp"] = detail::noise_to_node(config.noise_warp);
@@ -484,6 +491,14 @@ inline void apply_config_node(const fkyaml::node& node, MapConfig& config) {
     config.border_length = detail::read_or(node, "border_length", config.border_length);
     config.sea_level = detail::read_or(node, "sea_level", config.sea_level);
     config.terrain_relief = detail::read_or(node, "terrain_relief", config.terrain_relief);
+    config.terrain_ridges = detail::read_or(node, "terrain_ridges", config.terrain_ridges);
+    config.erosion = detail::read_or(node, "erosion", config.erosion);
+    config.erosion_iterations =
+        detail::read_or(node, "erosion_iterations", config.erosion_iterations);
+    config.beach_height_m = detail::read_or(node, "beach_height_m", config.beach_height_m);
+    config.biome_dither = detail::read_or(node, "biome_dither", config.biome_dither);
+    config.biome_river_boundary =
+        detail::read_or(node, "biome_river_boundary", config.biome_river_boundary);
     config.terrain_roughness =
         detail::read_or(node, "terrain_roughness", config.terrain_roughness);
     config.threshold_water = detail::read_or(node, "threshold_water", config.threshold_water);
@@ -537,6 +552,7 @@ inline void apply_config_node(const fkyaml::node& node, MapConfig& config) {
         c.seabed_shelf = detail::read_or(n, "seabed_shelf", c.seabed_shelf);
     }
     detail::noise_from_node(node, "noise_hills", config.noise_hills);
+    detail::noise_from_node(node, "noise_biome", config.noise_biome);
     detail::noise_from_node(node, "noise_ridge", config.noise_ridge);
     detail::noise_from_node(node, "noise_plateau", config.noise_plateau);
     detail::noise_from_node(node, "noise_warp", config.noise_warp);

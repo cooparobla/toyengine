@@ -142,23 +142,39 @@ CloudDeck planet_cloud_deck(coopa::scene::Scene& scene, const env::PlanetFrame& 
     // that bites: a layer of cloud above the atmosphere reads as cloud in vacuum, and the
     // volumetric march bounds its ray by the shell's own outer radius (volumetrics_march.frag),
     // so a deck beyond it gets none of the shell's in-scatter and sits in front of the limb
-    // instead of within it. Scaled down together, so raising one knob past the shell does not
-    // silently change the deck's proportions as well as its size.
+    // instead of within it.
+    //
+    // A deck that does not fit is thinned, not lowered. The base is what the altitude knobs are
+    // FOR: it is what clears the mountains, and what a camera has to get under for the deck to
+    // read as a layer overhead at all -- a planet camera's closest orbit is only
+    // `peak + min_clearance` up (planet_camera_fit.h). The depth only decides how much of a
+    // layer it reads as from outside. Scaling both together drags the base below the peak and
+    // below that closest orbit, so the camera ends up inside the slab at full zoom with no
+    // position left that sees the deck from beneath.
     if (atmos != nullptr && atmos->shell_outer() > atmos->shell_inner()) {
         const float head = atmos->shell_outer() - planet.radius;   // air there is to put it in
-        const float want = deck.altitude + deck.thickness;
-        if (want > head && want > 0.0f) {
-            const float squeeze = head / want;
-            deck.altitude  *= squeeze;
-            deck.thickness = std::max(deck.thickness * squeeze, 0.1f);
-            static bool warned = false;
-            if (!warned) {
-                warned = true;
-                coopa::debug::Logger("clouds").warn(
-                    "the cloud deck reached " + std::to_string(planet.radius + want) +
-                    " but the atmosphere ends at " + std::to_string(atmos->shell_outer()) +
-                    "; squeezed it back inside. Raise PlanetAtmosphere's radius_thickness_scale "
-                    "(or thickness_scale) to give it room.");
+        if (deck.altitude + deck.thickness > head) {
+            // The same radius-keyed figure the thickness floor uses: below this the layer stops
+            // reading as one from orbit, and giving up base clearance is the better trade.
+            const float thinnest = std::max(
+                planet.radius * std::max(knobs.cloud_thickness_radius_scale, 0.0f), 0.1f);
+            const float room = head - deck.altitude;
+            if (room >= thinnest) {
+                deck.thickness = room;
+            } else {
+                // Not even the base fits with a layer on top of it: the air is genuinely too
+                // thin for a deck, and only here is lowering it the lesser evil.
+                deck.thickness = std::max(std::min(thinnest, head), 0.1f);
+                deck.altitude  = std::max(head - deck.thickness, 0.0f);
+                static bool warned = false;
+                if (!warned) {
+                    warned = true;
+                    coopa::debug::Logger("clouds").warn(
+                        "the cloud deck's base reached " + std::to_string(planet.radius + deck.altitude) +
+                        " but the atmosphere ends at " + std::to_string(atmos->shell_outer()) +
+                        "; dropped it back inside. Raise PlanetAtmosphere's radius_thickness_scale "
+                        "(or thickness_scale) to give it room.");
+                }
             }
         }
     }

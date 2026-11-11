@@ -3,8 +3,9 @@
  * @brief toyengine Hub: a small Unity-Hub-style launcher for toyengine projects, drawn with the
  *        editor's immediate-mode UI, themes and file dialog so it looks like the editor.
  *
- * Pages: Projects (the list: open in the editor, reveal, clean rebuild, re-pin / link the engine, remove;
- * New / Add with their options), Engine (this checkout, CLI install, macOS app), Settings (the
+ * Pages: Projects (the list: open in the editor, reveal, clean rebuild, switch which of the three
+ * ways it gets its engine -- shared checkout, its own worktree of one, its own clone -- remove;
+ * New / Add with the same three options), Engine (this checkout, CLI install, macOS app), Settings (the
  * hub's own theme, ~/.toyengine/settings.yaml, blender_dark by default). Every project operation
  * runs tools/toyhub as a Task (editor/core/process.h) whose output streams into the log drawer at
  * the bottom; the hub itself never builds, clones or writes a project. Building is the editor's
@@ -197,17 +198,25 @@ public:
         run_toyhub("Rebuild " + p.name, {"rebuild", p.root.string()});
     }
 
-    /** @brief The New / Add options: where, and which engine the project builds against. */
+    /**
+     * @brief The New / Add options: where the project goes, and which of the three ways it gets
+     *        its engine (the same three `toyhub link|worktree|own` switches a project between).
+     */
     struct ProjectForm {
         bool adding = false;              ///< Add (an existing folder) vs New
         std::string name = "my_game";     ///< New: the folder (= project) name, always snake_case
         std::string location;             ///< New: the parent folder
         std::string folder;               ///< Add: the folder
-        int engine_mode = 0;              ///< 0: pinned clone at a commit, 1: linked to a local checkout
-        std::string ref;                  ///< Pinned: empty = this checkout's HEAD (must be pushed)
-        std::string engine_path = ROOT_DIR;   ///< Linked: any toyengine checkout
-        bool setup_engine = true;         ///< Fetch / link .libs/toyengine now (setup.sh)
+        int engine_mode = 0;              ///< 0: linked, 1: its own worktree, 2: its own clone
+        std::string ref;                  ///< The commit / tag / branch the engine starts at
+        std::string engine_path = ROOT_DIR;   ///< Linked: the checkout to share
+        std::string branch;               ///< Worktree / own: empty = the project's name
+        bool setup_engine = true;         ///< Put the engine in place now (setup.sh)
 
+        /** @brief The toyhub option this engine choice is: `--link` / `--worktree` / `--own`. */
+        const char* engine_option() const {
+            return engine_mode == 0 ? "--link" : engine_mode == 1 ? "--worktree" : "--own";
+        }
         fs::path target() const { return adding ? fs::path(folder) : fs::path(location) / editor::snake_case(name); }
     };
     ProjectForm& project_form() { return form_; }
@@ -243,11 +252,19 @@ public:
     /** @brief Runs `toyhub new` / `toyhub add` with the form's options. */
     void submit_project_form() {
         const fs::path dir = form_.target();
-        std::vector<std::string> args{form_.adding ? "add" : "new", dir.string()};
-        if (form_.engine_mode == 1) { args.push_back("--link"); args.push_back(form_.engine_path); }
-        else if (!form_.ref.empty()) { args.push_back("--ref"); args.push_back(form_.ref); }
+        std::vector<std::string> args{form_.adding ? "add" : "new", dir.string(), form_.engine_option()};
+        if (form_.engine_mode == 0) args.push_back(form_.engine_path);
+        else if (!form_.branch.empty()) { args.push_back("--branch"); args.push_back(form_.branch); }
+        if (!form_.ref.empty()) { args.push_back("--ref"); args.push_back(form_.ref); }
         if (!form_.setup_engine) args.push_back("--no-setup");
         run_toyhub((form_.adding ? "Add " : "Create ") + dir.filename().string(), args, [this, dir] { select_(dir); });
+    }
+
+    /** @brief Switches an existing project's engine mode (toyhub link / worktree / own). */
+    void set_engine_mode(const HubProject& p, const std::string& mode, const std::string& engine_path = {}) {
+        std::vector<std::string> args{mode, p.root.string()};
+        if (!engine_path.empty()) args.push_back(engine_path);
+        run_toyhub("Engine " + mode + ": " + p.name, args);
     }
 
     /** @brief The "Remove Project..." confirmation for `p`. */
@@ -440,12 +457,11 @@ private:
         const std::string eng = p.engine_label();
         const float bw = ctx.text_width(eng) + 16;
         const imm::Box badge{r.x + col_engine, r.y + 16, bw, 22};
-        ctx.fill_rounded(badge, p.linked() ? ctx.style.accent * glm::vec4(1, 1, 1, 0.45f) : ctx.style.field, 11);
-        ctx.text_in(badge, eng, p.linked() ? ctx.style.text : ctx.style.text_dim, 0.0f, true);
-        if (ctx.is_hovered(badge)) {
-            ctx.tooltip(p.linked() ? "Linked to " + p.engine_link + "\nBuilds against that working tree, uncommitted edits included."
-                                    : "Pinned engine commit " + p.engine_ref + "\n(.libs/toyengine is a clone checked out there)");
-        }
+        const bool own_engine = p.own_engine();
+        ctx.fill_rounded(badge, p.linked() ? ctx.style.accent * glm::vec4(1, 1, 1, 0.45f)
+                                           : own_engine ? ctx.style.accent * glm::vec4(1, 1, 1, 0.22f) : ctx.style.field, 11);
+        ctx.text_in(badge, eng, p.linked() || own_engine ? ctx.style.text : ctx.style.text_dim, 0.0f, true);
+        if (ctx.is_hovered(badge)) ctx.tooltip(p.engine_tooltip());
         ctx.text_in({r.x + col_mod, r.y, 120, r.h}, relative_time(p.modified), ctx.style.text_dim, 0.0f);
 
         // Actions: Open (the editor), and the "..." menu.
@@ -468,20 +484,27 @@ private:
             if (ctx.menu_item("Reveal in Finder", "", nullptr, true, imm::Icon::Folder)) reveal_in_file_browser(p.root);
             if (ctx.menu_item("Rebuild (clean)", "", nullptr, idle, imm::Icon::Tool)) rebuild_project(p);
             ctx.menu_separator();
-            if (!p.linked() && ctx.menu_item("Re-pin engine to this checkout's HEAD", "", nullptr, idle, imm::Icon::Restart)) {
-                run_toyhub("Re-pin " + p.name, {"upgrade", dir});
-            }
-            if (ctx.menu_item(p.linked() ? "Link to another toyengine checkout..." : "Link to a local toyengine checkout...", "", nullptr, idle,
-                              imm::Icon::Link)) {
+            // The same three engine modes the New / Add dialog offers, for a project that exists.
+            // Each is one toyhub command, which dismantles the mode the project is in now first;
+            // uncommitted engine work stops the switch and says so in the log.
+            if (ctx.menu_item(p.linked() ? "Engine: link to another checkout..." : "Engine: link to a shared checkout...", "",
+                              nullptr, idle, imm::Icon::Link)) {
                 const HubProject target = p;
                 file_dialog_.open(ctx, FileDialog::Mode::PickFolder, "Choose a toyengine Checkout", fs::path(ROOT_DIR).parent_path(), {},
                                   [this, target](const fs::path& eng) {
                                       if (!is_toyengine_checkout(eng)) { status_ = eng.string() + " is not a toyengine checkout"; return; }
-                                      run_toyhub("Link " + target.name, {"link", target.root.string(), eng.string()});
+                                      set_engine_mode(target, "link", eng.string());
                                   });
             }
-            if (p.linked() && ctx.menu_item("Unlink engine (use the pinned clone)", "", nullptr, idle, imm::Icon::Link)) {
-                run_toyhub("Unlink " + p.name, {"unlink", dir});
+            if (p.mode() != "worktree" &&
+                ctx.menu_item("Engine: its own worktree (branch " + p.name + ")", "", nullptr, idle, imm::Icon::Tool)) {
+                set_engine_mode(p, "worktree");
+            }
+            if (p.mode() != "own" && ctx.menu_item("Engine: its own copy in engine/", "", nullptr, idle, imm::Icon::Package)) {
+                set_engine_mode(p, "own");
+            }
+            if (p.mode() == "own" && ctx.menu_item("Engine: move its copy to this checkout's HEAD", "", nullptr, idle, imm::Icon::Restart)) {
+                run_toyhub("Re-pin " + p.name, {"upgrade", dir});
             }
             ctx.menu_separator();
             if (ctx.menu_item("Remove Project...", "", nullptr, idle, imm::Icon::Trash)) open_remove_dialog(p);
@@ -511,9 +534,13 @@ private:
         row("HEAD", engine_head_.empty() ? std::string("(not a git checkout)") : engine_head_);
         row("Libraries", std::string(PROJ_DIR));
         ctx.spacing(8);
-        ctx.paragraph("New projects pin this checkout's HEAD commit and clone git@github.com:cooparobla/toyengine.git into "
-                      "<project>/.libs/toyengine, so the commit has to be pushed. A linked project builds against this "
-                      "checkout directly instead, uncommitted engine and libs/ edits included.");
+        ctx.paragraph("A project gets its engine in one of three ways, chosen when it is created and switched from a project "
+                      "row's menu. Linked: .libs/toyengine symlinks a checkout the project shares with every other linked "
+                      "project, this one by default -- uncommitted engine and libs/ edits build straight into the game. "
+                      "Worktree: <project>/engine is a git worktree of that checkout on a branch named after the project, so "
+                      "the project's engine work is committed in the engine's own history without any other project seeing it, "
+                      "and without a second clone. Own: <project>/engine is the project's own clone, independent of every "
+                      "checkout on this machine.");
         ctx.spacing(8);
         const bool idle = !task_.running();
         if (ctx.button("Install toyhub command", 220, idle, imm::Icon::Console)) run_toyhub("Install toyhub", {"install"});
@@ -593,7 +620,14 @@ private:
 #else
             ctx.paragraph("Move to Trash deletes the project folder. Remove from List only stops showing it here; its files stay.");
 #endif
-            if (remove_target_.linked()) ctx.label_dim("Its linked engine checkout (" + remove_target_.engine_link + ") is not touched.");
+            if (remove_target_.linked())
+                ctx.label_dim("The checkout it shares (" + remove_target_.engine_link + ") is not touched.");
+            else if (remove_target_.mode() == "worktree")
+                ctx.label_dim("Its engine worktree (" + remove_target_.engine_link + ") goes with it; the branch it is on" +
+                              (remove_target_.engine_branch.empty() ? "" : " (" + remove_target_.engine_branch + ")") +
+                              " and every commit on it stay in the checkout that owns it.");
+            else if (remove_target_.mode() == "own")
+                ctx.label_dim("Its own engine clone (" + remove_target_.engine_link + ") goes with it: push engine work you want to keep first.");
             ctx.spacing(6);
             if (ctx.button("Move to Trash", 130, !task_.running(), imm::Icon::Trash)) {
                 ctx.close_modal();
@@ -624,7 +658,7 @@ private:
         };
         if (f.adding) {
             ctx.paragraph("This folder has no project file yet. It will be set up as a toyengine project in place: a "
-                          ".toy file, src/, the build / run / editor scripts and the engine in .libs/ are added, and "
+                          ".toy file, src/, the build / run / editor scripts and the engine chosen below are added, and "
                           "nothing already in the folder is overwritten.");
             const imm::Box r = ctx.property_row("Folder");
             ctx.text_in(r, f.folder, ctx.style.text, 0.0f);
@@ -638,23 +672,36 @@ private:
             if (ctx.button("Browse...", 100)) browse("Choose Location", fs::path(f.location), [this](const fs::path& p) { form_.location = p.string(); });
         }
         ctx.spacing(6);
-        static const std::vector<std::string> modes = {"Pinned to a commit (cloned into .libs/)", "Linked to a local toyengine checkout"};
+        // The three ways a project gets its engine, in the order of how much it keeps to itself.
+        static const std::vector<std::string> modes = {"Share a toyengine checkout (link to it)",
+                                                       "Its own worktree of that checkout, in engine/",
+                                                       "Its own clone of the engine, in engine/"};
         ctx.combo("Engine", &f.engine_mode, modes);
         bool engine_ok = true;
         if (f.engine_mode == 0) {
-            ctx.input_text("Commit / tag", &f.ref);
-            ctx.label_dim("Empty: this checkout's HEAD. Clones git@github.com:cooparobla/toyengine.git, so it must be pushed.");
-        } else {
             ctx.input_text("Checkout", &f.engine_path);
             if (ctx.button("Browse...##engine", 100)) {
                 browse("Choose a toyengine Checkout", fs::path(f.engine_path).parent_path(), [this](const fs::path& p) { form_.engine_path = p.string(); });
             }
             engine_ok = is_toyengine_checkout(f.engine_path);
             if (!engine_ok) ctx.label("Not a toyengine checkout (no cmake/ToyProject.cmake or toyengine/core/engine.h).", &ctx.style.warning);
-            else ctx.label_dim(".libs/toyengine becomes a symlink to it: its uncommitted engine and libs/ edits build into the project.");
+            else ctx.paragraph(".libs/toyengine becomes a symlink to it: its uncommitted engine and libs/ edits build into the project -- "
+                               "and so does every other linked project's.", &ctx.style.text_dim);
+        } else if (f.engine_mode == 1) {
+            ctx.input_text("Branch", &f.branch);
+            ctx.input_text("From", &f.ref);
+            ctx.paragraph("engine/ becomes a git worktree of " + fs::path(ROOT_DIR).filename().string() + " on its own branch (empty: the "
+                          "project's name), started from From (empty: this checkout's HEAD). Engine work is committed on that branch, in "
+                          "the engine's own history, and costs no second clone.", &ctx.style.text_dim);
+        } else {
+            ctx.input_text("Commit / tag / branch", &f.ref);
+            ctx.input_text("Branch", &f.branch);
+            ctx.paragraph("engine/ becomes the project's own clone, independent of every checkout on this machine -- what a project that "
+                          "has to build somewhere else wants. Empty Branch leaves the clone where the ref puts it.", &ctx.style.text_dim);
         }
         ctx.spacing(4);
-        ctx.property_bool(f.engine_mode == 0 ? "Clone the engine now" : "Link the engine now", &f.setup_engine);
+        ctx.property_bool(f.engine_mode == 0 ? "Link the engine now" : f.engine_mode == 1 ? "Create the worktree now" : "Clone the engine now",
+                          &f.setup_engine);
         ctx.spacing(6);
         std::error_code ec;
         bool target_ok = true;

@@ -11,6 +11,7 @@
 #include <coopa/testing/test.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <memory>
 
 #include <glm/glm.hpp>
@@ -431,4 +432,64 @@ COOPA_TEST(the_same_limb_depth_looks_the_same_on_any_sized_planet) {
     const float large = depth_of(512, 160);
     expect_near(small, 2.0f, 1e-3f, "a small globe reaches the authored limb depth");
     expect_near(large, 2.0f, 1e-3f, "and so does one eight times its radius, from the same number");
+}
+
+/**
+ * @brief A deck that will not fit gives up its DEPTH, never its base.
+ *
+ * planet_demo's own case: a 256-unit peak under `thickness_scale: 1.4` and
+ * `cloud_altitude_peak_scale: 1.15`. Every term that decides the outcome is peak-keyed and
+ * dominates its radius-keyed partner, so a small globe reproduces the arithmetic exactly
+ * without allocating the demo's 6.3M tiles: the deck asks for 294.4 + 147.2 = 441.6 against
+ * 358.4 of air and does not fit.
+ *
+ * What happens next decides whether the clouds can be seen from below at all. A
+ * `PlanetCameraFit` camera's closest orbit is `R + peak + min_clearance`, which on the demo's
+ * R = 651.9 is 911.9; a base scaled down to 0.81 x 294.4 = 238.9 (radius 890.8) puts full zoom
+ * INSIDE the slab -- and under the 256-unit mountains besides.
+ */
+COOPA_TEST(a_deck_that_does_not_fit_is_thinned_not_lowered) {
+    Fixture f(256, 64);
+    f.sizer->thickness_scale = 1.4f;               // as assets/scenes/terrain/planet_demo sets it
+    f.sizer->cloud_altitude_peak_scale = 1.15f;
+    f.scene.update(1.0f / 60.0f);
+
+    const float radius = f.terrain->params.layout().radius();
+    const toy::world::CloudDeck deck =
+        toy::world::planet_cloud_deck(f.scene, toy::env::PlanetFrame{glm::vec3(0.0f), radius});
+
+    const float head = f.sizer->shell_outer() - radius;
+    std::printf("    R %.1f peak 256 head %.1f -> deck altitude %.1f thickness %.1f (radius %.1f..%.1f)\n",
+                radius, head, deck.altitude, deck.thickness,
+                radius + deck.altitude, radius + deck.altitude + deck.thickness);
+
+    expect(deck.altitude + deck.thickness <= head + 1e-3f, "the deck still fits inside the shell");
+    expect_near(deck.altitude, 256.0f * 1.15f, 1e-2f,
+                "the base is exactly where cloud_altitude_peak_scale puts it -- the knob is not inert");
+    expect(deck.altitude > 256.0f, "so the deck clears the tallest mountain");
+    // The camera's closest orbit, from planet_camera_fit.h's own expression.
+    const float min_orbit = radius + 256.0f + 4.0f;
+    expect(radius + deck.altitude > min_orbit,
+           "and clears the closest orbit a PlanetCameraFit camera can reach, so full zoom is under it");
+    expect_near(deck.thickness, head - deck.altitude, 1e-2f, "the depth is what gave way instead");
+}
+
+/** @brief When even the base will not fit, the deck is dropped rather than pushed outside. */
+COOPA_TEST(a_deck_with_no_room_at_all_is_dropped_inside_the_shell) {
+    Fixture f(40, 64);
+    f.sizer->thickness_scale = 0.2f;               // almost no air over a 40-unit peak
+    f.sizer->radius_thickness_scale = 0.0f;
+    f.sizer->min_thickness = 0.0f;
+    f.sizer->cloud_altitude_peak_scale = 1.15f;
+    f.scene.update(1.0f / 60.0f);
+
+    const float radius = f.terrain->params.layout().radius();
+    const toy::world::CloudDeck deck =
+        toy::world::planet_cloud_deck(f.scene, toy::env::PlanetFrame{glm::vec3(0.0f), radius});
+
+    const float head = f.sizer->shell_outer() - radius;
+    expect(head > 0.0f, "the shell has some air in it");
+    expect(deck.altitude + deck.thickness <= head + 1e-3f, "the deck is inside the shell");
+    expect(deck.thickness > 0.0f, "and is still a layer, not a degenerate plane");
+    expect(deck.altitude < 40.0f * 1.15f, "the base gave way, because nothing else could");
 }

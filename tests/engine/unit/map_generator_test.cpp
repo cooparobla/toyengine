@@ -360,9 +360,22 @@ COOPA_TEST(one_map_gives_both_modes_the_same_ground_and_field) {
     expect(biome_same == biome_checked,
            "both modes: every sampled point reports the same biome through both samplers");
 
-    // Layer fallback: a texel resolves to the grass layer (index 0) only if its own kind really
-    // is grass -- the regression a kind missing from `layers:` would otherwise hide silently.
-    int off_grass_checked = 0, off_grass_correct = 0;
+    // Layer painting: every texel carries full weight on exactly the layer the apply's by-name
+    // resolution picks for its kind -- its own named layer, or the first as the documented
+    // fallback for a kind `layers:` does not name (this fixture has no `salt` layer, as
+    // unified_terrain_demo has none). Resolving by name here too is what catches a kind
+    // painted onto the wrong layer without hiding behind that fallback.
+    std::array<int, toy::world::k_tile_kind_count> layer_for_kind{};
+    for (std::size_t k = 0; k < toy::world::k_tile_kind_count; ++k) {
+        layer_for_kind[k] = 0;
+        for (std::size_t i = 0; i < tb.layers.size(); ++i) {
+            if (tb.layers[i].name == toy::world::tile_kind_names()[k]) {
+                layer_for_kind[k] = static_cast<int>(i);
+                break;
+            }
+        }
+    }
+    int texels_checked = 0, texels_correct = 0;
     const double map_tiles =
         static_cast<double>(tb.applied_map->params().tiles_for_grid(g.generated_config().grid_size));
     const int sw = tb.field.data()->layer_nx(), sh = tb.field.data()->layer_ny();
@@ -371,15 +384,15 @@ COOPA_TEST(one_map_gives_both_modes_the_same_ground_and_field) {
             const double u = (static_cast<double>(i) + 0.5) / sw;
             const double v = (static_cast<double>(j) + 0.5) / sh;
             const auto s = tb.applied_map->sample_surface(u * map_tiles, v * map_tiles);
-            if (s.top == TileKind::Grass) continue;
-            ++off_grass_checked;
-            if (tb.field.data()->layer_at(0, i, j) == 0) ++off_grass_correct;
+            const int expected = layer_for_kind[static_cast<std::size_t>(s.top)];
+            ++texels_checked;
+            if (tb.field.data()->layer_at(expected, i, j) == 255) ++texels_correct;
         }
     }
-    expect(off_grass_checked > 0, "both modes: sampled at least one non-grass texel");
-    expect(off_grass_correct == off_grass_checked,
-           "both modes: a non-grass kind never falls back to the grass layer (" +
-           std::to_string(off_grass_correct) + "/" + std::to_string(off_grass_checked) + ")");
+    expect(texels_checked > 0, "both modes: sampled at least one texel");
+    expect(texels_correct == texels_checked,
+           "both modes: every texel is painted on the layer its kind resolves to (" +
+           std::to_string(texels_correct) + "/" + std::to_string(texels_checked) + ")");
 }
 
 /**

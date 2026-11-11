@@ -102,6 +102,23 @@ COOPA_TEST(project_actions_through_real_input) {
     app.project_form().name = "My Game";
     expect(app.project_form().target() == base / "my_game", "a typed \"My Game\" creates the folder my_game");
 
+    // The three ways a project gets its engine, each with its own fields in the dialog: every
+    // one draws, and each maps to the toyhub option that sets that mode up.
+    app.open_new_project_dialog();
+    tick(engine, 3);
+    expect(app.modal_shown() == "New Project", "New project opens the options dialog");
+    for (int mode = 0; mode < 3; ++mode) {
+        app.project_form().engine_mode = mode;
+        tick(engine, 2);
+        expect(app.modal_shown() == "New Project", "engine option " + std::to_string(mode) + " draws");
+    }
+    app.project_form().engine_mode = 1;
+    app.project_form().branch = "my_game";
+    tick(engine, 2);
+    dump(engine, "hub_new_worktree");
+    in.key(coopa::input::Key::Escape);
+    tick(engine, 2);
+
     // Remove: the confirmation, then Remove from List (files stay) / Move to Trash (folder goes).
     app.open_remove_dialog(app.projects()[0]);
     tick(engine, 3);

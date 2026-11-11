@@ -379,11 +379,11 @@ A project contains:
 
 | Path | What |
 |---|---|
-| `<target>.toy` | The project file (YAML): `target` (the executable name) and `engine:`, which holds `source` (`git@github.com:cooparobla/toyengine.git`), `ref` (the pinned commit) and optionally `link` (an engine checkout to build instead: absolute for a shared one, project-relative for a vendored submodule). |
+| `<target>.toy` | The project file (YAML): `target` (the executable name) and `engine:`, which holds `source` (`git@github.com:cooparobla/toyengine.git`), `ref` (the commit, tag or branch the engine is at), `link` (where the engine is: absolute for a checkout shared with other projects, project-relative for one of the project's own) and, for an own engine, `mode` (`worktree` / `own`) and `branch`. |
 | `assets/` | The project's content. It sits over this repo's `assets/`, which is the fallback for shaders, fonts, shared meshes and materials. `assets/shaders/*` compile with the engine and gfxcoopa shader headers on the include path. |
 | `src/` | C++ compiled into both the game and the editor, so the editor's Play runs it. Register components with `TOY_MODULE` ([`toyengine/core/module.h`](toyengine/core/module.h)). Describe them to the inspector with `register_component_schema()` under `#if TOY_EDITOR`. `src/main.cpp` replaces the game's `main`. Engine code is a compiled library, so changing it means editing (or forking) the engine checkout. |
 | `.libs/toyengine` | Where the build finds the engine. `setup.sh` clones it at `engine.ref`, or symlinks it to `engine.link`. Git-ignored -- never put a checkout you care about here: `clean.sh --all` removes this whole tree. |
-| `engine/` | A **vendored** engine only: the project's own toyengine as a git submodule, committed and tracked. `.libs/toyengine` symlinks it. |
+| `engine/` | An engine of the project's **own** only: a git worktree of a toyengine checkout, or the project's own clone. `.libs/toyengine` symlinks it. A git checkout in its own right, so it is git-ignored in the project and committed in the engine's history, not the project's. |
 | `setup.sh build.sh run.sh editor.sh package.sh clean.sh` | The project's scripts (from [`templates/project/`](templates/project/)). |
 | `build_settings.yaml` | Build Settings: product name, version, bundle id, signing. Written by the editor; never shipped. |
 
@@ -393,25 +393,33 @@ There are three ways a project can get its engine, all of them the `engine:` blo
 | Mode | `.toy` | `.libs/toyengine` | Use it when |
 |---|---|---|---|
 | **linked** | `link:` an absolute path | symlink to that checkout | working on the engine and a game together -- the default. Builds this working tree directly, uncommitted edits in the engine and `libs/` included. Every linked project on the machine shares it, so an engine edit for one game is an edit for all of them. |
-| **pinned** | `ref:` a pushed commit | a clone at that commit | the project must be reproducible on any machine and does not change engine code. |
-| **vendored** | `link:` a project-relative path | symlink to a submodule in the project | the game needs engine changes of its own. `toyhub vendor <dir>` adds the engine as a git submodule (`engine/`), so the project commits and pins the exact engine it builds and no other project is affected. |
+| **worktree** | `link:` a project-relative path, `mode: worktree`, `branch:` | symlink to a git worktree in the project | the game needs engine changes of its own and the engine checkout is on this machine. `toyhub worktree <dir> [--branch B]` adds `engine/` as a **git worktree** of this checkout on a branch named after the project, so engine work is committed in the engine's own history, pushed and merged like any other branch, and invisible to every other project until it is. A worktree shares the checkout's object store, so it costs no second clone. |
+| **own** | `link:` a project-relative path, `mode: own` | symlink to a clone in the project | the project has to build on a machine with no toyengine checkout. `toyhub own <dir> [--ref R]` pulls the project's own clone into `engine/` (from this checkout when there is one, so commits that are not pushed yet come along, with `origin` left pointing at `engine.source`). |
+
+A `.toy` with no `link:` at all is the one remaining shape without an engine of its own: `setup.sh`
+clones `engine.ref` into `.libs/toyengine`, and `toyhub upgrade <dir> [--ref R]` re-pins it. The
+three modes above are what `toyhub new`/`add` and the hub offer.
 
 Everything a project builds goes into its own `build/`, compiled shaders included
 (`build/shaders/`), so building one never writes into the engine checkout or its `build/`.
 
-`toyhub link|unlink|vendor <dir>` switches between the modes and `toyhub upgrade <dir> [--ref R]`
-re-pins a pinned one. Switching is one step: the mode the project is in now is dismantled first
--- a pinned clone in `.libs/`, a vendored submodule (its worktree, `.gitmodules` stanza, index
-entry and `.git/config` section) and a stale `.libs/toyengine` symlink all go, as do `build/` and
+`toyhub link|worktree|own <dir>` switches between the modes, and the hub offers the same three on
+a project row's menu. Switching is one step: the mode the project is in now is dismantled first
+-- a clone in `.libs/`, an engine worktree (removed from the checkout that owns it, where its
+branch and every commit on it stay), an own clone, an engine a `toyhub` old enough to have
+vendored submodules left behind (its worktree, `.gitmodules` stanza, index entry and
+`.git/config` section) and a stale `.libs/toyengine` symlink all go, as do `build/` and
 `build-*/`, whose CMake cache remembers the old engine path. Uncommitted work in the engine being
-removed stops the switch and is named; `--force` throws it away. A removed submodule's objects
-stay in `.git/modules/<name>`, so unpushed engine commits survive and vendoring again reuses the
-clone instead of re-fetching the engine; `--purge` drops those too.
+removed stops the switch and is named; `--force` throws it away.
 
-A vendored engine is deliberately *not* placed at `.libs/toyengine`: that path is `clean.sh
---all`'s to delete and `setup.sh`'s to `git checkout`, either of which would eat uncommitted
-engine work. The symlink keeps it in link mode, where `setup.sh` only ever re-runs
-`ln`. When a project's build is broken and it won't open, `toyhub rebuild <dir>` (the hub's
+An engine of the project's own is deliberately *not* placed at `.libs/toyengine`: that path is
+`clean.sh --all`'s to delete and `setup.sh`'s to `git checkout`, either of which would eat
+uncommitted engine work. The symlink keeps it in link mode, where `setup.sh` only ever re-runs
+`ln`. It is a git checkout in its own right, so the project git-ignores `engine/` and records it
+in the `.toy` instead; a fresh clone of the project gets it from `setup.sh`, which clones
+`engine.source` at `engine.branch` or `engine.ref`.
+
+When a project's build is broken and it won't open, `toyhub rebuild <dir>` (the hub's
 **...** > **Rebuild (clean)**) removes its build output and builds it again. The CMake side is [`cmake/ToyProject.cmake`](cmake/ToyProject.cmake)
 (`toyengine_add_project()`). When `.libs/toyengine` is not the top-level build, it adds only the
 engine; its own tests and tools are skipped.
@@ -525,8 +533,9 @@ cmake/          ToyProject.cmake: toyengine_add_project() (game + editor for a p
 assets/         config.yaml, scenes, meshes, materials, textures, shaders (every one the engine loads), fonts
 docs/           hand-written guides (e.g. ambient lighting); docs/images holds these screenshots
 plans/          design records for larger pieces of work
-libs/           pinned submodules: libcoopa (scene graph, assets, jobs), gfxcoopa (Vulkan),
-                physxcoopa (physics), sfxcoopa, uicoopa (UI), mapcoopa (world gen), caml
+libs/           tracked content, committed with the engine: libcoopa (scene graph, assets, jobs),
+                gfxcoopa (Vulkan), physxcoopa (physics), sfxcoopa, uicoopa (UI),
+                mapcoopa (world gen), caml
 ```
 
 Each module has its own README with the details.
@@ -535,7 +544,7 @@ Each module has its own README with the details.
 `toyengine::editor`. The rule is that **a header declares and its `.cpp` beside it holds the
 bodies**, along with the includes only those bodies need — so a game, editor or test source
 compiles only its own code, and editing an engine `.cpp` rebuilds that one file and relinks.
-The `libs/` submodules are header-only.
+The `libs/` libraries are header-only.
 
 Three deliberate exceptions:
 

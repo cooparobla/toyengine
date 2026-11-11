@@ -25,7 +25,7 @@
 #   height_step 1.0                                      (bed_kind_for's thresholds are in steps)
 #   heightmap chunk_size 32 -> chunk_tiles 32  ==  tile chunk_size 32
 #   view_radius 10 x chunk_size 32 x tile_size 1  ==  view_distance 320  ==  shadow_distance 320
-# Both tile flavours additionally share max_wall_steps, soil_depth_steps, collision_radius,
+# Both tile flavours additionally share soil_depth_steps, collision_radius,
 # material and water -- they differ ONLY in `tile_set` (and the voxel one drops kind_tile_sets,
 # since pointing a kind at a rounded set would restore round_kind_corners for it).
 #
@@ -189,7 +189,6 @@ scene:
           view_radius: 10
           tile_size: 1.0
           height_step: 1.0
-          max_wall_steps: 16
           soil_depth_steps: 2
           shadow_distance: 224
           # The shipped chunk_lods defaults ({0.40,0.14},{0.15,0.07},{0.07,0.03}) are tuned for a
@@ -295,7 +294,6 @@ scene:
           view_radius: 10
           tile_size: 1.0
           height_step: 1.0
-          max_wall_steps: 16
           soil_depth_steps: 2
           shadow_distance: 224
           collision: true

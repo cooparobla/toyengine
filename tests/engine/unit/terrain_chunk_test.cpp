@@ -117,15 +117,17 @@ COOPA_TEST(walls_appear_exactly_where_a_neighbour_is_lower) {
         for (int dir : {1, -1, 2, -2}) walls = walls && area.count(dir) && std::abs(area.at(dir) - 2.0) < 1e-3;
         expect(walls, "voxel chunk: a raised column exposes all four sides, two steps each");
 
-        // The clamp is a cap on the wall, not on the column: the top stays where it was.
-        TerrainParams clamped = params;
-        clamped.max_wall_steps = 1;
-        ChunkMeshData clamped_mesh;
-        mesh_chunk_styled(pad, voxel_library(), clamped, clamped_mesh);
-        area = area_by_direction(clamped_mesh);
+        // A deep drop runs the whole way down to its neighbour: a wall stopping short would
+        // leave an open band the width of the tile edge, which back-face culling turns into a
+        // see-through hole. 40 steps here; planet_demo's sea cliffs are over a hundred.
+        ColumnPad deep = make_flat_pad(4, 1);
+        deep.at(2, 2).steps = 41;
+        ChunkMeshData deep_mesh;
+        mesh_chunk_styled(deep, voxel_library(), params, deep_mesh);
+        area = area_by_direction(deep_mesh);
         walls = true;
-        for (int dir : {1, -1, 2, -2}) walls = walls && area.count(dir) && std::abs(area.at(dir) - 1.0) < 1e-3;
-        expect(walls, "voxel chunk: max_wall_steps caps a wall's height");
+        for (int dir : {1, -1, 2, -2}) walls = walls && area.count(dir) && std::abs(area.at(dir) - 40.0) < 1e-3;
+        expect(walls, "voxel chunk: a 40-step drop exposes all 40 steps of each side");
     }
 }
 

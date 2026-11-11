@@ -15,6 +15,12 @@
  *   settings.yaml   the hub's own settings (`theme`; default blender_dark)
  *
  * A project's name is always its folder's name. The engine checkout itself is never a project.
+ *
+ * A project gets its engine in one of three ways, which `HubProject::mode()` names and which the
+ * New / Add dialog and a project row's menu both offer: `linked` (a checkout shared with every
+ * other linked project), `worktree` (its own git worktree of a checkout, inside the project, on
+ * its own branch) and `own` (its own clone, inside the project). `toyhub link|worktree|own`
+ * switches a project between them; see tools/toyhub's header for what each costs.
  */
 
 #ifndef TOYENGINE_HUB_HUB_CORE_H
@@ -60,19 +66,51 @@ struct HubProject {
     fs::path toy_file;
     std::string target;         ///< `.toy` target: build/<target>, build/<target>_editor.
     std::string engine_ref;     ///< `.toy` engine.ref
-    std::string engine_link;    ///< `.toy` engine.link (non-empty: linked to a local checkout)
+    std::string engine_link;    ///< `.toy` engine.link (absolute: a shared checkout; relative: in the project)
+    std::string engine_mode;    ///< `.toy` engine.mode (empty in a `.toy` that predates it: read from the link)
+    std::string engine_branch;  ///< `.toy` engine.branch: the engine branch this project's engine work goes on
     fs::file_time_type modified{};
 
-    bool linked() const { return !engine_link.empty(); }
+    /**
+     * @brief Which of the three ways this project gets its engine: `linked` (a checkout shared
+     *        with every other linked project), `worktree` (its own git worktree of a checkout,
+     *        inside the project, on its own branch) or `own` (its own clone, inside the
+     *        project). `pinned` is a `.toy` with no link at all, whose engine is a clone in
+     *        `.libs/toyengine`.
+     */
+    std::string mode() const {
+        if (!engine_mode.empty()) return engine_mode;
+        if (engine_link.empty()) return "pinned";
+        return engine_link.front() == '/' ? "linked" : "own";
+    }
+    /** @brief True when the engine is a checkout shared with every other linked project. */
+    bool linked() const { return mode() == "linked"; }
+    /** @brief True when the engine lives inside the project (a worktree or a clone of its own). */
+    bool own_engine() const { const std::string m = mode(); return m == "worktree" || m == "own"; }
+
     fs::path editor_binary() const { return root / "build" / (target + "_editor"); }
     fs::path game_binary() const { return root / "build" / target; }
     bool built() const { std::error_code ec; return fs::exists(editor_binary(), ec); }
-    /** @brief "linked" or a short engine ref. */
+    /** @brief The engine mode, or a short engine ref for a pinned project. */
     std::string engine_label() const {
-        if (linked()) return "linked";
+        const std::string m = mode();
+        if (m != "pinned") return m;
         if (engine_ref.empty()) return "unpinned";
         return engine_ref.size() > 12 && engine_ref.find_first_not_of("0123456789abcdef") == std::string::npos
                    ? engine_ref.substr(0, 10) : engine_ref;
+    }
+    /** @brief What the engine badge explains on hover. */
+    std::string engine_tooltip() const {
+        const std::string m = mode();
+        if (m == "linked")
+            return "Linked to " + engine_link + "\nBuilds that working tree, uncommitted edits included -- and so does "
+                   "every other linked project on this machine.";
+        if (m == "worktree")
+            return "Its own engine worktree in " + engine_link + (engine_branch.empty() ? "" : ", on branch " + engine_branch) +
+                   "\nEngine work is committed on that branch, in the engine's own history; no other project sees it.";
+        if (m == "own")
+            return "Its own engine clone in " + engine_link + "\nIndependent of every toyengine checkout on this machine.";
+        return "Pinned engine commit " + engine_ref + "\n(.libs/toyengine is a clone checked out there)";
     }
 };
 
@@ -174,6 +212,8 @@ inline std::optional<HubProject> read_project(const fs::path& root) {
     if (toy.contains("engine") && toy.at("engine").is_mapping()) {
         h.engine_ref = get_string(toy.at("engine"), "ref");
         h.engine_link = get_string(toy.at("engine"), "link");
+        h.engine_mode = get_string(toy.at("engine"), "mode");
+        h.engine_branch = get_string(toy.at("engine"), "branch");
     }
     h.modified = fs::last_write_time(h.toy_file, ec);
     if (fs::is_directory(p.assets(), ec)) {

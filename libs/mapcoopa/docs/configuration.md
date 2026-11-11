@@ -208,6 +208,17 @@ There are no moisture controls. Moisture is derived from lakes, rivers and dista
 coast, then normalised to span the full range on every map. Only its arrangement changes,
 through the river count, sea level and lake threshold.
 
+Biomes are assigned per cell by `PassBiomes`, and per *point* by `BiomeField` -- the query a
+3D consumer samples. The point query classifies from the continuous ground height and the
+barycentrically blended climate, so biome boundaries follow ridges, valleys and shorelines
+rather than cell edges. Two keys shape it:
+
+| Key | Shipped | Effect |
+|---|---|---|
+| `beach_height_m` | 6.0 | How high above the water a shore may stand and still be beach. Flat shelves grow wide beaches; cliff coasts none. 0 removes beaches |
+| `biome_dither` | 0.05 | Noise added to the point query's moisture and temperature so boundaries wander organically. Cells never dither |
+| `biome_river_boundary` | 1.0 | How strongly a river separates its two banks. A river runs along a Voronoi edge, so the bank a point is on is the cell nearest it; at 1 the query does not blend climate across such an edge, which lands nearby transitions ON the watercourse. 0 treats a river as ordinary ground |
+
 ## Terrain
 
 Height starts as breadth-first distance from the coast. That keeps coastlines at sea level
@@ -217,6 +228,17 @@ the bays on either side, which looks artificial. Three settings work at three sc
 - **`terrain_relief`** (0 to 1, shipped 0.65) blends the distance field toward fractal
   noise, so the interior becomes massifs and valleys. A coastal mask keeps the shore the
   lowest land. 0 restores the pure distance field of the original algorithm. `--relief=F`.
+- **`terrain_ridges`** (0 to 1, shipped 0.45) writes ridged mountain ranges into the
+  stored height field, using the same `noise_ridge` field (and warp) the natural terrain
+  model samples at render time, faded in away from the coast. Because the stored corners
+  move, rivers, the temperature lapse and the biome bands all respond to the ranges. 0
+  removes the term.
+- **`erosion`** (0 to 1, shipped 0.6) carves fluvial valleys into the stored field with an
+  iterated stream-power model: rain accumulates downslope into a discharge, each corner is
+  cut by `slope * sqrt(drainage area)`, and a weak hillslope diffusion opens the cuts into
+  valleys. Drainage basins come out dendritic, and rivers (routed afterwards) run along
+  their floors. `erosion_iterations` (shipped 20) sets how many passes the loop makes. 0
+  skips the stage.
 - **`elevation_smoothing_iterations`** relaxes the stored height field. It controls how
   smooth the landform is, not how smooth the render looks. Use `elevation_surface` for
   that.

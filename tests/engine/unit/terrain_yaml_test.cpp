@@ -210,8 +210,7 @@ COOPA_TEST(unified_terrain_demo_keeps_its_three_flavours_interchangeable) {
 
     // The two tile terrains: same shared params, differing only in tile_set / kind_tile_sets.
     for (const char* key : {"chunk_size", "view_radius", "tile_size", "height_step",
-                            "max_wall_steps", "soil_depth_steps", "shadow_distance",
-                            "collision_radius"}) {
+                            "soil_depth_steps", "shadow_distance", "collision_radius"}) {
         expect(num_at(ts, key) == num_at(tv, key),
                std::string("unified: soft and voxel share `") + key + "`");
     }

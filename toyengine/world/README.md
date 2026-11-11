@@ -904,10 +904,16 @@ See `assets/scenes/terrain/planet_demo` -- a globe held whole in frame, spun by 
   PlanetAtmosphere at all the defaults apply, so a hand-written `planet: true` + `clouds: true`
   scene still gets a working layer.
 
-  **The deck is kept inside the shell**, squeezed back with a warning if the knobs push it out.
-  Not a tidiness rule: `volumetrics_march.frag` bounds its ray by the shell's own outer radius,
-  so a deck beyond it gets none of the atmosphere's in-scatter and reads as a layer in front of
-  the limb rather than within it. Give it room with `radius_thickness_scale`, not by clipping.
+  **The deck is kept inside the shell.** Not a tidiness rule: `volumetrics_march.frag` bounds
+  its ray by the shell's own outer radius, so a deck beyond it gets none of the atmosphere's
+  in-scatter and reads as a layer in front of the limb rather than within it. A deck that does
+  not fit is **thinned, not lowered** -- the base is what clears the mountains and what a camera
+  has to get under for the deck to read as a layer overhead, while the depth only decides how
+  much of a layer it is from orbit. Lowering it instead puts the base under the peak and under
+  the closest orbit a `PlanetCameraFit` camera can reach (`R + peak + min_clearance`), so full
+  zoom lands *inside* the slab and no position is left that sees the deck from beneath. Only
+  when the base alone will not fit is it dropped, and that warns. Give it room with
+  `thickness_scale` / `radius_thickness_scale`, which is what sizes the air above the ground.
 
   `cloud_scale` stays underivable from YAML: the field's noise periods are fixed cloud-space
   lengths (13 km), so it is solved for three weather systems around the deck's own

@@ -16,7 +16,9 @@
 #include <cmath>
 #include <cstdio>
 #include <iterator>
+#include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include <gfxcoopa/engine/data/mesh.h>
@@ -501,6 +503,61 @@ COOPA_TEST(field_level_never_sinks_below_the_full_mesh) {
  * above that height, so the two chunks' z-coverage at the seam always overlaps. Checked per tile
  * row, from the meshes themselves rather than from the model that produced them.
  */
+/**
+ * @brief A wall descends to its neighbour's own height, however deep the drop -- in BOTH meshers.
+ *
+ * The seam rule both meshers keep is that a surface sits at or above its neighbour's true
+ * height while its wall descends TO that height, so two chunks at different levels overlap
+ * instead of opening a hole. A wall that stopped short of its neighbour would leave an open
+ * band the full width of the tile edge, which back-face culling renders as a see-through
+ * hole -- the artefact this pins against.
+ *
+ * Deep drops are ordinary, not exotic. A coarse field cell is the tallest column of a block
+ * up to 32 tiles across; and on a planet at `height_scale: 256` a river channel alone cuts
+ * about ten steps, a sea cliff over a hundred. Depth costs neither mesher anything: a field
+ * wall is two quads at any height, and the styled mesher's vertical run-merge collapses a
+ * plain wall to `soil_depth_steps + 1` stamps at any height.
+ */
+COOPA_TEST(a_deep_wall_reaches_its_neighbours_own_height) {
+    TerrainParams params = make_test_params(32);
+    const std::int32_t high = 120;          // a drop far deeper than any tile piece is tall
+    const ColumnPad pad = step_pad(params.chunk_size, high);
+    // The cliff's foot is the low ground's own height, whatever the drop.
+    const float foot = 1.0f * params.height_step;
+
+    const auto extent = [](const ChunkMeshData& mesh) {
+        float lowest = 1e9f, highest = -1e9f;
+        for (const auto& v : mesh.vertices) {
+            lowest  = std::min(lowest, v.position.z);
+            highest = std::max(highest, v.position.z);
+        }
+        return std::pair<float, float>(lowest, highest);
+    };
+
+    for (const std::int32_t stride : {1, 8, 32}) {
+        ChunkMeshData mesh;
+        mesh_chunk_field(pad, params, stride, 0, mesh);
+        expect(!mesh.vertices.empty(), "the field mesher produced geometry");
+        const auto [lowest, highest] = extent(mesh);
+        std::printf("    field stride %2d: wall runs %.1f..%.1f (foot %.1f)\n", stride, lowest, highest, foot);
+        expect(highest > foot, "field: the cliff top is meshed");
+        expect(lowest <= foot + 1e-3f, "field: the wall reaches its neighbour's own height");
+    }
+
+    // The styled mesher runs the whole drop too: its walls are what a ground-level camera
+    // actually looks at, and planet_demo's river banks are where the deepest ones are.
+    for (const char* set : {"voxel", "soft"}) {
+        ChunkMeshData mesh;
+        mesh_chunk_styled(pad, make_tile_library({set}), params, mesh);
+        expect(!mesh.vertices.empty(), "the styled mesher produced geometry");
+        const auto [lowest, highest] = extent(mesh);
+        std::printf("    styled %-5s : wall runs %.1f..%.1f (foot %.1f)\n", set, lowest, highest, foot);
+        expect(highest > foot, std::string("styled ") + set + ": the cliff top is meshed");
+        expect(lowest <= foot + 1e-3f,
+               std::string("styled ") + set + ": the wall reaches its neighbour's own height");
+    }
+}
+
 COOPA_TEST(two_field_chunks_overlap_on_their_shared_seam) {
     TerrainParams params = make_test_params(32);
     const std::int32_t n = params.chunk_size;

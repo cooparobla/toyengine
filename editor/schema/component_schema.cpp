@@ -1523,7 +1523,6 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                          "meets the bank"),
                 with_tip(f_float("river_inset", 0.2f, 0.01f, 0.0f, 0.95f),
                          "The same for rivers (steps): lower sits them higher in their channels, nearer the bank tops"),
-                with_tip(f_int("max_wall_steps", 24, 0, 1024), "Tallest wall drawn under a column, in steps (deep sea cliffs stop here)"),
                 with_tip(f_int("soil_depth_steps", 3, 0, 1024), "Steps of soil under the surface before bare stone"),
                 with_tip(with_label(f_int("max_merge", 0, 0, 512), "Max merge (tiles)"),
                          "Widest merged flat run, in tiles; 0 = unlimited. A planet leaves this 0 "

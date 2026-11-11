@@ -52,7 +52,6 @@ scene:
             roughness: 0.9
             texture_albedo: textures/terrain_atlas.png
             texture_metallic_roughness: textures/terrain_atlas_mr.png
-          max_wall_steps: 8
           river_inset: 0.2
           soil_depth_steps: 1
           tile_set: objects/terrain/tileset_soft

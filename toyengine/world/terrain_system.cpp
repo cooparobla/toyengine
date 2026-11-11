@@ -289,6 +289,22 @@ void TerrainSystem::mark_edited_chunks_(TerrainComponent& terrain) {
     const TerraCursor since{terrain.applied_tile_revision, data.cursor().heights, data.cursor().layers};
     data.for_each_dirty_since(since, [&](const IRect& rect) {
         if (terrain.params.planet) {
+            // Everything dirty at once: every chunk is stale, so say that directly. The walk
+            // below is per TILE, and a planet has a great many -- 6144 x 1024 on planet_demo,
+            // which with the nine lookups each is 57 million hash probes on the owner thread in
+            // one frame, for an answer that is just "all of them". It is not a rare path either:
+            // TerraData reports the whole grid after any mark_all_dirty() (a load, a bake, a
+            // reshape) and whenever its dirty journal overflows.
+            if (rect.x0 <= 0 && rect.y0 <= 0 && rect.x1 >= width && rect.y1 >= height) {
+                for (auto& [coord, chunk] : terrain.chunks()) {
+                    (void)coord;
+                    if (chunk.state == ChunkState::Retiring || chunk.state == ChunkState::Queued) {
+                        continue;
+                    }
+                    chunk.stale = true;
+                }
+                return;
+            }
             // A tile on a face's edge is in the next face's skirt too: mark the chunks of every
             // tile the rect touches and of each of their neighbours, wrapped across the faces.
             const PlanetLayout layout = terrain.params.layout();

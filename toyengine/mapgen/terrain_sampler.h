@@ -47,6 +47,7 @@
 
 #include <coopa/maps/biome.h>
 #include <coopa/maps/map_config.h>
+#include <coopa/maps/biome_field.h>
 #include <coopa/maps/map_data.h>
 #include <coopa/maps/noise.h>
 #include <coopa/maps/water_field.h>
@@ -104,6 +105,10 @@ public:
         // mapcoopa's own answer to "where is the water, and how high" -- seas and lakes at their
         // levels, rivers at their banked surfaces. Nothing about the water is decided here.
         water_ = std::make_unique<coopa::maps::WaterField>(graph_, config_, detail_, channels_);
+        // The per-point biome: classified from the continuous ground and blended
+        // climate, so biome boundaries follow the terrain instead of the cell
+        // mosaic, and beaches are a band at the actual waterline.
+        biomes_ = std::make_unique<coopa::maps::BiomeField>(graph_, config_);
 
         build_site_index_();
         built_ = !graph_.centers.empty();
@@ -258,7 +263,6 @@ public:
         const coopa::maps::MapCenter& cell = cell_at(gx, gy);
         const coopa::maps::MapPoint p{gx, gy};
 
-        out.biome       = static_cast<std::uint8_t>(cell.biome);
         out.temperature = TileCell::quantise01(cell.temperature);
         out.moisture    = TileCell::quantise01(cell.moisture);
         out.region      = cell.region >= 0 && cell.region < 0xFFFF ? static_cast<std::uint16_t>(cell.region) : TileCell::k_no_id;
@@ -267,12 +271,14 @@ public:
         out.river       = graph_.channel_cut(cell, p, channels_) > 0.0;
 
         const coopa::maps::WaterSample water = water_->at(cell, p, k_river_min_half_tiles / per_unit);
+        const coopa::maps::Biome biome = biomes_->at(cell, p, water);
+        out.biome = static_cast<std::uint8_t>(biome);
         out.ground = static_cast<float>(water.ground * params_.height_scale);
-        out.top = tile_kind_for_biome(cell.biome);
+        out.top = tile_kind_for_biome(biome);
         if (water.wet()) {
             out.water = water.kind;
             out.water_surface = static_cast<float>(water.surface * params_.height_scale);
-            if (cell.biome == coopa::maps::Biome::Ice && water.kind != coopa::maps::WaterKind::River) {
+            if (biome == coopa::maps::Biome::Ice && water.kind != coopa::maps::WaterKind::River) {
                 // Frozen: solid ice up at the water's surface, and no water over it.
                 out.ground = out.water_surface;
                 out.water = coopa::maps::WaterKind::None;
@@ -310,7 +316,6 @@ private:
                      const glm::dvec3& across, const glm::dvec3& along,
                      bool continuous_water_level = false) const {
         TileCell r;
-        r.biome       = static_cast<std::uint8_t>(cell.biome);
         r.temperature = TileCell::quantise01(cell.temperature);
         r.moisture    = TileCell::quantise01(cell.moisture);
         r.region      = cell.region >= 0 && cell.region < 0xFFFF ? static_cast<std::uint16_t>(cell.region) : TileCell::k_no_id;
@@ -321,11 +326,13 @@ private:
         // A river narrower than a tile would land on a tile centre only here and there -- a dotted
         // line of pits. Asked at the grid's own resolution, mapcoopa widens it to a continuous run.
         const coopa::maps::WaterSample water = water_->at(cell, p, k_river_min_half_tiles / per_unit);
+        const coopa::maps::Biome biome = biomes_->at(cell, p, water);
+        r.biome = static_cast<std::uint8_t>(biome);
         r.steps = static_cast<std::int16_t>(std::min<std::int32_t>(steps_from_elevation_(water.ground), 32767));
-        TileKind top = tile_kind_for_biome(cell.biome);
+        TileKind top = tile_kind_for_biome(biome);
         if (water.wet()) {
             const std::int32_t level_steps = std::max(1, steps_from_elevation_(water.surface));
-            if (cell.biome == coopa::maps::Biome::Ice && water.kind != coopa::maps::WaterKind::River) {
+            if (biome == coopa::maps::Biome::Ice && water.kind != coopa::maps::WaterKind::River) {
                 // Frozen: solid ice at the water's terrace.
                 r.steps = static_cast<std::int16_t>(level_steps);
                 r.set_top_kind(TileKind::Ice);
@@ -648,7 +655,8 @@ private:
     std::unique_ptr<coopa::maps::TerrainSurface> surface_; /**< Borrowed by detail_; hence the unique_ptr. */
     coopa::maps::TerrainDetail          detail_;   /**< How the ground is shaped over the control mesh. */
     coopa::maps::RiverChannels          channels_; /**< River beds cut after the displacement. */
-    std::unique_ptr<coopa::maps::WaterField> water_; /**< Borrows graph_, detail_, channels_. */
+    std::unique_ptr<coopa::maps::WaterField> water_;
+    std::unique_ptr<coopa::maps::BiomeField> biomes_; /**< Borrows graph_, detail_, channels_. */
 
     std::vector<std::vector<std::int32_t>> buckets_;  /**< Site indices, bucketed by position. */
     double       origin_x_ = 0.0;

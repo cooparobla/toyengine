@@ -788,9 +788,6 @@ void register_scene_components(coopa::gfx::core::Device& device,
             if (node.contains("view_radius")) {
                 params.view_radius = node.at("view_radius").get_value<std::int32_t>();
             }
-            if (node.contains("max_wall_steps")) {
-                params.max_wall_steps = node.at("max_wall_steps").get_value<std::int32_t>();
-            }
             if (node.contains("soil_depth_steps")) {
                 params.soil_depth_steps = node.at("soil_depth_steps").get_value<std::int32_t>();
             }

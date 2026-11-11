@@ -67,13 +67,12 @@ inline const toy::world::TileMeshLibrary& voxel_library() {
     return library;
 }
 
-/** @brief Test params: a small chunk, unit cells, generous wall clamp. */
+/** @brief Test params: a small chunk with unit cells. */
 inline toy::world::TerrainParams make_test_params(std::int32_t chunk_size = 4) {
     toy::world::TerrainParams params;
     params.chunk_size       = chunk_size;
     params.tile_size        = 1.0f;
     params.height_step      = 1.0f;
-    params.max_wall_steps   = 64;
     params.soil_depth_steps = 3;
     return params;
 }

@@ -372,9 +372,9 @@ EditResult TileTerrainPanel::draw_tile_terrain_panel_(imm::Context& ctx, ObjectI
             std::snprintf(buf, sizeof(buf), "World: %d x %d tiles, %.0f m square", live->field.geometry().tiles_x, live->field.geometry().tiles_y, metres);
             ctx.label(buf, &dim);
         }
-        fields({tfield("soil_depth_steps", "Soil Depth (steps)"), tfield("max_wall_steps", "Max Wall (steps)")});
+        fields({tfield("soil_depth_steps", "Soil Depth (steps)")});
     }
-    mark({"tile_size", "height_step", "soil_depth_steps", "max_wall_steps", "tiles"});
+    mark({"tile_size", "height_step", "soil_depth_steps", "tiles"});
 
     // --- Detail levels -----------------------------------------------------------------------
     if (section("Detail Levels", I::Mesh,

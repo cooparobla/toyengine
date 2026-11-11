@@ -32,7 +32,6 @@ scene:
           face_tiles: 1024
           gravity: 0.0
           height_step: 1.0
-          max_wall_steps: 8
           mode: tiles
           planet: true
           planet_coarse_builds: true
@@ -65,7 +64,7 @@ scene:
               color: { b: 1.0, g: 0.55, r: 0.35 }
               falloff: 0.75
               kind: fog
-              occlusion: 0.55
+              occlusion: 0.25
               shape: shell
               sun_amount: 0.9
             - type: PlanetAtmosphere
@@ -73,9 +72,9 @@ scene:
               day_sky_altitude_scale: 1.5
               moon_intensity: 0.045
               night_sky_color: { b: 0.14, g: 0.07, r: 0.045 }
-              limb_optical_depth: 2.0
+              limb_optical_depth: 1.1
               scale_height_fraction: 0.25
-              thickness_scale: 1.95
+              thickness_scale: 1.4
           children: []
     - name: camera
       active: true

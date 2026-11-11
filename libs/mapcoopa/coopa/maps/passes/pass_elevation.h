@@ -57,6 +57,10 @@ public:
         // Before downslopes, not after: the flow direction has to be derived from
         // the field rivers will actually run on, or they carve uphill.
         smooth_elevations_(graph, config);
+        // After the remap and smoothing, because erosion carves absolute depths
+        // into the final histogram -- run before the remap, the rank pass would
+        // re-stretch the carved valleys back out of the field.
+        erode_(graph, config);
         // Filling is what makes a downhill walk from any land corner actually
         // arrive somewhere wet; the downslopes are then read off the filled
         // field, which is why `restore_drainage()` pairs the two.
@@ -192,6 +196,10 @@ private:
         }
 
         const Noise noise(config.noise_relief);
+        const double ridges = std::max(0.0, config.terrain_ridges);
+        const Noise ridge_noise(config.noise_ridge);
+        const Noise warp_noise(config.noise_warp);
+        const double warp = config.natural.warp;
         for (MapCorner& corner : graph.corners) {
             if (corner.ocean || corner.border || !std::isfinite(corner.elevation)) {
                 continue;
@@ -203,12 +211,39 @@ private:
                 0.0, 1.0);
             const double coast_mask = std::min(1.0, distance / k_coast_band);
 
-            const double shaped = (1.0 - relief) * distance + relief * coast_mask * unit;
+            double shaped = (1.0 - relief) * distance + relief * coast_mask * unit;
+            if (ridges > 0.0) {
+                // The same ridged field `natural_elevation_()` samples at render
+                // time, read through the same domain warp, so the render-time
+                // crest detail lands on the stored ranges instead of beside them.
+                const MapPoint& o = corner.point;
+                const MapPoint w{
+                    o.x + warp * static_cast<double>(graph.noise_at(warp_noise, o)),
+                    o.y + warp * static_cast<double>(graph.noise_at(
+                              warp_noise, MapPoint{o.x + 37.1, o.y - 21.7, o.z + 13.3})),
+                    graph.is_sphere()
+                        ? o.z + warp * static_cast<double>(graph.noise_at(
+                                    warp_noise, MapPoint{o.x - 19.4, o.y + 8.8, o.z - 41.0}))
+                        : 0.0};
+                const double crest = std::clamp(
+                    0.5 * (static_cast<double>(graph.noise_at(ridge_noise, w)) + 1.0), 0.0, 1.0);
+                // Squared so the crests come to an edge, like the render-time term.
+                // Faded in over the interior: the coast keeps its plain, and the
+                // ranges stand where the land is already far from any shore.
+                const double interior = smoothstep_(0.2, 0.55, distance);
+                shaped += ridges * coast_mask * interior * crest * crest;
+            }
             // No shore offset any more: the split rank remap that follows puts the
             // sea below the waterline and everything else above it, so lifting
             // land clear of water here would be doing that job twice.
             corner.elevation = land_ceiling * shaped;
         }
+    }
+
+    /** @brief Hermite fade from 0 at `e0` to 1 at `e1`. */
+    static double smoothstep_(double e0, double e1, double v) {
+        const double t = std::clamp((v - e0) / (e1 - e0), 0.0, 1.0);
+        return t * t * (3.0 - 2.0 * t);
     }
 
     /**
@@ -374,6 +409,162 @@ private:
                 const double mean = sum / static_cast<double>(counted);
                 const double own = previous[static_cast<std::size_t>(center.index)];
                 center.elevation = own + strength * (mean - own);
+            }
+        }
+    }
+
+    /**
+     * @brief Total depth the strongest stream may cut over the whole run, in height units.
+     *
+     * Reached only by a trunk stream draining a large share of the landmass down a
+     * steep flank; a headwater gully cuts a few percent of this. 0.35 of the land
+     * band is deep enough that major valleys read from orbit without severing the
+     * landmass into mesas.
+     */
+    static constexpr double k_erosion_depth = 0.35;
+    /** @brief Per-iteration cap on a single corner's cut, so no spike can form. */
+    static constexpr double k_erosion_max_step = 0.02;
+    /**
+     * @brief The slope the stream-power law is normalised against.
+     *
+     * A typical continental flank: the land band (~0.75 height units) over the
+     * ~15 grid units from a coast to its interior. A corner this steep draining
+     * the whole landmass cuts at the full rate; gentler or smaller streams cut
+     * proportionally less. Dividing by a reference keeps the model's output in
+     * height units whatever the map's scale, where a raw `slope * sqrt(share)`
+     * product would leave the depth two orders of magnitude under its target.
+     */
+    static constexpr double k_erosion_reference_slope = 0.05;
+    /** @brief Hillslope diffusion per iteration; what opens a cut into a valley. */
+    static constexpr double k_erosion_diffusion = 0.15;
+
+    /**
+     * @brief Carves fluvial valleys into the corner field with a stream-power model.
+     *
+     * Each iteration: the drainage invariants are restored so flow can be routed,
+     * a unit of rain per corner is accumulated down the `downslope` graph into a
+     * discharge, and every land corner is cut by
+     * `slope * sqrt(drainage share) * rate` -- the stream-power law with the
+     * exponents landscape-evolution models most commonly use (m = 0.5, n = 1).
+     * A weak relaxation follows, which is the hillslope diffusion that turns an
+     * incised line into a valley with walls.
+     *
+     * Corners are processed from the summits down, and a corner is never cut
+     * below the downslope neighbour it drains to, so a pass cannot invert a flow
+     * path it is eroding. Water corners never move -- lake beds are carved by
+     * `assign_water_levels()`, which runs after -- and dry land is clamped at the
+     * waterline exactly as `PassValleys` clamps its cuts.
+     *
+     * @param graph The graph to erode.
+     * @param config Supplies `erosion` (strength) and `erosion_iterations`.
+     */
+    void erode_(MapGraph& graph, const MapConfig& config) const {
+        if (config.erosion <= 0.0 || config.erosion_iterations <= 0 || graph.corners.empty()) {
+            return;
+        }
+        const double strength = std::clamp(config.erosion, 0.0, 1.0);
+
+        std::size_t land_count = 0;
+        for (const MapCorner& corner : graph.corners) {
+            if (!corner.water && !corner.border) {
+                ++land_count;
+            }
+        }
+        if (land_count == 0) {
+            return;
+        }
+
+        const std::size_t count = graph.corners.size();
+        std::vector<CornerId> order(count);
+        std::vector<double> flux(count);
+        std::vector<double> previous(count);
+        // sqrt(drainage share) is ~1 for a trunk stream, and a steep flank's slope
+        // is on the order of the land band over a few grid units; the rate is what
+        // makes those bounds integrate to k_erosion_depth across the iterations.
+        const double rate = strength * k_erosion_depth / static_cast<double>(config.erosion_iterations);
+
+        for (int iteration = 0; iteration < config.erosion_iterations; ++iteration) {
+            // Flow is routed on the field as this iteration finds it: every cut
+            // moves the ground, and accumulating rain down last iteration's
+            // downslopes would send it across terrain that no longer exists.
+            restore_drainage(graph);
+
+            std::iota(order.begin(), order.end(), static_cast<CornerId>(0));
+            coopa::maps::sort(order.begin(), order.end(), [&graph](CornerId a, CornerId b) {
+                const double ea = graph.corners[static_cast<std::size_t>(a)].elevation;
+                const double eb = graph.corners[static_cast<std::size_t>(b)].elevation;
+                if (ea != eb) {
+                    return ea > eb; // Summits first, so flux arrives before it leaves.
+                }
+                return a < b; // Stable against ties, so a run is reproducible.
+            });
+
+            std::fill(flux.begin(), flux.end(), 1.0);
+            for (const CornerId id : order) {
+                const MapCorner& corner = graph.corners[static_cast<std::size_t>(id)];
+                if (corner.water) {
+                    continue; // Rain on water has arrived; it accumulates nowhere.
+                }
+                if (corner.downslope != id) {
+                    flux[static_cast<std::size_t>(corner.downslope)] +=
+                        flux[static_cast<std::size_t>(id)];
+                }
+            }
+
+            // Summits first here too: a corner is cut against its downslope's
+            // height from *before* that neighbour is cut this iteration, which is
+            // what makes "never below the ground it drains to" hold along the
+            // whole chain.
+            for (const CornerId id : order) {
+                MapCorner& corner = graph.corners[static_cast<std::size_t>(id)];
+                if (corner.water || corner.border || corner.downslope == id) {
+                    continue;
+                }
+                const MapCorner& down =
+                    graph.corners[static_cast<std::size_t>(corner.downslope)];
+                const double run = corner.point.distance_to(down.point);
+                if (run <= 0.0) {
+                    continue;
+                }
+                const double slope = (corner.elevation - down.elevation) / run;
+                if (slope <= 0.0) {
+                    continue;
+                }
+                const double share =
+                    flux[static_cast<std::size_t>(id)] / static_cast<double>(land_count);
+                const double cut = std::min(
+                    k_erosion_max_step,
+                    rate * (slope / k_erosion_reference_slope) * std::sqrt(share));
+                const double floor = std::max(config.sea_level, down.elevation);
+                corner.elevation = std::max(floor, corner.elevation - cut);
+            }
+
+            // Hillslope diffusion, one weak pass: same snapshot-read relaxation as
+            // `smooth_elevations_()`, confined to land so the shoreline cannot be
+            // dragged, and floored at the waterline like every other cut here.
+            for (std::size_t i = 0; i < count; ++i) {
+                previous[i] = graph.corners[i].elevation;
+            }
+            for (MapCorner& corner : graph.corners) {
+                if (corner.water || corner.border || corner.adjacent.empty()) {
+                    continue;
+                }
+                double sum = 0.0;
+                std::size_t counted = 0;
+                for (const CornerId neighbor_id : corner.adjacent) {
+                    if (graph.corners[static_cast<std::size_t>(neighbor_id)].water) {
+                        continue;
+                    }
+                    sum += previous[static_cast<std::size_t>(neighbor_id)];
+                    ++counted;
+                }
+                if (counted == 0) {
+                    continue;
+                }
+                const double mean = sum / static_cast<double>(counted);
+                const double own = previous[static_cast<std::size_t>(corner.index)];
+                const double relaxed = own + k_erosion_diffusion * strength * (mean - own);
+                corner.elevation = std::max(config.sea_level, relaxed);
             }
         }
     }

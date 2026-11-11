@@ -226,7 +226,31 @@ inline double biome_habitability(Biome biome) {
 }
 
 /**
- * @brief Classifies a cell from its terrain state and climate.
+ * @struct BiomeSample
+ * @brief One point's terrain state and climate, as `classify_biome()` reads it.
+ *
+ * The fields a cell-level caller has are a subset of the ones a point-level
+ * caller has, so the defaults describe an interior point: no shore nearby and
+ * the ground arbitrarily far above any water. `BiomeField` fills every field
+ * from its continuous queries; the cell-level overload of `classify_biome()`
+ * fills the shore from the binary coast flag.
+ */
+struct BiomeSample {
+    double elevation = 0.0;   /**< @brief Land-relative height in `[0, 1]`; see `land_height()`. */
+    double moisture = 0.0;    /**< @brief Normalised wetness in `[0, 1]`. */
+    double temperature = 0.0; /**< @brief Normalised warmth in `[0, 1]`; 0 polar, 1 equatorial. */
+    bool is_water = false;    /**< @brief True under a lake or the ocean. */
+    bool is_ocean = false;    /**< @brief True under the ocean specifically. */
+    /** @brief Proximity to open water: 1 at the waterline, fading to 0 inland. */
+    double shore = 0.0;
+    /** @brief Height of the ground above the nearest water surface, in metres. */
+    double relief_m = 1.0e9;
+    /** @brief `MapConfig::beach_height_m`: how high a shore may stand and still be beach. */
+    double beach_height_m = 6.0;
+};
+
+/**
+ * @brief Classifies a point or cell from its terrain state and climate.
  *
  * Water state wins over climate: an ocean cell is `Ocean` at any latitude, an
  * inland water cell is `Ice` or `Lake` and never anything else, and a land cell
@@ -243,20 +267,17 @@ inline double biome_habitability(Biome biome) {
  * Lives here rather than inside the biome pass so it can be exercised directly
  * on a table of inputs, without building a whole map to reach it.
  *
- * @param elevation Normalised height in `[0, 1]`.
- * @param moisture Normalised wetness in `[0, 1]`.
- * @param temperature Normalised warmth in `[0, 1]`; 0 polar, 1 equatorial.
- * @param is_water True if the cell is a lake or ocean.
- * @param is_ocean True if the cell is connected to the map border by water.
- * @param is_coast True if the cell is land bordering an ocean cell.
+ * @param sample The point's terrain state and climate; see `BiomeSample`.
  * @return The assigned biome.
  */
-inline Biome classify_biome(double elevation, double moisture, double temperature,
-                            bool is_water, bool is_ocean, bool is_coast) {
-    if (is_ocean) {
+inline Biome classify_biome(const BiomeSample& sample) {
+    const double elevation = sample.elevation;
+    const double moisture = sample.moisture;
+    const double temperature = sample.temperature;
+    if (sample.is_ocean) {
         return Biome::Ocean;
     }
-    if (is_water) {
+    if (sample.is_water) {
         // Every water cell gets a water biome, without exception. A cell with a
         // `water_level` is a body of water and has to *read* as one: handing a
         // shallow lake `Marsh` or `Swamp`, which are dark greens, would make rivers
@@ -271,7 +292,13 @@ inline Biome classify_biome(double elevation, double moisture, double temperatur
         // low one not at all. A tarn in a temperate zone is a lake.
         return temperature < k_biome_frigid ? Biome::Ice : Biome::Lake;
     }
-    if (is_coast) {
+    // The shore band. Graded on two real measures rather than cell adjacency:
+    // how close the water is (`shore`, fading to zero inland) and how little the
+    // ground has climbed above its surface (`relief_m`). The band is widest at
+    // the waterline and pinches out where the ground climbs away -- so a flat
+    // shelf carries a wide beach, and a cliff coast none at all, however close
+    // the sea is: nothing low enough to be swash lies at its foot.
+    if (sample.shore > 0.0 && sample.relief_m < sample.beach_height_m * sample.shore) {
         // A warm, wet shore grows mangrove; a cold one is bare shingle.
         if (temperature > k_biome_tropical && moisture > 0.6) return Biome::Mangrove;
         if (temperature < k_biome_frigid) return Biome::Tundra;
@@ -347,6 +374,34 @@ inline Biome classify_biome(double elevation, double moisture, double temperatur
     if (moisture > 0.3) return Biome::Savanna;
     if (moisture > 0.12) return Biome::SubtropicalDesert;
     return elevation < k_biome_basin_elevation ? Biome::SaltFlat : Biome::Dunes;
+}
+
+/**
+ * @brief `classify_biome()` from cell-level state, where the shore is a flag.
+ *
+ * What `PassBiomes` calls: a coast cell is the whole shore band at full
+ * strength, exactly the classification every map before the graded shore
+ * existed was built on.
+ *
+ * @param elevation Normalised land-relative height in `[0, 1]`.
+ * @param moisture Normalised wetness in `[0, 1]`.
+ * @param temperature Normalised warmth in `[0, 1]`; 0 polar, 1 equatorial.
+ * @param is_water True if the cell is a lake or ocean.
+ * @param is_ocean True if the cell is connected to the map border by water.
+ * @param is_coast True if the cell is land bordering an ocean cell.
+ * @return The assigned biome.
+ */
+inline Biome classify_biome(double elevation, double moisture, double temperature,
+                            bool is_water, bool is_ocean, bool is_coast) {
+    BiomeSample sample;
+    sample.elevation = elevation;
+    sample.moisture = moisture;
+    sample.temperature = temperature;
+    sample.is_water = is_water;
+    sample.is_ocean = is_ocean;
+    sample.shore = is_coast ? 1.0 : 0.0;
+    sample.relief_m = is_coast ? 0.0 : sample.relief_m;
+    return classify_biome(sample);
 }
 
 } // namespace maps

@@ -270,7 +270,7 @@ void apply_component_sections(std::map<std::string, ComponentSchema>& table) {
             sec("World", "World").when("mode", {"tiles"})
                 .says("How the generated world is cut into tiles and chunks, and the tile set it is built from.")
                 .keys({"tile_set", "tiles", "world_tiles", "tiles_per_grid_unit", "tile_size", "height_step",
-                       "height_scale", "max_wall_steps", "soil_depth_steps", "view_radius"}).done(),
+                       "height_scale", "soil_depth_steps", "view_radius"}).done(),
             sec("Data", "Image").when("mode", {"heightmap"})
                 .says("The stored .terra file -- height, layers and water together. Splat Resolution "
                       "and Layer Texture Size are the GPU textures it is streamed into.")

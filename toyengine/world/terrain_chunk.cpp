@@ -106,7 +106,7 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
     auto wall_cell_at = [&](const glm::ivec2& c, TileFace face, std::int32_t cell) {
         const TileColumn& col = pad.at(c);
         const TileColumn& nb  = pad.at(c + face_step(face));
-        return cell < col.steps && cell >= nb.steps && cell >= col.steps - params.max_wall_steps;
+        return cell < col.steps && cell >= nb.steps;
     };
     auto stamp = [&](const TileMeshLibrary::SideGeometry& g, const glm::vec3& origin, float code,
                      bool anchored) {
@@ -197,7 +197,12 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
                 const TileColumn& nb   = pad.at(c + step);
                 if (nb.steps >= col.steps) continue;
 
-                const std::int32_t lowest = std::max(nb.steps, col.steps - params.max_wall_steps);
+                // The wall runs the whole drop, down to the neighbour's own height: a wall
+                // stopping short would leave an open band the width of the tile edge, which
+                // back-face culling turns into a see-through hole. Depth is free here -- the
+                // vertical run-merge below collapses a plain wall to `soil_depth_steps + 1`
+                // stamps whatever its height -- so there is nothing to trade for it.
+                const std::int32_t lowest = nb.steps;
                 for (const bool right : {true, false}) {
                     const glm::ivec2   along  = wall_end_direction(face, right);
                     const std::uint8_t orient = wall_orientation(face, right);
@@ -339,7 +344,7 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
                     }
                     flush_pending();
 
-                    if (lowest == nb.steps && end == WallEnd::Convex) {
+                    if (end == WallEnd::Convex) {
                         stamp(library.foot(orient), origin_of(c, lowest), encode_surface_flat(nb.top_kind), false);
                     }
                 }
@@ -571,8 +576,12 @@ void mesh_chunk_field(const ColumnPad& pad, const TerrainParams& params, std::in
     }
 
     // --- Walls: one run per maximal stretch of tile edges sharing both heights and the side kind ---
+    // Every wall descends to the neighbour's OWN height, however deep the drop. A coarse cell is
+    // the tallest column of a block up to 32 tiles across, so neighbouring cells differ by tens of
+    // steps routinely, and a wall stopping short of its neighbour would leave exactly the open
+    // band the Cell comment above promises never to open. It costs nothing to run the whole way:
+    // a wall here is at most two quads (a soil band and a stone band) whatever its height.
     const std::int32_t soil = std::max(0, params.soil_depth_steps);
-    const std::int32_t reach = std::max(1, params.max_wall_steps);
     // `u` then `v` is the order that makes the quad face `normal` (bottom edge u->v, then up).
     auto emit_wall = [&](const glm::vec2& u, const glm::vec2& v, std::int32_t bottom, std::int32_t top,
                          const glm::vec3& normal, TileKind side_kind) {
@@ -600,7 +609,7 @@ void mesh_chunk_field(const ColumnPad& pad, const TerrainParams& params, std::in
             }
             const float ex = static_cast<float>(x + 1) * ts;
             emit_wall({ex, static_cast<float>(y) * ts}, {ex, static_cast<float>(y2) * ts},
-                      std::max(nb, own - reach), own, {1.0f, 0.0f, 0.0f}, kind);
+                      nb, own, {1.0f, 0.0f, 0.0f}, kind);
             y = y2;
         }
         for (std::int32_t y = 0; y < n;) {
@@ -614,7 +623,7 @@ void mesh_chunk_field(const ColumnPad& pad, const TerrainParams& params, std::in
             }
             const float ex = static_cast<float>(x) * ts;
             emit_wall({ex, static_cast<float>(y2) * ts}, {ex, static_cast<float>(y) * ts},
-                      std::max(nb, own - reach), own, {-1.0f, 0.0f, 0.0f}, kind);
+                      nb, own, {-1.0f, 0.0f, 0.0f}, kind);
             y = y2;
         }
     }
@@ -630,7 +639,7 @@ void mesh_chunk_field(const ColumnPad& pad, const TerrainParams& params, std::in
             }
             const float ey = static_cast<float>(y + 1) * ts;
             emit_wall({static_cast<float>(x2) * ts, ey}, {static_cast<float>(x) * ts, ey},
-                      std::max(nb, own - reach), own, {0.0f, 1.0f, 0.0f}, kind);
+                      nb, own, {0.0f, 1.0f, 0.0f}, kind);
             x = x2;
         }
         for (std::int32_t x = 0; x < n;) {
@@ -644,7 +653,7 @@ void mesh_chunk_field(const ColumnPad& pad, const TerrainParams& params, std::in
             }
             const float ey = static_cast<float>(y) * ts;
             emit_wall({static_cast<float>(x) * ts, ey}, {static_cast<float>(x2) * ts, ey},
-                      std::max(nb, own - reach), own, {0.0f, -1.0f, 0.0f}, kind);
+                      nb, own, {0.0f, -1.0f, 0.0f}, kind);
             x = x2;
         }
     }

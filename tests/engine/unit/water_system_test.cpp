@@ -163,6 +163,35 @@ COOPA_TEST(new_bodies_bake_nearest_first) {
     expect(far_body->baked, "bake order: ...and the rest follow on later frames");
 }
 
+/**
+ * @brief A body that goes away and comes back gets its mesh, even if it left mid-bake.
+ *
+ * `baked` goes true as soon as the CPU query is live -- a frame or two before the tile
+ * build lands. A body that stops being live in that window has its build cancelled, and
+ * deactivating an object is enough to do it: a planet chunk passing over the horizon
+ * leaves the live set without being destroyed. Before `WaterBody::tiles_published`, such
+ * a body came back `baked` with `bake_stage == 2` and no mesh, which stage 1 skipped
+ * ("already baked") and stage 2 skipped ("already final") -- so its water was gone for
+ * good, and an orbiting camera lost a chunk's water at a time.
+ */
+COOPA_TEST(water_rebakes_after_leaving_the_live_set_mid_bake) {
+    BuoyScene bs = make_water_scene();
+    start(bs);
+    run(bs, 1.0f / 60.0f);
+    require(bs.body != nullptr && bs.body->baked, "the body baked on its first frame");
+
+    // Deactivating the owner is what the planet's horizon cull does: the component lives,
+    // but WaterSystem::refresh_bodies() drops it from the live set.
+    bs.body->tiles_published = false;   // as a cancelled in-flight build leaves it
+    bs.body->owner->set_active(false);
+    run(bs, 1.0f / 60.0f);
+    bs.body->owner->set_active(true);
+    run(bs, 1.0f / 60.0f);
+
+    expect(bs.body->tiles_published,
+           "a body whose build was cancelled bakes again when it returns, and publishes");
+}
+
 /** @brief Render tiles cover the surface exactly; every LOD is a subset of LOD 0, wound +Z,
  *         with LOD switch sizes decreasing; a mesh tiling keeps every triangle once. */
 COOPA_TEST(render_tiles_cover_the_surface_with_nested_lods) {

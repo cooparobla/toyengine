@@ -37,9 +37,23 @@ A project's name is always its folder's name. **The engine checkout itself is ne
 
 ## Pages
 
-`Projects` (open in the editor, reveal, clean rebuild, re-pin / link the engine, remove; New /
-Add with their options) · `Engine` (this checkout, CLI install, macOS app) · `Settings` (the
-hub's theme).
+`Projects` (open in the editor, reveal, clean rebuild, switch which of the three ways the project
+gets its engine, remove; New / Add with the same three options) · `Engine` (this checkout, CLI
+install, macOS app) · `Settings` (the hub's theme).
+
+## The three engine modes
+
+A project row's **...** menu and the New / Add dialog offer the same three choices, each one a
+`tools/toyhub` command:
+
+| Choice | Command | What the project builds |
+|---|---|---|
+| Share a checkout | `toyhub link <dir> [<engine>]` | `.libs/toyengine` symlinks a checkout shared with every other linked project |
+| Its own worktree | `toyhub worktree <dir> [--branch B]` | `<project>/engine` is a git worktree of that checkout, on a branch named after the project |
+| Its own clone | `toyhub own <dir> [--ref R]` | `<project>/engine` is the project's own clone, independent of every checkout on this machine |
+
+`HubProject::mode()` is what the badge, its tooltip and the menu read; the script is the only
+thing that moves an engine.
 
 ## Running it
 

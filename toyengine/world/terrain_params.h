@@ -78,16 +78,6 @@ struct TerrainParams {
      */
     std::int32_t view_radius = 3;
 
-    /**
-     * @brief Longest wall a single column may emit, in steps.
-     *
-     * A cliff's exposed face is as many steps as the drop, and a sea cliff against the ocean
-     * floor can be dozens. Past this many steps the wall stops: the result is a skirt whose
-     * bottom is hidden inside the neighbouring column's own geometry at any viewing angle a
-     * ground-level camera can reach, for a bounded cost per column.
-     */
-    std::int32_t max_wall_steps = 24;
-
     /** @brief Steps of `side_kind` under a top face before a wall switches to bare Stone. */
     std::int32_t soil_depth_steps = 3;
 

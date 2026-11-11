@@ -1298,6 +1298,80 @@ struct MapConfig {
      */
     double terrain_relief = 0.65;
     /**
+     * @brief How strongly ridged mountain ranges are written into the stored height field.
+     *
+     * `terrain_relief` replaces the distance field's ordering with fractal noise, which
+     * makes massifs -- rounded blobs. This adds the same ridged field the Natural terrain
+     * model samples at render time (`noise_ridge`, read through the same domain warp),
+     * faded in away from the coast, so the highest *stored* ground forms connected
+     * crests rather than spots. Because the stored corners move, everything derived from
+     * them follows: rivers rise on the ranges and run down their flanks, the temperature
+     * lapse cools the crests, and the biome bands trace them -- none of which a
+     * render-time-only mountain can do.
+     *
+     * Applied inside the relief blend, so `terrain_relief = 0` still reproduces the pure
+     * distance field byte for byte. Zero removes the term entirely.
+     */
+    double terrain_ridges = 0.45;
+    /**
+     * @brief Strength of the fluvial erosion carved into the stored height field, 0 to 1.
+     *
+     * An iterated stream-power model over the corner graph: uniform rain accumulates
+     * downslope into a discharge per corner, each corner is cut in proportion to its
+     * slope times the square root of its drainage area, and a weak hillslope diffusion
+     * opens the cuts into valleys. Drainage basins come out dendritic -- the branching
+     * valley systems rain actually carves -- instead of noise-shaped bowls, and because
+     * rivers are routed down the eroded field afterwards they run along the floors of
+     * these valleys by construction.
+     *
+     * Runs after the height remap and smoothing, before the drainage restore, so every
+     * invariant the later passes rely on (no dry pit, downslopes on the final field,
+     * shores above their water) is re-established once the ground has moved. Zero skips
+     * the stage and leaves the field untouched.
+     */
+    double erosion = 0.6;
+    /** @brief Iterations of the erosion loop; more cuts deeper, sharper valley systems. */
+    int erosion_iterations = 20;
+    /**
+     * @brief How high above the water a shore may stand and still be beach, in metres.
+     *
+     * The graded-shore classifier (`classify_biome(BiomeSample)`) draws the beach
+     * band where ground near the water lies within this height of its surface, so
+     * a flat shelf grows a wide beach and a cliff coast none. Zero removes
+     * beaches entirely.
+     */
+    double beach_height_m = 6.0;
+    /**
+     * @brief Amplitude of the noise added to moisture and temperature by the
+     *        per-point biome query, in field units.
+     *
+     * What keeps a threshold crossing from tracing the interpolation seams: the
+     * boundary wanders by a cell or so instead. Zero classifies on the blended
+     * fields alone. Cell-level classification (`PassBiomes`) never dithers --
+     * roads, towns and regions keep reasoning about whole cells.
+     */
+    double biome_dither = 0.05;
+    /**
+     * @brief The field `BiomeField` dithers biome thresholds with.
+     *
+     * Cell-scale on purpose (cells are one grid unit across whatever the grid
+     * size, so this is not rescaled by `derived_config()`): coarser would move
+     * whole regions, finer would fuzz the boundary into speckle.
+     */
+    NoiseConfig noise_biome{2693, 0.8};
+    /**
+     * @brief How strongly a river separates the biomes on its two banks, 0 to 1.
+     *
+     * A river runs along a Voronoi edge, which is the boundary between the two cells it
+     * separates -- so the bank a point is on is the cell nearest to it. At 1 the per-point
+     * query (`BiomeField`) does not blend climate across such an edge at all, which makes
+     * the fields discontinuous at the watercourse: any transition that would otherwise have
+     * landed within a cell of the river lands ON it instead, and the banks may read as
+     * different biomes. At 0 a river is just more ground and boundaries fall wherever the
+     * climate puts them. Boundaries away from any river are unaffected either way.
+     */
+    double biome_river_boundary = 1.0;
+    /**
      * @brief The detail field displacing the sampled ground surface.
      *
      * A higher frequency than the island or temperature fields on purpose: this

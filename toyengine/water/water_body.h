@@ -148,6 +148,19 @@ public:
     bool      baked = false;
     int       bake_stage = 0;  ///< 1 = baked before physics existed, 2 = with depth/obstacle raycasts.
     float     baked_density = -1.0f; ///< WaterSettings::grid_density the bake used.
+    /**
+     * @brief Whether the last bake's tile build reached `publish_tiles_()`.
+     *
+     * `baked` goes true as soon as the CPU query is live, which is before the mesh
+     * exists: the tiles are built on a worker and published a frame or two later. A
+     * build whose body stops being live in the meantime is cancelled and never
+     * publishes -- and a streamed world does that routinely, because deactivating an
+     * object (a planet chunk going over the horizon) drops its body from the live set
+     * without destroying it. Without this, such a body stays `baked` with no mesh and
+     * no stage left to run, so its water never comes back. The bake re-runs while this
+     * is false.
+     */
+    bool      tiles_published = false;
 
     /** @brief A published render tile of a multi-tile body: a runtime child object. */
     struct TileSlot {

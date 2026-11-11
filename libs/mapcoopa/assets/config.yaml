@@ -341,6 +341,36 @@ terrain_relief: 0.65          # how much fractal relief reshapes the height fiel
                               # shore the lowest land there is, and land is lifted clear of
                               # water, so rivers still run off the land into the sea.
                               # 0 restores the pure distance field. --relief=F overrides.
+terrain_ridges: 0.45          # how strongly ridged mountain RANGES are written into the
+                              # stored height field, 0 to disable. The same ridged field the
+                              # natural terrain model samples at render time (noise_ridge,
+                              # through the same warp), faded in away from the coast, so the
+                              # highest stored ground forms connected crests the rivers,
+                              # temperature lapse and biome bands all respond to.
+erosion: 0.6                  # strength of the fluvial erosion carved into the stored height
+                              # field, 0 to 1. A stream-power model: rain accumulates
+                              # downslope into a discharge, each corner is cut by
+                              # slope * sqrt(drainage area), and a weak hillslope diffusion
+                              # opens the cuts into valleys — so drainage basins come out
+                              # dendritic, and rivers (routed afterwards) run along their
+                              # floors. 0 skips the stage entirely.
+erosion_iterations: 20        # iterations of that loop; more cuts deeper, sharper valleys.
+beach_height_m: 6.0           # how high above the water a shore may stand and still be
+                              # BEACH, in metres. The per-point biome query draws the band
+                              # where near-water ground lies within this height of the
+                              # surface — wide on a flat shelf, absent under a cliff. 0
+                              # removes beaches.
+biome_river_boundary: 1.0     # how strongly a river separates the biomes on its two banks,
+                              # 0 to 1. A river runs along a Voronoi edge — the boundary
+                              # between two cells — so the bank a point is on is the cell
+                              # nearest it. At 1 the per-point query does not blend climate
+                              # across such an edge, so a transition that would have landed
+                              # near the river lands ON it and the banks can read as
+                              # different biomes. 0 treats a river as ordinary ground.
+biome_dither: 0.05            # noise added to moisture/temperature by the per-point biome
+                              # query so boundaries wander organically instead of tracing
+                              # interpolation seams. Cells (roads, towns, regions) never
+                              # dither. 0 classifies on the blended fields alone.
 terrain_roughness: 0.0        # how strongly the detail field displaces the SAMPLED surface,
                               # 0 to 1. Zero leaves it exactly as the passes computed it.
                               # Raising it adds jaggedness without touching cell or corner

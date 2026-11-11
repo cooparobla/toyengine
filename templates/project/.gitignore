@@ -1,5 +1,9 @@
-# Engine checkout (./setup.sh recreates it from the .toy file's engine: block)
+# Engine checkouts (./setup.sh recreates them from the .toy file's engine: block)
 .libs/
+# This project's own engine, when it has one (toyhub worktree / toyhub own): a git checkout in
+# its own right -- a worktree of a toyengine checkout, or a clone -- committed in its own
+# history, never in the project's.
+/engine/
 # The engine's agent rules, linked in by ./setup.sh
 .claude
 build/

@@ -60,7 +60,9 @@ void WaterSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameC
             const glm::mat4& world = body->owner->get_transform()->transform().get_world_matrix();
             const bool moved = body->baked && world != body->baked_world;
             const bool density = body->baked && uses_grid_(*body) && body->baked_density != settings_.grid_density;
-            if (body->baked && !moved && !density) continue;
+            // A baked body whose tiles never landed still needs the bake: its build was
+            // cancelled when it left the live set (WaterBody::tiles_published).
+            if (body->baked && !moved && !density && body->tiles_published) continue;
             if (tiles_pending_(*body)) continue;   // its tiles are being built; re-bake after
             // A body that has never baked has no query bounds yet, so distance_to_body_() cannot
             // place it: its owner's position stands in, so a streamed world's nearest new water
@@ -597,6 +599,9 @@ void WaterSystem::bake_(coopa::scene::Scene& scene, WaterBody& body, const glm::
         pending.job   = jobs_->create_handle();
         if (pending.job.is_valid()) {
             jobs_->submit([build]() { build->run(); }, k_water_job_type, pending.job);
+            // Not published until the job lands, and a cancelled job never publishes at
+            // all -- see WaterBody::tiles_published.
+            body.tiles_published = false;
             pending_tiles_.push_back(std::move(pending));
         } else {
             // Handle pool exhausted: do it here rather than drop the body's mesh.
@@ -784,6 +789,11 @@ void WaterSystem::TileBuild::run() {
 void WaterSystem::publish_tiles_(coopa::scene::Scene& scene, WaterBody& body, TileBuild& built) {
     using coopa::gfx::engine::components::MeshRenderer;
     using coopa::gfx::engine::data::Mesh;
+    // First, and whatever the early-outs below decide: this marks that the bake's build
+    // ARRIVED, which is what tells stage 1 the body does not need baking again. The
+    // early-outs are all "there is nothing to publish" (no device, no tiles), not "come
+    // back later" -- only a cancelled job skips this function, and that one must re-bake.
+    body.tiles_published = true;
     if (!device_ || !allocator_ || !assets_ || !body.owner) return;
     std::vector<WaterTile>& tiles = built.tiles;
     if (tiles.empty() || built.meshes.size() != tiles.size()) return;

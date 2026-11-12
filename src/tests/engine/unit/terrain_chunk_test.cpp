@@ -17,7 +17,7 @@
 
 #include <glm/glm.hpp>
 #include <physxcoopa/geometry/triangle_mesh.h>
-#include <toyengine/world/planet_chunk_shaper.h>
+#include <toyengine/world/chunk_shaper.h>
 #include <toyengine/world/terrain_chunk.h>
 #include <toyengine/world/tile_mesh_library.h>
 #include <toyengine/world/tile_topology.h>
@@ -120,7 +120,7 @@ COOPA_TEST(walls_appear_exactly_where_a_neighbour_is_lower) {
 
         // A deep drop runs the whole way down to its neighbour: a wall stopping short would
         // leave an open band the width of the tile edge, which back-face culling turns into a
-        // see-through hole. 40 steps here; planet_demo's sea cliffs are over a hundred.
+        // see-through hole. 40 steps here; a demo world's sea cliffs are over a hundred.
         ColumnPad deep = make_flat_pad(4, 1);
         deep.at(2, 2).steps = 41;
         ChunkMeshData deep_mesh;
@@ -398,31 +398,52 @@ COOPA_TEST(collision_mesh_is_the_drawn_surface) {
 
 // --- Coarse builds (ChunkBuildJob::coarse_only) ---------------------------------------------
 //
-// A planet never evicts a chunk, so every chunk's native tile geometry is otherwise resident for
-// the life of the scene -- including the overwhelming majority of a globe held in frame, where no
-// pixel ever draws it. A coarse build skips that pass and meshes the finest `field` tier in its
-// place. These pin the properties the rest of the system leans on; no device is needed, since a
+// Where chunks are never evicted, every chunk's native tile geometry is resident for the life of
+// the scene -- including the overwhelming majority of a world held whole in frame, where no pixel
+// ever draws it. A coarse build skips that pass and meshes the finest `field` tier in its place.
+// These pin the properties the rest of the system leans on; no device is needed, since a
 // ChunkBuildJob with a null device leaves the CPU arrays for the caller.
+//
+// The feature is gated on ChunkShaper::allows_coarse_builds(), so these drive a shaper that says
+// yes and shapes nothing -- the saving is in the meshing, and bending the result is a separate
+// concern with its own tests.
 
 namespace {
 
-/// The globe's shape, as the parser installs it on a planet TerrainComponent. Static so the
-/// borrowed pointer every job below holds stays valid for the suite.
-const toy::world::PlanetChunkShaper& planet_shaper() {
-    static const toy::world::PlanetChunkShaper s;
+/// A shaper that permits coarse builds and leaves the geometry where the mesher put it. Static so
+/// the borrowed pointer every job below holds stays valid for the suite.
+class CoarseShaper final : public toy::world::ChunkShaper {
+public:
+    glm::vec3 chunk_origin(const toy::world::TerrainParams& params,
+                           const toy::world::ChunkCoord& coord) const override {
+        const float size = params.chunk_world_size();
+        return glm::vec3(static_cast<float>(coord.x) * size, static_cast<float>(coord.y) * size, 0.0f);
+    }
+    void shape(const toy::world::TerrainParams&, const toy::world::ChunkCoord&,
+               toy::world::ChunkMeshData&, toy::world::ChunkWaterData&,
+               toy::world::ChunkWaterData&) const override {}
+    std::vector<std::uint8_t> seam_locks(const toy::world::TerrainParams&,
+                                         const toy::world::ChunkCoord&,
+                                         const toy::world::ChunkMeshData&) const override {
+        return {};
+    }
+    bool allows_style_lods() const override { return false; }
+    bool allows_coarse_builds() const override { return true; }
+};
+
+const CoarseShaper& coarse_shaper() {
+    static const CoarseShaper s;
     return s;
 }
 
-/** @brief A planet chunk build job over a flat pad with one raised column, ready to run(). */
-toy::world::ChunkBuildJob make_planet_job(bool coarse, bool collision = false) {
+/** @brief A chunk build job over a flat pad with one raised column, ready to run(). */
+toy::world::ChunkBuildJob make_coarse_job(bool coarse, bool collision = false) {
     using namespace toy::world;
     toy::world::ChunkBuildJob job;
     job.params = make_test_params(8);
-    job.params.planet     = true;
-    job.params.face_tiles = 32;
-    job.params.max_merge  = 1;        // as the parser forces on a planet
-    job.params.allow_kind_corner_rounding = false;   // as the parser sets on a planet
-    job.shaper            = &planet_shaper();
+    job.params.max_merge  = 1;
+    job.params.allow_kind_corner_rounding = false;
+    job.shaper            = &coarse_shaper();
     job.params.chunk_lods = {{{0.0f, 0.30f, -1, 1, 2, false},
                               {0.0f, 0.14f, -1, 1, 8, true},
                               {0.0f, 0.07f, -1, 0, 32, true},
@@ -441,15 +462,15 @@ toy::world::ChunkBuildJob make_planet_job(bool coarse, bool collision = false) {
 
 COOPA_TEST(a_coarse_build_skips_the_native_geometry) {
     using namespace toy::world;
-    ChunkBuildJob full = make_planet_job(false);
+    ChunkBuildJob full = make_coarse_job(false);
     full.run();
-    ChunkBuildJob coarse = make_planet_job(true);
+    ChunkBuildJob coarse = make_coarse_job(true);
     coarse.run();
 
     expect(!full.mesh.empty() && !coarse.mesh.empty(), "both builds produce geometry");
     // A third of the vertices on this deliberately tiny 8-tile chunk with `field: 2`. The ratio
     // is a function of chunk_size / field_stride, so it widens sharply at the sizes a large
-    // planet actually uses -- the point is that it is a fraction, not that it is this fraction.
+    // world actually uses -- the point is that it is a fraction, not that it is this fraction.
     expect(coarse.mesh.vertices.size() * 2 < full.mesh.vertices.size(),
            "a coarse build is a fraction of the vertices (" +
                std::to_string(coarse.mesh.vertices.size()) + " vs " +
@@ -460,7 +481,7 @@ COOPA_TEST(a_coarse_build_skips_the_native_geometry) {
 
 COOPA_TEST(a_coarse_builds_lod_zero_is_the_finest_field_tier) {
     using namespace toy::world;
-    ChunkBuildJob coarse = make_planet_job(true);
+    ChunkBuildJob coarse = make_coarse_job(true);
     coarse.run();
 
     require(!coarse.lods.empty(), "a coarse build still produces a LOD table");
@@ -479,11 +500,11 @@ COOPA_TEST(a_coarse_build_still_produces_the_chunks_water) {
     // The property the no-blinking-ocean behaviour rests on: water is read from the pad, not the
     // mesh, so the hash matches across a promotion and upload_finished_chunks_() carries the
     // already-baked WaterBody children over instead of handing back fresh ones.
-    ChunkBuildJob full = make_planet_job(false);
+    ChunkBuildJob full = make_coarse_job(false);
     full.pad = make_flat_pad(8, 2);
     for (std::int32_t y = -1; y <= 8; ++y)
         for (std::int32_t x = -1; x <= 3; ++x) { full.pad.at(x, y).water = 1; }
-    ChunkBuildJob coarse = make_planet_job(true);
+    ChunkBuildJob coarse = make_coarse_job(true);
     coarse.pad = full.pad;
 
     full.run();
@@ -495,13 +516,13 @@ COOPA_TEST(a_coarse_build_still_produces_the_chunks_water) {
 
 COOPA_TEST(a_coarse_build_reports_the_chunks_height) {
     using namespace toy::world;
-    ChunkBuildJob full = make_planet_job(false);
+    ChunkBuildJob full = make_coarse_job(false);
     full.run();
-    ChunkBuildJob coarse = make_planet_job(true);
+    ChunkBuildJob coarse = make_coarse_job(true);
     coarse.run();
 
-    // The planet's horizon cull bounds each chunk's limb margin by its own max_steps, so a
-    // coarse build reporting 0 would hide chunks whose peaks should still show over the horizon.
+    // A visibility cull bounds each chunk's margin by its own max_steps, so a coarse build
+    // reporting 0 would hide chunks whose peaks should still be drawn.
     expect(coarse.mesh.max_steps == full.mesh.max_steps,
            "mesh_chunk_field() writes max_steps too, so the horizon cull is unaffected");
     expect(coarse.mesh.max_steps > 0, "and it is the real height, not zero");
@@ -511,9 +532,9 @@ COOPA_TEST(a_collision_build_is_never_coarse) {
     using namespace toy::world;
     // A collider must be what the chunk is SHAPED like. A character walking on a quantised field
     // tier -- a different surface depending on where the camera is -- is worse than no saving.
-    ChunkBuildJob job = make_planet_job(/*coarse=*/true, /*collision=*/true);
+    ChunkBuildJob job = make_coarse_job(/*coarse=*/true, /*collision=*/true);
     job.run();
-    ChunkBuildJob full = make_planet_job(false);
+    ChunkBuildJob full = make_coarse_job(false);
     full.run();
 
     expect(job.collision_mesh != nullptr && job.collision_mesh->triangle_count() > 0,
@@ -524,10 +545,10 @@ COOPA_TEST(a_collision_build_is_never_coarse) {
 
 COOPA_TEST(a_coarse_build_with_no_field_tier_falls_back_to_the_full_build) {
     using namespace toy::world;
-    ChunkBuildJob job = make_planet_job(true);
+    ChunkBuildJob job = make_coarse_job(true);
     job.params.chunk_lods = {};   // no field tier to stand in for the native geometry
     job.run();
-    ChunkBuildJob full = make_planet_job(false);
+    ChunkBuildJob full = make_coarse_job(false);
     full.params.chunk_lods = {};
     full.run();
 

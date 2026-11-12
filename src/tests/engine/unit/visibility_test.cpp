@@ -169,7 +169,7 @@ COOPA_TEST(select_lod_is_history_independent_inside_the_dead_band) {
     // 0.24 sits inside LOD1's dead band: [0.9 * 0.25, 0.25). Both LOD0 and LOD1 are stable
     // there, so the level must not depend on how the object arrived -- an object first seen at
     // this size has to agree with one that has been closer, or it loads coarse and can never
-    // coarsen back once refined (a planet chunk at max zoom-out: no history gave LOD1, having
+    // coarsen back once refined (a chunk at max zoom-out: no history gave LOD1, having
     // been nearer gave LOD0, and nothing could clear the margin again).
     expect(select_lod(0.24f, t, 0.0f, -2, 0.1f) == select_lod(0.24f, t, 0.0f, 0, 0.1f),
            "inside the band, a fresh pick agrees with one held from the finer side");

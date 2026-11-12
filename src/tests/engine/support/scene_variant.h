@@ -22,17 +22,27 @@
 #include <string>
 
 #include <root_directory.h>
+#include <toyengine/io/runtime_paths.h>
 
 namespace toy::test {
 
 /**
- * @brief Copies the demo folder holding `scene` (a path under the checkout, e.g.
+ * @brief Copies the demo folder holding `scene` (a path under a checkout, e.g.
  *        "assets/scenes/rendering/clouds_demo/scene.yaml") to scratch_dir()/<tag>, applies
  *        `patch` to its scene.yaml, and returns the copy's scene.yaml path.
+ *
+ * `scene` is resolved against the PROJECT this runner was built for first, then against the
+ * engine checkout -- the same order as the engine's own asset roots. A game project's suites run
+ * against scenes that ship with the project, and `ROOT_DIR` is the engine either way.
  */
 inline std::string scene_variant(const std::string& scene, const std::string& tag,
                                  const std::function<void(fkyaml::node& doc)>& patch) {
-    const std::filesystem::path src = std::filesystem::path(ROOT_DIR) / scene;
+    std::filesystem::path src = std::filesystem::path(ROOT_DIR) / scene;
+    if (const char* project = toy::io::build_project_root(); project != nullptr && *project != '\0') {
+        const std::filesystem::path theirs = std::filesystem::path(project) / scene;
+        std::error_code ec;
+        if (std::filesystem::exists(theirs, ec)) src = theirs;
+    }
     const std::filesystem::path dir = coopa::test::scratch_dir(tag);
     std::filesystem::copy(src.parent_path(), dir,
                           std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing);
@@ -58,8 +68,8 @@ inline fkyaml::node* scene_component(fkyaml::node& doc, const std::string& objec
  * @brief Removes the first component of `type` from the root object named `object`.
  *
  * What a variant needs when a component would OVERRIDE the very fields it is pinning: a test
- * that hand-sets a camera's zoom range, say, has to take PlanetCameraFit off first or the
- * component derives them straight back from the planet.
+ * that hand-sets a camera's zoom range, say, has to remove whatever component derives it first,
+ * or that component writes its own values straight back.
  *
  * @return True when one was removed.
  */

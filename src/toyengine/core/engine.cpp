@@ -51,8 +51,6 @@
 #include <toyengine/scene/kinematic_control_system.h>
 #include <toyengine/scene/register.h>
 #include <toyengine/scene/scene_link.h>
-#include <toyengine/world/planet_atmosphere.h>
-#include <toyengine/world/planet_camera_fit.h>
 #include <toyengine/world/snow_system.h>
 #include <toyengine/mapgen/map_generator_component.h>
 #include <toyengine/world/terrain_system.h>
@@ -254,12 +252,6 @@ Engine::Engine(AppConfig config, EngineOptions options)
     init_user_settings_();
     init_audio_();
     init_saves_();
-    // TRANSITIONAL: the engine's own answer for where a world's frame comes from, installed
-    // before the modules below so a project can replace it. Moves out with the rest of the
-    // planet code, at which point an engine with no project installs no source at all and
-    // every scene is the flat world.
-    set_world_frame_source([](coopa::scene::Scene& s) { return world::find_planet_frame(s); });
-
     // Project modules (TOY_MODULE in a project's src/, see module.h) last, so they can
     // build on -- or replace -- any parser registered above.
     for (const Module& m : modules()) {
@@ -599,14 +591,6 @@ void Engine::prepare_scene_(coopa::scene::Scene& scene, bool drain_assets) {
     // Order 59: a map that lands this frame is applied before the streamer decides what to
     // mesh, so the first chunks are never built from an empty grid. See toyengine/mapgen.
     mapgen::install_map_generator_system(scene);
-    // Order 61, just after TerrainSystem (60): a bake that lands this frame is already
-    // measurable when the atmosphere shell is sized from it. Runs in edit mode too, so the sky
-    // is visible while authoring rather than only under play.
-    world::install_planet_atmosphere_system(scene);
-    // Order 65: frames the planet. After the terrain and the other sizers, and far ahead of the
-    // Behaviour walk (200) that ticks CameraController, so the camera reads this frame's values.
-    // Edit mode too -- a framing that only exists under play cannot be authored against.
-    world::install_planet_camera_fit_system(scene);
     world::install_terrain_system(scene, ctx_.device(), ctx_.allocator(), assets_);
     // Order 61: heightmap terrains -- their chunks, GPU grids and colliders, before Physics (100)
     // steps against them. See heightmap_terrain_system.h.
@@ -2000,18 +1984,6 @@ render::ToyRenderConfig Engine::make_render_config_(const AppConfig& config,
         /* shadow_cube_frag */ "",
         /* cull */ coopa::gfx::CullMode::Back,
     });
-    // A planet TileTerrain's chunks: terrain_styled built with TERRAIN_CURVED (terrain_styled.glsl).
-    rc.surface_shaders.add({
-        /* name  */ "terrain_styled_planet",
-        /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Opaque,
-        /* vert  */ "terrain_styled.vert", // shared with terrain_styled: see its doc
-        /* frag  */ "terrain_styled_planet.frag",
-        /* shadow_vert */ "",
-        /* shadow_frag */ "",
-        /* shadow_cube_vert */ "",
-        /* shadow_cube_frag */ "",
-        /* cull */ coopa::gfx::CullMode::Back,
-    });
     rc.surface_shaders.add({
         /* name  */ "triplanar",
         /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Opaque,
@@ -2086,8 +2058,8 @@ render::ToyRenderConfig Engine::make_render_config_(const AppConfig& config,
         /* tesc */ "water.tesc", // wider cull margin for the waves' reach
         /* tese */ "water.tese",
     });
-    // A planet's water (WaterBody::local_frame): the same shader compiled with WATER_LOCAL_FRAME,
-    // so "water" itself carries none of the planet code -- see water_surface.glsl.
+    // A local-frame water body (WaterBody::local_frame): the same shader compiled with
+    // WATER_LOCAL_FRAME, so "water" itself carries none of that code -- see water_surface.glsl.
     rc.surface_shaders.add({
         /* name  */ "water_local_frame",
         /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Transparent,
@@ -2101,26 +2073,6 @@ render::ToyRenderConfig Engine::make_render_config_(const AppConfig& config,
         /* tesc */ "water.tesc",
         /* tese */ "water_local_frame.tese",
     });
-    // The planet's atmosphere itself is a raymarched VolumeComponent (VolumeShape::Shell, sized
-    // by toyengine/world/planet_atmosphere.h) now, not a surface shader -- see that header for
-    // why a mesh shell couldn't give it the look a real volumetric glow needs.
-    // A cloud deck shell, just inside the atmosphere above (planet_clouds_surface.glsl): the
-    // vertex hook only passes object-space position through for the coverage noise, no
-    // displacement, so still no shadows and no tessellation.
-    rc.surface_shaders.add({
-        /* name  */ "planet_clouds",
-        /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Transparent,
-        /* vert  */ "planet_clouds.vert",
-        /* frag  */ "planet_clouds.frag",
-        /* shadow_vert */ "",
-        /* shadow_frag */ "",
-        /* shadow_cube_vert */ "",
-        /* shadow_cube_frag */ "",
-        /* cull */ coopa::gfx::CullMode::None,
-        /* tesc */ "",
-        /* tese */ "",
-    });
-
     // A project's own surface shaders, last. This is the only moment early enough for them:
     // the pipeline builds one variant per registered surface shader when it is constructed
     // from this config, and apply_live_config() preserves the live registry afterwards -- so a

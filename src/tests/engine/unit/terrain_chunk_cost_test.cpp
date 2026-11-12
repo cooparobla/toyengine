@@ -22,7 +22,6 @@
 #include <vector>
 
 #include <gfxcoopa/engine/data/mesh.h>
-#include <toyengine/world/planet_chunk_shaper.h>
 #include <toyengine/world/terrain_chunk.h>
 
 #include "engine/support/terrain_fixtures.h"
@@ -34,30 +33,6 @@ using namespace toy::test;
 using namespace toy::world;
 
 namespace {
-
-/** @brief The styled_tiles busy terrain: 3x3-tile blocks at 1-4 steps, 5x5 patches of kinds. */
-ColumnPad busy_pad(std::int32_t chunk_size, std::uint32_t seed) {
-    ColumnPad pad;
-    pad.resize(chunk_size);
-    auto hash = [seed](std::int32_t x, std::int32_t y) {
-        std::uint32_t h = static_cast<std::uint32_t>(x) * 73856093u ^
-                          static_cast<std::uint32_t>(y) * 19349663u ^ seed * 83492791u;
-        h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
-        return h;
-    };
-    auto block = [](std::int32_t v, std::int32_t size) { return v >= 0 ? v / size : (v - size + 1) / size; };
-    for (std::int32_t y = -1; y <= chunk_size; ++y) {
-        for (std::int32_t x = -1; x <= chunk_size; ++x) {
-            TileColumn& c = pad.at(x, y);
-            c.steps     = 1 + static_cast<std::int32_t>(hash(block(x, 3), block(y, 3)) % 4u);
-            static const TileKind kinds[] = {TileKind::Grass, TileKind::Grass, TileKind::Stone,
-                                             TileKind::Sand, TileKind::Snow};
-            c.top_kind  = kinds[hash(block(x, 5) + 101, block(y, 5)) % 5u];
-            c.side_kind = TileKind::Dirt;
-        }
-    }
-    return pad;
-}
 
 double median(std::vector<double> xs) {
     std::sort(xs.begin(), xs.end());
@@ -272,82 +247,6 @@ COOPA_TEST(style_lod_level_indexes_its_own_appended_vertices) {
 }
 
 /**
- * @brief Two neighbouring PLANET chunks put the same surface heights on their shared edge.
- *
- * `max_merge = 1` makes this true by construction -- no run spans a tile, so every quad sits on
- * the uniform half-tile lattice and nothing can displace a seam vertex. The test is the tripwire
- * for changing that: a merged run bent onto the sphere is a chord whose edge leaves the surface
- * its neighbours sit on, and raising it to compensate only converts the gap into a ledge. Either
- * way the seam stops agreeing, which is what this catches.
- */
-COOPA_TEST(two_planet_chunks_agree_on_their_shared_seam) {
-    const TileMeshLibrary library = make_tile_library({"soft", "rock"});
-    TerrainParams params = make_test_params(32);
-    params.planet      = true;
-    params.face_tiles  = 192;
-    params.tile_size   = 1.0f;
-    params.height_step = 1.0f;
-    params.max_merge   = 1;   // what register.cpp forces for a planet
-    params.allow_kind_corner_rounding = false;   // likewise
-
-    const std::int32_t n = params.chunk_size;
-    const float span = static_cast<float>(n) * params.tile_size;
-    const ColumnPad wide = busy_pad(2 * n, 9);
-    auto pad_at = [&](std::int32_t cx) {
-        ColumnPad out;
-        out.resize(n);
-        for (std::int32_t y = -1; y <= n; ++y) {
-            for (std::int32_t x = -1; x <= n; ++x) out.at(x, y) = wide.at(cx * n + x, y);
-        }
-        return out;
-    };
-
-    // Face space, before the warp: a vertex's z becomes its radius, so agreement here is
-    // agreement on the globe.
-    auto seam_heights = [&](const ChunkMeshData& mesh, float plane_x) {
-        std::vector<float> zs;
-        for (const auto& v : mesh.vertices) {
-            if (std::abs(v.position.x - plane_x) > 1e-3f) continue;
-            zs.push_back(v.position.z);
-        }
-        std::sort(zs.begin(), zs.end());
-        zs.erase(std::unique(zs.begin(), zs.end(),
-                             [](float a, float b) { return std::abs(a - b) < 1e-4f; }),
-                 zs.end());
-        return zs;
-    };
-
-    ChunkMeshData left, right;
-    mesh_chunk_styled(pad_at(0), library, params, left);
-    mesh_chunk_styled(pad_at(1), library, params, right);
-    const std::vector<float> a = seam_heights(left, span);
-    const std::vector<float> b = seam_heights(right, 0.0f);
-
-    auto unmatched = [](const std::vector<float>& xs, const std::vector<float>& ys) {
-        std::vector<float> out;
-        for (const float x : xs) {
-            bool found = false;
-            for (const float y : ys) {
-                if (std::abs(x - y) < 1e-3f) { found = true; break; }
-            }
-            if (!found) out.push_back(x);
-        }
-        return out;
-    };
-    const std::vector<float> only_left  = unmatched(a, b);
-    const std::vector<float> only_right = unmatched(b, a);
-
-    std::printf("    seam heights: left %zu, right %zu, left-only %zu, right-only %zu\n",
-                a.size(), b.size(), only_left.size(), only_right.size());
-    if (!only_left.empty())  std::printf("      first left-only  z = %.5f\n", only_left[0]);
-    if (!only_right.empty()) std::printf("      first right-only z = %.5f\n", only_right[0]);
-
-    expect(a.size() > 4, "the seam carries a range of heights -- the pad is busy there");
-    expect(only_left.empty() && only_right.empty(),
-           "both chunks put the same surface heights on their shared seam -- no step to see through");
-}
-
-/**
  * @brief `smooth` rounds a field level's shading without touching a triangle of it.
  *
  * The whole point of the flag: the level still costs exactly what it did and still carries the
@@ -515,7 +414,7 @@ COOPA_TEST(field_level_never_sinks_below_the_full_mesh) {
  * hole -- the artefact this pins against.
  *
  * Deep drops are ordinary, not exotic. A coarse field cell is the tallest column of a block
- * up to 32 tiles across; and on a planet at `height_scale: 256` a river channel alone cuts
+ * up to 32 tiles across; and at `height_scale: 256` a river channel alone cuts
  * about ten steps, a sea cliff over a hundred. Depth costs neither mesher anything: a field
  * wall is two quads at any height, and the styled mesher's vertical run-merge collapses a
  * plain wall to `soil_depth_steps + 1` stamps at any height.
@@ -547,7 +446,7 @@ COOPA_TEST(a_deep_wall_reaches_its_neighbours_own_height) {
     }
 
     // The styled mesher runs the whole drop too: its walls are what a ground-level camera
-    // actually looks at, and planet_demo's river banks are where the deepest ones are.
+    // actually looks at, and a demo world's river banks are where the deepest ones are.
     for (const char* set : {"voxel", "soft"}) {
         ChunkMeshData mesh;
         mesh_chunk_styled(pad, make_tile_library({set}), params, mesh);
@@ -634,68 +533,45 @@ COOPA_TEST(two_field_chunks_overlap_on_their_shared_seam) {
 }
 
 /**
- * @brief A `field` level appends its own vertices like a `style` level -- and, unlike one, is
- *        built on a PLANET, where it lands on the sphere.
+ * @brief A `field` level appends its own vertices like a `style` level, indexed locally.
+ *
+ * The complement of style_lod_level_indexes_its_own_appended_vertices: a field level is re-meshed
+ * from the chunk's own columns rather than simplified out of LOD 0, so its vertices go on the end
+ * of the same buffer and its indices have to be local to that appended range. A shaped world's
+ * field level is bent onto its surface as well (world/chunk_shaper.h), which belongs to whichever
+ * project owns that shape -- here the geometry stays in grid space.
  */
-COOPA_TEST(field_lod_level_is_appended_and_works_on_a_planet) {
+COOPA_TEST(field_lod_level_is_appended_and_indexes_its_own_vertices) {
     const TileMeshLibrary library = make_tile_library({"soft", "rock"});
 
-    for (const bool planet : {false, true}) {
-        TerrainParams params = make_test_params(32);
-        params.chunk_lods    = {};
-        params.chunk_lods[0] = {0.40f, 0.33f};                 // one ordinary ratio level
-        params.chunk_lods[1].field_stride = 8;                 // and one field level behind it
-        params.chunk_lods[1].screen_size  = 0.10f;
-        params.chunk_lods[1].native_border = 1;
-        params.planet     = planet;
-        params.face_tiles = 64;
-        if (planet) {
-            params.max_merge = 1;   // what register.cpp forces for a planet
-            params.allow_kind_corner_rounding = false;   // likewise
-        }
+    TerrainParams params = make_test_params(32);
+    params.chunk_lods    = {};
+    params.chunk_lods[0] = {0.40f, 0.33f};                 // one ordinary ratio level
+    params.chunk_lods[1].field_stride = 8;                 // and one field level behind it
+    params.chunk_lods[1].screen_size  = 0.10f;
+    params.chunk_lods[1].native_border = 1;
 
-        // LOD 0 is left in face space here -- ChunkBuildJob::run() is what shapes it. What this
-        // checks is that build_chunk_lods() shapes the FIELD level it re-meshes.
-        const ColumnPad pad = busy_pad(params.chunk_size, 3);
-        ChunkMeshData mesh;
-        mesh_chunk_styled(pad, library, params, mesh);
-        coopa::gfx::engine::data::Mesh::weld_and_optimize(mesh.vertices, mesh.indices);
-        const std::size_t lod0_vertices = mesh.vertices.size();
+    const ColumnPad pad = busy_pad(params.chunk_size, 3);
+    ChunkMeshData mesh;
+    mesh_chunk_styled(pad, library, params, mesh);
+    coopa::gfx::engine::data::Mesh::weld_and_optimize(mesh.vertices, mesh.indices);
+    const std::size_t lod0_vertices = mesh.vertices.size();
 
-        const toy::world::PlanetChunkShaper globe;
-        const std::vector<coopa::gfx::engine::data::MeshLod> table =
-            build_chunk_lods(params, ChunkCoord{0, 0}, pad, library, mesh, 0,
-                             planet ? &globe : nullptr);
+    const std::vector<coopa::gfx::engine::data::MeshLod> table =
+        build_chunk_lods(params, ChunkCoord{0, 0}, pad, library, mesh, 0, nullptr);
 
-        std::printf("    planet=%d: %zu levels, LOD 0 %zu verts, field level %u tris\n",
-                    planet ? 1 : 0, table.size(), lod0_vertices,
-                    table.size() >= 3 ? table[2].index_count / 3 : 0u);
-        expect(table.size() == 3, "LOD 0, one ratio level and one field level -- on a planet too");
-        expect(table[2].vertex_offset == static_cast<std::int32_t>(lod0_vertices),
-               "the field level's own vertices start where LOD 0's left off");
-        expect(table[2].index_count > 0, "the field level has geometry");
+    std::printf("    %zu levels, LOD 0 %zu verts, field level %u tris\n",
+                table.size(), lod0_vertices,
+                table.size() >= 3 ? table[2].index_count / 3 : 0u);
+    expect(table.size() == 3, "LOD 0, one ratio level and one field level");
+    expect(table[2].vertex_offset == static_cast<std::int32_t>(lod0_vertices),
+           "the field level's own vertices start where LOD 0's left off");
+    expect(table[2].index_count > 0, "the field level has geometry");
 
-        bool in_range = true;
-        const std::size_t appended = mesh.vertices.size() - lod0_vertices;
-        for (std::size_t k = table[2].first_index; k < table[2].first_index + table[2].index_count; ++k) {
-            if (mesh.indices[k] >= appended) { in_range = false; break; }
-        }
-        expect(in_range, "the field level's indices are local to its own appended vertex range");
-
-        if (!planet) continue;
-        // On a planet the level must have been bent onto the globe with LOD 0, not left flat in
-        // face space -- every one of its vertices stands off the planet's centre.
-        const float radius = params.layout().radius();
-        float lowest = 1e9f, highest = 0.0f;
-        for (std::size_t v = lod0_vertices; v < mesh.vertices.size(); ++v) {
-            const float r = glm::length(mesh.vertices[v].position);
-            lowest  = std::min(lowest, r);
-            highest = std::max(highest, r);
-        }
-        std::printf("      field level radii %.2f..%.2f (planet radius %.2f)\n", lowest, highest, radius);
-        expect(lowest > radius * 0.5f,
-               "a planet's field level is warped onto the globe, not left flat in face space");
-        expect(highest < radius + static_cast<float>(mesh.max_steps + 2) * params.height_step,
-               "and it does not fly off it");
+    bool in_range = true;
+    const std::size_t appended = mesh.vertices.size() - lod0_vertices;
+    for (std::size_t k = table[2].first_index; k < table[2].first_index + table[2].index_count; ++k) {
+        if (mesh.indices[k] >= appended) { in_range = false; break; }
     }
+    expect(in_range, "the field level's indices are local to its own appended vertex range");
 }

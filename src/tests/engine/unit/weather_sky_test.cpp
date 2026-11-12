@@ -65,7 +65,7 @@ COOPA_TEST(atmosphere_model_colours_and_caches_its_tables) {
     expect(toward.r > toward.b * 1.5f, "atmosphere: the horizon under a setting sun is red / orange");
     const glm::vec3 t_low = m.transmittance_toward(vr, sunset), t_up = m.transmittance(vr, 1.0f);
     expect(t_low.r / t_up.r > 2.0f * (t_low.b / t_up.b), "atmosphere: a low sun's light is reddened");
-    expect(glm::length(m.transmittance_toward(vr, glm::vec3(0, 0, -1))) == 0.0f, "atmosphere: no light through the planet");
+    expect(glm::length(m.transmittance_toward(vr, glm::vec3(0, 0, -1))) == 0.0f, "atmosphere: no light through the ground");
     const auto night = m.gradient(-noon, 0.025f, vr);
     expect(night.zenith.b < day.zenith.b * 0.1f && night.zenith.b > 0.0f, "atmosphere: the moonlit night is dim, not black");
     m.set_media(toy::render::SkyAtmosphereMedia::earth(4.0f, 1.0f));

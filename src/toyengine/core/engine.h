@@ -71,9 +71,6 @@ namespace audio { class AudioSystem; }
 /// Pointer-only here (warm_saved_upload_ms_); defined in toyengine/world/terrain_component.h,
 /// included by the .cpp files that dereference it.
 namespace world { class TerrainComponent; }
-/// By const reference only (sync_cloud_state_'s parameter); defined in
-/// toyengine/world/planet_atmosphere.h, included by the .cpp that derives it.
-namespace world { struct CloudDeck; }
 /// Pointer-only here (warm_saved_chunk_budget_); defined in toyengine/instance/instance_painter.h,
 /// included by the .cpp files that dereference it.
 namespace instance { class InstancePainter; }
@@ -356,6 +353,35 @@ public:
      *
      * @param fn Receives the scene, its world frame, the frame's dt and the state to adjust.
      */
+    /**
+     * @brief Lets a project finish the sky's per-frame state.
+     *
+     * Called once a frame with the engine's own values filled in, just before they are handed to
+     * the renderer. A project whose world has an atmosphere the engine does not model writes the
+     * terms only it can know -- how far daylight has drowned the stars out, what the night side
+     * is lit by -- and drives the sky gradient through drive_sky_gradient().
+     *
+     * @param fn Receives the scene, its world frame, the frame's dt and the state to adjust.
+     */
+    void set_sky_state_hook(
+        std::function<void(coopa::scene::Scene&, const env::WorldFrame&, float, render::SkyFrameState&)> fn) {
+        sky_state_hook_ = std::move(fn);
+    }
+
+    /**
+     * @brief Blends the scene's sky gradient toward `colour`, keeping the authored values safe.
+     *
+     * The engine remembers what the config authored the first time something drives the
+     * gradient, so restore_sky_gradient() can put it back when nothing is. `blend` of 0 is the
+     * authored gradient; 1 is `colour` at the zenith with a slight lift toward white at the
+     * horizon and ground -- the gradient's zenith is world +Z, so leaning on the horizon band
+     * is what keeps a curved world's sky from reading as a white wash away from the pole.
+     */
+    void drive_sky_gradient(float blend, const glm::vec3& colour);
+
+    /** @brief Puts the authored sky gradient back; a no-op if nothing drove it. */
+    void restore_sky_gradient() { restore_sky_colours_(); }
+
     void set_cloud_state_hook(
         std::function<void(coopa::scene::Scene&, const env::WorldFrame&, float, render::CloudFrameState&)> fn) {
         cloud_state_hook_ = std::move(fn);
@@ -946,13 +972,10 @@ public:
      *        already the moon's at night and warm at sunset -- and the gradient's colours light
      *        the clouds' ambient in the shader.
      *
-     * `deck` is the planet cloud layer's derived geometry (world::planet_cloud_deck()), unused
-     * on a flat world. Passed in rather than derived here because sync_sky_render_state_() needs
-     * the same values earlier in the frame, for the deck's zonal spin rate -- deriving it twice
-     * would let the two drift.
+     * A project whose world the engine does not model finishes the layer through
+     * set_cloud_state_hook(), which is called from here.
      */
-    void sync_cloud_state_(coopa::scene::Scene& scene, const render::SkyFrameState* sky,
-                           const world::CloudDeck& deck, float dt);
+    void sync_cloud_state_(coopa::scene::Scene& scene, const render::SkyFrameState* sky, float dt);
 
     /**
      * @brief Hands the renderer this frame's surface world (render/surface_world.h): the lying
@@ -1065,6 +1088,8 @@ public:
     bool booting() const { return boot_splash_ != nullptr; }
 
     coopa::gfx::presentation::Window& window() { return ctx_.window(); }
+    /// @brief The Vulkan device and allocator a project's own GPU system needs to install
+    /// itself (a terrain streamer, a mesh baker) -- the same two every built-in one is given.
     coopa::gfx::core::Device&         device() { return ctx_.device(); }
     coopa::gfx::memory::Allocator&    allocator() { return ctx_.allocator(); }
     coopa::gfx::command::CommandPool& command_pool() { return ctx_.command_pool(); }
@@ -1470,20 +1495,12 @@ private:
     /// Finishes the cloud layer for a world the engine does not model. See set_cloud_state_hook().
     std::function<void(coopa::scene::Scene&, const env::WorldFrame&, float, render::CloudFrameState&)>
         cloud_state_hook_;
+    /// Finishes the sky for a world the engine does not model. See set_sky_state_hook().
+    std::function<void(coopa::scene::Scene&, const env::WorldFrame&, float, render::SkyFrameState&)>
+        sky_state_hook_;
+    glm::vec2 cloud_wind_dir_{1.0f, 0.0f};      ///< This frame's cloud wind; see CloudFrameState.
+    float cloud_wind_speed_ = 0.0f;
     double cloud_flat_phase_ = 0.0;             ///< The flat clouds' evolution phase, 0..1.
-    /// Planet only: the angle the cloud deck has turned about the planet's pole (rad). A
-    /// globe's wind rotates the deck where a flat world slides `cloud_offset_` across it;
-    /// accumulated here so changing the wind's speed never jumps the clouds.
-    double cloud_spin_ = 0.0;
-    /// Planet only: this frame's step of cloud_spin_ (rad). The temporal reconstruction
-    /// reprojects its history by exactly this, so it has to be the step actually applied.
-    float cloud_spin_delta_ = 0.0f;
-    /// Planet only: the colours its cloud deck's ambient blends between across the
-    /// terminator -- the atmosphere's own daylight colour, and its night side already
-    /// scaled by the moon. Gathered in the sky sync (which already walks every
-    /// PlanetAtmosphere) and read by the cloud sync, which runs just after it.
-    glm::vec3 planet_day_fill_{0.0f};
-    glm::vec3 planet_night_fill_{0.0f};
     float sky_time_ = 0.0f;                     ///< Seconds the physical sky has run.
     /// Sky illuminance per unit of sun light intensity. Brighter than a real sky (about 1) to keep
     /// the engine's ambient-rich look; the sun disc, stars and the CPU gradient all scale with it.

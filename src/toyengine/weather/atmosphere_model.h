@@ -50,7 +50,7 @@ public:
     static constexpr float kPi = 3.14159265358979f;
     static constexpr int kTW = 64, kTH = 16;   ///< Transmittance table.
     static constexpr int kMS = 16;             ///< Multi-scatter table (square).
-    static constexpr float kPlanetOffset = 0.01f;
+    static constexpr float kGroundOffset = 0.01f;
 
     AtmosphereModel() { set_media(render::SkyAtmosphereMedia{}); }
 
@@ -61,13 +61,13 @@ public:
     int builds() const { return builds_; }
 
     /** @brief Radius (km) of a viewer at world height `z_metres` -- sky_view_radius() in GLSL. */
-    float view_radius(float z_metres) const { return media_.bottom_radius + std::max(z_metres, 0.0f) * 0.001f + kPlanetOffset; }
+    float view_radius(float z_metres) const { return media_.bottom_radius + std::max(z_metres, 0.0f) * 0.001f + kGroundOffset; }
 
-    /** @brief Transmittance from radius r toward cos-zenith mu, to the top of the atmosphere (no planet test). */
+    /** @brief Transmittance from radius r toward cos-zenith mu, to the top of the atmosphere (no ground test). */
     glm::vec3 transmittance(float r, float mu) const;
 
     /**
-     * @brief Transmittance from a viewer at `view_r` toward `dir`, with the planet blocking it
+     * @brief Transmittance from a viewer at `view_r` toward `dir`, with the ground blocking it
      *        (zero for a direction into the ground). The sun's colour at the viewer is this times
      *        the sun's colour above the atmosphere.
      */

@@ -52,8 +52,7 @@
 #include <coopa/maps/noise.h>
 #include <coopa/maps/water_field.h>
 
-#include <toyengine/world/planet.h>
-#include <toyengine/world/planet_grid.h>
+#include <toyengine/mapgen/world_bake.h>
 #include <toyengine/world/terra_data.h>
 #include <toyengine/world/terrain_params.h>
 #include <toyengine/world/terrain_water.h>
@@ -126,6 +125,30 @@ public:
 
     /** @brief The tiling this sampler was built for. */
     const TerrainParams& params() const { return params_; }
+
+    /**
+     * @brief The tile record at an arbitrary point of the map, with the cell search warm-started.
+     *
+     * What a replacement bake walk fills each of its tiles from (mapgen/world_bake.h): the flat
+     * walk reads a tile's point off its grid index, and this answers the same question for a
+     * point arrived at any other way.
+     *
+     * `cell_hint` is both read and written -- the cell search is a downhill walk over the map
+     * graph, so handing back the cell it settled on makes the next nearby point a few steps
+     * instead of a full descent. Start it at 0 and keep passing the same variable.
+     *
+     * @param p         The point on the map, in the graph's own frame.
+     * @param per_unit  Tiles per map grid unit, which fixes how wide a river reads.
+     * @param across    Unit map-space direction of the tile grid's x at `p`.
+     * @param along     Unit map-space direction of the tile grid's y at `p`.
+     * @param cell_hint In/out: where to start the cell search, left on the cell that won.
+     * @return The tile, terraced and watered exactly as the flat walk would leave it.
+     */
+    TileCell cell_at(const coopa::maps::MapPoint& p, double per_unit, const glm::dvec3& across,
+                     const glm::dvec3& along, std::size_t& cell_hint) const {
+        cell_hint = nearest_cell_(p, cell_hint);
+        return record_(graph_.centers[cell_hint], p, per_unit, across, along);
+    }
 
     /** @brief Tiles along one axis of the whole world; tile indices span `[0, tiles_per_axis())`. */
     std::int32_t tiles_per_axis() const {
@@ -301,7 +324,8 @@ public:
 private:
     /**
      * @brief A tile's record from the cell under it and its point on the map (`p`: 2D on a plane,
-     *        on the globe for a planet). `across` and `along` are the tile grid's x and y in the
+     *        on whatever surface a shaped world's grid lies on). `across` and `along` are the
+     *        tile grid's x and y in the
      *        map's frame, which a river's flow is measured against.
      *
      * `continuous_water_level` keeps `water_level` at mapcoopa's exact surface. mapcoopa
@@ -362,8 +386,8 @@ private:
         return r;
     }
 
-    /** @brief The cell whose site is nearest a point of a globe, walking from `hint` (a planet's bake). */
-    std::size_t nearest_on_globe_(const coopa::maps::MapPoint& p, std::size_t hint) const {
+    /** @brief The cell whose site is nearest an arbitrary map point, walking out from `hint`. */
+    std::size_t nearest_cell_(const coopa::maps::MapPoint& p, std::size_t hint) const {
         std::size_t best = hint < graph_.centers.size() ? hint : 0;
         double distance = graph_.centers[best].point.distance_to(p);
         for (int guard = 0; guard < 100000; ++guard) {
@@ -379,40 +403,6 @@ private:
             best = next;
         }
         return best;
-    }
-
-    /** @brief A planet's bake: every tile of the six faces from mapcoopa's globe. Tiles mode only. */
-    void bake_planet_(TerraData& out) const {
-        const PlanetLayout layout = params_.layout();
-        const std::int32_t n = layout.n;
-        TerraGeometry g = out.geometry();
-        g.tiles_x = 6 * n;
-        g.tiles_y = n;
-        out.reset(g);
-        const double map_radius = graph_.sphere_radius > 0.0 ? graph_.sphere_radius : 1.0;
-        // Tiles per map grid unit along a face (a face spans a quarter of the globe's circumference).
-        const double per_unit = static_cast<double>(n) / (map_radius * PlanetLayout::k_pi * 0.5);
-        const double ts = params_.tile_size;
-        std::size_t hint = 0;
-        for (std::int32_t face = 0; face < 6; ++face) {
-            for (std::int32_t j = 0; j < n; ++j) {
-                for (std::int32_t i = 0; i < n; ++i) {
-                    const glm::dvec3 dir = layout.direction(face, (i + 0.5) * ts, (j + 0.5) * ts);
-                    const glm::dvec3 across = glm::normalize(layout.direction(face, (i + 1.0) * ts, (j + 0.5) * ts) -
-                                                             layout.direction(face, i * ts, (j + 0.5) * ts));
-                    const glm::dvec3 along = glm::normalize(layout.direction(face, (i + 0.5) * ts, (j + 1.0) * ts) -
-                                                            layout.direction(face, (i + 0.5) * ts, j * ts));
-                    const coopa::maps::MapPoint p{dir.x * map_radius, dir.y * map_radius, dir.z * map_radius};
-                    hint = nearest_on_globe_(p, hint);
-                    out.at(face * n + i, j) = record_(graph_.centers[hint], p, per_unit, across, along);
-                }
-            }
-        }
-        TerrainField field = borrow(out);
-        // The rounding's spread steps neighbours through the layout, so a tile on a face's
-        // edge reconciles against the face beside it (world/tile_grid.h).
-        const world::PlanetGrid topology{layout};
-        settle_water_rounding(field, IRect{0, 0, 6 * n, n}, &topology);   // terrain_water.h
     }
 
 public:
@@ -441,10 +431,8 @@ public:
      * (`MapGeneratorComponent::layers`), which this sampler has no idea exists.
      */
     void bake(TerraData& out) const {
-        if (params_.planet) {
-            bake_planet_(out);
-            return;
-        }
+        // A world that is not one flat square of tiles walks its own grid (mapgen/world_bake.h).
+        if (const WorldBakeHook& hook = world_bake_hook(); hook && hook(*this, out)) return;
         const std::int32_t n = tiles_per_axis();
         TerraGeometry g = out.geometry();
         g.tiles_x = g.tiles_y = n;

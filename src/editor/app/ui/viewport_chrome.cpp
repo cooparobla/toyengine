@@ -357,7 +357,6 @@ void ViewportChromePanel::draw_add_menu_items_(imm::Context& ctx) {
     if (ctx.menu_item("Reflection Probe", "", nullptr, true, I::EnvLight)) app_.create_with_component("ReflectionProbe", "Reflection Probe");
     if (ctx.menu_item("Heightmap Terrain", "", nullptr, true, I::Terrain)) app_.create_with_component("HeightmapTerrain", "Terrain");
     if (ctx.menu_item("Tile Terrain", "", nullptr, true, I::Terrain)) app_.create_with_component("TileTerrain", "Tile Terrain");
-    if (ctx.menu_item("Planet", "", nullptr, true, I::World)) app_.create_planet();
     if (ctx.menu_item("Instance Painter", "", nullptr, true, I::BrushDraw)) {
         app_.create_with_component("InstancePainter", "Painted Instances");
     }

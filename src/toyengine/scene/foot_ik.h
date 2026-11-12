@@ -158,7 +158,7 @@ private:
     glm::vec3 pelvis_translation_applied_{0.0f};
     glm::quat pelvis_rotation_applied_{1.0f, 0.0f, 0.0f, 0.0f};
     bool pelvis_applied_valid_ = false;
-    /// "Up" for the feet: world +Z -- or, where gravity is a field (a planet), the character's own up.
+    /// "Up" for the feet: world +Z -- or, where gravity is a field, the character's own up.
     glm::vec3 up_{0.0f, 0.0f, 1.0f};
     float body_pitch_deg_ = 0.0f;
 };

@@ -244,7 +244,7 @@ public:
         float            surface_height = 0.0f; ///< Of the body above `p` (valid when `body`).
         float            depth = 0.0f;          ///< surface_height - p.z (negative above water).
         const WaterBody* body = nullptr;        ///< The body above/around `p`, or null.
-        /// A local-frame body's (a planet's water) up, in world: `surface_height` is then
+        /// A local-frame body's up, in world: `surface_height` is then
         /// measured along it, as dot(point, up), and `depth` too. Unset for ordinary water.
         std::optional<glm::vec3> up;
     };
@@ -495,7 +495,7 @@ private:
      */
     void frozen_substep_(BuoyantEntry& e, coopa::physx::dynamics::Body& body, const glm::vec3& gravity, float h);
     /**
-     * @brief floater_substep_() where local-frame water is in play (a planet's): each pontoon is
+     * @brief floater_substep_() where local-frame water is in play: each pontoon is
      *        measured in each water body's own frame, and gravity and up come from the physics
      *        field where it is. Used only when such a body is active, so ordinary water keeps the
      *        exact path above.

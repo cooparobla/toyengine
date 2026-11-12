@@ -11,6 +11,18 @@
 
 namespace toy {
 namespace world {
+
+namespace {
+TerrainParseHook& hook_slot() {
+    static TerrainParseHook hook;
+    return hook;
+}
+}  // namespace
+
+void set_terrain_parse_hook(TerrainParseHook hook) { hook_slot() = std::move(hook); }
+
+const TerrainParseHook& terrain_parse_hook() { return hook_slot(); }
+
 namespace {
 
 float get_f(const fkyaml::node& n, const char* key, float fallback) {
@@ -38,7 +50,7 @@ TerrainMode infer_terrain_mode(const fkyaml::node& node) {
         if (!m.empty()) return terrain_mode_from_name(m);
     }
     for (const char* key : {"tile_set", "tiles", "generator", "world_tiles", "tiles_per_grid_unit",
-                            "tile_size", "height_step", "height_scale", "face_tiles", "planet"}) {
+                            "tile_size", "height_step", "height_scale", "face_tiles"}) {
         if (node.contains(key)) return TerrainMode::Tiles;
     }
     for (const char* key : {"heightmap", "splat0", "splat1", "resolution", "splat_resolution", "size",

@@ -135,9 +135,9 @@ void SkyCloudPass::execute(coopa::gfx::command::CommandBuffer& cmd, uint32_t fra
     d.history = glm::vec4(p.drift, valid ? 1.0f : 0.0f, pix_angle);
     d.camera = glm::vec4(p.camera_pos, p.light_change);
     d.look = glm::vec4(cs, std::clamp(p.fade, 0.0f, 1.0f), p.atmosphere_lut ? 1.0f : 0.0f, p.spin_delta);
-    // The planet's centre and radius stay in WORLD metres like `camera` above; the shaders
+    // The world frame's centre and radius stay in WORLD metres like `camera` above; the shaders
     // divide both by the scale themselves. A flat frame leaves this zero, which is the shaders'
-    // "pin a fake planet under the camera" path -- the flat world's arithmetic, untouched.
+    // "pin a fake sphere under the camera" path -- the flat world's arithmetic, untouched.
     d.world_frame = p.world_frame.curved() ? glm::vec4(p.world_frame.centre, p.world_frame.radius) : glm::vec4(0.0f);
     d.spin = glm::vec4(glm::normalize(p.spin_axis), p.spin_angle);
     d.day_fill = glm::vec4(p.day_fill, 0.0f);

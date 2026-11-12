@@ -132,8 +132,8 @@ public:
     /**
      * @brief The body lives in its own frame: its surface is a height field over its LOCAL XY,
      *        its waves rise along its local Z, and everything about it (query, flow, depth,
-     *        floating) is worked out in that frame. A planet's water sets it -- each piece tilted
-     *        so local Z points away from the planet. Off (the default), a body is a height field
+     *        floating) is worked out in that frame. Water on a curved world sets it -- each piece
+     *        tilted so local Z points away from the centre. Off (the default), a body is a height field
      *        over world XY, exactly as always.
      */
     bool local_frame = false;
@@ -155,7 +155,7 @@ public:
      * exists: the tiles are built on a worker and published a frame or two later. A
      * build whose body stops being live in the meantime is cancelled and never
      * publishes -- and a streamed world does that routinely, because deactivating an
-     * object (a planet chunk going over the horizon) drops its body from the live set
+     * object (a terrain chunk going out of view) drops its body from the live set
      * without destroying it. Without this, such a body stays `baked` with no mesh and
      * no stage left to run, so its water never comes back. The bake re-runs while this
      * is false.

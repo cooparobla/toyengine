@@ -103,7 +103,7 @@ public:
 
     AutoApply auto_apply = AutoApply::WhenMissing;
 
-    /** @brief Generate on a globe rather than a plane (a planet terrain sets it). */
+    /** @brief Generate on a sphere rather than a plane; mapcoopa's `MapTopology::Sphere`. */
     bool sphere = false;
 
     // --- How the map is written into a Tiles target (ignored by a Heightmap one) ---
@@ -143,7 +143,7 @@ public:
      * @brief The per-tile view of the world, shared with whatever it was last applied to.
      *
      * Built by an apply, not by generation: reading the map per tile needs the TARGET's
-     * quantisation and layout (its `height_step`, and a planet's cube-sphere), which only the
+     * quantisation and layout (its `height_step`, and a shaped world's own grid), which only the
      * apply knows. Null until then.
      */
     std::shared_ptr<const world::TerrainSampler> sampler() const { return sampler_; }

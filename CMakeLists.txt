@@ -161,6 +161,13 @@ endif()
 # the uicoopa search root in RuntimeLayout::shader_roots() (toyengine/io/runtime_paths.h).
 
 configure_file(configuration/root_directory.h.in configuration/root_directory.h)
+# Every coopa library generates a root_directory.h of its own, and only THIS one defines SRC_DIR
+# (the editor's bundled themes and the test fixtures read it). They all expose their
+# configuration/ PUBLICly, so which header a TU compiles against is decided by include order --
+# exported here so toyengine_add_project_tests() can put this one first for a project's own
+# suites, where nothing else would.
+set(TOYENGINE_CONFIG_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/configuration"
+    CACHE INTERNAL "toyengine's generated configuration/ -- the root_directory.h with SRC_DIR")
 
 # --- Shader compilation ---
 # cbuild --vulkan (the primary build tool for this workspace) already walks
@@ -256,18 +263,6 @@ toyengine_add_project(NAME toyengine DIR "${TOYENGINE_DIR}" EDITOR_NAME toyengin
 enable_testing()
 # Tests: tests/CMakeLists.txt (one suite per file, tiered unit / gpu / extended).
 add_subdirectory(src/tests)
-
-# --- Projects shipped beside the engine (projects/) ---
-# Engine features that are NOT part of the engine. projects/planet is the planetary world: the
-# engine is flat-terrain only, and a round world is a project that overrides what it needs
-# through the module hooks (toyengine/core/module.h). Each is an ordinary toyengine project --
-# the same toyengine_add_project() this file uses for the engine's own targets -- kept in the
-# checkout so one build tree configures and tests both worlds. Guarded on the directory so a
-# trimmed checkout still configures, and inside the top-level gate above so a game project
-# consuming this engine never builds them.
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/projects/planet/CMakeLists.txt")
-    add_subdirectory(projects/planet)
-endif()
 
 # --- Editor ---
 # toyengine_editor (defined by toyengine_add_project() above) embeds the same Engine, so its

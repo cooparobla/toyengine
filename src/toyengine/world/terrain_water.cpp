@@ -147,7 +147,7 @@ WaterSettle begin_settle(TerrainField& field, const IRect& rect, const IRect& li
     IRect changed;
     // The ring around the edit as well as the edit itself: water just outside it is what floods
     // ground that dropped inside. The ring is taken through the layout, so an edit
-    // against a face's edge is seeded from the face next door rather than from across the globe.
+    // against a region's edge is seeded from the region next door rather than from far away.
     const IRect r = clip_limit(field, IRect{rect.x0 - 1, rect.y0 - 1, rect.x1 + 1, rect.y1 + 1});
     const auto consider = [&](int x, int y) {
         const glm::ivec2 t(x, y);

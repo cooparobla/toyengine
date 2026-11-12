@@ -140,7 +140,7 @@ public:
     // --- Per-frame input, pushed by Engine::drive_character_controllers_() ---
     glm::vec2 move_input{0.0f};      ///< x = right, y = forward, in the move basis; length clamped to 1.
     float move_basis_yaw_deg = 0.0f; ///< Yaw of the move basis (the camera's); 0 = world axes (x -> +X, y -> +Y).
-    /// Where gravity is a field (a planet's -- the physics world has gravity sources), a world
+    /// Where gravity is a field (the physics world has gravity sources), a world
     /// yaw means nothing: the move basis is this world direction (the camera's view) laid onto
     /// the ground plane instead. Zero: `move_basis_yaw_deg`, measured in the character's frame.
     glm::vec3 move_basis_forward{0.0f};
@@ -258,7 +258,7 @@ private:
 
     /**
      * @brief advance() where gravity is a field (the physics world has gravity sources -- a
-     *        planet): the same motion in the character's own frame -- up away from the pull at
+     *        gravity source): the same motion in the character's own frame -- up away from the pull at
      *        its feet, carried along as it walks (parallel transport), so "forward" never spins
      *        -- with velocity (`h_velocity_`, `v_velocity_`) and yaw held in that frame. Moving
      *        platforms are not carried here. Without sources advance() never comes here.

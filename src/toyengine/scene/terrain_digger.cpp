@@ -35,7 +35,7 @@ void TerrainDigger::update(float delta_time) {
 
     if (!digging || cooldown_ > 0.0f) return;
 
-    // The hit is in the terrain's own space; raise_at() wants a world position, and on a planet
+    // The hit is in the terrain's own space; raise_at() wants a world position, and under a
     // the two differ by more than an offset.
     glm::vec3 world = hit.point;
     if (terrain->owner != nullptr) {

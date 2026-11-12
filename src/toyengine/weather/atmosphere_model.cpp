@@ -176,7 +176,7 @@ void AtmosphereModel::build_multiscatter_() {
             const float ux = std::clamp(unit_uv_((x + 0.5f) / kMS, kMS), 0.0f, 1.0f);
             const float uy = std::clamp(unit_uv_((y + 0.5f) / kMS, kMS), 0.0f, 1.0f);
             const float sun_mu = ux * 2.0f - 1.0f;
-            const float r = bottom + uy * (top - bottom - kPlanetOffset) + kPlanetOffset;
+            const float r = bottom + uy * (top - bottom - kGroundOffset) + kGroundOffset;
             const glm::vec3 pos(0.0f, 0.0f, r), sun(std::sqrt(std::max(1.0f - sun_mu * sun_mu, 0.0f)), 0.0f, sun_mu);
             glm::vec3 lum_sum(0.0f), f_sum(0.0f);
             for (int iy = 0; iy < kSqrtDirs; ++iy) {

@@ -193,7 +193,7 @@ COOPA_TEST(the_floor_under_water_has_relief_and_grades_by_depth) {
  * rest, and the bed can never bake below the ground plane (steps are heights, not signed
  * depths). So the deepest water a world can hold is exactly `sea_level * height_scale` steps --
  * at the default 0.25 that is a quarter of the range against three quarters for the land, which
- * is why a default planet's seas read as puddles beside its mountains. Raising `sea_level`
+ * is why a default world's seas read as puddles beside its mountains. Raising `sea_level`
  * (with `height_scale` to keep the land's own relief) is the only thing that changes the ratio.
  */
 COOPA_TEST(sea_level_sets_the_ceiling_on_how_deep_an_ocean_can_bake) {
@@ -235,7 +235,7 @@ COOPA_TEST(sea_level_sets_the_ceiling_on_how_deep_an_ocean_can_bake) {
     };
 
     const auto shallow = sound(0.25, 32.0f);   // the default split: a quarter of the range
-    const auto deep    = sound(0.45, 56.0f);   // planet_demo's: a deeper sea that keeps its land
+    const auto deep    = sound(0.45, 56.0f);   // a deeper sea that keeps its land
     std::cerr << "         sea_level 0.25 -> deepest " << shallow.first << " of " << shallow.second
               << " steps; 0.45 -> deepest " << deep.first << " of " << deep.second << "\n";
 

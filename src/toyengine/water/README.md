@@ -65,7 +65,7 @@ the one `WaterSystem` creates for it.
 
 Opacity grows along the water the view ray actually CROSSES, not the depth under the surface,
 so water seen at a glancing angle is as opaque as the same water seen straight down is deep.
-A planet's water (`local_frame`, the `water_local_frame` shader) goes all the way to opaque, and
+Water in its own frame (`local_frame`, the `water_local_frame` shader) goes all the way to opaque, and
 reads any pixel with no opaque geometry behind it -- its sea against open space at the limb --
 as unbounded depth rather than as a shoreline. Flat water stops at 0.94 and keys its opacity on
 the vertical column, as it always has.
@@ -155,17 +155,18 @@ mass, on velocity relative to the mean current under the body, which is what car
 downstream. Linear drag plus quadratic form drag (`0.5 rho Cd A |v|`) are both applied as a
 clamped fraction of the relative velocity, so they are unconditionally stable.
 
-### Local-frame bodies (a planet's water)
+### Local-frame bodies (water on a curved world)
 
-`WaterBody::local_frame` (off by default; set by a planet TileTerrain, see the world README's
-Planets section) makes a body a height field over **its own** XY instead of world XY: the bake,
+`WaterBody::local_frame` (off by default; set by whatever installs a `ChunkShaper` on a terrain
+-- see the world README's seam table) makes a body a height field over **its own** XY instead of
+world XY: the bake,
 query, flow and depth probes (cast along the body's own -Z) run in the body's frame, and buoyancy
 (`frame_floater_substep_()`) measures each pontoon in each nearby body's frame with gravity and
 up from the physics field. It draws with the `water_local_frame` shader (`water_surface.glsl` built
 with `WATER_LOCAL_FRAME`; the ordinary `water` shader carries none of this code), which lifts the
 surface along its normal by waves of the world position seen through the three axis planes
 (triplanar); the CPU query (`frame_sample()`) does the same, so the many tilted
-pieces of a planet's sea meet without seams and float things on the waves that are drawn. The
+pieces of a curved world's sea meet without seams and float things on the waves that are drawn. The
 underwater pass and the fog measure the surface along the body's up (`UnderwaterInfo::up`).
 `WaterSystem::sample(xy)` skips these bodies (a world XY means nothing to them). Ordinary bodies,
 rotated ones included, never take any of these paths.

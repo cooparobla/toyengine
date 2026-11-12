@@ -61,7 +61,7 @@ COOPA_TEST(an_explicit_mode_wins) {
 /** @brief Without a `mode:`, each half's own keys choose it. */
 COOPA_TEST(the_keys_choose_the_mode) {
     for (const char* key : {"tile_set", "tiles", "generator", "world_tiles", "tiles_per_grid_unit",
-                            "tile_size", "height_step", "height_scale", "face_tiles", "planet"}) {
+                            "tile_size", "height_step", "height_scale", "face_tiles"}) {
         expect(infer_terrain_mode(with_key(key)) == TerrainMode::Tiles,
                std::string("`") + key + "` means a tile world");
     }

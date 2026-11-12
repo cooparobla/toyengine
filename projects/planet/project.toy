@@ -1,9 +1,0 @@
-# planet -- toyengine's planetary world, as a project on the engine it ships beside.
-# Its engine is this checkout, so there is no .libs/toyengine and no ref to pin: the
-# top-level CMakeLists.txt add_subdirectory()s this directory directly.
-format: toyproject
-version: 1
-target: planet
-engine:
-  source: in-tree
-  ref: HEAD

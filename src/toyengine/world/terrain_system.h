@@ -95,7 +95,6 @@
 
 #include <gfxcoopa/engine/components/camera_component.h>
 
-#include <toyengine/env/world_frame.h>
 #include <toyengine/world/terrain_component.h>
 #include <toyengine/world/terrain_views.h>
 
@@ -155,7 +154,7 @@ public:
      * of the budgets in this system is a memory budget: `max_chunk_jobs_per_frame`,
      * `max_chunks_in_flight` and `upload_budget_ms` all pace wall clock or counts, so a change
      * that quadruples the geometry is simply paced into existence over more frames and then
-     * stays. A planet makes that sharper still -- it never evicts a chunk -- and the buffers are
+     * stays. A policy that never evicts a chunk makes that sharper still, and the buffers are
      * host-visible and persistently mapped (`memory::Buffer::vertex`), so this is system RAM,
      * not VRAM.
      *
@@ -168,7 +167,7 @@ public:
     std::int32_t resident_chunks() const { return resident_chunks_; }
     /** @brief Of those, the ones whose SceneObject is active -- what the renderer walks. */
     std::int32_t drawn_chunks() const { return drawn_chunks_; }
-    /** @brief Of those, the ones built without their native tile geometry. 0 unless a planet asks. */
+    /** @brief Of those, the ones built without their native tile geometry (ChunkShaper::allows_coarse_builds). */
     std::int32_t coarse_chunks() const { return coarse_chunks_; }
 
     /**
@@ -186,7 +185,7 @@ public:
      * sizing itself to the terrain's relief wants this one. Zero on a flat terrain, which
      * measures no peak: nothing a flat world feeds has any use for one.
      */
-    float relief_peak() const { return planet_peak_; }
+    float relief_peak() const { return relief_peak_; }
 
     /**
      * @brief Called from TerrainComponent::~TerrainComponent(): drops `terrain` out of
@@ -225,6 +224,84 @@ public:
         return ws;
     }
 
+protected:
+    // ------------------------------------------------------------------
+    // The streaming policy seam.
+    //
+    // Everything above is shape-agnostic: chunks are built, uploaded, measured and retired the
+    // same way whatever surface they lie on. What DOES depend on the surface is which chunks are
+    // wanted, in what order, and at what priority -- and that is these four, overridden by a
+    // subclass for a world the flat policy does not describe. The base implementations are the
+    // flat ones: a square of chunks streamed around the camera.
+    // ------------------------------------------------------------------
+
+    /**
+     * @brief Decides which of `terrain`'s chunks exist this frame, and pumps them.
+     *
+     * Called once per ready terrain per frame, after its edits have been folded in. The flat
+     * policy streams a square around the camera and evicts what leaves it.
+     */
+    virtual void stream_(TerrainComponent& terrain, coopa::scene::Scene& scene,
+                         const coopa::scene::FrameContext& ctx);
+
+    /**
+     * @brief Orders a pass's chunks soonest-first, so the ground the camera is looking at is
+     *        built and uploaded before the rest.
+     *
+     * The tie-break must stay deterministic for a given camera pose -- that is what makes a
+     * scripted capture reproducible. Flat sorts by chunk distance from the streaming centre.
+     */
+    virtual void order_chunks_(const TerrainComponent& terrain, std::vector<ChunkCoord>& coords) const;
+
+    /**
+     * @brief The JobEngine priority a chunk's build runs at.
+     *
+     * One job per chunk, so this is what gets the ground under the camera built first whatever
+     * order the queue was in, and what keeps the far ring off the frame's own parallel work.
+     */
+    virtual coopa::job::Priority chunk_job_priority_(const TerrainComponent& terrain,
+                                                     const ChunkCoord& coord) const;
+
+    /**
+     * @brief The terrain's measured relief -- its peak height above its datum, world units.
+     *
+     * Zero for the flat policy, which has nothing that needs it. A policy whose world is sized
+     * relative to its own relief (an atmosphere shell, a camera fit) measures it here.
+     */
+    virtual float relief_of_(const TerrainComponent& terrain) const;
+
+    /** @brief Runs once at the end of a frame's pass, after every terrain has been streamed. */
+    virtual void after_terrains_(coopa::scene::Scene& scene);
+
+    // --- What a policy drives: the shape-agnostic chunk pump, and the warm-up counters. ---
+
+    /**
+     * @brief Publishes chunks whose meshing jobs have finished, soonest-wanted first, within
+     *        `upload_budget_ms`.
+     *
+     * Ordered by order_chunks_() and not in hash order: the chunk under the camera must not wait
+     * behind the horizon's. A time slice rather than a count because what is left on this thread
+     * -- a scene insert, a published asset, the water children's first bake, a physics re-gather
+     * -- differs by an order of magnitude between a chunk of open sea and a chunk of cliff. One
+     * chunk always lands, whatever the budget.
+     */
+    void upload_finished_chunks_(TerrainComponent& terrain, coopa::scene::Scene& scene);
+    /**
+     * @brief Submits queued chunk builds within this frame's budget, soonest-first.
+     *
+     * @param centre The flat streaming centre, used only by the flat ordering; a policy with no
+     *        such centre passes `{0, 0}` and orders through order_chunks_() instead.
+     */
+    void submit_queued_chunks_(TerrainComponent& terrain, const ChunkCoord& centre,
+                               const coopa::scene::FrameContext& ctx);
+
+    /// Chunks this frame's policy asked for, and how many are not yet drawing. A policy
+    /// accumulates into both so warm_up_state() and load_ms() see its world; execute() zeroes them.
+    std::int32_t wanted_chunks_ = 0;
+    std::int32_t unfinished_chunks_ = 0;
+    /// execute() calls, so a policy can hold a decision for a number of frames.
+    std::uint64_t frame_ = 0;
+
 private:
     /**
      * @brief Follows AssetManager::k_asset_io_job_type's precedent: any value >= k_max_job_types
@@ -233,17 +310,15 @@ private:
      */
     static constexpr coopa::job::JobType k_terrain_job_type = 0x7E44A100u;
 
-    std::int32_t wanted_chunks_ = 0;      /**< See wanted_chunks(). */
-    std::int32_t unfinished_chunks_ = 0;  /**< See unfinished_chunks(). */
     bool terrain_baking_ = false;         /**< Any terrain still baking its world or tile set. */
 
     std::uint64_t resident_mesh_bytes_ = 0; /**< See resident_mesh_bytes(). */
     std::int32_t resident_chunks_ = 0;      /**< See resident_chunks(). */
     std::int32_t drawn_chunks_ = 0;         /**< See drawn_chunks(). */
     std::int32_t coarse_chunks_ = 0;        /**< See coarse_chunks(). */
-    float planet_peak_ = 0.0f;              /**< See relief_peak(). */
+    float relief_peak_ = 0.0f;              /**< See relief_peak(). */
 
-    /** @brief Accumulates the four resident_* counters and planet_peak_ over one frame's terrains. */
+    /** @brief Accumulates the four resident_* counters and relief_peak_ over one frame's terrains. */
     void measure_(const TerrainComponent& terrain);
 
     double load_ms_ = 0.0;                  /**< See load_ms(). */
@@ -342,27 +417,6 @@ private:
     void release_terrain_(TerrainComponent& terrain, const coopa::scene::FrameContext& ctx);
 
     /**
-     * @brief Publishes chunks whose meshing jobs have finished, nearest first, within
-     *        `upload_budget_ms`.
-     *
-     * Nearest first and not in hash order: the chunk under the camera must not wait behind the
-     * horizon's. A time slice rather than a count because what is left on this thread -- a
-     * scene insert, a published asset, the water children's first bake, a physics re-gather --
-     * differs by an order of magnitude between a chunk of open sea and a chunk of cliff. One
-     * chunk always lands, whatever the budget.
-     */
-    void upload_finished_chunks_(TerrainComponent& terrain, coopa::scene::Scene& scene);
-
-    /**
-     * @brief Submits meshing jobs for the nearest queued chunks, up to `max_chunks_in_flight`.
-     *
-     * Each is submitted at a priority that falls off with distance from the centre, so the
-     * JobEngine works the ground under the camera first whatever order the queue was in.
-     */
-    void submit_queued_chunks_(TerrainComponent& terrain, const ChunkCoord& centre,
-                               const coopa::scene::FrameContext& ctx);
-
-    /**
      * @brief Creates the GPU mesh, publishes it, and hangs a drawable (and collidable) child off
      *        the terrain.
      *
@@ -411,64 +465,6 @@ private:
      */
     void advance_water_settles_(TerrainComponent& terrain);
 
-    /** @brief A planet keeps every chunk: all six faces are always wanted. */
-    void want_planet_chunks_(TerrainComponent& terrain);
-
-    /**
-     * @brief Decides which of a planet's chunks need their native tile geometry at all.
-     *
-     * Only with TerrainComponent::planet_coarse_builds. The threshold is the finest `field`
-     * tier's own `screen_size` -- EXACTLY the size at which the renderer starts asking for
-     * LOD 0, because select_lod() ignores `thresholds[0]` and draws level 0 above
-     * `thresholds[1]`. So the policy and the renderer key off one number by construction,
-     * instead of a tuned guess that can drift from it.
-     *
-     * Three guards against churn, because a zoom crosses any threshold for hundreds of chunks
-     * at once: a dead band (promote well before the renderer needs it, demote well after),
-     * a dwell in frames, and the ordinary chunk budget -- a detail rebuild joins `pending_`
-     * under the same per-frame cap and the same nearest-first ordering, so a promotion near the
-     * camera beats a demotion on the limb with no second budget to tune.
-     *
-     * Chunks on the far side are skipped outright: the policy never promotes something
-     * cull_planet_horizon_() is about to deactivate anyway.
-     */
-    void sync_planet_detail_(TerrainComponent& terrain);
-
-    /**
-     * @brief The camera's position in `terrain`'s local space; false when there is no camera.
-     *
-     * Shared by cull_planet_horizon_() and sync_planet_detail_(), which both need the eye
-     * relative to the planet's own frame and must agree about where it is.
-     */
-    bool planet_eye_local_(const TerrainComponent& terrain, glm::vec3& eye) const;
-    /**
-     * @brief Hides the chunks of a planet that the planet itself is in front of.
-     *
-     * The far side of a globe is INSIDE the camera's frustum -- the pipeline's per-view frustum
-     * test (`gather_meshes_()`) cannot reject it, and without this roughly half of every planet
-     * is drawn, shadow-mapped and water-simulated behind its own horizon. A chunk is hidden by
-     * deactivating its SceneObject, which prunes it and its water children from the render
-     * snapshot (`ToyRenderPipeline::snapshot_scene_()`) and from the scene's update walk; the
-     * chunk itself stays loaded, so coming back round the limb costs nothing.
-     *
-     * Only chunks past the horizon by a margin are hidden -- the margin covers the chunk's own
-     * angular size and the height of what stands on it -- and the threshold to hide is further
-     * out than the threshold to show again, so a chunk at the limb cannot flicker.
-     */
-    void cull_planet_horizon_(TerrainComponent& terrain);
-    /** @brief Keeps a planet's gravity source in the physics world, at its centre (and drops gone ones). */
-    void sync_planet_gravity_(coopa::scene::Scene& scene);
-
-    /**
-     * @brief Unit direction from a planet's centre toward the main camera's eye, in the
-     *        terrain's own local frame; `{0, 0, 0}` with no camera or no transform.
-     *
-     * The one piece cull_planet_horizon_() and the planet branch of upload_finished_chunks_() /
-     * submit_queued_chunks_() all need: "which way is the camera" has no flat-terrain
-     * counterpart (a planet keeps every chunk loaded, so there is no resident-set centre to be
-     * near), but it still answers "which half of the globe is visible" for all three.
-     */
-    glm::vec3 planet_eye_direction_(const TerrainComponent& terrain) const;
 
     /** @brief Scene-tree name of a chunk object, e.g. `chunk_3_-2`. */
     static std::string chunk_object_name_(const ChunkCoord& coord) {
@@ -490,22 +486,7 @@ private:
     /// Frames a retired chunk's collision mesh is kept alive (see the file doc).
     static constexpr std::uint64_t k_collision_keep_frames = 600;
 
-    /**
-     * @brief How far PAST the finest `field` tier's threshold a chunk must be before its full
-     *        build is started.
-     *
-     * Margin, not necessity: a chunk that gets close before its full build lands simply draws
-     * the coarse mesh's own finest tier, which select_lod() is already happy to use above
-     * `thresholds[1]`. The margin exists so the build is usually there by the time it is wanted,
-     * and it also absorbs the renderer's `mesh_lod_bias`, which this system cannot see.
-     */
-    static constexpr float k_planet_detail_promote = 1.5f;
-    /** @brief And how far below it before the native geometry is given back up. See above. */
-    static constexpr float k_planet_detail_demote = 0.9f;
-    /** @brief Frames a chunk holds its detail after changing it, whatever the policy then says. */
-    static constexpr std::uint64_t k_planet_detail_dwell_frames = 30;
 
-    std::uint64_t frame_ = 0;          /**< execute() calls, for retiring collision meshes. */
     /** @brief Chunks meshed and published since this system was installed -- for the churn a
      *         streaming test measures, and for the debug overlay. */
     std::uint64_t chunks_built_ = 0;
@@ -513,10 +494,6 @@ private:
     std::uint64_t chunks_released_ = 0;
     double        last_upload_ms_ = 0.0; /**< upload_finished_chunks_()'s own cost (diagnostics). */
     bool          physics_dirty_ = false; /**< A chunk collider came or went this frame. */
-    /** @brief Each planet terrain's gravity source in the physics world (sync_planet_gravity_()). */
-    std::unordered_map<const TerrainComponent*, std::uint32_t> planet_gravity_;
-    /// Planets whose every chunk has been live: their pull is on (and stays on through edits).
-    std::unordered_set<const TerrainComponent*> planet_ready_;
 
     /** @brief Tiles-mode terrains execute() ticked last frame; diffed each frame against the
      *         current gather so one going inactive is released_terrain_()'d instead of simply
@@ -547,53 +524,6 @@ std::uint64_t mesh_bytes(std::uint32_t vertex_count, std::uint32_t lod0_index_co
 /** @brief mesh_bytes() for a live mesh. */
 std::uint64_t mesh_bytes(const coopa::gfx::engine::data::Mesh& mesh);
 
-/**
- * @brief The scene's planet terrain, or null when it has no planet.
- *
- * What find_planet_frame() and everything that sizes itself to a planet -- the atmosphere shell,
- * the cloud deck, an orbit camera's framing -- scan with, so "which terrain is the planet" is
- * answered in one place. A planet is a Tiles-only shape, so `params` is always the right half to
- * read from the result.
- *
- * Returning null, rather than a neutral value, is the point: a default `env::WorldFrame` is the
- * FLAT world, which is a perfectly good answer to "which way is up" and a useless one to "is
- * there a planet here". A caller that must no-op without one wants this.
- *
- * @param scene Scene to scan; one planet per scene by design, so the first found wins.
- * @return The planet's TerrainComponent, or null.
- */
-TerrainComponent* find_planet_terrain(coopa::scene::Scene& scene);
-
-/**
- * @brief A planet terrain's measured peak height above the datum, world units.
- *
- * The terrain's own baked height (`TerraData::height_range()`), NOT `params.height_scale`. That
- * field is a nominal amplitude a bake can fall well short of -- and a scene authoring
- * `height_scale:` on its `MapGenerator` rather than on the Terrain leaves it at the default
- * entirely, since it only reaches `params` on an apply, which never runs when the `.terra`
- * already exists. Anything sizing itself to a planet's relief wants this one.
- *
- * @param terrain A terrain; need not be a planet, and need not have been baked.
- * @return The peak, clamped at 0; 0 for an empty field.
- */
-float planet_peak(const TerrainComponent& terrain);
-
-/**
- * @brief The scene's planet as an `env::WorldFrame`, or a flat frame when it has no planet.
- *
- * The one place "what is this scene's planet" is answered. Scans for the first
- * TerrainComponent with `params.planet` and reads its centre from the owner's world
- * transform and its radius from `params.layout().radius()` -- a planet's radius is derived
- * from `face_tiles * tile_size`, never authored, so there is nothing else to consult.
- *
- * One planet per scene, by design (see world/README.md): the first one found wins. A scene
- * with none yields a default `WorldFrame`, which *is* the flat Z-up world -- so a caller
- * uses the result unconditionally rather than testing for a planet first.
- *
- * @param scene Scene to scan. Cheap: a cached component scan plus a matrix column read.
- * @return The planet's frame, or a flat frame.
- */
-env::WorldFrame find_planet_frame(coopa::scene::Scene& scene);
 
 /**
  * @brief Constructs a TerrainSystem and registers it ahead of the physics phase.

@@ -221,6 +221,39 @@ To disable it deliberately, the human edits `.claude/settings.json` or uses `/ho
 
 ---
 
+# The engine is flat-terrain only
+
+**`src/toyengine`, `src/editor` and `src/tests` must not mention planets -- not in code, and not
+in a comment.** `tools/check_core_is_flat.sh` greps `planet|cube.?sphere` across those three roots
+and fails on a hit. Run it before you finish any terrain, render or world work.
+
+The world plane is +Z up, and weather, fog, the sky and the streamer's square of chunks are all
+written for that one shape. Round worlds are **planetoy**'s -- its own project on its own engine
+branch (`~/git/planetoy`, `mode: worktree`). What the engine publishes instead is seams, each
+costing a flat terrain one null compare:
+
+| Seam | For |
+|---|---|
+| `world/chunk_shaper.h` `ChunkShaper` | bending a chunk's geometry off the world plane, on its worker |
+| `world/tile_grid.h` `TileGrid` | a grid topology other than one flat square |
+| `world/terrain_system.h` policy virtuals | `stream_()`, `order_chunks_()`, `chunk_job_priority_()`, `relief_of_()`, `after_terrains_()` |
+| `world/terrain_yaml.h` `set_terrain_parse_hook()` | terrain keys the engine does not model |
+| `mapgen/world_bake.h` `set_world_bake_hook()` | a map bake over a grid other than one flat square |
+| `env/world_frame.h` + `Engine::set_world_frame_source()` | which way is up, and how high up you are |
+| `Engine::set_sky_state_hook()` / `set_cloud_state_hook()` | the backdrop and the cloud deck |
+| `core/module.h` `on_engine_init` / `on_prepare_scene` / `on_render_config` | where a project installs all of it |
+
+`nullptr` **is** the flat world, as `WorldFrame::radius <= 0` is -- there is no `FlatChunkShaper`.
+
+**So when a change seems to want planet knowledge in the engine, it wants a seam instead.** Widen
+one of the above, or add one in the same shape (a settable hook with a flat default), and put the
+round-world code in planetoy. A comment explaining a branch with "on a planet" is exactly the
+knowledge core should not have: say "a world whose up is not +Z", or name the seam.
+
+Two words the gate deliberately does *not* match, because they have unrelated legitimate uses
+here: `globe` (a lamp's glass globe; the turntable-vs-trackball distinction) and `sphere`
+(`MapGenerator.sphere` is a real mapcoopa topology that stays in core).
+
 # Where does this change go?
 
 A map from "I need to change X" to the files, in order, and the narrowest build + test command.

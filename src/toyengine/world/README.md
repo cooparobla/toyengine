@@ -371,8 +371,9 @@ component **queues** the settle (`TerrainComponent::water_settles`) and `Terrain
 ride the streamer's existing pacing. `settle_water()` still runs the whole thing in one call for
 the editor, and `terrain_water_test` asserts the two end up identical.
 
-On a planet every one of these steps its neighbours through `PlanetLayout::neighbour()`, because
-one column along in storage is a column of the next face, nowhere near the water.
+Under a `topology` ([`tile_grid.h`](tile_grid.h)) every one of these steps its neighbours through
+`TileGrid::neighbour()` instead of assuming storage order: on a multi-region grid one column along
+in storage can be a column of the next region, nowhere near the water.
 
 `TerrainDigger` (toyengine/scene/terrain_digger.h) is a small component that does all of the
 above from the mouse: it outlines the tiles under the cursor every frame (the cue Engine draws
@@ -385,7 +386,7 @@ included).
 
 ## Cost model
 
-This section (through Planets, below) is Tile mode's cost model: its chunks are meshed on the
+This section is Tile mode's cost model: its chunks are meshed on the
 CPU, and `lods:` names simplification levels of that mesh. A heightmap chunk is a different
 drawing scheme entirely (see [Heightmap terrain](#heightmap-terrain)) — its own cost model lives
 there.
@@ -425,7 +426,7 @@ the 7% level rejected. The renderer picks one per chunk per frame from
 its projected height, with hysteresis, and the shadow views reuse that choice
 (`toy::render::select_lod()`); the collider is always LOD 0. The defaults coarsen only what is
 genuinely small, so a ground-level camera on a streamed terrain sees LOD 0 throughout; they earn
-their keep on a planet held whole in frame and on terrains with a large `view_radius`. Pin them
+their keep on a world held whole in frame and on terrains with a large `view_radius`. Pin them
 off per renderer with `lods_enabled: false`, or globally with the render config's
 `mesh_lod_bias`.
 
@@ -449,8 +450,9 @@ whether or not the tier is ever reached on screen, and stays shading-identical a
 the override style shares its neighbours' `round_kind_corners` and corner radii -- `soft_lod`
 (below) is `soft`'s own radii at coarser segment counts for exactly this reason. `native_border`
 keeps that many tiles of the chunk's rim in the un-overridden style, for a tier that wants its
-interior cheap but its edge geometry matching a full-detail neighbour exactly. Planets don't
-support this tier: the planet warp runs before a style level would need its own copy of it.
+interior cheap but its edge geometry matching a full-detail neighbour exactly. A shaped world
+does not support this tier -- a style level welds independently, which the shaping would then have
+to be re-applied to, so `ChunkShaper::allows_style_lods()` says no and the tier is skipped.
 
 **The `field` tier: a chunk as a plain heightfield.** A level can instead name `field:`, the
 number of tiles per cell of a quantised grid (`mesh_chunk_field()`): one flat quad per cell at
@@ -465,7 +467,7 @@ lods:
   - { field: 16, screen_size: 0.085 }                    # one quad per 16x16 tiles
 ```
 
-It is the cheapest tier by a wide margin and the only re-meshed one a **planet** carries. Measured
+It is the cheapest tier by a wide margin and the only re-meshed one a **shaped world** carries. Measured
 on a busy 32-tile `soft` chunk (`terrain_chunk_cost`), against LOD 0's 19.9k triangles:
 
 | tier | triangles | of LOD 0 | build |
@@ -484,9 +486,8 @@ is free and cannot crack a seam. Best left off on the first coarse level, which 
 
 Three properties `ratio` lacks. Its cost is a function of `chunk_size / field` and nothing else,
 not of how busy the terrain is. It cannot be rejected, so the tier exists on *every* chunk. And
-being built in face space from the same columns LOD 0 used, `warp_chunk_to_planet()` bends it onto
-a globe like any other geometry — which is what makes it work on a planet where a style tier
-cannot. Note the 18 ms: the `ratio` tiers cost **5.6x the 3.2 ms of meshing and welding the chunk
+being built in grid space from the same columns LOD 0 used, a `ChunkShaper` bends it like any
+other geometry — which is what makes it work on a shaped world where a style tier cannot. Note the 18 ms: the `ratio` tiers cost **5.6x the 3.2 ms of meshing and welding the chunk
 in the first place**, so a scene that replaces them with field tiers gets its load time back as
 well as its triangles.
 
@@ -739,249 +740,30 @@ the object it writes.
 `KINDS` in the atlas generator must stay in `TileKind` order — the shader reads a kind's cell from
 the enum value alone, so a kind is appended, never inserted.
 
-## Planets
+## Planets, and anything else round
 
-`planet: true` turns a TileTerrain into a small round world: the same tiles, tile sets, water and
-editing, wrapped around a globe, with gravity pulling toward its centre. It is a mode beside the
-flat terrain, off by default — a terrain without the key is built exactly as before.
+Not here, and not in this engine. `toyengine` is **flat-terrain only**: the world plane is +Z up,
+and every system above -- weather, fog, the sky, the streamer's square of chunks -- is written for
+that one shape. `tools/check_core_is_flat.sh` holds the line, and fails on the word.
 
-```yaml
-- type: TileTerrain
-  planet: true
-  face_tiles: 96        # tiles along each cube face's edge; the circumference is 4 x that
-  chunk_size: 16
-  height_scale: 12.0
-  gravity: 9.81         # m/s^2 at the surface (0: none)
-  generator: { grid_size: 40 }
-```
+What the engine offers instead is the seams a round world is built ON, each of which a flat
+terrain pays one null compare for:
 
-See `assets/scenes/terrain/planet_demo` -- a globe held whole in frame, spun by the mouse
-(`Turntable` on the terrain object) under a camera that only zooms.
+| Seam | What a project puts there |
+|---|---|
+| [`chunk_shaper.h`](chunk_shaper.h) `ChunkShaper` | bends a chunk meshed in grid space onto the world's real shape, on the worker that meshed it |
+| [`tile_grid.h`](tile_grid.h) `TileGrid` | the grid's own topology: neighbours, raycasts, brush clipping, which region a column is in |
+| [`terrain_system.h`](terrain_system.h) policy virtuals | `stream_()`, `order_chunks_()`, `chunk_job_priority_()`, `relief_of_()`, `after_terrains_()` -- a streaming policy of its own |
+| [`terrain_yaml.h`](terrain_yaml.h) `set_terrain_parse_hook()` | the terrain keys the engine has never heard of, and the shape they imply |
+| [`../mapgen/world_bake.h`](../mapgen/world_bake.h) `set_world_bake_hook()` | a map bake that walks a grid other than one flat square |
+| [`../env/world_frame.h`](../env/world_frame.h) + `Engine::set_world_frame_source()` | which way is up and how high up you are, for the renderer and the sky |
 
-- **Map.** mapcoopa generates the world **on a sphere** (`topology: sphere` — cells over the whole
-  globe, no edges, climate by latitude); see its README. The terrain sets that itself.
-- **Layout** (`planet.h`, `PlanetLayout`). Six faces of a cube, each `face_tiles` square, bent
-  onto the sphere with equal-angle faces (tiles stay near-square everywhere). The radius is
-  `2 · face_tiles · tile_size / π`, so a tile in the middle of a face is `tile_size` across.
-  The six faces are stored side by side in one `6N × N` `TerraData`, so the `.terra` format is
-  the flat one. `wrap()` / `neighbour()` step across a face's edge onto the next face (turned).
-- **`chunk_size` and `face_tiles` are baked in.** The parser trims `face_tiles` to a multiple of
-  `chunk_size` (the demo's 216 becomes 208 at `chunk_size: 16`), and the stored `.terra` file
-  holds the world at that width. Changing EITHER on a planet whose tiles already exist reads
-  them at the wrong size -- bands of missing sea across the globe -- until the world is
-  regenerated, and neither invalidates the file on its own: in Tiles mode `sync_field()` passes
-  `tiles_x = 0`, which tells `TerraStore` to keep whatever is loaded. Delete the `.terra` and
-  re-bake. Change the two together, or pick a `chunk_size` that divides `face_tiles` exactly.
-- **Horizon culling.** The far side of a globe is *inside* the camera's frustum, so the
-  pipeline's per-view frustum test cannot reject it: without help, half a planet is drawn,
-  shadow-mapped and water-simulated behind its own horizon. `TerrainSystem::
-  cull_planet_horizon_()` deactivates the SceneObject of every chunk whose centre lies past the
-  horizon by more than its own angular width and the height of what stands on it (the exact
-  tangent angles, `acos(R/D) + acos(R/(R+height_scale))`), which prunes the chunk *and its
-  water children* from the render snapshot and the update walk. The chunk stays loaded, so
-  coming back round the limb costs nothing, and the hide threshold sits a little further round
-  than the show threshold so a chunk on the limb cannot flicker. Measured on planet_demo:
-  1206 drawn meshes → 835, shadow casters 1424 → 1011.
-- **Meshing.** Each chunk is meshed in flat face space exactly as a flat chunk, then
-  `warp_chunk_to_planet()` bends every vertex onto the globe and carries its normal through the
-  map's Jacobian. Chunk objects sit at the planet's centre. A planet keeps every chunk loaded.
-- **Merging is off (`max_merge = 1`), and that is not a missed optimisation.** On flat ground a
-  merged rectangle is exactly coplanar with the per-tile geometry it borders, so only the
-  subdivision differs — a T-junction, whose cracks are sub-pixel. Bent onto a sphere the merged
-  quad becomes a **chord**, and its edge leaves the surface its neighbours lie on: at four tiles
-  on `planet_demo`'s 122-unit globe it deviates ~1.7 cm, which is a plainly visible seam on a 1 m
-  tile at ground level. Raising the quad by its sagitta does not rescue it — that converts the gap
-  into a ledge of the same size, which reads just as badly at a grazing angle. A width can be
-  solved for against a deviation tolerance, but no tolerance loose enough to be worth merging is
-  tight enough to be invisible. Measured before this was settled: a curvature-derived width bought
-  ~5% of the shadow triangles and ~11% of load near the surface, and **nothing at all zoomed out**,
-  where no chunk draws LOD 0. A planet's cost belongs to its `lods:` field tiers instead. A scene
-  can still author `max_merge:` explicitly if it wants to experiment.
-- **Water.** Each chunk's sea, lakes and rivers are WaterBodies in **their own frame** (local Z
-  out from the planet at the chunk's centre, `WaterBody::local_frame`), so the water system's
-  height-field queries, depth probes, flow and buoyancy still hold over a curved surface. Their
-  waves come from the world position (triplanar), so neighbouring pieces meet without a seam.
-- **Cost, and what actually bounds it.** Every chunk of the globe is built at load --
-  `6 · (face_tiles / chunk_size)²` of them, 1536 at the demo's 1024-tile faces and
-  `chunk_size: 64` -- and **none of them is ever evicted**, because a planet has no view radius.
-  A planet gives each one a collider too (there is no collision radius on a globe: ground solid
-  in front of you and not behind is worse than none), so a planet nothing stands on should say
-  `collision: false` and `gravity: 0`.
+`nullptr` throughout **is** the flat world, as `WorldFrame::radius <= 0` is -- so there is no
+`FlatChunkShaper` to pay for.
 
-  The number to watch is **resident mesh bytes**, not chunk count: mesh memory scales with the
-  globe's TOTAL TILE COUNT, so raising `chunk_size` alongside `face_tiles` to hold the chunk
-  count flat does not hold memory flat -- it makes each resident unit bigger instead.
-  `TerrainSystem::resident_mesh_bytes()` reports it, the `terrain.mesh_mb` overlay line shows
-  it, and a line is logged when a terrain finishes loading so a headless run can read it too.
-  Those buffers are host-visible and persistently mapped, so this is system RAM, not VRAM, and
-  no budget in the streamer counts bytes -- `max_chunk_jobs_per_frame`, `max_chunks_in_flight`
-  and `upload_budget_ms` all pace wall clock or counts.
-
-  **`planet_coarse_builds: true` is what makes a large planet affordable.** With it, a chunk too
-  small on screen to draw its native tile geometry is built with only its coarsest `field` tier
-  (`ChunkBuildJob::coarse_only`) and promoted to a full build as the camera comes in, with a
-  dead band and a dwell so a drifting camera cannot churn it. The threshold is the finest
-  `field` tier's own `screen_size` -- the exact size at which the renderer starts asking for
-  LOD 0, since `select_lod()` ignores `thresholds[0]` -- so the policy and the renderer agree by
-  construction. Water is still built in a coarse pass (it comes from the columns, not the mesh),
-  which keeps `chunk_water_hash()` identical across a promotion so the already-baked WaterBody
-  children carry over instead of every ocean on the globe blinking. A `collision: true` planet
-  is excluded and behaves exactly as before: a collider has to be the chunk's real shape, not a
-  quantised stand-in that changes with the camera.
-
-  Measured on `planet_demo`, 1920x1080, `collision: false`:
-
-  | | chunks | resident mesh | terrain load | frame | RSS |
-  |---|---|---|---|---|---|
-  | `face_tiles: 512`, `chunk_size: 32`, `field 1/4/16`, peak 112 | 1536 | 802 MB | 1.6 s | 14.4 ms | 1.42 GB |
-  | `face_tiles: 1024`, `chunk_size: 64`, `field 1/4/16`, peak 256 | 1536 | 3413 MB | 7.7 s | — | — |
-  | the same, `field 2/8/32` | 1536 | 2629 MB | 4.0 s | — | 4.78 GB |
-  | the same, **+ `planet_coarse_builds`** | 1536 | **590 MB** | 1.8 s | 22.3 ms | 2.38 GB |
-
-  So four times the tiles costs LESS resident mesh than the 512 globe did, for about half again
-  the frame time. Two separate levers are visible there and both matter: dropping a `field: 1`
-  tier (which is as dense as the native tops and carries its own vertices) is worth 784 MB on
-  its own, and the coarse builds are worth another 2 GB.
-
-  Changing `face_tiles` does **not** invalidate the stored `.terra` -- see the `chunk_size`
-  trap above, which is the same trap -- so delete the file and re-bake. `TOY_TERRAIN_SAVE=1`
-  writes a freshly baked world from a headless run, since saving is otherwise the editor's.
-- **Gravity.** The terrain registers a physxcoopa gravity source at its centre — at zero strength
-  until every chunk is live, so nothing dropped at the start falls through ground still being
-  built. Rigid bodies, buoyancy, `CharacterController` (walking in its own frame, up away from
-  the planet), `FootIK` and the orbit `CameraController` follow the field.
-- **Camera.** A planet's radius is derived, never authored, so every camera number tuned against
-  it is a magic multiple that stops framing the world the moment `face_tiles` changes --
-  planet_demo was authored that way, at 4.3 radii out with `min_distance` four units above the
-  *datum* on a globe whose mountains stand a third of its radius tall (so full zoom-in was inside
-  the terrain). `PlanetCameraFit` ([`planet_camera_fit.h`](planet_camera_fit.h)), on the camera
-  object beside its `Camera` and `CameraController`, takes those over: `max_distance` from the
-  distance a sphere of radius `R` exactly fills the vertical fov at (the editor viewport's own
-  `EditorCamera::frame()` rule), `min_distance` from `R + measured peak + min_clearance`,
-  `zoom_speed` from the range divided by a notch count, and the clip planes from the far end of
-  the zoom. The scene keeps authoring the rig's **shape** -- `pitch_at_*_distance_deg`,
-  `tangent_at_*`, the look button, the smoothing -- and hands over the **scale**.
-  It writes all three distances or none, because the zoom-coupled pitch and look tilt both
-  normalise the zoom as `(distance - min) / (max - min)`: deriving a subset would silently move
-  where an authored `pitch_at_max_distance_deg` is reached. A scene with no planet is a strict
-  no-op, and `shadow_distance` / `volumetrics_max_distance` are deliberately not derived (render
-  config, and they depend on the atmosphere's thickness, which no camera can see).
-- **Sky** is evaluated in the camera's own frame on the planet (`render::WorldFrameState`: the
-  sky's view rays and sun turned so the camera's up is the sky's zenith). The global **fog** is
-  plain distance fog on a planet (world Z is no height there): give a planet scene walked on the
-  ground a light `fog_density` (and none at all when the whole globe is meant to be in view, as
-  in planet_demo -- fog over hundreds of metres would simply erase it). Neither changes a flat
-  scene's shaders or values.
-- **Shader.** Planet chunks draw with `terrain_styled_planet` (`terrain_styled.glsl` built with
-  `TERRAIN_CURVED`): "up" is the per-vertex `uv.y` the warp wrote, and strata have an even grain.
-  The flat `terrain_styled` carries none of that code.
-- **Editor.** The World Generator's Planet toggle, Add > Planet, and Tile Mode (hover marches the
-  view ray through the columns; a brush or selection stays on the face it starts on).
-
-- **Clouds.** The volumetric cloud layer (`clouds: true`) works on a planet: it is a real
-  spherical shell about the planet's centre, so it curves to the horizon, the ground occludes
-  it, and it is visible from orbit and from the surface alike. The render settings'
-  `cloud_altitude`, `cloud_thickness` and `cloud_scale` are **discarded** there -- they are
-  absolute metres tuned for an Earth-sized sky, and on a globe a few hundred units across they
-  would put the deck radii out in space. `world::planet_cloud_deck()`
-  ([`planet_atmosphere.h`](planet_atmosphere.h)) sizes it from the planet instead.
-
-  **To move the deck, use `PlanetAtmosphere`'s four `cloud_*` knobs**, which are proportions for
-  the same reason the shell's are -- one set of numbers has to work on a globe of any size:
-
-  ```
-  altitude  = max(peak * cloud_altitude_peak_scale,     R * cloud_altitude_radius_scale)
-  thickness = max(R    * cloud_thickness_radius_scale,  altitude * cloud_thickness_altitude_scale)
-  ```
-
-  The peak term dominates on a world with real relief (planet_demo's mountains stand 112 units
-  above a 326-unit datum), so `cloud_altitude_peak_scale` is the knob that raises those clouds;
-  the radius term is the floor that keeps an ocean world's deck off the water. The scene's
-  *atmosphere* is the `PlanetAtmosphere` with `day_sky_altitude_scale > 0` -- the same marker
-  `day_sky_factor()` uses -- so a second one authored as a fog deck does not get a vote. With no
-  PlanetAtmosphere at all the defaults apply, so a hand-written `planet: true` + `clouds: true`
-  scene still gets a working layer.
-
-  **The deck is kept inside the shell.** Not a tidiness rule: `volumetrics_march.frag` bounds
-  its ray by the shell's own outer radius, so a deck beyond it gets none of the atmosphere's
-  in-scatter and reads as a layer in front of the limb rather than within it. A deck that does
-  not fit is **thinned, not lowered** -- the base is what clears the mountains and what a camera
-  has to get under for the deck to read as a layer overhead, while the depth only decides how
-  much of a layer it is from orbit. Lowering it instead puts the base under the peak and under
-  the closest orbit a `PlanetCameraFit` camera can reach (`R + peak + min_clearance`), so full
-  zoom lands *inside* the slab and no position is left that sees the deck from beneath. Only
-  when the base alone will not fit is it dropped, and that warns. Give it room with
-  `thickness_scale` / `radius_thickness_scale`, which is what sizes the air above the ground.
-
-  `cloud_scale` stays underivable from YAML: the field's noise periods are fixed cloud-space
-  lengths (13 km), so it is solved for three weather systems around the deck's own
-  circumference. At scale 1 a globe whose whole circumference is under a kilometre of cloud
-  space reads one constant weather value everywhere and comes out featureless.
-
-  `cloud_type: flat` is NOT supported on a planet -- its layer is an infinite world-Z slab --
-  and falls back to the volumetric layer with a warning. Cloud shadows are off there too (the
-  shadow map is still a flat XY square around the camera).
-- **Atmosphere density is a DEPTH, not a per-metre figure.** `Volume::density` is per unit of
-  length, so it is the one number in a shell's profile that does not scale with the globe: the
-  thickness and the scale height are derived from the planet, the path a ray takes through them
-  grows with it, and an authored density silently rides along meaning something different.
-  planet_demo carried `0.0006` from its 326-unit days, which is a limb optical depth of about
-  **0.3** -- a haze that measures as nothing against the star field, which is why the shaped
-  gradient was never visible on screen. Set `PlanetAtmosphere`'s `limb_optical_depth` instead:
-
-      density = limb_optical_depth / sqrt(2*pi * scale_height * planet_radius)
-
-  the grazing-path integral through an exponential atmosphere. ~2 is a clear bright limb with the
-  disc still legible through it; 1 is a thin veil, 4 reads as a gas giant. The limb is
-  `sqrt(2*pi*R/H)` times deeper than the view straight down (5.7x on the demo), so a SHORTER
-  `scale_height_fraction` sharpens the band and clears the disc, a longer one spreads the glow
-  further out. 0 -- the default -- leaves an authored `density` alone, so no existing scene moves.
-
-  Measuring it: take a radial luminance profile about the planet's centre rather than trusting
-  the eye. The demo's runs 173 at the limb to 21 (the star floor) by 1.7 radii, over a surface
-  that sits at 278 px of a 1080-line frame.
-
-- **The froxel grid gives an orbital atmosphere almost no slices.** `volumetrics_mode: froxel`
-  distributes its 64 depth slices EXPONENTIALLY between 0.1 and `volumetrics_max_distance`, which
-  is right for fog near the camera and wrong for a shell seen from four radii out: on the demo
-  the whole atmosphere in front of the planet lands in **2.5 slices**. Raising
-  `volumetrics_max_distance` does not help (it stretches the same 64 slices further) and
-  `volumetrics_mode: raymarch` measurably barely does either -- the fix is optical depth, above.
-  What `volumetrics_max_distance` IS for is making sure the shell is inside the grid at all:
-  keep it past `camera distance + shell outer radius`.
-
-- **The world frame.** [`env/world_frame.h`](../env/world_frame.h) is the one authoritative
-  answer to "which way is up here, and how high up is this": `up_at()`, `altitude_at()`,
-  `tangent_at()` and `transport()`. A default-constructed `WorldFrame` **is** the flat Z-up
-  world, so a caller asks it unconditionally rather than branching on whether a planet exists --
-  the same shape as `MoveOptions::up` in the character motor, which defaults to `+Z` and keeps
-  an exact fast path for it. `world::find_planet_frame(scene)` finds the scene's planet;
-  `render::WorldFrameState` is an alias of the same type.
-
-- **Day and night.** The terminator is one shared soft band (`gfx_world_day()` in
-  [`gfx/planet.glsl`](../../assets/shaders/gfx/planet.glsl)), so the atmosphere shell, the
-  cloud deck, the star backdrop's daylight fade and the ground all cross into night at the same
-  angle. `PlanetAtmosphere`'s `moon_intensity` lights the hemisphere facing away from the sun --
-  ground, water and clouds together -- and `night_sky_color` / `day_sky_color` are the two
-  colours the cloud deck's ambient blends between across that band. **`moon_intensity` defaults
-  to 0, which is a black night side**: without it nothing lights that hemisphere at all, and the
-  deck is still there and still occluding the stars at the limb while emitting nothing. The
-  moon sits opposite the sun (a full moon over the anti-solar point) and casts no shadows; an
-  independently placed moon and a `moon_color` would both need a direction and a colour plumbed
-  to the lighting pass and the cloud march, and are out of scope.
-
-**Not on planets yet:** moving platforms under a character, Mount/Rider, ragdoll recovery,
-navigation, the first-person camera, cloud shadows (the map is still a flat XY square around
-the camera, so it is switched off on a planet), the global height fog (plain distance fog
-there), the weather system (its sun path, wind bearing and ground-height plane are all
-world-Z), and sky reflections/ambient (they still read the world-oriented sky gradient).
-More than one planet per scene is out of scope for now. A LARGE planet is in scope with
-`planet_coarse_builds` and a `field` tier no finer than 2 (see Cost above); what is still out of
-scope is a planet whose TILE data outgrows memory, since `TerraData` is 24 bytes a tile plus 8
-for its splats -- about 200 MB at `face_tiles: 1024`, and 800 MB at 2048. Streaming a planet
-(evicting chunks behind you) remains unimplemented; coarse builds bound what a resident globe
-costs instead of changing what is resident.
-
+The planetary implementation lives in **planetoy**, its own project on its own engine branch:
+cube-sphere tiles on six faces, a derived atmosphere, horizon culling, coarse chunk builds and
+radial gravity. See its README for how a globe is authored and what one costs.
 ## Heightmap terrain
 
 `HeightmapTerrain` ([`heightmap_terrain.h`](heightmap_terrain.h)) is a plain height grid: a size

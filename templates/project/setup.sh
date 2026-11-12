@@ -57,7 +57,7 @@ if [[ -n "$link" ]]; then
             fi
         fi
     fi
-    if [[ ! -f "$link/CMakeLists.txt" || ! -d "$link/toyengine" ]]; then
+    if [[ ! -f "$link/CMakeLists.txt" || ! -d "$link/src/toyengine" ]]; then
         if [[ "$link" == "$PROJECT_DIR"/* ]]; then
             die "engine.link points at ${link#"$PROJECT_DIR"/}, which holds no toyengine checkout -- make one with 'toyhub worktree $PROJECT_DIR' (a branch of a local checkout) or 'toyhub own $PROJECT_DIR' (its own clone)"
         fi
@@ -113,6 +113,31 @@ if [[ -d "$ENGINE_DIR/.claude" ]]; then
     else
         warn ".claude exists and is not a symlink; leaving it alone (engine rules: $ENGINE_DIR/.claude)"
     fi
+fi
+
+# assets/config.yaml: seeded from the engine's own, which is where the tuned render settings
+# live (aa_mode, auto-exposure, bloom, contact shadows, the quality tiers). The engine reads
+# exactly ONE path for it -- <project>/assets/config.yaml, no search across asset roots -- and
+# falls back to hardcoded defaults when it is missing, so a project without one renders visibly
+# unlike the engine. The EDITOR already seeds it (Project::default_config()), but a project made
+# with `toyhub new` never goes through that, which is how one ended up on bare defaults.
+#
+# Only the three keys that are the project's own identity are changed, exactly as
+# Project::default_config() changes them. Never overwrites an existing file: a project is free to
+# tune its own look, and two of them already have.
+if [[ -f "$ENGINE_DIR/assets/config.yaml" && ! -f "$PROJECT_DIR/assets/config.yaml" ]]; then
+    mkdir -p "$PROJECT_DIR/assets"
+    cp "$ENGINE_DIR/assets/config.yaml" "$PROJECT_DIR/assets/config.yaml"
+    # Each of the three is a single-line flow mapping (`window: { height: 1080, title: ... }`),
+    # so every substitution is anchored to its own key's line rather than matching the token
+    # anywhere in the file.
+    sed -i.bak \
+        -e 's|^scene: { default_scene: .* }$|scene: { default_scene: assets/scenes/main/scene.yaml }|' \
+        -e '/^output: {/ s|save_on_exit: true|save_on_exit: false|' \
+        -e "/^window: {/ s|title: toyengine|title: $TOY_NAME|" \
+        "$PROJECT_DIR/assets/config.yaml"
+    rm -f "$PROJECT_DIR/assets/config.yaml.bak"
+    echo "[setup] assets/config.yaml seeded from the engine's (title: $TOY_NAME, default scene: assets/scenes/main/scene.yaml)"
 fi
 
 # Toolchain report (cmake, a C++20 compiler, glslc) with this platform's install line. Only a

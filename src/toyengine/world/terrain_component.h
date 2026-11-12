@@ -170,7 +170,8 @@ struct TerrainChunk {
      *
      * A dead band alone is not enough: a slow zoom crosses any band, however wide, in one frame
      * and then crosses back. This is the dwell that turns that into one rebuild instead of a
-     * stream of them. See TerrainSystem::sync_planet_detail_().
+     * stream of them. Maintained by whichever streaming policy promotes and demotes chunks
+     * (TerrainSystem::stream_()).
      */
     std::uint64_t detail_frame = 0;
 
@@ -181,9 +182,8 @@ struct TerrainChunk {
      * @brief The tallest column (ChunkMeshData::max_steps) this chunk was last meshed at.
      *
      * Copied from the build job's output on every upload (TerrainSystem::upload_finished_chunks_()),
-     * so a planet's horizon cull (TerrainSystem::cull_planet_horizon_()) can bound how far round
-     * the limb THIS chunk's own peak stays visible from, instead of one global margin sized to
-     * the tallest column anywhere on the globe.
+     * so a streaming policy's visibility cull can bound how far THIS chunk's own peak stays
+     * visible from, instead of one global margin sized to the tallest column in the world.
      */
     std::int32_t max_steps = 0;
 
@@ -451,8 +451,12 @@ public:
     water::WaterBody water_look = default_water_look();
 
     /**
-     * @brief Planet only (`params.planet`): the pull at the surface, m/s^2, toward the planet's
-     *        centre -- a physics gravity source TerrainSystem keeps there. 0 adds none.
+     * @brief Radial gravity at the terrain's surface, m/s^2, pulling toward its centre; 0 adds
+     *        none.
+     *
+     * Only a terrain whose streaming policy installs a physics gravity source from it does
+     * anything with this -- the built-in flat policy does not, so it is inert unless a project
+     * overrides `TerrainSystem::after_terrains_()` (world/terrain_system.h).
      */
     float gravity = 9.81f;
 
@@ -518,26 +522,28 @@ public:
     int dormant_chunks = 32;
 
     /**
-     * @brief Planet only: build a chunk's native tile geometry only while it is near enough to
-     *        draw it, and the coarsest `field` tier otherwise.
+     * @brief Build a chunk's native tile geometry only while it is near enough to draw it, and
+     *        the coarsest `field` tier otherwise.
      *
-     * A planet never evicts a chunk -- it is small and seen whole, so the whole globe stays
-     * resident -- and every chunk's full voxel geometry is otherwise built at load and kept for
-     * the life of the scene, even though at globe view not one pixel of it is ever drawn. That
-     * is most of a large planet's memory and most of its load time: measured on planet_demo at
-     * `face_tiles: 1024`, `chunk_size: 64`, 2.6 GB of resident chunk mesh and 4 s of meshing.
+     * For a world that never evicts a chunk -- small enough to be seen whole, so everything
+     * stays resident. Every chunk's full voxel geometry is otherwise built at load and kept for
+     * the life of the scene, even though when the world is held whole in frame not one pixel of
+     * it is ever drawn. That is most of such a world's memory and most of its load time:
+     * measured at 1024 tiles per face and `chunk_size: 64`, 2.6 GB of resident chunk mesh and
+     * 4 s of meshing.
      *
      * With this on, a chunk past the finest `field` tier's `screen_size` is built coarse (see
      * ChunkBuildJob::coarse_only) and promoted to a full build as the camera approaches, with a
      * dead band and a dwell so a drifting camera cannot churn it. Rebuilds share the ordinary
      * chunk budget, so a promotion near the camera naturally beats a demotion on the limb.
      *
-     * Off by default: it changes what a planet holds in memory, and the terrain's own water,
-     * colliders and horizon cull all behave the same either way, so a scene opts in. Requires
-     * at least one `field` tier in `lods:` and `collision: false` -- a collider must be the
-     * chunk's real shape, not a quantised stand-in that changes with the camera.
+     * Off by default: it changes what the terrain holds in memory, and its water, colliders and
+     * visibility cull all behave the same either way, so a scene opts in. Requires at least one
+     * `field` tier in `lods:`, `collision: false` -- a collider must be the chunk's real shape,
+     * not a quantised stand-in that changes with the camera -- and a `shaper` that returns true
+     * from `ChunkShaper::allows_coarse_builds()`.
      */
-    bool planet_coarse_builds = false;
+    bool coarse_builds = false;
 
     /**
      * @brief The shape of this terrain's world, or null for the flat Z-up world.
@@ -785,9 +791,9 @@ public:
 
     /**
      * @brief Casts a world-space ray at the tile columns; the hit is in the terrain's own space
-     *        (TileHit). Flat worlds march the grid, a planet marches the globe.
+     *        (TileHit). A flat world marches the grid; a `topology` marches its own surface.
      *
-     * What a digging tool picks with -- and it works with no colliders, which a planet drawn
+     * What a digging tool picks with -- and it works with no colliders, which a terrain drawn
      * for its own sake tends not to have.
      */
     bool raycast_tiles(const glm::vec3& origin, const glm::vec3& dir, float max_t, TileHit& hit) const;
@@ -796,7 +802,8 @@ public:
      * @brief The four world-space corners of a tile RANGE's top face, anticlockwise -- what a
      *        hover outline or a placement preview is drawn from.
      *
-     * Follows the ground: on a planet the corners are four points on the globe, not a flat quad.
+     * Follows the ground: under a `topology` the corners are four points on its surface, not a
+     * flat quad.
      * The height is the range's middle tile's, so an outline over a slope sits on it rather
      * than hovering at one end.
      *
@@ -919,8 +926,8 @@ private:
  * @brief Whether the chunk at `coord` should carry a MeshCollider, with the region centred on
  *        `centre` (see TerrainComponent::collision_radius).
  *
- * A planet has no radius: it is small, it is walked all over, and a ring there would only mean
- * ground that is solid in front of you and not behind.
+ * A `topology` that collides everywhere has no radius: such a world is small and walked all
+ * over, and a ring there would only mean ground solid in front of you and not behind.
  *
  * @param terrain The terrain, for `collision` and `collision_radius`.
  * @param coord   The chunk in question.

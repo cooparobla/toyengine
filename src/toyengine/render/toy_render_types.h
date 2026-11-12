@@ -27,14 +27,14 @@ namespace toy {
 namespace render {
 
 /**
- * @brief The scene's planet (a planet TileTerrain), handed over by Engine
+ * @brief The scene's curved world, handed over by Engine
  *        (ToyRenderPipeline::set_world_frame()): the sky and the fog are then evaluated in the
  *        camera's own frame on it -- up away from the centre, heights as altitude above
  *        `radius`.
  *
  * An alias for `toy::env::WorldFrame`, which is the whole engine's answer to "which way is
  * up here, and how high up is this" -- see toyengine/env/world_frame.h. The renderer shares
- * that type rather than carrying its own copy so a planet's centre and radius cannot drift
+ * that type rather than carrying its own copy so the centre and radius cannot drift
  * between the sky and the weather, and so the pipeline can ask `up_at()` / `altitude_at()`
  * instead of re-deriving them. `env/` is a glm-only leaf, so this costs no new dependency.
  */
@@ -71,7 +71,7 @@ struct WaterFrameState {
     /// waterline) draw as normal.
     bool      underwater = false;
     float     surface_level = 0.0f;
-    /// The surface's up, when it is not world +Z (a planet's water): `surface_level` is then
+    /// The surface's up, when it is not world +Z (water on a curved world): `surface_level` is then
     /// measured along it (dot(p, surface_up)). Unset, the level is a world Z, as always.
     std::optional<glm::vec3> surface_up;
     glm::vec3 fog_color{0.05f, 0.24f, 0.28f};
@@ -106,11 +106,11 @@ struct ToyLightingPushConstants {
     /// (no separate skybox draw) and reconstructs their view ray from this, computed on the
     /// CPU.
     glm::mat4 sky_inv_view_proj = glm::mat4(1.0f);
-    /// The scene's planet: xyz = centre (world), w = radius. `w <= 0` is a FLAT world, which is
+    /// The scene's curved world: xyz = centre (world), w = radius. `w <= 0` is a FLAT world, which is
     /// the default and what every flat scene uploads.
     ///
     /// The lighting pass needs it to answer "which way is up at this fragment", which is what
-    /// decides whether a point lies on the day or the night side of the globe. It cannot come
+    /// decides whether a point lies on the day or the night side. It cannot come
     /// from the light UBO's `sky_moon`/`sky_sun`: those are pre-rotated into the CAMERA's frame
     /// by sky_frame_() for the sky shaders (see pipeline_shadows.cpp), so shading a world-space
     /// fragment with them would put the terminator in the wrong place everywhere but directly

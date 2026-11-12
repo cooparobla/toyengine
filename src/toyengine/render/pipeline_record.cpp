@@ -285,11 +285,11 @@ void ToyRenderPipeline::record_scene_(coopa::gfx::command::CommandBuffer& cmd, c
     // The sky is drawn by this same pass at background pixels (see toy_lighting.frag),
     // so sky and lighting share one fullscreen draw.
     lighting_pc.sky_inv_view_proj    = glm::inverse(ctx.proj * ctx.view);
-    // On a planet the sky is drawn in the camera's own frame there (sky_frame_()).
+    // On a curved world the sky is drawn in the camera's own frame there (sky_frame_()).
     if (world_frame_) lighting_pc.sky_inv_view_proj = glm::mat4(sky_frame_()) * lighting_pc.sky_inv_view_proj;
     // World space, unrotated -- unlike the sky directions above, which sky_frame_() turns into
     // the camera's frame. The lighting pass shades world-space fragments, so it needs the
-    // planet where it actually is to tell day from night at each of them.
+    // world frame where it actually is to tell day from night at each of them.
     lighting_pc.world_frame = world_frame_ ? glm::vec4(world_frame_->centre, world_frame_->radius) : glm::vec4(0.0f);
     // gfxcoopa's DeferredLightingPass::draw() pushes this internally (the templated
     // overload), after its own bind_pipeline() -- no separate push needed.
@@ -1461,7 +1461,7 @@ void ToyRenderPipeline::fill_forward_globals_(ForwardGlobals& g) const {
     }
     g.water_ripple_info = glm::vec4(static_cast<float>(n), static_cast<float>(water_state_.ripple_layers),
                                     water_state_.detail_distance, water_state_.ripple_range);
-    // The same submerged fact UnderwaterPass is driven by. A planet's water surface is a sphere,
+    // The same submerged fact UnderwaterPass is driven by. A curved world's water surface is a sphere,
     // so the shader cannot decide "the camera is below this fragment" from world Z the way flat
     // water does -- it reads this instead (see water_surface.glsl's underside branch).
     g.water_view = glm::vec4(water_state_.underwater ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);

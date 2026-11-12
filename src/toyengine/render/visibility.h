@@ -195,7 +195,7 @@ inline int select_lod(float size, const std::vector<LodThreshold>& thresholds, f
 
     const int raw = pick(size);
     // No history: the frame an object is first gathered, or the first after it was pruned from
-    // the scene (a planet chunk over the horizon) and lost its entry. Take the FINER side of
+    // the scene (a terrain chunk culled out of view) and lost its entry. Take the FINER side of
     // the dead band, not the coarse one. Inside the band BOTH levels are stable, so resolving
     // it on the coarse side made the level depend on how the camera reached a pose rather than
     // on the pose itself: an object first seen from far away came up coarse, and once the

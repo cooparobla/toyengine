@@ -104,7 +104,7 @@ COOPA_TEST(the_collision_radius_is_a_ring_around_the_centre) {
 /**
  * The resident-mesh measurement. A chunk's coarser levels live in the SAME index buffer behind
  * LOD 0, and a `field` level carries its own vertices there too, so counting LOD 0's index
- * count alone under-reports a planet chunk by most of what it is holding -- the one way this
+ * count alone under-reports a coarse-built chunk by most of what it is holding -- the one way this
  * goes wrong without anything on screen looking wrong.
  */
 COOPA_TEST(mesh_bytes_counts_every_lod_level_in_the_buffer) {

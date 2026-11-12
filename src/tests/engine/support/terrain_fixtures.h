@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <initializer_list>
 #include <string>
+#include <vector>
 
 #include <glm/glm.hpp>
 
@@ -33,12 +34,32 @@
 
 namespace toy::test {
 
-/** @brief Loads one generated tile-set piece from the repo's assets, whatever the working directory. */
+/**
+ * @brief Loads one generated tile-set piece from the shipped assets, whatever the working
+ *        directory -- and whichever tree the runner was built in.
+ *
+ * `ROOT_DIR` is the top-level project's root, which for a game project's own suites is the GAME,
+ * not the engine; the pieces ship with the engine. So both roots are searched, project first so
+ * a project overriding a piece wins. `TOY_ENGINE_ASSETS_DIR` is defined on a project's test
+ * targets by `toyengine_add_project_tests()` and is absent in the engine's own tree, where
+ * `ROOT_DIR` already is the engine.
+ */
 inline coopa::gfx::engine::data::SkinnedMeshSource load_tile_piece(const std::string& name) {
-    // Found by name: the pieces live in tag folders (meshes/terrain/<set>/).
-    const auto path = coopa::asset::AssetIndex::find(std::filesystem::path(ROOT_DIR) / "assets", "meshes/" + name + ".yaml");
+    const std::string rel = "meshes/" + name + ".yaml";
+    std::vector<std::filesystem::path> roots{std::filesystem::path(ROOT_DIR) / "assets"};
+#ifdef TOY_ENGINE_ASSETS_DIR
+    roots.emplace_back(TOY_ENGINE_ASSETS_DIR);
+#endif
+    for (const std::filesystem::path& root : roots) {
+        // Found by name: the pieces live in tag folders (meshes/terrain/<set>/).
+        if (const auto path = coopa::asset::AssetIndex::find(root, rel)) {
+            return coopa::gfx::engine::data::SkinnedMeshSource::from_node(
+                coopa::yaml::load_document(*path));
+        }
+    }
+    // Nothing indexed it: let the flat path report which file is missing.
     return coopa::gfx::engine::data::SkinnedMeshSource::from_node(coopa::yaml::load_document(
-        path.value_or(std::filesystem::path(ROOT_DIR) / "assets" / "meshes" / (name + ".yaml"))));
+        roots.back() / "meshes" / (name + ".yaml")));
 }
 
 /**
@@ -78,6 +99,31 @@ inline toy::world::TerrainParams make_test_params(std::int32_t chunk_size = 4) {
 }
 
 /** @brief A pad whose every column -- skirt included -- stands at the same height. */
+/** @brief The styled_tiles busy terrain: 3x3-tile blocks at 1-4 steps, 5x5 patches of kinds. */
+inline toy::world::ColumnPad busy_pad(std::int32_t chunk_size, std::uint32_t seed) {
+    toy::world::ColumnPad pad;
+    pad.resize(chunk_size);
+    auto hash = [seed](std::int32_t x, std::int32_t y) {
+        std::uint32_t h = static_cast<std::uint32_t>(x) * 73856093u ^
+                          static_cast<std::uint32_t>(y) * 19349663u ^ seed * 83492791u;
+        h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+        return h;
+    };
+    auto block = [](std::int32_t v, std::int32_t size) { return v >= 0 ? v / size : (v - size + 1) / size; };
+    for (std::int32_t y = -1; y <= chunk_size; ++y) {
+        for (std::int32_t x = -1; x <= chunk_size; ++x) {
+            toy::world::TileColumn& c = pad.at(x, y);
+            c.steps     = 1 + static_cast<std::int32_t>(hash(block(x, 3), block(y, 3)) % 4u);
+            using toy::world::TileKind;
+            static const TileKind kinds[] = {TileKind::Grass, TileKind::Grass, TileKind::Stone,
+                                             TileKind::Sand,  TileKind::Snow};
+            c.top_kind  = kinds[hash(block(x, 5) + 101, block(y, 5)) % 5u];
+            c.side_kind = toy::world::TileKind::Dirt;
+        }
+    }
+    return pad;
+}
+
 inline toy::world::ColumnPad make_flat_pad(std::int32_t chunk_size, std::int32_t steps) {
     toy::world::ColumnPad pad;
     pad.resize(chunk_size);

@@ -353,7 +353,6 @@ bool EditorApp::bind_selection_to_rig(BindWeights kind) { return weights_panel_-
 bool EditorApp::bind_targets(ObjectId& skin, ObjectId& rig) { return weights_panel_->bind_targets(skin, rig); }
 void EditorApp::close_world_generator() { world_generator_panel_->close_world_generator(); }
 void EditorApp::open_world_generator(ObjectId id) { world_generator_panel_->open_world_generator(id); }
-bool& EditorApp::world_generator_planet() { return world_generator_panel_->world_generator_planet(); }
 std::uint64_t EditorApp::world_generator_preview_serial() const { return world_generator_panel_->world_generator_preview_serial(); }
 
 
@@ -534,20 +533,6 @@ ObjectId EditorApp::create_with_component(const std::string& type, const std::st
     set_object_position_(obj, spawn_point_() + glm::vec3(0, 0, type == "Camera" ? 2.0f : 3.0f));
     obj["components"].as_seq().push_back(default_component(type));
     const ObjectId id = doc_.add_object(obj, parent, -1, "Create " + name);
-    after_structure_change_(id);
-    return id;
-}
-
-ObjectId EditorApp::create_planet() {
-    Node obj = doc_.make_object(doc_.unique_name("planet", 0));
-    set_object_position_(obj, spawn_point_());
-    Node comp = default_component("TileTerrain");
-    comp["planet"] = Node(true);
-    comp["face_tiles"] = Node(static_cast<int64_t>(64));
-    comp["chunk_size"] = Node(static_cast<int64_t>(16));
-    comp["gravity"] = Node(9.81);
-    obj["components"].as_seq().push_back(comp);
-    const ObjectId id = doc_.add_object(obj, 0, -1, "Create Planet");
     after_structure_change_(id);
     return id;
 }
@@ -1986,7 +1971,7 @@ bool EditorApp::object_bounds_(ObjectId id, glm::vec3& lo, glm::vec3& hi, bool m
     // baked field only to refine, because frame_all() runs when a scene OPENS -- before the
     // generator has produced a field at all. Requiring the field here meant a terrain scene
     // contributed no bounds on open, so nothing was framed and the camera kept its 12-unit
-    // default; on a planet of radius 122 that put the viewport inside the globe, looking at
+    // default; on a round world of radius 122 that put the viewport inside the terrain, looking at
     // back-faces through the atmosphere shell.
     if (const auto* tt = live->get_component<toy::world::TerrainComponent>()) {
         const bool baked = !tt->field.empty() && tt->field.data() != nullptr;
@@ -2896,7 +2881,6 @@ void EditorApp::draw_viewport_popups_(imm::Context& ctx, bool mesh_edit) {
         if (ctx.menu_item("Reflection Probe")) create_with_component("ReflectionProbe", "Reflection Probe");
         if (ctx.menu_item("Heightmap Terrain")) create_with_component("HeightmapTerrain", "Terrain");
         if (ctx.menu_item("Tile Terrain")) create_with_component("TileTerrain", "Tile Terrain");
-        if (ctx.menu_item("Planet")) create_planet();
         ctx.end_popup();
     }
     if (ctx.begin_popup("vp_delete_confirm", 150)) {

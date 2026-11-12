@@ -315,8 +315,8 @@ glm::vec2 TerraData::height_range() const {
         } else if (!empty()) {
             // No float height plane: `steps` IS the height (the terraced read), the same case
             // chunk_minmax() already handles per chunk -- this is that scan over the whole
-            // plane, not six separate calls even on a planet (its six faces are one contiguous
-            // 6N x N TerraData, planet.h).
+            // plane, not one call per region even for a multi-region grid: a shaped world's
+            // faces are stored as one contiguous TerraData.
             float lo = std::numeric_limits<float>::max(), hi = std::numeric_limits<float>::lowest();
             for (int y = 0; y < geometry_.tiles_y; ++y) {
                 for (int x = 0; x < geometry_.tiles_x; ++x) {

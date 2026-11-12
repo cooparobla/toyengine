@@ -95,7 +95,7 @@ die()  { echo "toyhub: $*" >&2; exit 1; }
 warn() { echo "toyhub: warning: $*" >&2; }
 abspath() { (cd "$1" && pwd); }
 
-is_toyengine_checkout() { [[ -f "$1/CMakeLists.txt" && -d "$1/toyengine" ]]; }
+is_toyengine_checkout() { [[ -f "$1/CMakeLists.txt" && -d "$1/src/toyengine" ]]; }
 
 # engine_link <project dir> <engine dir> -- how a .toy should spell engine.link. An engine inside
 # the project (a worktree or its own clone) is written project-relative so the .toy is

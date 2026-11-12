@@ -209,7 +209,13 @@ function(toyengine_add_project_tests)
 
     # _toyengine_project_test_target(<target> <sources...>) -- the parts both runners share.
     macro(_toyengine_project_test_target target)
-        add_executable(${target} ${ARGN} ${_support} ${_proj_src} "${_root_src}")
+        # The engine's own fixtures too (render_fixture, scene_variant, checks): a project's GPU
+        # suites are written against them, reached by the same "engine/support/..." include the
+        # engine's suites use. Compiled in rather than linked: the engine's test runners are
+        # executables, so there is no library to link against.
+        file(GLOB _engine_support CONFIGURE_DEPENDS
+             "${_engine_dir}/src/tests/engine/support/*.cpp")
+        add_executable(${target} ${ARGN} ${_support} ${_engine_support} ${_proj_src} "${_root_src}")
         # Without the shader targets a runner throws `could not resolve 'smaa_edge.vert.spv'` the
         # moment a test constructs an Engine, and passes only while a previous build's .spv
         # happen to still be on disk. The project's own shaders are a dependency for the same
@@ -221,8 +227,17 @@ function(toyengine_add_project_tests)
         # <engine>/src/tests so a project suite reuses the engine's fixtures by the same include
         # the engine's own suites use ("engine/support/scene_variant.h"); <DIR>/src for the
         # project's own headers; <DIR>/tests for its fixtures.
+        # TOYENGINE_CONFIG_INCLUDE_DIR first: it holds the only root_directory.h that defines
+        # SRC_DIR, which editor/app/editor_theme.h needs, and every coopa library ships one of
+        # its own on an equally PUBLIC include path (see the engine's configure_file).
         target_include_directories(${target} BEFORE PRIVATE
+            "${TOYENGINE_CONFIG_INCLUDE_DIR}"
             "${TPT_DIR}/src" "${_tests}" "${_engine_dir}/src/tests")
+        # The engine fixtures load shipped assets (tile-set pieces, meshes) and resolve them
+        # against ROOT_DIR, which in a project's tree is the PROJECT root -- where the engine's
+        # assets/ is not. This is the second place they look.
+        target_compile_definitions(${target} PRIVATE
+            TOY_ENGINE_ASSETS_DIR="${_engine_dir}/assets")
         # Alongside the engine's runners: their paths are user-facing (CLAUDE.md, src/tests/README.md).
         set_target_properties(${target} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
         target_link_libraries(${target} PRIVATE coopa::test_main)
@@ -241,7 +256,12 @@ function(toyengine_add_project_tests)
     endif()
 
     if(_ed_gpu)
-        _toyengine_project_test_target(${TPT_NAME}_editor_tests ${_ed_gpu})
+        # The editor fixtures (EditorSession, the input driver, tick/dump) are compiled, not a
+        # library -- the engine's own editor runner builds them the same way. Only this target
+        # gets them: they pull in toyengine::editor, which the engine-only runner does not link.
+        file(GLOB _editor_support CONFIGURE_DEPENDS
+             "${_engine_dir}/src/tests/editor/support/*.cpp")
+        _toyengine_project_test_target(${TPT_NAME}_editor_tests ${_ed_gpu} ${_editor_support})
         target_link_libraries(${TPT_NAME}_editor_tests PRIVATE toyengine::editor)
         target_compile_definitions(${TPT_NAME}_editor_tests PRIVATE TOY_EDITOR=1)
         coopa_add_test_suites(${TPT_NAME}_editor_tests PREFIX ${TPT_PREFIX}_editor

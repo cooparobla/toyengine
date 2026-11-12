@@ -103,7 +103,7 @@ def write(name, verts, faces, uvs, normals=None):
         for k in range(1, len(f) - 1):
             tris.append([f[0], f[k], f[k + 1]])
 
-    # Round to the editor's own 5 decimals (editor/core/yaml_util.h tidy()), so a save from the
+    # Round to the editor's own 5 decimals (src/editor/core/yaml_util.h tidy()), so a save from the
     # editor writes back exactly these numbers instead of nudging the last digit.
     def r5(rows):
         return [[round(c, 5) for c in row] for row in rows]

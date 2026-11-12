@@ -36,7 +36,7 @@
 // evaluates rather than replacing it, and leaves every indirect term continuous, so a banded
 // prop still takes its ambient, AO and reflections from the scene like its PBR neighbour.
 
-#include <gfx/planet.glsl>
+#include <gfx/world_frame.glsl>
 #include <gfx/sky.glsl>
 #include <gfx/brdf.glsl>
 #include <gfx/shadow_sampling.glsl>
@@ -111,7 +111,7 @@ layout(push_constant) uniform ToyLightingParams {
                                 // Direct Lighting Strength): 0 = indirect only
     float ssao_intensity;       // Unreal's AO Intensity: ssao = mix(1, ssao, intensity)
     mat4  sky_inv_view_proj;     // inverse(proj * view), for the sky at background pixels
-    vec4  planet;                // xyz = the planet's centre (world), w = its radius.
+    vec4  world_frame;           // xyz = the centre the world curves about (world), w = its radius.
                                  // w <= 0 is a FLAT world -- every term below then reduces to
                                  // what it has always been. WORLD space, unlike lights.sky_sun /
                                  // sky_moon, which are pre-rotated into the camera's frame.
@@ -275,7 +275,7 @@ void main() {
         // above it still there and still occluding the stars at the limb, but emitting nothing.
         //
         // Gated by the SAME terminator the atmosphere shell and the cloud deck use
-        // (gfx_planet_day), so ground, air and cloud cross into night together. Its direction is
+        // (gfx_world_day), so ground, air and cloud cross into night together. Its direction is
         // derived rather than sent: the moon sits opposite the sun, so the direction TOWARD it
         // is the direction the sun's light TRAVELS -- `lights.dir_direction.xyz`, already world
         // space here. (`lights.sky_moon` is NOT usable: it is pre-rotated into the camera's
@@ -287,10 +287,10 @@ void main() {
         // construction, dim. `night_floor` is 0 unless a PlanetAtmosphere authors a
         // moon_intensity, so every scene that has not asked for one is untouched.
         float moon_lum = lights.sky_extra.z;
-        if (moon_lum > 0.0 && params.planet.w > 0.0) {
-            vec3  up = gfx_planet_up(world_pos, params.planet);
+        if (moon_lum > 0.0 && params.world_frame.w > 0.0) {
+            vec3  up = gfx_world_up(world_pos, params.world_frame);
             vec3  sun_to = normalize(-lights.dir_direction.xyz);
-            float night = 1.0 - gfx_planet_day(up, sun_to);
+            float night = 1.0 - gfx_world_day(up, sun_to);
             if (night > 0.0) {
                 // The same tint the night sky itself uses (sky_physical.glsl's airglow term),
                 // so the ground a moonlit cloud sits over reads as the same light.

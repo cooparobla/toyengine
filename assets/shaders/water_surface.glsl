@@ -17,7 +17,7 @@
 //   gfx_params        = base wave: amplitude, wavelength, direction (radians), steepness
 //   gfx_params_ext0   = foam colour rgb, foam amount           (forward pass only)
 //   gfx_params_ext1   = shore foam depth, edge fade depth, ripple strength, ripple scale
-//   (water_planet, compiled with WATER_LOCAL_FRAME: a local-frame body -- a planet's water. Its
+//   (water_local_frame, compiled with WATER_LOCAL_FRAME: a local-frame body -- a planet's water. Its
 //    waves come from the world position through the three axis planes (triplanar) and lift the
 //    surface along its normal, so the many tilted pieces of a planet's sea meet without seams,
 //    and the per-pixel detail uses the world plane facing the surface most squarely. Without

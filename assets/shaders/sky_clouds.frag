@@ -21,7 +21,7 @@
 // plus a narrow silver-lining lobe, a powder term, and the deck's statistical self-shadowing at a
 // low sun -- plus the sky's ambient (the gradient's colours, or the physical sky's matched ones).
 
-#include <gfx/planet.glsl>
+#include <gfx/world_frame.glsl>
 #include <gfx/spot_light.glsl>
 #include "sky_atmosphere.glsl"
 
@@ -104,14 +104,14 @@ void main() {
     // horizon and the ground sphere below occludes it; everything from here down is unchanged
     // and simply becomes correct. On a flat world the fake planet stays pinned under the camera
     // at the atmosphere's own radius, exactly as before -- so flat scenes render identically.
-    if (cf.planet.w > 0.0) {
-        g_center = cf.planet.xyz / scale;
-        g_radius = cf.planet.w / scale;
+    if (cf.world_frame.w > 0.0) {
+        g_center = cf.world_frame.xyz / scale;
+        g_radius = cf.world_frame.w / scale;
     } else {
         g_center = vec3(ro.xy, -ATMO_BOTTOM_R);
         g_radius = ATMO_BOTTOM_R;
     }
-    g_spin = cf.planet.w > 0.0 ? vec4(normalize(cf.spin.xyz), cf.spin.w) : vec4(0.0, 0.0, 1.0, 0.0);
+    g_spin = cf.world_frame.w > 0.0 ? vec4(normalize(cf.spin.xyz), cf.spin.w) : vec4(0.0, 0.0, 1.0, 0.0);
 
     // The part of the ray inside the layer's shell (camera below, inside or above it).
     float r_in = g_radius + cf.slab.x, r_out = r_in + cf.slab.y;
@@ -185,13 +185,13 @@ void main() {
     float mu = dot(up, L);
     vec3  moon_light = vec3(0.0);
     vec3  amb_top, amb_bottom;
-    if (cf.planet.w > 0.0) {
+    if (cf.world_frame.w > 0.0) {
         // The deck wraps a real globe, so "how far does sunlight travel through it" is a chord,
         // and "is it day here" is the planet's own terminator -- the two things the flat path
         // below can only approximate.
         bool  blocked;
-        float airmass = gfx_planet_airmass(length(mid - g_center), mu, r_in, r_out, blocked);
-        float day = gfx_planet_day(up, L);
+        float airmass = gfx_world_airmass(length(mid - g_center), mu, r_in, r_out, blocked);
+        float day = gfx_world_day(up, L);
         // Same shoulder constant as the flat path: airmass is 1 overhead, exactly as 1/mu was.
         sun_light *= blocked ? 0.0 : day * exp(-cf.slab.z * cf.slab.w * 0.3 * max(airmass - 1.5, 0.0));
 

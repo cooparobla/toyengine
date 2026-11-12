@@ -1,4 +1,4 @@
-"""Generates the subdivided grid mesh used by the kitchen_sink test scene's water plane (tests/fixtures/scenes/).
+"""Generates the subdivided grid mesh used by the kitchen_sink test scene's water plane (src/tests/fixtures/scenes/).
 
 Standalone generator, not part of the C++ build -- run it manually (`python3
 tools/gen_water_grid_mesh.py`) whenever
@@ -21,7 +21,7 @@ GRID_SIZE = 12
 pond's Gerstner waves (wave_length 1.6 on its WaterBody, over this mesh's 2x2-unit local extent
 before the object's own Transform.scale) resolve visible crests rather than aliasing into a
 jagged few-vertex fold. The pond's WaterBody loads this mesh CPU-side and bakes it (see
-toyengine/water/water_system.h); the MeshRenderer itself names no mesh."""
+src/toyengine/water/water_system.h); the MeshRenderer itself names no mesh."""
 
 OUTPUT_PATH = pathlib.Path(__file__).parent.parent / "assets/meshes/water/water_grid.yaml"
 

@@ -266,7 +266,7 @@ def main():
                 f"          active: {active}\n")
         # No `children:` key: on a prefab instance that list means child OVERRIDES, and the
         # editor drops an empty one when it saves -- which would make this scene fail
-        # tests/editor/unit/asset_roundtrip_test.cpp's load-save-compare.
+        # src/tests/editor/unit/asset_roundtrip_test.cpp's load-save-compare.
         parts.append(f"    - name: {name}\n"
                      f"      active: true\n"
                      f"      prefab: objects/vehicles/{name}\n"
@@ -381,7 +381,7 @@ scene:
         # on ~60 idle bodies, which is nothing here, and it is what makes the cones scatter and
         # the crates shove the way a driving course needs them to.
         # Spelled in full: `1.0e9` does not survive a YAML load/save round-trip as the same
-        # scalar, and tests/editor/unit/asset_roundtrip_test.cpp holds every scene to that.
+        # scalar, and src/tests/editor/unit/asset_roundtrip_test.cpp holds every scene to that.
         sleep_time: 1000000.0
   root_objects:
 '''

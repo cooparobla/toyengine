@@ -217,7 +217,7 @@ bones as dual quaternions so a twisted joint keeps its cross section instead of 
 (Blender's option of the same name). The weights need not be authored by hand: in the editor,
 `Object > Parent > Bind to Rig with Automatic Weights` generates them from the rig's bones (bone
 heat) in one step; headless, the same generator is `toy::scene::compute_auto_weights()`
-(`toyengine/scene/auto_skin_weights.h`). Real example: `assets/objects/animation/tentacle.yaml`.
+(`src/toyengine/scene/auto_skin_weights.h`). Real example: `assets/objects/animation/tentacle.yaml`.
 
 ### IK (bone-space; after the SkeletalAnimator, overriding the rig's pose)
 

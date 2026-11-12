@@ -64,7 +64,7 @@ Unity-style component model:
 - Snapshot undo, hot-reloading themes and a console.
 
 Everything it saves is plain YAML in your project's `assets/` folder, so you can hand-edit,
-diff and merge it. See [editor/README.md](editor/README.md) for the full tour.
+diff and merge it. See [src/editor/README.md](src/editor/README.md) for the full tour.
 
 ## Features
 
@@ -94,11 +94,11 @@ diff and merge it. See [editor/README.md](editor/README.md) for the full tour.
   quantisation are available when a project wants them.
 
 ### Simulation
-- **Rigid-body physics** ([physxcoopa](libs/physxcoopa)). Box, sphere, capsule and mesh
+- **Rigid-body physics** ([physxcoopa](src/libs/physxcoopa)). Box, sphere, capsule and mesh
   colliders, physics materials, hinge, ball and cone-twist joints, triggers, collision layers,
   and kinematic movers and controllers. Raycasts, shape sweeps, overlaps and penetration
   queries take one `QueryFilter` (layer mask, triggers, an ignored body, a predicate).
-- **Characters** ([toyengine/scene](toyengine/scene/README.md)). `CharacterController` walks a
+- **Characters** ([src/toyengine/scene](src/toyengine/scene/README.md)). `CharacterController` walks a
   capsule with collide-and-slide, steps, slope limits, jumps, moving platforms and pushing, and
   can move by animation root motion. The camera follows it in a colliding third-person orbit or
   in first person.
@@ -106,19 +106,19 @@ diff and merge it. See [editor/README.md](editor/README.md) for the full tour.
   and blend back into animation.
 - **Cloth.** XPBD cloth that collides with the world and renders as a shaded, shadow-casting
   mesh.
-- **Water** ([toyengine/water](toyengine/water/README.md)):
+- **Water** ([src/toyengine/water](src/toyengine/water/README.md)):
   - Lakes and oceans with Gerstner waves. The same wave math runs in the shader and in a CPU
     surface query, so gameplay and visuals agree.
   - Rivers whose current comes from the mesh's own slope and bends around obstacles.
   - Shoreline and contact foam, and ripple rings from anything crossing the surface.
   - `Buoyancy` makes any rigid body float, bob on waves and drift with the current.
   - Underwater, you get fog, absorption, caustics and Snell's window.
-- **Procedural terrain** ([toyengine/world](toyengine/world/README.md)):
-  - A seeded [mapcoopa](libs/mapcoopa) world with elevation, biomes and rivers.
+- **Procedural terrain** ([src/toyengine/world](src/toyengine/world/README.md)):
+  - A seeded [mapcoopa](src/libs/mapcoopa) world with elevation, biomes and rivers.
   - Meshed in chunks on the job system and streamed around the camera.
   - Tile shapes are mesh assets, so the look changes with one line of YAML.
 
-- **Particles** ([toyengine/particles](toyengine/particles/README.md)):
+- **Particles** ([src/toyengine/particles](src/toyengine/particles/README.md)):
   - Unity-style modules: emission rate and bursts, shapes, forces, curl-noise turbulence,
     colour/size over life, ground collision and sub emitters.
   - Blender-style mesh emission from faces, vertices or edges, oriented to the surface, plus a
@@ -127,7 +127,7 @@ diff and merge it. See [editor/README.md](editor/README.md) for the full tour.
     with soft depth fades and HDR glow.
   - Procedural sprites with a stylized look: flame, smoke puff, spark, ring, star and leaf.
 
-- **Weather and time of day** ([toyengine/weather](toyengine/weather/README.md)):
+- **Weather and time of day** ([src/toyengine/weather](src/toyengine/weather/README.md)):
   - A clock moves the sun and moon, and the sky blends through day, twilight and night palettes.
   - Weather conditions (clear, rain, storm, fog, snow, sandstorm...) blend smoothly into each
     other on a fixed, random or cycling schedule. Each condition drives the sky, ambient light,
@@ -139,7 +139,7 @@ diff and merge it. See [editor/README.md](editor/README.md) for the full tour.
   - The whole thing is edited per scene in the editor's World tab.
 
 ### UI and scenes
-- **UI toolkit** ([uicoopa](libs/uicoopa)). Panels, text, buttons, sliders, progress bars,
+- **UI toolkit** ([uicoopa](src/libs/uicoopa)). Panels, text, buttons, sliders, progress bars,
   layouts and masks. Use it as a crisp screen-space HUD, or on world-space canvases that
   billboard or sit in 3D and stay clickable.
 - **Data-driven scenes.** YAML scenes, object assets and shared material assets. Every loader
@@ -149,21 +149,21 @@ diff and merge it. See [editor/README.md](editor/README.md) for the full tour.
 - **Animation** ([coopa/animation](libs/libcoopa/coopa/animation/README.md)). Keyframed and
   procedural clips with crossfades, timeline events (footsteps), root motion, and two-bone,
   look-at and foot-placement IK.
-- **Async scene loading** ([toyengine/core](toyengine/core/README.md)). The next scene builds
+- **Async scene loading** ([src/toyengine/core](src/toyengine/core/README.md)). The next scene builds
   in the background behind a fade or a loading screen with a progress bar; `SceneLink` doors
   change levels with no code.
-- **Save games** ([toyengine/save](toyengine/save/README.md)). Named slots in the player's data
+- **Save games** ([src/toyengine/save](src/toyengine/save/README.md)). Named slots in the player's data
   folder with a sidecar for slot menus, atomic writes, encoded in shipping builds. The engine
   decides where saves go; the game decides what is in them, through save/load signals, per-object
   `ISaveable` components keyed by `SaveId`, and version migrations. F5 / F9 quick-save and load.
 
 ### Audio
-- **Mixer and 3D sound** ([sfxcoopa](libs/sfxcoopa)). WAV and MP3 clips, buses
+- **Mixer and 3D sound** ([sfxcoopa](src/libs/sfxcoopa)). WAV and MP3 clips, buses
   (Master > Music / SFX / UI), binaural panning, distance falloff and doppler.
 - **Scene components.** `AudioSource` (2D or positioned, `play_on_start`, loop) and
   `AudioListener`. Without a listener, the main camera hears. `VolumeBinding` connects a
   settings-menu slider to a bus and remembers the player's choice.
-- **Music** ([music_player.h](toyengine/audio/music_player.h)). Equal-power crossfades between
+- **Music** ([music_player.h](src/toyengine/audio/music_player.h)). Equal-power crossfades between
   tracks, playlists that hand off on their own as a track ends, pause/resume fades, and a
   push/pop stack for temporary tracks (zones, boss fights) that resumes the music underneath
   where it stopped. Music carries over scene changes. Scene side: `MusicPlaylist`, `MusicZone`,
@@ -180,7 +180,7 @@ This walks you from a fresh clone to your own project running its first scene.
 
 ### 1. Clone
 
-The coopa libraries live in [`libs/`](libs/), committed in this repository, so a plain clone
+The coopa libraries live in [`src/libs/`](src/libs/), committed in this repository, so a plain clone
 is a complete checkout:
 
 ```bash
@@ -381,7 +381,7 @@ A project contains:
 |---|---|
 | `<target>.toy` | The project file (YAML): `target` (the executable name) and `engine:`, which holds `source` (`git@github.com:cooparobla/toyengine.git`), `ref` (the commit, tag or branch the engine is at), `link` (where the engine is: absolute for a checkout shared with other projects, project-relative for one of the project's own) and, for an own engine, `mode` (`worktree` / `own`) and `branch`. |
 | `assets/` | The project's content. It sits over this repo's `assets/`, which is the fallback for shaders, fonts, shared meshes and materials. `assets/shaders/*` compile with the engine and gfxcoopa shader headers on the include path. |
-| `src/` | C++ compiled into both the game and the editor, so the editor's Play runs it. Register components with `TOY_MODULE` ([`toyengine/core/module.h`](toyengine/core/module.h)). Describe them to the inspector with `register_component_schema()` under `#if TOY_EDITOR`. `src/main.cpp` replaces the game's `main`. Engine code is a compiled library, so changing it means editing (or forking) the engine checkout. |
+| `src/` | C++ compiled into both the game and the editor, so the editor's Play runs it. Register components with `TOY_MODULE` ([`src/toyengine/core/module.h`](src/toyengine/core/module.h)). Describe them to the inspector with `register_component_schema()` under `#if TOY_EDITOR`. `src/main.cpp` replaces the game's `main`. Engine code is a compiled library, so changing it means editing (or forking) the engine checkout. |
 | `.libs/toyengine` | Where the build finds the engine. `setup.sh` clones it at `engine.ref`, or symlinks it to `engine.link`. Git-ignored -- never put a checkout you care about here: `clean.sh --all` removes this whole tree. |
 | `engine/` | An engine of the project's **own** only: a git worktree of a toyengine checkout, or the project's own clone. `.libs/toyengine` symlinks it. A git checkout in its own right, so it is git-ignored in the project and committed in the engine's history, not the project's. |
 | `setup.sh build.sh run.sh editor.sh package.sh clean.sh` | The project's scripts (from [`templates/project/`](templates/project/)). |
@@ -392,7 +392,7 @@ There are three ways a project can get its engine, all of them the `engine:` blo
 
 | Mode | `.toy` | `.libs/toyengine` | Use it when |
 |---|---|---|---|
-| **linked** | `link:` an absolute path | symlink to that checkout | working on the engine and a game together -- the default. Builds this working tree directly, uncommitted edits in the engine and `libs/` included. Every linked project on the machine shares it, so an engine edit for one game is an edit for all of them. |
+| **linked** | `link:` an absolute path | symlink to that checkout | working on the engine and a game together -- the default. Builds this working tree directly, uncommitted edits in the engine and `src/libs/` included. Every linked project on the machine shares it, so an engine edit for one game is an edit for all of them. |
 | **worktree** | `link:` a project-relative path, `mode: worktree`, `branch:` | symlink to a git worktree in the project | the game needs engine changes of its own and the engine checkout is on this machine. `toyhub worktree <dir> [--branch B]` adds `engine/` as a **git worktree** of this checkout on a branch named after the project, so engine work is committed in the engine's own history, pushed and merged like any other branch, and invisible to every other project until it is. A worktree shares the checkout's object store, so it costs no second clone. |
 | **own** | `link:` a project-relative path, `mode: own` | symlink to a clone in the project | the project has to build on a machine with no toyengine checkout. `toyhub own <dir> [--ref R]` pulls the project's own clone into `engine/` (from this checkout when there is one, so commits that are not pushed yet come along, with `origin` left pointing at `engine.source`). |
 
@@ -457,7 +457,7 @@ Builds target the machine you build on. There is no cross-compiling.
 
 ### toyengine Hub
 
-`build/toyengine_hub` (source in [`hub/`](hub/)) is a small launcher that lists, creates, adds,
+`build/toyengine_hub` (source in [`src/hub/`](src/hub/)) is a small launcher that lists, creates, adds,
 opens, re-pins and removes projects. It is drawn with the editor's UI and themes
 and calls `tools/toyhub` for everything. Build output streams into its log drawer.
 
@@ -505,13 +505,15 @@ HEADLESS=1 PROFILE=1 MAX_FRAMES=600 ./build/toyengine      # per-feature timings
 ```
 
 `FIXED_DT`, `NO_INPUT`, `CAPTURE_FRAMES`, `SCENE` and `CONFIG` make captures reproducible. See
-the docs on `Engine::run()` in [toyengine/core/engine.h](toyengine/core/engine.h).
+the docs on `Engine::run()` in [src/toyengine/core/engine.h](src/toyengine/core/engine.h).
 
 ## Project layout
 
 ```
-toyengine/
-├── core/       Engine, AppConfig, scene loading, caml codec, branding, runtime paths
+src/toyengine/
+├── core/       Engine, AppConfig, scene loading, branding -- the composition root
+├── io/         the leaf utilities every layer may use: runtime paths, the .caml container,
+│            YAML read helpers, the user's settings file
 ├── render/     the render pipeline, its config, profiler, and passes/
 ├── scene/      gameplay components: camera controller, movers, cloth & skinned renderers
 ├── world/      streamed procedural tile terrain and heightmap terrain, snow
@@ -523,28 +525,28 @@ toyengine/
 ├── save/       save slots, ISaveable, the save/load system
 ├── debug/      the F3 stats overlay and the game-facing watch/text API
 └── ui/         UI asset helpers: open/close a screen, UiController widget bindings
-editor/         toyengine_editor: app & panels, documents & undo, schemas, mesh modelling,
+src/editor/         toyengine_editor: app & panels, documents & undo, schemas, mesh modelling,
                 viewport tools, terrain brushes, build & packaging
-hub/            toyengine_hub: the project launcher (a GUI over tools/toyhub)
-tests/          the test suites: engine/ and editor/, each unit / gpu / extended
+src/hub/            toyengine_hub: the project launcher (a GUI over tools/toyhub)
+src/tests/          the test suites: engine/ and editor/, each unit / gpu / extended
 tools/          asset generators (gen_*.py), toyhub, the icon exporter, profiling helpers
 templates/      project/: the files `toyhub new` / `toyhub add` create a project from
 cmake/          ToyProject.cmake: toyengine_add_project() (game + editor for a project dir)
 assets/         config.yaml, scenes, meshes, materials, textures, shaders (every one the engine loads), fonts
 docs/           hand-written guides (e.g. ambient lighting); docs/images holds these screenshots
 plans/          design records for larger pieces of work
-libs/           tracked content, committed with the engine: libcoopa (scene graph, assets, jobs),
+src/libs/           tracked content, committed with the engine: libcoopa (scene graph, assets, jobs),
                 gfxcoopa (Vulkan), physxcoopa (physics), sfxcoopa, uicoopa (UI),
                 mapcoopa (world gen), caml
 ```
 
 Each module has its own README with the details.
 
-`toyengine/` and `editor/` are compiled once, as the static libraries `toyengine::engine` and
+`src/toyengine/` and `src/editor/` are compiled once, as the static libraries `toyengine::engine` and
 `toyengine::editor`. The rule is that **a header declares and its `.cpp` beside it holds the
 bodies**, along with the includes only those bodies need — so a game, editor or test source
 compiles only its own code, and editing an engine `.cpp` rebuilds that one file and relinks.
-The `libs/` libraries are header-only.
+The `src/libs/` libraries are header-only.
 
 Three deliberate exceptions:
 
@@ -552,11 +554,11 @@ Three deliberate exceptions:
   `water_waves.h`, `tile_topology.h` and friends are pure functions over plain data, with no
   Vulkan and no scene, and they are unit-tested directly.
 - **Templates and `constexpr`** have to be, as everywhere.
-- **`hub/`** is header-only, because it has exactly one translation unit (`hub.cpp`).
+- **`src/hub/`** is header-only, because it has exactly one translation unit (`hub.cpp`).
 
-`editor/app/ui/*.inl` is a fourth case and a known wart rather than a convention: panel
+`src/editor/app/ui/*.inl` is a fourth case and a known wart rather than a convention: panel
 declarations are `#include`d inside `EditorApp`'s class body. See
-[`editor/app/README.md`](editor/app/README.md).
+[`src/editor/app/README.md`](src/editor/app/README.md).
 
 ## Platform notes
 
@@ -568,19 +570,20 @@ declarations are `#include`d inside `EditorApp`'s class body. See
     and sort functions and builds with `-ffp-contract=off`.
 - **SMAA lookup textures** are fetched at configure time unless `SMAA_TEXTURES_DIR` points at
   a checkout.
-- **Working inside `libs/`.** Each library still builds standalone in place, and editing one is
+- **Working inside `src/libs/`.** Each library still builds standalone in place, and editing one is
   an ordinary commit in this repository. Each library's own repo at `cooparobla/<lib>` stays its
-  home for other consumers; `git subtree push --prefix=libs/<lib> <url> main` sends changes
+  home for other consumers; `git subtree push --prefix=src/libs/<lib> <url> main` sends changes
   back to one and `git subtree pull` brings theirs in. A toyengine build compiles every shader -- the libraries' too -- into its own
   `build/shaders/<target>/`, never next to the sources; a library's standalone build still
   compiles in place (and uicoopa's commits its `.spv`).
 
 ## Documentation
 
-- Per-module READMEs: [core](toyengine/core/README.md), [render](toyengine/render/README.md),
-  [scene](toyengine/scene/README.md), [particles](toyengine/particles/README.md),
-  [world](toyengine/world/README.md), [water](toyengine/water/README.md),
-  [editor](editor/README.md), [assets](assets/README.md).
+- Per-module READMEs: [core](src/toyengine/core/README.md), [io](src/toyengine/io/README.md),
+  [render](src/toyengine/render/README.md),
+  [scene](src/toyengine/scene/README.md), [particles](src/toyengine/particles/README.md),
+  [world](src/toyengine/world/README.md), [water](src/toyengine/water/README.md),
+  [editor](src/editor/README.md), [assets](assets/README.md).
 - [`docs/editor/`](docs/editor/README.md) is the editor's user manual.
 - [`docs/`](docs/) holds hand-written guides to specific engine behaviour.
 - `.docs/` is the generated HTML API reference, built from in-source docstrings with

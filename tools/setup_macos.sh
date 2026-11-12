@@ -4,7 +4,7 @@
 # Vulkan on macOS runs through MoltenVK (Vulkan-on-Metal). This installs the
 # Khronos loader, MoltenVK, headers, validation layers and glslc (shaderc), plus
 # GLFW. gfxcoopa finds the Homebrew loader at runtime on its own (see
-# libs/gfxcoopa/gfxcoopa/util/volk_init.h), so no DYLD_* variables are needed.
+# src/libs/gfxcoopa/gfxcoopa/util/volk_init.h), so no DYLD_* variables are needed.
 #
 # Linux is unaffected: nothing in the build calls this script.
 set -euo pipefail

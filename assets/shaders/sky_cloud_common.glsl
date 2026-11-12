@@ -43,7 +43,7 @@ layout(set = CLOUD_UBO_SET, binding = CLOUD_UBO_BINDING) uniform CloudFrame {
                           // z = 1: light_color is above the atmosphere (the physical sky's
                           //     transmittance table colours it) / 0: use it as is,
                           // w = this frame's spin step (rad), planet only
-    vec4 planet;          // xyz = the planet's centre (world m), w = its radius (world m).
+    vec4 world_frame;     // xyz = the centre the world curves about (world m), w = its radius.
                           // w <= 0 is a FLAT world: the march pins a fake planet under the
                           // camera as it always has, and `spin` below is unused.
     vec4 spin;            // xyz = the axis the deck turns about (unit), w = total angle (rad).

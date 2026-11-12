@@ -9,8 +9,8 @@ A scene is `assets/scenes/<area>/<name>_demo/scene.yaml` -- the repo keeps ONE d
 (`rendering/`, `water/`, `effects/`, `gameplay/`, `physics/`, `animation/`, `terrain/`,
 `navigation/`, `ui/`, `audio/`), so extend the area's demo with a new station before adding a scene. A
 test that needs a scene-level variant (another cloud type, weather, camera pose) patches a copy
-of the demo with `tests/engine/support/scene_variant.h`; scenes that exist only for tests live in
-`tests/fixtures/scenes/`.
+of the demo with `src/tests/engine/support/scene_variant.h`; scenes that exist only for tests live in
+`src/tests/fixtures/scenes/`.
 `./build/toyengine <name>` and `SCENE=<name>` find it by name whatever its tags. It is a tree of named objects, each a list of
 components. **The loader is permissive**: unknown component types and unknown keys are
 silently skipped, and most enum parsers map an unknown value to the default. A typo renders as

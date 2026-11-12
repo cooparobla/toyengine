@@ -8,7 +8,7 @@ description: Add procedural tile terrain to a toyengine scene -- the TileTerrain
 One terrain component, two modes. This is `mode: tiles` -- written `TileTerrain`, or `Terrain`
 with `mode: tiles`; a block with neither reads as tiles anyway. For the smooth half see
 create-heightmap-terrain, and for the world it is generated from see **MapGenerator**
-(`toyengine/mapgen/README.md`): generation is its own component now, applied to a terrain, and a
+(`src/toyengine/mapgen/README.md`): generation is its own component now, applied to a terrain, and a
 scene that writes `generator:` on its terrain gets one made for it, so nothing had to change.
 
 A tile terrain builds every tile from a **tile set**: an object asset whose children are the pieces
@@ -19,15 +19,15 @@ import, see the create-heightmap-terrain skill.
 The world is **stored**: mapcoopa bakes it once into a `.tiles` file (`tiles:`, default
 `terrain/<object>.tiles` beside the scene; baked automatically when missing), and from then on the
 tiles are edited -- in the editor's Tile Mode, or by gameplay (`TerrainComponent::tiles`, then
-`mark_dirty()`; water edits through `toyengine/world/tile_water.h`). The `generator:` block only
+`mark_dirty()`; water edits through `src/toyengine/world/tile_water.h`). The `generator:` block only
 shapes a bake; delete the `.tiles` file (or use the editor's World Generator / Regenerate World)
 to bake again after changing it. Each tile stores ground height, surfaces, biome, temperature,
 moisture, water depth and river flow, and region / country ids. Water is drawn as smooth WaterBody
 surfaces over sand beds (never as tiles); `water:` takes WaterBody keys.
 
-Read **`toyengine/world/README.md`** (stored tiles, generation, tile sets, pieces, collision) and
-copy from `assets/scenes/terrain/terrain_demo/scene.yaml`. Parser: `toyengine/scene/register.cpp`
-("TileTerrain", alias "Terrain"); defaults in `toyengine/world/terrain_component.h` and
+Read **`src/toyengine/world/README.md`** (stored tiles, generation, tile sets, pieces, collision) and
+copy from `assets/scenes/terrain/terrain_demo/scene.yaml`. Parser: `src/toyengine/scene/register.cpp`
+("TileTerrain", alias "Terrain"); defaults in `src/toyengine/world/terrain_component.h` and
 `terrain_sampler.h`.
 
 ## Minimal recipe
@@ -67,7 +67,7 @@ copy from `assets/scenes/terrain/terrain_demo/scene.yaml`. Parser: `toyengine/sc
 Key groups: stored tiles (`tiles`); tile set (`tile_set`, `kind_tile_sets { <kind>: objects/terrain/tileset_x }` with
 kinds grass, dirt, stone, sand, snow, rock, ice, moss, clay, ash, salt -- unlisted kinds
 use `tile_set`); generation (`generator:` -- any mapcoopa config key, see
-`libs/mapcoopa/assets/config.yaml`; plus `world_tiles` / `tiles_per_grid_unit`, `height_scale` -- bake only; the
+`src/libs/mapcoopa/assets/config.yaml`; plus `world_tiles` / `tiles_per_grid_unit`, `height_scale` -- bake only; the
 old flat keys `seed`, `shape`, `sea_level`... still load); tiling (`tile_size`, `height_step`,
 `chunk_size`, `view_radius`, `soil_depth_steps`, `max_chunk_jobs_per_frame`);
 water (`water_inset`, `water:` WaterBody keys); collision (`collision`, `physics_material`); look

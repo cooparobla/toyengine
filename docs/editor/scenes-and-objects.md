@@ -340,6 +340,6 @@ In Object Mode, mesh changes you made in Edit Mode can still be undone after you
 
 ---
 
-Sources: `editor/app/ui/properties.inl`, `editor/app/ui/outliner.inl`, `editor/app/ui/assets.inl`, `editor/app/ui/instances.inl`, `editor/app/ui/topbar.inl`, `editor/app/ui/viewport_chrome.inl`, `editor/schema/component_schema.h`, `editor/schema/inspector.h`, `editor/core/scene_document.h`, `editor/core/undo.h`, `editor/app/editor_app.h`
+Sources: `editor/app/ui/properties.inl`, `editor/app/ui/outliner.inl`, `editor/app/ui/assets.inl`, `editor/app/ui/instances.inl`, `editor/app/ui/topbar.inl`, `editor/app/ui/viewport_chrome.inl`, `src/editor/schema/component_schema.h`, `src/editor/schema/inspector.h`, `src/editor/core/scene_document.h`, `src/editor/core/undo.h`, `src/editor/app/editor_app.h`
 
 Previous: [Interface](interface.md) | Next: [Viewport](viewport.md)

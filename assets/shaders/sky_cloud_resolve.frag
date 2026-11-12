@@ -91,12 +91,12 @@ void main() {
     // back around the planet instead. Getting this wrong does not merely ghost: a
     // mis-reprojection raises `motion` below, which loosens the anti-flicker cap and lets the
     // raw per-frame march noise through -- the very sparkle the deck exists to avoid.
-    if (cf.planet.w > 0.0) {
-        vec3 d = p - cf.planet.xyz;
+    if (cf.world_frame.w > 0.0) {
+        vec3 d = p - cf.world_frame.xyz;
         float a = -cf.look.w;                      // this frame's spin step, backwards
         float c = cos(a), sn = sin(a);
         vec3  k = normalize(cf.spin.xyz);
-        p = cf.planet.xyz + d * c + cross(k, d) * sn + k * (dot(k, d) * (1.0 - c));
+        p = cf.world_frame.xyz + d * c + cross(k, d) * sn + k * (dot(k, d) * (1.0 - c));
     } else {
         p += vec3(cf.history.xy, 0.0);
     }

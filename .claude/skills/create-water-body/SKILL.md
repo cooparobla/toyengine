@@ -5,10 +5,10 @@ description: Add water to a toyengine scene -- a WaterBody (lake/pond with waves
 
 # Add water
 
-Read **`toyengine/water/README.md`** (system overview, tiers, gotchas) and copy from
+Read **`src/toyengine/water/README.md`** (system overview, tiers, gotchas) and copy from
 `assets/scenes/water/water_demo/scene.yaml` (lake + river + floating props, and a deep pool with
-underwater settings at y = 65). Parsers: `toyengine/scene/register.h` (WaterBody, Buoyancy);
-defaults in `toyengine/water/water_body.h`, `buoyancy.h`.
+underwater settings at y = 65). Parsers: `src/toyengine/scene/register.h` (WaterBody, Buoyancy);
+defaults in `src/toyengine/water/water_body.h`, `buoyancy.h`.
 
 ## Surface
 

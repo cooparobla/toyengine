@@ -80,7 +80,7 @@ void weather_reads(vec2 xy, float lod, out vec4 m1, out vec4 m2) {
 // the usual cost is one or two reads' worth rather than three.
 vec3 weather_at(vec3 q, vec2 planar, float lod) {
     vec4 m1, m2;
-    if (cf.planet.w > 0.0) {
+    if (cf.world_frame.w > 0.0) {
         vec3 n = normalize(q - g_center);
         vec3 w = n * n;                       // already non-negative and sums to 1
         w = w * w;                            // sharpen: one plane dominates away from the diagonals
@@ -139,7 +139,7 @@ float cloud_density(vec3 p, float h, float foot, float step_len, bool detail, ou
     // 128^3 volume (see cloud_noise_texture.h), so a 3D position tiles it seamlessly in every
     // direction -- no spherical parametrisation, no poles, no seams, and the layer's own radial
     // `h` still drives the height profile above. A flat world keeps the planar construction.
-    vec3 sp = (cf.planet.w > 0.0 ? q / SHAPE_PERIOD : vec3(xy, z) / SHAPE_PERIOD)
+    vec3 sp = (cf.world_frame.w > 0.0 ? q / SHAPE_PERIOD : vec3(xy, z) / SHAPE_PERIOD)
             + vec3(0.0, 0.0, cf.wind.z * 2e-5);
     vec4 s = textureLod(u_shape, sp, log2(max(foot / (SHAPE_PERIOD / 128.0), 1.0)));
     float low = s.g * 0.625 + s.b * 0.25 + s.a * 0.125;
@@ -162,7 +162,7 @@ float cloud_density(vec3 p, float h, float foot, float step_len, bool detail, ou
         float fade = 1.0 - smoothstep(3.0, 5.0, lod);   // too small on screen to show: skip
         if (fade > 0.0) {
             // A little swirl: the shape's own channels push the detail around.
-            vec3 dp = (cf.planet.w > 0.0 ? q / DETAIL_PERIOD : vec3(xy, z * 1.3) / DETAIL_PERIOD)
+            vec3 dp = (cf.world_frame.w > 0.0 ? q / DETAIL_PERIOD : vec3(xy, z * 1.3) / DETAIL_PERIOD)
                     + (s.gba - 0.5) * 0.35;
             vec4 dn = textureLod(u_detail, dp, lod);
             float hf = dn.r * 0.625 + dn.g * 0.25 + dn.b * 0.125;

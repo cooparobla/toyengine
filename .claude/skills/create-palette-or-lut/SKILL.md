@@ -18,7 +18,7 @@ the palette-quantisation look is legacy -- don't make it a scene's default witho
 (`pico8.png` 8x1, `aap64.png`, `duel_1x.png` 256x1). Any size works: the loader reads pixels in
 row order, keeps unique opaque colours in first-seen order, skips alpha == 0, caps at 256.
 Matching is nearest colour by RGB distance in sRGB. Loader:
-`libs/gfxcoopa/gfxcoopa/engine/data/palette_lut.h`.
+`src/libs/gfxcoopa/gfxcoopa/engine/data/palette_lut.h`.
 
 ```yaml
 render:
@@ -34,7 +34,7 @@ to right, red increases across each slice, green increases down (row 0 = g 0). I
 
     pixel(x, y) = ( r = (x mod N) / (N-1),  g = y / (N-1),  b = floor(x / N) / (N-1) )
 
-Sampled linearly with clamp. Loader: `libs/gfxcoopa/gfxcoopa/engine/data/grading_lut.h`;
+Sampled linearly with clamp. Loader: `src/libs/gfxcoopa/gfxcoopa/engine/data/grading_lut.h`;
 shader `assets/shaders/gfx/grading.glsl`.
 
 ```yaml

@@ -1,0 +1,110 @@
+/**
+ * @file cloud_noise_texture.h
+ * @brief A tiling noise texture for the cloud march -- 2D (the weather map) or 3D (the shape and
+ *        detail volumes) -- with a full mip chain, generated once on the GPU by a compute shader.
+ *
+ * RGBA8, STORAGE | SAMPLED, with one storage view per mip (the generator writes mip 0, a
+ * box-filter compute pass writes each further mip from the one above) and the image's own view
+ * over the whole chain for sampling. The cloud march samples it trilinearly with a repeating
+ * sampler and picks the mip from each sample's screen footprint, so distant clouds read
+ * pre-filtered noise instead of aliasing into shimmer.
+ *
+ * The generator and downsample pipelines are shared (CloudNoiseGenerators) and take one storage
+ * image (binding 0) -- the downsample a second (binding 1, the destination). Push constants: the
+ * generator gets the texture size in x (uint), the downsample nothing.
+ */
+
+#ifndef TOYENGINE_RENDER_PASSES_CLOUD_NOISE_TEXTURE_H
+#define TOYENGINE_RENDER_PASSES_CLOUD_NOISE_TEXTURE_H
+
+
+#include <algorithm>
+#include <cstdint>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include <gfxcoopa/command/command_buffer.h>
+#include <gfxcoopa/memory/image.h>
+#include <gfxcoopa/memory/image_view.h>
+
+namespace toy {
+namespace render {
+namespace passes {
+
+/**
+ * @brief The compute pipelines that fill CloudNoiseTextures: the downsamples (2D and 3D) and
+ *        their set layouts. The per-texture generators are built by their owner against
+ *        gen_layout().
+ */
+class CloudNoiseGenerators {
+public:
+    CloudNoiseGenerators(coopa::gfx::core::Device& device, const std::string& mip2d_spv, const std::string& mip3d_spv)
+        : gen_layout_(coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                          .storage_image(0, coopa::gfx::ShaderStage::Compute)
+                          .build(device)),
+          mip_layout_(coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                          .storage_image(0, coopa::gfx::ShaderStage::Compute)
+                          .storage_image(1, coopa::gfx::ShaderStage::Compute)
+                          .build(device)),
+          mip2d_(device, mip2d_spv, {&mip_layout_}),
+          mip3d_(device, mip3d_spv, {&mip_layout_}) {}
+
+    coopa::gfx::pipeline::DescriptorSetLayout& gen_layout() { return gen_layout_; }
+    coopa::gfx::pipeline::DescriptorSetLayout& mip_layout() { return mip_layout_; }
+    const coopa::gfx::pipeline::ComputePipeline& mip(bool volume) const { return volume ? mip3d_ : mip2d_; }
+
+private:
+    coopa::gfx::pipeline::DescriptorSetLayout gen_layout_;
+    coopa::gfx::pipeline::DescriptorSetLayout mip_layout_;
+    coopa::gfx::pipeline::ComputePipeline     mip2d_;
+    coopa::gfx::pipeline::ComputePipeline     mip3d_;
+};
+
+class CloudNoiseTexture {
+public:
+    /**
+     * @param size   Texels per axis (a power of two).
+     * @param volume true: size^3 (3D); false: size^2 (2D).
+     */
+    CloudNoiseTexture(coopa::gfx::core::Device& device, coopa::gfx::memory::Allocator& allocator,
+                      CloudNoiseGenerators& gens, uint32_t size, bool volume);
+
+    CloudNoiseTexture(const CloudNoiseTexture&) = delete;
+    CloudNoiseTexture& operator=(const CloudNoiseTexture&) = delete;
+
+    /** @brief The whole mip chain, for sampling (shader-readable after generate()). */
+    coopa::gfx::TextureView view() const { return image_.view_typed(); }
+    uint32_t levels() const { return levels_; }
+
+    /**
+     * @brief Records the generator into mip 0, then every further mip, and leaves the image
+     *        shader-readable. Outside any render pass. `generator` must take gen_layout() at set 0
+     *        and a uint size push constant.
+     */
+    void generate(coopa::gfx::command::CommandBuffer& cmd, const coopa::gfx::pipeline::ComputePipeline& generator,
+                  const CloudNoiseGenerators& gens);
+
+private:
+    /** @brief One level of the chain, as the storage image the mip passes bind. */
+    void barrier_(coopa::gfx::command::CommandBuffer& cmd, coopa::gfx::SubresourceRange range,
+                  coopa::gfx::TextureUsage from, coopa::gfx::TextureUsage to,
+                  coopa::gfx::ImageAccess wait_for, coopa::gfx::ImageAccess make_visible_to) const;
+
+    uint32_t                  size_;
+    bool                      volume_;
+    uint32_t                  levels_ = 1;
+    coopa::gfx::memory::Image image_;
+    /** @brief One single-level storage view per mip; a chain-spanning view is illegal in one. */
+    std::vector<coopa::gfx::memory::ImageView> mip_views_;
+    std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>              pool_;
+    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>               gen_set_;
+    std::vector<std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>> mip_sets_;
+};
+
+} // namespace passes
+} // namespace render
+} // namespace toy
+
+#endif // TOYENGINE_RENDER_PASSES_CLOUD_NOISE_TEXTURE_H

@@ -6,8 +6,8 @@ description: Create a toyengine physics material -- friction and bounciness for 
 # Create a physics material
 
 A physics material is friction + restitution for colliders. Loader:
-`libs/physxcoopa/physxcoopa/loaders/physics_material_loader.h`; struct and combine rules:
-`libs/physxcoopa/physxcoopa/dynamics/physics_material.h`. Shipped:
+`src/libs/physxcoopa/physxcoopa/loaders/physics_material_loader.h`; struct and combine rules:
+`src/libs/physxcoopa/physxcoopa/dynamics/physics_material.h`. Shipped:
 `assets/physics_materials/` -- clay, concrete, ice, metal, rubber, superball, wood. Names match
 the render materials where both exist, so a renderer and its collider pair up by name.
 

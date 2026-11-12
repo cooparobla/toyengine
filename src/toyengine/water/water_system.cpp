@@ -1,0 +1,1519 @@
+#include <toyengine/water/water_system.h>
+
+#include <toyengine/env/env_system.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+
+#include <coopa/asset/asset_manager.h>
+#include <coopa/event/signal.h>
+#include <coopa/job/parallel_for.h>
+#include <coopa/scene/components/transform_component.h>
+#include <coopa/scene/scene.h>
+#include <coopa/scene/scene_object.h>
+#include <coopa/scene/scene_system.h>
+#include <gfxcoopa/core/device.h>
+#include <gfxcoopa/engine/components/camera_component.h>
+#include <gfxcoopa/engine/data/mesh.h>
+#include <gfxcoopa/memory/allocator.h>
+#include <physxcoopa/components/collider.h>
+#include <physxcoopa/components/rigidbody.h>
+#include <toyengine/water/water_parallel.h>
+#include <toyengine/water/water_surface_query.h>
+#include <toyengine/water/water_tiles.h>
+#include <toyengine/water/water_waves.h>
+#include <toyengine/weather/weather_system.h>
+
+namespace toy {
+namespace water {
+
+void WaterSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameContext& ctx) {
+    connect_physics_(scene);
+    jobs_ = ctx.jobs;
+    const bool simulating = scene.is_simulating();
+    // Advanced per substep, in lockstep with physics, while simulating; otherwise (edit mode,
+    // or no physics) by the frame clock so CPU queries still see moving waves.
+    if (!physics_ || !simulating) time_ += ctx.delta_time;
+    simulating_ = simulating;
+    bake_spent_ms_ = 0.0f;   // this frame's bake budget, spent by bake_() -- see the stages below
+    resolve_focus_(scene);
+
+    // Depth and obstacle raycasts need PhysicsSystem's colliders, which it only gathers once
+    // it has executed -- after this system on a scene's first simulated frame, and never in
+    // edit mode. Until then bodies bake without them (stage 1) and are re-baked once.
+    const bool physics_ready = physics_ != nullptr && simulating && physics_->bound_count() > 0;
+
+    refresh_bodies(scene);
+    // Tiles built on a worker since the last frame: published here, where the scene can be
+    // touched, and dropped for any body that has gone in the meantime.
+    poll_tile_builds_(scene);
+    // Stage 1 for anything new, moved, or baked at another grid density: needed to be seen at
+    // all, and cheap next to stage 2 (no raycasts) -- but not free, and a streamed world hands
+    // several bodies over at once, so nearest first and a few per frame, like stage 2.
+    {
+        stage1_pending_ = 0;
+        std::vector<std::pair<float, WaterBody*>> pending;
+        for (WaterBody* body : bodies_) {
+            if (!body->owner) continue;
+            const glm::mat4& world = body->owner->get_transform()->transform().get_world_matrix();
+            const bool moved = body->baked && world != body->baked_world;
+            const bool density = body->baked && uses_grid_(*body) && body->baked_density != settings_.grid_density;
+            // A baked body whose tiles never landed still needs the bake: its build was
+            // cancelled when it left the live set (WaterBody::tiles_published).
+            if (body->baked && !moved && !density && body->tiles_published) continue;
+            if (tiles_pending_(*body)) continue;   // its tiles are being built; re-bake after
+            // A body that has never baked has no query bounds yet, so distance_to_body_() cannot
+            // place it: its owner's position stands in, so a streamed world's nearest new water
+            // (a terrain chunk's sits at its chunk origin) really is baked first.
+            const float d = body->query.valid() ? distance_to_body_(*body)
+                            : has_focus_        ? glm::distance(focus_, glm::vec3(world[3]))
+                                                : 0.0f;
+            pending.push_back({d, body});
+        }
+        std::sort(pending.begin(), pending.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        stage1_pending_ = static_cast<int>(pending.size());   // see warm_up_state()
+        const std::size_t budget = static_cast<std::size_t>(std::max(settings_.new_bakes_per_frame, 1));
+        for (std::size_t i = 0; i < pending.size() && i < budget; ++i) {
+            // Nearest always bakes; the rest only while this frame's millisecond budget holds
+            // (see WaterSettings::bake_budget_ms). Both stages draw on the one budget: they are
+            // the same work on the same thread, and a frame that spent it on stage 1 has no more
+            // room for a stage-2 re-bake than the other way round.
+            if (i > 0 && bake_spent_ms_ >= settings_.bake_budget_ms) break;
+            WaterBody& body = *pending[i].second;
+            bake_(scene, body, body.owner->get_transform()->transform().get_world_matrix(), false);
+        }
+    }
+    // Stage 2, nearest first, within range, a few per frame.
+    stage2_pending_ = 0;
+    if (physics_ready) {
+        std::vector<std::pair<float, WaterBody*>> pending;
+        for (WaterBody* body : bodies_) {
+            if (!body->owner || !body->baked || body->bake_stage >= 2) continue;
+            if (tiles_pending_(*body)) continue;   // stage 1's tiles are still in flight
+            const float d = distance_to_body_(*body);
+            if (d <= settings_.sim_radius) pending.push_back({d, body});
+        }
+        std::sort(pending.begin(), pending.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        stage2_pending_ = static_cast<int>(pending.size());   // see warm_up_state()
+        const std::size_t budget = static_cast<std::size_t>(std::max(settings_.bakes_per_frame, 1));
+        for (std::size_t i = 0; i < pending.size() && i < budget; ++i) {
+            // A stage-2 re-bake waits for a frame with budget left: the body is already visible
+            // with its stage-1 depths, so nothing is missing from the frame meanwhile.
+            if (bake_spent_ms_ >= settings_.bake_budget_ms) break;
+            WaterBody& body = *pending[i].second;
+            bake_(scene, body, body.owner->get_transform()->transform().get_world_matrix(), true);
+        }
+    }
+
+    apply_wind_(scene, ctx.delta_time);
+
+    if (!simulating) {
+        // Edit mode: the bodies are visible; nothing floats and nothing ripples. The editor
+        // edits the owner's material live, so keep tiles in step.
+        for (WaterBody* body : bodies_) sync_material(*body);
+        buoyant_.clear();
+        ripples_.clear();
+        emitters_.clear();
+        active_bodies_.clear();
+        return;
+    }
+    gather_active_bodies_();
+    gather_buoyant_(scene);
+    emit_ripples_(scene);
+}
+
+void WaterSystem::set_settings(const WaterSettings& settings) {
+    settings_ = settings;
+    while (ripples_.size() > settings_.max_ripples) ripples_.erase(ripples_.begin());
+    for (WaterBody* body : bodies_) {
+        body->tier_tessellates = settings_.tessellate;
+        sync_material(*body);
+    }
+}
+
+void WaterSystem::set_focus(const glm::vec3& p) {
+    focus_override_ = true;
+    has_focus_ = true;
+    focus_ = p;
+}
+
+bool WaterSystem::focus(glm::vec3& out) const {
+    if (has_focus_) out = focus_;
+    return has_focus_;
+}
+
+bool WaterSystem::is_published(const WaterBody& body) {
+    using coopa::gfx::engine::components::MeshRenderer;
+    if (!body.baked || !body.owner) return false;
+    if (body.tiles.empty()) {
+        auto* mr = body.owner->get_component<MeshRenderer>();
+        return mr && mr->is_ready();
+    }
+    for (const auto& t : body.tiles) {
+        auto* mr = t.object ? t.object->get_component<MeshRenderer>() : nullptr;
+        if (!mr || !mr->is_ready()) return false;
+    }
+    return true;
+}
+
+void WaterSystem::sync_material(WaterBody& body) {
+    using coopa::gfx::engine::components::MeshRenderer;
+    if (!body.owner) return;
+    auto* src = body.owner->get_component<MeshRenderer>();
+    if (!src) return;
+    // Tessellation is the owner's (its MeshRenderer checkbox and values); a tier that does
+    // not allow it overrides it off at runtime, leaving the authored block untouched.
+    src->tessellation_override = MeshRenderer::Tessellation{};   // enabled = false
+    src->has_tessellation_override = src->tessellation.enabled && !body.tier_tessellates;
+    for (auto& t : body.tiles) {
+        auto* mr = t.object ? t.object->get_component<MeshRenderer>() : nullptr;
+        if (!mr) continue;
+        mr->material = src->material;
+        mr->affects_reflection_probes = src->affects_reflection_probes;
+        mr->lod_bias = src->lod_bias;
+        mr->tessellation = src->tessellation;
+        mr->tessellation_override = src->tessellation_override;
+        mr->has_tessellation_override = src->has_tessellation_override;
+    }
+}
+
+void WaterSystem::refresh_bodies(coopa::scene::Scene& scene) {
+    // A body under a disabled object (its own, or a parent's) is gone: not drawn, not
+    // floating anything, not sampled by rain or queries.
+    bodies_.clear();
+    for (WaterBody* b : scene.get_components<WaterBody>()) {
+        if (b->owner && active_in_hierarchy_(*b->owner)) bodies_.push_back(b);
+    }
+}
+
+float WaterSystem::render_time() const {
+    if (!physics_ || !simulating_) return time_;
+    const auto& world = physics_->world();
+    return time_ - world.config().fixed_dt * (1.0f - world.interpolation_alpha());
+}
+
+namespace {
+
+/**
+ * @brief A local-frame body's surface at local XY `lp` (in its own frame), waves included -- the
+ *        way water_surface.glsl draws it: the calm surface, lifted along the body's up by the
+ *        waves of the world position there seen through the three axis planes (triplanar), so a
+ *        planet's water pieces agree where they meet. False off the body.
+ */
+bool frame_sample(const WaterBody& wb, const glm::vec2& lp, float t, const WaveQueryOptions& opt, WaterSample& out) {
+    if (!wb.baked) return false;
+    WaterBaseSample base;
+    if (!wb.query.sample_base(lp, base)) return false;
+    out.surface_height = base.height;
+    out.normal = glm::vec3(0.0f, 0.0f, 1.0f);
+    out.flow = base.flow;
+    out.depth = base.depth;
+    out.turbulence = base.turbulence;
+    const WaveSet& waves = wb.wave_set();
+    if (waves.calm) return true;
+    const glm::vec3 at = glm::vec3(wb.baked_world * glm::vec4(lp, base.height, 1.0f));
+    const glm::vec3 n0 = glm::normalize(glm::vec3(wb.baked_world[2]));
+    glm::vec3 blend = n0 * n0;
+    blend /= std::max(blend.x + blend.y + blend.z, 1e-4f);
+    const float atten = depth_attenuation(base.depth, waves.waves[0].lambda);
+    const float dist = opt.has_focus ? glm::distance(opt.focus, at) : 0.0f;
+    const glm::vec2 planes[3] = {glm::vec2(at.y, at.z), glm::vec2(at.x, at.z), glm::vec2(at.x, at.y)};
+    float h = 0.0f;
+    for (int k = 0; k < 3; ++k) {
+        if (blend[k] < 0.02f) continue;
+        h += blend[k] * evaluate(waves, planes[k], t, atten, dist).displacement.z;
+    }
+    out.surface_height = base.height + h;
+    return true;
+}
+
+} // namespace
+
+bool WaterSystem::sample(const glm::vec2& p, WaterSample& out, const WaterBody** which) const {
+    bool found = false;
+    const WaveQueryOptions opt = wave_options_();
+    for (const WaterBody* body : bodies_) {
+        if (body->local_frame) continue;   // its query is over its own frame, not world XY
+        WaterSample s;
+        if (!body->sample(p, time_, s, opt)) continue;
+        if (!found || s.surface_height > out.surface_height) {
+            out = s;
+            found = true;
+            if (which) *which = body;
+        }
+    }
+    return found;
+}
+
+void WaterSystem::emit_ripple(const glm::vec2& position, float strength, float radius) {
+    ripples_.push_back({position, time_, strength, radius});
+    const std::size_t cap = std::min(std::max<std::size_t>(settings_.max_ripples, 1), k_max_ripples);
+    while (ripples_.size() > cap) ripples_.erase(ripples_.begin());
+}
+
+WaterSystem::UnderwaterInfo WaterSystem::underwater_at(const glm::vec3& p) const {
+    UnderwaterInfo info;
+    WaterSample s;
+    const WaterBody* body = nullptr;
+    if (sample(glm::vec2(p), s, &body)) {
+        info.body = body;
+        info.surface_height = s.surface_height;
+        info.depth = s.surface_height - p.z;
+        info.underwater = info.depth > 0.0f && info.depth < s.depth + 1.0f;
+        return info;
+    }
+    // Local-frame bodies (a planet's water): measured along each body's own up.
+    const WaveQueryOptions opt = wave_options_();
+    for (const WaterBody* wb : bodies_) {
+        if (!wb->local_frame || !wb->baked) continue;
+        const glm::vec3 lp = glm::vec3(glm::inverse(wb->baked_world) * glm::vec4(p, 1.0f));
+        WaterSample sc;
+        if (!frame_sample(*wb, glm::vec2(lp), time_, opt, sc)) continue;
+        const float depth = sc.surface_height - lp.z;
+        if (info.body && depth <= info.depth) continue;
+        const glm::vec3 up = glm::normalize(glm::vec3(wb->baked_world[2]));
+        info.body = wb;
+        info.up = up;
+        info.surface_height = glm::dot(glm::vec3(wb->baked_world * glm::vec4(glm::vec2(lp), sc.surface_height, 1.0f)), up);
+        info.depth = depth;
+        info.underwater = depth > 0.0f && depth < sc.depth + 1.0f;
+    }
+    return info;
+}
+
+void WaterSystem::connect_physics_(coopa::scene::Scene& scene) {
+    auto* sys = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene.find_system("Physics"));
+    if (sys == physics_) return;
+    substep_connection_.disconnect();
+    physics_ = sys;
+    if (physics_) {
+        substep_connection_ = physics_->world().on_substep.connect(
+            [this](coopa::physx::PhysicsWorld& world, float h) { substep_(world, h); });
+    }
+}
+
+void WaterSystem::resolve_focus_(coopa::scene::Scene& scene) {
+    if (focus_override_) return;
+    has_focus_ = false;
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    // Only a camera of THIS scene: the main camera may belong to another (an editor's
+    // edit scene under a pushed play scene, or a previous scene not yet torn down).
+    if (!camera || !camera->owner || camera->scene != &scene) return;
+    if (auto* tc = camera->owner->get_transform()) {
+        // get_world_matrix(), not world_matrix(): this runs before TransformResolve (see
+        // TerrainSystem::camera_position_()).
+        focus_ = glm::vec3(tc->transform().get_world_matrix()[3]);
+        has_focus_ = true;
+    }
+}
+
+float WaterSystem::distance_to_body_(const WaterBody& body) const {
+    if (!has_focus_ || !body.query.valid()) return 0.0f;
+    const glm::vec3 f = body.local_frame && body.baked
+                            ? glm::vec3(glm::inverse(body.baked_world) * glm::vec4(focus_, 1.0f))
+                            : focus_;
+    const glm::vec3 c = glm::clamp(f, body.query.bounds_min(), body.query.bounds_max());
+    return glm::distance(c, f);
+}
+
+WaveQueryOptions WaterSystem::wave_options_() const {
+    WaveQueryOptions o;
+    o.iterations = settings_.wave_iterations;
+    o.has_focus = has_focus_;
+    o.focus = focus_;
+    return o;
+}
+
+ParallelFor WaterSystem::parallel_(std::size_t min_items) const {
+    coopa::job::JobEngine* jobs = jobs_;
+    if (!jobs || jobs->worker_count() < 2) return {};
+    return [jobs, min_items](std::size_t n, const RangeFn& fn) {
+        if (n < min_items) {
+            fn(0, n);
+            return;
+        }
+        jobs->parallel_for_blocking(n, 0, [&fn](std::size_t begin, std::size_t end) { fn(begin, end); },
+                                    0, coopa::job::Priority::Normal, coopa::job::Priority::Normal);
+    };
+}
+
+void WaterSystem::gather_active_bodies_() {
+    active_bodies_.clear();
+    // A floater stays simulated out to sim_radius * hysteresis; its own size is small next
+    // to the margin.
+    const float reach = settings_.sim_radius * settings_.sim_hysteresis + 25.0f;
+    for (WaterBody* body : bodies_) {
+        if (body->baked && distance_to_body_(*body) <= reach) active_bodies_.push_back(body);
+    }
+}
+
+int WaterSystem::grid_resolution_(const WaterBody& body, float density) {
+    const int res = static_cast<int>(std::lround(static_cast<float>(body.resolution) * density));
+    return std::clamp(res, 1, 512);
+}
+
+bool WaterSystem::local_geometry_(const WaterBody& body, float density, std::vector<glm::vec3>& positions,
+                            std::vector<glm::vec2>& uvs, std::vector<uint32_t>& indices, int& grid_res,
+                            const ParallelFor* par) {
+    positions.clear();
+    uvs.clear();
+    indices.clear();
+    grid_res = -1;
+    if (!body.geometry_indices.empty()) {
+        positions = body.geometry_positions;
+        uvs       = body.geometry_uvs;
+        uvs.resize(positions.size(), glm::vec2(0.0f));
+        indices   = body.geometry_indices;
+        return true;
+    }
+    if (!body.mesh_path.empty()) {
+        if (!body.source.is_loaded()) return false;
+        const auto& src = *body.source;
+        positions.reserve(src.vertices.size());
+        uvs.reserve(src.vertices.size());
+        for (const auto& v : src.vertices) {
+            positions.push_back(v.position);
+            uvs.push_back(v.uv);
+        }
+        indices = src.indices;
+        return !indices.empty();
+    }
+    const int res = grid_resolution_(body, density);
+    grid_res = res;
+    const glm::vec2 half = body.size * 0.5f;
+    const std::size_t row = static_cast<std::size_t>(res) + 1;
+    positions.resize(row * row);
+    uvs.resize(row * row);
+    indices.resize(static_cast<std::size_t>(res) * static_cast<std::size_t>(res) * 6);
+    // Row by row, each row into its own slots (rows of vertices, then rows of quads).
+    run_range(par, row, [&](std::size_t y0, std::size_t y1) {
+        for (std::size_t y = y0; y < y1; ++y) {
+            for (std::size_t x = 0; x < row; ++x) {
+                const glm::vec2 f(static_cast<float>(x) / res, static_cast<float>(y) / res);
+                positions[y * row + x] = glm::vec3(-half + f * body.size, 0.0f);
+                uvs[y * row + x] = f;
+            }
+            if (y >= static_cast<std::size_t>(res)) continue;
+            for (std::size_t x = 0; x < static_cast<std::size_t>(res); ++x) {
+                const uint32_t i0 = static_cast<uint32_t>(y * row + x), i1 = i0 + 1;
+                const uint32_t i2 = i0 + static_cast<uint32_t>(row), i3 = i2 + 1;
+                uint32_t* q = &indices[(y * static_cast<std::size_t>(res) + x) * 6];
+                q[0] = i0; q[1] = i1; q[2] = i3; q[3] = i0; q[4] = i3; q[5] = i2;
+            }
+        }
+    });
+    return true;
+}
+
+bool WaterSystem::static_raycast_raw_(const glm::vec3& origin, const glm::vec3& dir, float max_distance,
+                         FlowRayHit& out) const {
+    if (!physics_) return false;
+    coopa::physx::geometry::Ray ray;
+    ray.origin = origin;
+    ray.direction = dir;
+    ray.max_distance = max_distance;
+    const auto& world = physics_->world();
+    // Fast path: the closest solid hit is almost always the static bank or bed. Only when a
+    // dynamic body is in the way is every hit along the ray needed.
+    coopa::physx::query::RaycastHit closest;
+    if (!world.raycast(ray, closest, ~0u, false)) return false;
+    if (const auto* b = world.get_body(closest.body); b && b->type == coopa::physx::dynamics::BodyType::Static) {
+        out.distance = closest.distance;
+        out.normal = closest.normal;
+        return true;
+    }
+    for (const auto& hit : world.raycast_all(ray, ~0u, false)) {
+        const auto* b = world.get_body(hit.body);
+        if (!b || b->type != coopa::physx::dynamics::BodyType::Static) continue;
+        out.distance = hit.distance;
+        out.normal = hit.normal;
+        return true;
+    }
+    return false;
+}
+
+bool WaterSystem::static_raycast_(const glm::vec3& origin, const glm::vec3& dir, float max_distance,
+                     FlowRayHit& out) const {
+    if (!static_raycast_raw_(origin, dir, max_distance, out)) return false;
+    if (glm::dot(out.normal, dir) > 0.0f) out.normal = -out.normal;
+    return true;
+}
+
+float WaterSystem::probe_depth_along_(const glm::vec3& p, const glm::vec3& down, float max_depth) const {
+    FlowRayHit up;
+    if (static_raycast_raw_(p, -down, 25.0f, up) && glm::dot(up.normal, -down) > 0.0f) return 0.0f;
+    FlowRayHit hit;
+    if (static_raycast_raw_(p - down * 0.01f, down, max_depth, hit)) return std::max(hit.distance - 0.01f, 0.0f);
+    return max_depth;
+}
+
+float WaterSystem::probe_depth_(const glm::vec3& p, float max_depth) const {
+    // Hitting an UP-facing surface on the way up means `p` is beneath ground (a water mesh
+    // extending under its banks). A down-facing one (a pier deck's underside) is an
+    // overhang, not burial.
+    FlowRayHit up;
+    if (static_raycast_raw_(p, glm::vec3(0.0f, 0.0f, 1.0f), 25.0f, up) && up.normal.z > 0.0f) {
+        return 0.0f;
+    }
+    FlowRayHit down;
+    if (static_raycast_raw_(p + glm::vec3(0.0f, 0.0f, 0.01f), glm::vec3(0.0f, 0.0f, -1.0f), max_depth, down)) {
+        return std::max(down.distance - 0.01f, 0.0f);
+    }
+    return max_depth;
+}
+
+void WaterSystem::bake_(coopa::scene::Scene& scene, WaterBody& body, const glm::mat4& world, bool with_physics) {
+    // TOY_WATER_LOG_BAKES=<ms>: diagnostic. Reports every bake that runs longer than that, with
+    // the stage and the vertex count -- what a `cpu.scene.water` spike in a profile is made of
+    // (a bake is paced per frame, see new_bakes_per_frame, but one of them is not divisible).
+    static const double log_over_ms = [] {
+        const char* v = std::getenv("TOY_WATER_LOG_BAKES");
+        return v != nullptr && *v != '\0' ? std::strtod(v, nullptr) : 0.0;
+    }();
+    const auto bake_start = std::chrono::steady_clock::now();
+    // Charged to the frame's budget on every exit path (see execute()), so a bake that returns
+    // early from local_geometry_() still counts the work it did.
+    struct BakeLog {
+        const WaterBody& body;
+        bool with_physics;
+        double over_ms;
+        std::chrono::steady_clock::time_point start;
+        float& spent_ms;
+        ~BakeLog() {
+            const double ms = std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - start).count();
+            spent_ms += static_cast<float>(ms);
+            if (over_ms <= 0.0 || ms < over_ms) return;
+            std::printf("[water] bake %s %.2f ms: %zu authored corners, %s\n",
+                        with_physics ? "stage2" : "stage1", ms, body.geometry_positions.size(),
+                        body.owner != nullptr ? body.owner->name().c_str() : "?");
+            std::fflush(stdout);
+        }
+    } bake_log{body, with_physics, log_over_ms, bake_start, bake_spent_ms_};
+    std::vector<glm::vec3> corner_pos;
+    std::vector<glm::vec2> corner_uv;
+    std::vector<uint32_t>  corner_idx;
+    int grid_res = -1;
+    // Bake work spread over the job workers where a body is big enough (water_parallel.h).
+    const ParallelFor par_rows  = parallel_(256);
+    const ParallelFor par_verts = parallel_(k_parallel_vertices);
+    const ParallelFor par_rays  = parallel_(k_parallel_rays);
+    if (!local_geometry_(body, settings_.grid_density, corner_pos, corner_uv, corner_idx, grid_res, &par_rows)) return;
+
+    // Authored per-corner depths (set_geometry()): exact, already consistent across the bodies
+    // that share an edge (a TileTerrain's chunks read theirs from one tile grid), and available
+    // before physics -- so they replace the stage-2 depth raycasts outright.
+    const bool authored_depth = !body.geometry_indices.empty() &&
+                                body.geometry_depths.size() == body.geometry_positions.size();
+
+    std::vector<glm::vec3> local_pos;
+    std::vector<glm::vec2> uvs;
+    std::vector<uint32_t>  indices;
+    std::vector<float>     welded_depth;
+    std::vector<float>     welded_wave;
+    if (grid_res >= 1) {
+        // A procedural grid is already welded (and row-major, as build_grid_tiles() expects).
+        local_pos = std::move(corner_pos);
+        uvs       = std::move(corner_uv);
+        indices   = std::move(corner_idx);
+    } else if (authored_depth) {
+        // The authored wave scale rides along with the depth: both are per corner, both must come
+        // out of the weld on the same vertex (a corner two bodies share carries one of each).
+        weld_by_position(corner_pos, corner_uv, body.geometry_depths, body.geometry_wave_scales,
+                         corner_idx, local_pos, uvs, welded_depth, welded_wave, indices);
+    } else {
+        weld_by_position(corner_pos, corner_uv, corner_idx, local_pos, uvs, indices);
+    }
+
+    const std::size_t n = local_pos.size();
+    std::vector<glm::vec3> world_pos(n);
+    // A local-frame body (a planet's water) works in its own frame: its "world" is its local space.
+    const bool frame = body.local_frame;
+    run_range(&par_verts, n, [&](std::size_t begin, std::size_t end) {
+        for (std::size_t i = begin; i < end; ++i)
+            world_pos[i] = frame ? local_pos[i] : glm::vec3(world * glm::vec4(local_pos[i], 1.0f));
+    });
+
+    std::vector<glm::vec3> flow(n, glm::vec3(0.0f));
+    std::vector<float> turbulence(n, 0.0f);
+    if (body.mode == WaterMode::Flowing) {
+        FlowBakeParams fp;
+        fp.speed           = body.flow_speed;
+        fp.min_speed       = body.flow_min_speed;
+        fp.slope_gain      = body.flow_slope_gain;
+        fp.obstacle_radius = body.obstacle_radius;
+        fp.wake_length     = body.wake_length;
+        FlowRayFn ray;
+        if (with_physics) {
+            ray = [this](const glm::vec3& o, const glm::vec3& d, float m, FlowRayHit& h) {
+                return static_raycast_(o, d, m, h);
+            };
+        }
+        bake_flow(world_pos, uvs, indices, fp, ray, flow, turbulence);
+    }
+
+    std::vector<float> depth(n, body.max_depth);
+    if (authored_depth) {
+        depth = std::move(welded_depth);
+    } else if (with_physics) {
+        // Two raycasts a vertex, independent of each other: spread over the job workers.
+        // PhysicsWorld's queries are read-only and safe to run concurrently (thread_local
+        // traversal stacks -- see broadphase/aabb_tree.h).
+        if (frame) {
+            const glm::vec3 down = glm::normalize(glm::vec3(world * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
+            run_range(&par_rays, n, [&](std::size_t begin, std::size_t end) {
+                for (std::size_t i = begin; i < end; ++i)
+                    depth[i] = probe_depth_along_(glm::vec3(world * glm::vec4(local_pos[i], 1.0f)), down, body.max_depth);
+            });
+        } else {
+            run_range(&par_rays, n, [&](std::size_t begin, std::size_t end) {
+                for (std::size_t i = begin; i < end; ++i) depth[i] = probe_depth_(world_pos[i], body.max_depth);
+            });
+        }
+    }
+
+    // CPU query (world space).
+    std::vector<WaterVertex> wv(n);
+    run_range(&par_verts, n, [&](std::size_t begin, std::size_t end) {
+        for (std::size_t i = begin; i < end; ++i) {
+            wv[i] = {world_pos[i], flow[i], depth[i], turbulence[i],
+                     welded_wave.empty() ? 1.0f : std::clamp(welded_wave[i], 0.0f, 1.0f)};
+        }
+    });
+    body.query.build(std::move(wv), indices, &par_verts);
+
+    // The tiles and their GPU meshes -- the expensive half (see TileBuild) -- on a worker where
+    // there is one. The body counts as baked from here: its CPU query is live, so buoyancy and
+    // every sample() answer are already correct, and is_published() stays false for the frame or
+    // two until the mesh lands, exactly as it already did for a stage-2 re-upload.
+    auto build = plan_tiles_(body, world, std::move(local_pos), std::move(indices), std::move(flow),
+                             std::move(depth), std::move(turbulence), std::move(welded_wave), grid_res);
+    if (jobs_ != nullptr && jobs_->worker_count() > 1) {
+        PendingTiles pending;
+        pending.body  = &body;
+        pending.build = build;
+        pending.job   = jobs_->create_handle();
+        if (pending.job.is_valid()) {
+            jobs_->submit([build]() { build->run(); }, k_water_job_type, pending.job);
+            // Not published until the job lands, and a cancelled job never publishes at
+            // all -- see WaterBody::tiles_published.
+            body.tiles_published = false;
+            pending_tiles_.push_back(std::move(pending));
+        } else {
+            // Handle pool exhausted: do it here rather than drop the body's mesh.
+            build->run();
+            publish_tiles_(scene, body, *build);
+        }
+    } else {
+        build->run();
+        publish_tiles_(scene, body, *build);
+    }
+    body.tier_tessellates = settings_.tessellate;
+    apply_material_(body);
+
+    body.baked_world = world;
+    body.baked_density = settings_.grid_density;
+    body.baked = true;
+    // With authored depths a Planar body has nothing left to learn from physics -- its first
+    // bake is final (no re-bake, no pop, and no stage-1/2 depth mismatch against a neighbour).
+    // A Flowing one still takes its stage-2 pass for obstacle deflection and wakes.
+    const bool complete = with_physics || (authored_depth && body.mode == WaterMode::Planar);
+    body.bake_stage = complete ? 2 : 1;
+}
+
+std::vector<coopa::gfx::engine::data::Vertex> WaterSystem::make_vertices_(const glm::mat4& world, const std::vector<glm::vec3>& local_pos, const std::vector<uint32_t>& indices,
+               const std::vector<glm::vec3>& flow_ws, const std::vector<float>& depth,
+               const std::vector<float>& turbulence, const std::vector<float>& wave_scale,
+               const ParallelFor* par, bool flat) {
+    using coopa::gfx::engine::data::Vertex;
+    // Object-space normals, area-weighted from the welded triangles. Serial: triangles scatter
+    // into shared vertices, and a fixed summation order keeps the result reproducible.
+    // A procedural grid (`flat`) lies in its local XY plane: every normal is +Z, nothing to sum.
+    std::vector<glm::vec3> normals(local_pos.size(), flat ? glm::vec3(0.0f, 0.0f, 1.0f) : glm::vec3(0.0f));
+    for (std::size_t t = 0; !flat && t + 2 < indices.size(); t += 3) {
+        glm::vec3 a = local_pos[indices[t]], b = local_pos[indices[t + 1]], c = local_pos[indices[t + 2]];
+        glm::vec3 cr = glm::cross(b - a, c - a);
+        if (cr.z < 0.0f) cr = -cr; // winding is fixed per tile; the normal faces +Z regardless
+        for (int k = 0; k < 3; ++k) normals[indices[t + k]] += cr;
+    }
+    const glm::mat3 to_local = glm::inverse(glm::mat3(world));
+    std::vector<Vertex> verts(local_pos.size());
+    run_range(par, local_pos.size(), [&](std::size_t begin, std::size_t end) {
+        for (std::size_t i = begin; i < end; ++i) {
+            glm::vec3 nrm = glm::length(normals[i]) > 1e-12f ? glm::normalize(normals[i]) : glm::vec3(0.0f, 0.0f, 1.0f);
+            if (nrm.z < 0.0f) nrm = -nrm;
+            verts[i].position = local_pos[i];
+            verts[i].normal   = nrm;
+            verts[i].uv       = glm::vec2(depth[i], turbulence[i]);
+            // w == 2: baked (see file doc). Never exactly zero: stock vertex shaders (the editor's
+            // preview shading draws water with transparent.vert, not water.vert) normalize this slot as a
+            // real tangent, and a zero vector would turn the whole surface NaN. 1e-4 m/s of
+            // "flow" is invisible to water.vert and buoyancy alike.
+            glm::vec3 t = to_local * flow_ws[i];
+            if (glm::dot(t, t) < 1e-8f) t = glm::vec3(1e-4f, 0.0f, 0.0f);
+            // w = 2 + the wave scale (see the file doc): still 2 on water that waves fully, up to
+            // 3 never, so `w > 1.5` still reads "baked" and the shader recovers the scale as w - 2.
+            const float ws = wave_scale.empty() ? 1.0f : std::clamp(wave_scale[i], 0.0f, 1.0f);
+            verts[i].tangent  = glm::vec4(t, 2.0f + ws);
+        }
+    });
+    return verts;
+}
+
+bool WaterSystem::tiles_pending_(const WaterBody& body) const {
+    for (const PendingTiles& p : pending_tiles_) {
+        if (p.body == &body) return true;
+    }
+    return false;
+}
+
+void WaterSystem::poll_tile_builds_(coopa::scene::Scene& scene) {
+    if (pending_tiles_.empty()) return;
+    for (std::size_t i = 0; i < pending_tiles_.size();) {
+        PendingTiles& pending = pending_tiles_[i];
+        // Gone: the body's component was destroyed (a chunk streamed out) between the submit and
+        // now. Only the POINTER is compared -- bodies_ was just refreshed from the live
+        // components -- and the job keeps the build alive through its own shared_ptr.
+        const bool live = std::find(bodies_.begin(), bodies_.end(), pending.body) != bodies_.end();
+        if (!live) {
+            if (jobs_ != nullptr) jobs_->cancel(pending.job);
+            pending.job.close();
+            pending_tiles_.erase(pending_tiles_.begin() + static_cast<std::ptrdiff_t>(i));
+            continue;
+        }
+        if (!pending.job.is_complete()) {
+            ++i;
+            continue;
+        }
+        publish_tiles_(scene, *pending.body, *pending.build);
+        pending.job.close();
+        pending_tiles_.erase(pending_tiles_.begin() + static_cast<std::ptrdiff_t>(i));
+    }
+}
+
+std::shared_ptr<WaterSystem::TileBuild> WaterSystem::plan_tiles_(
+        const WaterBody& body, const glm::mat4& world,
+        std::vector<glm::vec3> local_pos, std::vector<uint32_t> indices,
+        std::vector<glm::vec3> flow_ws, std::vector<float> depth,
+        std::vector<float> turbulence, std::vector<float> wave_scale, int grid_res) const {
+    auto build = std::make_shared<TileBuild>();
+
+    // Bounds inflation for what the vertex shader adds: the full wave sum, vertically and
+    // horizontally (local space; a scaled body is rare and the margin is generous) -- of the
+    // roughest sea the weather's wind can make, so tiles never cull a windy crest.
+    const WaveSet ws = WaveSet::from(wind_waves_max(body.waves, body.wind_response));
+    glm::vec3 inflate(0.05f);
+    if (!ws.calm) {
+        for (const auto& w : ws.waves) {
+            inflate.x += w.qa;
+            inflate.y += w.qa;
+            inflate.z += w.amp;
+        }
+    }
+
+    const glm::vec3 scale(glm::length(glm::vec3(world[0])), glm::length(glm::vec3(world[1])),
+                          glm::length(glm::vec3(world[2])));
+    const float max_scale = std::max(std::max(scale.x, scale.y), std::max(scale.z, 1e-4f));
+    // Auto: k_default_tile_size, but never more than k_max_tiles_per_side a side (each tile
+    // has a per-frame CPU cost; see the constant's doc).
+    float tile_len = body.tile_size;
+    if (tile_len <= 0.0f) {
+        glm::vec2 lo(1e30f), hi(-1e30f);
+        for (const glm::vec3& p : local_pos) { lo = glm::min(lo, glm::vec2(p)); hi = glm::max(hi, glm::vec2(p)); }
+        const float extent = std::max(hi.x - lo.x, hi.y - lo.y) * max_scale;
+        tile_len = std::max(k_default_tile_size, extent / static_cast<float>(k_max_tiles_per_side));
+    }
+    tile_len /= max_scale;
+
+    // LOD distances in the body's LOCAL units, like the tile bounds they are compared with:
+    // the renderer's screen-size fraction (radius / distance) is then scale-independent.
+    build->lod.lod_bias = settings_.lod_bias;
+    if (!ws.calm) {
+        for (int i = 0; i < k_wave_count && i < 4; ++i) {
+            build->lod.wave_lambdas[i] = ws.waves[i].lambda / max_scale;
+            build->lod.wave_amps[i]    = ws.waves[i].amp / max_scale;
+        }
+    }
+
+    build->local_pos     = std::move(local_pos);
+    build->indices       = std::move(indices);
+    build->flow_ws       = std::move(flow_ws);
+    build->depth         = std::move(depth);
+    build->turbulence    = std::move(turbulence);
+    build->wave_scale    = std::move(wave_scale);
+    // A local-frame body's flow is already in its own frame (its bake ran there).
+    build->vertex_world  = body.local_frame ? glm::mat4(1.0f) : world;
+    build->flat          = grid_res >= 1;
+    build->grid_res      = grid_res;
+    build->body_size     = glm::vec2(body.size);
+    build->tile_len      = tile_len;
+    build->auto_tile_len = body.tile_size <= 0.0f;
+    build->inflate       = inflate;
+    build->device        = device_;
+    build->allocator     = allocator_;
+    return build;
+}
+
+void WaterSystem::TileBuild::run() {
+    using coopa::gfx::engine::data::Mesh;
+    const auto verts = make_vertices_(vertex_world, local_pos, indices, flow_ws, depth, turbulence,
+                                      wave_scale, nullptr, flat);
+    const std::size_t grid_verts = grid_res >= 1 ? static_cast<std::size_t>(grid_res + 1) * (grid_res + 1) : 0;
+    if (grid_res >= 1 && verts.size() == grid_verts) {
+        const float spacing = std::max(body_size.x, body_size.y) / static_cast<float>(grid_res);
+        int qpt = 1;
+        while (qpt * 2 <= std::max(1.0f, tile_len / std::max(spacing, 1e-4f))) qpt *= 2;
+        qpt = std::max(qpt, 2);
+        // Rounding down to a power of two must not undo the auto cap on the tile count.
+        if (auto_tile_len) {
+            while ((grid_res + qpt - 1) / qpt > k_max_tiles_per_side) qpt *= 2;
+        }
+        tiles = build_grid_tiles(verts, grid_res, grid_res, qpt, spacing, lod, inflate, nullptr);
+    } else {
+        tiles = build_mesh_tiles(verts, indices, tile_len, inflate, &lod, nullptr);
+    }
+    // The GPU meshes too, as ChunkBuildJob does: the upload is a small part of a bake, and
+    // doing it here leaves publishing nothing that touches the device.
+    if (device != nullptr && allocator != nullptr) {
+        meshes.reserve(tiles.size());
+        for (WaterTile& tile : tiles) {
+            meshes.push_back(std::make_shared<Mesh>(Mesh::from_cpu(*device, *allocator, std::move(tile.data))));
+        }
+    }
+}
+
+void WaterSystem::publish_tiles_(coopa::scene::Scene& scene, WaterBody& body, TileBuild& built) {
+    using coopa::gfx::engine::components::MeshRenderer;
+    using coopa::gfx::engine::data::Mesh;
+    // First, and whatever the early-outs below decide: this marks that the bake's build
+    // ARRIVED, which is what tells stage 1 the body does not need baking again. The
+    // early-outs are all "there is nothing to publish" (no device, no tiles), not "come
+    // back later" -- only a cancelled job skips this function, and that one must re-bake.
+    body.tiles_published = true;
+    if (!device_ || !allocator_ || !assets_ || !body.owner) return;
+    std::vector<WaterTile>& tiles = built.tiles;
+    if (tiles.empty() || built.meshes.size() != tiles.size()) return;
+
+    auto* renderer = body.owner->get_component<MeshRenderer>();
+    if (!renderer) renderer = add_default_renderer_(body);
+    // One stable synthetic id per body instance (and tile): a re-bake (stage 2, a moved body,
+    // an editor edit) re-publishes into the same slot, and AssetManager::create() retires the
+    // previous mesh with its in-flight grace period -- frames still drawing it keep a valid
+    // buffer.
+    const std::string base = "runtime/water/" + body.owner->name() + "@" +
+                             std::to_string(reinterpret_cast<std::uintptr_t>(&body));
+
+    if (tiles.size() == 1) {
+        body.gpu_mesh = std::move(built.meshes[0]);
+        body.single_asset_id = base;
+        renderer->set_mesh(assets_->create<Mesh>(base, body.gpu_mesh));
+        retire_tiles_(body, {});
+        return;
+    }
+
+    // Several tiles: the owner keeps the authored material but draws nothing itself.
+    body.gpu_mesh.reset();
+    if (!body.single_asset_id.empty()) {
+        renderer->set_mesh({});
+        assets_->unload(coopa::asset::AssetId::from_path(body.single_asset_id));
+        body.single_asset_id.clear();
+    }
+    std::vector<WaterBody::TileSlot> next;
+    next.reserve(tiles.size());
+    for (std::size_t ti = 0; ti < tiles.size(); ++ti) {
+        WaterTile& tile = tiles[ti];
+        const std::string id = base + "/t" + std::to_string(tile.coord.x) + "_" + std::to_string(tile.coord.y);
+        auto mesh = std::move(built.meshes[ti]);
+        WaterBody::TileSlot slot;
+        slot.asset_id = id;
+        for (auto& old : body.tiles) {
+            if (old.asset_id == id && old.object) {
+                slot.object = old.object;
+                old.object = nullptr; // reused: not retired below
+                break;
+            }
+        }
+        if (!slot.object) {
+            auto object = std::make_unique<coopa::scene::SceneObject>(
+                body.owner->name() + ".water_tile_" + std::to_string(tile.coord.x) + "_" + std::to_string(tile.coord.y));
+            // Identity under the owner: tiles are in its local space. add_child() does NOT link
+            // transforms (see SceneObject::add_child()); without this a tile would draw at the
+            // world origin.
+            auto* tc = object->add_component<coopa::scene::TransformComponent>();
+            if (auto* owner_tc = body.owner->get_transform()) tc->set_parent_transform(&owner_tc->transform());
+            auto* mr = object->add_component<MeshRenderer>();
+            mr->material = renderer->material;
+            mr->affects_reflection_probes = renderer->affects_reflection_probes;
+            mr->tessellation = renderer->tessellation;
+            mr->tessellation_override = renderer->tessellation_override;
+            mr->has_tessellation_override = renderer->has_tessellation_override;
+            slot.object = body.owner->add_child(std::move(object));
+            // Stamps the Scene back-pointer onto the new components, as TerrainSystem does.
+            scene.adopt(*slot.object);
+        }
+        slot.object->get_component<MeshRenderer>()->set_mesh(assets_->create<Mesh>(id, std::move(mesh)));
+        next.push_back(std::move(slot));
+    }
+    retire_tiles_(body, std::move(next));
+}
+
+void WaterSystem::retire_tiles_(WaterBody& body, std::vector<WaterBody::TileSlot> keep) {
+    for (auto& old : body.tiles) {
+        if (!old.object) continue;
+        // Destroying the object drops the last handle on its mesh, so the slot can go too.
+        if (body.owner) body.owner->detach_child(old.object);
+        if (assets_) assets_->unload(coopa::asset::AssetId::from_path(old.asset_id));
+    }
+    body.tiles = std::move(keep);
+}
+
+bool WaterSystem::active_in_hierarchy_(const coopa::scene::SceneObject& obj) {
+    for (const coopa::scene::SceneObject* o = &obj; o; o = o->parent()) {
+        if (!o->active()) return false;
+    }
+    return true;
+}
+
+coopa::gfx::engine::components::MeshRenderer* WaterSystem::add_default_renderer_(WaterBody& body) {
+    using namespace coopa::gfx::engine::components;
+    auto* r = body.owner->add_component<MeshRenderer>();
+    r->material.albedo               = body.deep_color;
+    r->material.alpha                = 0.55f;
+    r->material.alpha_mode           = AlphaMode::Blend;
+    r->material.roughness            = 0.06f;
+    r->material.refraction           = true;
+    r->material.ior                  = 1.33f;
+    r->material.refraction_tint      = glm::vec3(0.55f, 0.82f, 0.86f);
+    r->affects_reflection_probes     = false;
+    r->scene                         = body.scene;
+    // The body's own look, now that there is a renderer to put it on. apply_material_() gives up
+    // when the object has none, and for water the renderer is created HERE, after the bake has
+    // already tried: a terrain chunk's water object starts as a Transform and a WaterBody alone
+    // (TerrainSystem::add_chunk_water_), so without this the material keeps the defaults above
+    // and `shader` stays empty -- no water shader, so the surface never draws its waves, depth
+    // colour, foam or ripples, and a lake reads as its bare bed.
+    apply_material_(body);
+    return r;
+}
+
+void WaterSystem::apply_wind_(coopa::scene::Scene& scene, float dt) {
+    glm::vec2 wind(0.0f);
+    bool live = false;
+    if (const weather::WeatherSystem* w = weather::find(scene); w && w->enabled() && w->state().enabled) {
+        wind = glm::vec2(w->state().wind);
+        live = true;
+    }
+    // The MEAN wind, eased over a couple of seconds: gusts would make the sea breathe, and a
+    // condition change must never jump it.
+    const float ease = 1.0f - std::exp(-std::max(dt, 0.0f) / 2.0f);
+    for (WaterBody* body : bodies_) {
+        if (!body->owner || !body->baked) continue;
+        if (!live || body->wind_response <= 0.0f) {
+            if (body->wind_applied) {
+                body->wind_applied = false;
+                apply_material_(*body);
+            }
+            continue;
+        }
+        body->wind_smoothed = body->wind_applied ? body->wind_smoothed + (wind - body->wind_smoothed) * ease : wind;
+        const WaveParams wv = wind_waves(body->waves, body->wind_response, body->wind_smoothed);
+        const float rip = wind_ripple_scale(body->wind_response, body->wind_smoothed);
+        const glm::vec4 d = glm::abs(wv.pack() - body->wind_waves.pack());
+        if (body->wind_applied && std::max({d.x, d.y, d.z, d.w}) < 1e-4f && std::abs(rip - body->wind_ripple) < 1e-3f) continue;
+        body->wind_applied = true;
+        body->wind_waves = wv;
+        body->wind_ripple = rip;
+        apply_material_(*body);
+    }
+}
+
+void WaterSystem::apply_material_(WaterBody& body) {
+    if (!body.owner) return;
+    auto* renderer = body.owner->get_component<coopa::gfx::engine::components::MeshRenderer>();
+    if (!renderer) return;
+    auto& m = renderer->material;
+    // A local-frame body (a planet's water) draws with the water shader's planet build.
+    m.shader               = body.local_frame ? "water_local_frame" : "water";
+    m.shader_params        = body.live_waves().pack();
+    m.shader_params_ext[0] = glm::vec4(body.foam_color, body.foam_amount);
+    m.shader_params_ext[1] = glm::vec4(body.shore_foam_depth, body.edge_fade_depth,
+                                       body.ripple_strength * (body.wind_applied ? body.wind_ripple : 1.0f), body.ripple_scale);
+    m.refraction_thickness = std::max(body.clarity, 1e-3f);
+    if (m.alpha_mode != coopa::gfx::engine::components::AlphaMode::Blend) {
+        m.alpha_mode = coopa::gfx::engine::components::AlphaMode::Blend;
+    }
+    sync_material(body);
+}
+
+float WaterSystem::bounding_radius_(const coopa::physx::components::RigidbodyComponent& rb) {
+    using coopa::physx::collision::ShapeType;
+    float r = 0.0f;
+    for (auto* col : rb.owner->get_components_in_children<coopa::physx::components::Collider>()) {
+        if (col->is_trigger() || col->owner != rb.owner) continue; // children: rare, skip
+        const glm::vec3 scale = coopa::physx::util::world_trs(col->owner->get_transform()->transform()).scale;
+        const coopa::physx::collision::Shape s = col->make_shape(scale);
+        const float c = glm::length(s.local_center - rb.local_center_of_mass());
+        switch (s.type) {
+            case ShapeType::Sphere:  r = std::max(r, c + s.radius); break;
+            case ShapeType::Box:     r = std::max(r, c + glm::length(s.half_extents)); break;
+            case ShapeType::Capsule: r = std::max(r, c + s.capsule_half_height + s.capsule_radius); break;
+            default: break;
+        }
+    }
+    return r;
+}
+
+void WaterSystem::emit_ripples_(coopa::scene::Scene& scene) {
+    while (!ripples_.empty() && time_ - ripples_.front().birth > k_ripple_lifetime) {
+        ripples_.erase(ripples_.begin());
+    }
+    if (bodies_.empty()) {
+        emitters_.clear();
+        return;
+    }
+    for (auto& [rb, e] : emitters_) e.seen = false;
+    const float range2 = settings_.ripple_range * settings_.ripple_range;
+    for (auto* rb : scene.get_components<coopa::physx::components::RigidbodyComponent>()) {
+        if (!rb->owner || !rb->body_id().is_valid()) continue;
+        RippleEmitter& e = emitters_[rb];
+        e.seen = true;
+        const glm::vec3 c = rb->world_center_of_mass();
+        // Out of ripple range: too far for a ring to show. Checked before anything costs.
+        if (has_focus_) {
+            const glm::vec3 d = c - focus_;
+            if (glm::dot(d, d) > range2) {
+                e.touching = false;
+                continue;
+            }
+        }
+        if (e.radius < 0.0f) e.radius = bounding_radius_(*rb);
+        if (e.radius <= 0.0f) continue;
+
+        WaterSample s;
+        const bool over = sample(glm::vec2(c), s);
+        const bool touching = over && c.z - e.radius < s.surface_height && c.z + e.radius > s.surface_height;
+        if (touching) {
+            const glm::vec3 v = rb->velocity();
+            const float vh = glm::length(glm::vec2(v) - glm::vec2(s.flow));
+            const float spacing = std::max(0.3f, e.radius * 0.6f);
+            if (!e.touching && v.z < -0.8f) {
+                emit_ripple(glm::vec2(c), glm::clamp(-v.z * e.radius * 0.35f, 0.1f, 1.5f), e.radius * 0.9f);
+            } else if (vh > 0.25f && glm::distance(glm::vec2(c), e.last_position) > spacing) {
+                emit_ripple(glm::vec2(c), glm::clamp(vh * e.radius * 0.35f, 0.03f, 1.0f), e.radius * 0.6f);
+            } else if (std::abs(v.z) > 0.25f && time_ - e.last_time > 0.5f) {
+                emit_ripple(glm::vec2(c), glm::clamp(std::abs(v.z) * e.radius * 0.3f, 0.02f, 0.6f), e.radius * 0.8f);
+            } else {
+                e.touching = touching;
+                continue;
+            }
+            e.last_position = glm::vec2(c);
+            e.last_time = time_;
+        }
+        e.touching = touching;
+    }
+    for (auto it = emitters_.begin(); it != emitters_.end();) {
+        it = it->second.seen ? std::next(it) : emitters_.erase(it);
+    }
+    emit_env_ripples_(scene);
+}
+
+void WaterSystem::emit_env_ripples_(coopa::scene::Scene& scene) {
+    // A local influence over water rings it: a rotor's downwash churns the pond under it.
+    // Rings only -- the per-body wave response (apply_wind_) rewrites the body's MATERIAL when
+    // it changes, which is far too expensive to drive from something that moves every frame.
+    const env::EnvSystem* es = env::find_env(scene);
+    if (!es) return;
+    const env::EnvField& f = es->field();
+    const float range2 = settings_.ripple_range * settings_.ripple_range;
+    for (int i = 0; i < f.count; ++i) {
+        const env::EnvSource& src = f.source[i];
+        if (src.water_disturb <= 0.0f || src.radius <= 0.0f) continue;
+        if (has_focus_) {
+            const glm::vec3 d = src.position - focus_;
+            if (glm::dot(d, d) > range2) continue;
+        }
+        // Probe the centre first, then a ring inside the footprint: a rotor hovering BESIDE a
+        // pond still has to churn the part of it the wash reaches. Without this a source whose
+        // centre is over dry ground rings nothing, however much of the water it covers.
+        WaterSample s;
+        glm::vec2 at(src.position);
+        bool over = sample(at, s);
+        if (!over) {
+            const float probe_r = src.radius * 0.65f;
+            for (int k = 0; k < 8 && !over; ++k) {
+                const float a = 0.7853981634f * static_cast<float>(k);   // 8 compass points
+                const glm::vec2 q(src.position.x + std::cos(a) * probe_r,
+                                  src.position.y + std::sin(a) * probe_r);
+                if (sample(q, s)) { at = q; over = true; }
+            }
+        }
+        if (!over) continue;
+
+        EnvRippleEmitter& e = env_emitters_[i];
+        e.seen = true;
+        // Paced so the rings read as a train expanding from under the source rather than a
+        // solid disc of churn, and so the ring budget is not spent in one frame.
+        const float interval = 0.12f;
+        if (time_ - e.last_time < interval) continue;
+        e.last_time = time_;
+        // Alternating birth radii give the concentric look a single radius cannot.
+        e.phase = (e.phase + 1) % 3;
+        const float r = src.radius * (0.25f + 0.2f * static_cast<float>(e.phase));
+        emit_ripple(at, std::clamp(src.water_disturb * 0.6f, 0.02f, 1.0f), r);
+    }
+    for (auto it = env_emitters_.begin(); it != env_emitters_.end();) {
+        it = it->second.seen ? std::next(it) : env_emitters_.erase(it);
+    }
+    for (auto& [idx, e] : env_emitters_) e.seen = false;
+}
+
+float WaterSystem::shape_volume_(const coopa::physx::collision::Shape& s) {
+    using coopa::physx::collision::ShapeType;
+    constexpr float pi = 3.14159265358979f;
+    switch (s.type) {
+        case ShapeType::Sphere:  return (4.0f / 3.0f) * pi * s.radius * s.radius * s.radius;
+        case ShapeType::Box:     return 8.0f * s.half_extents.x * s.half_extents.y * s.half_extents.z;
+        case ShapeType::Capsule: {
+            float r = s.capsule_radius, hh = s.capsule_half_height;
+            return pi * r * r * 2.0f * hh + (4.0f / 3.0f) * pi * r * r * r;
+        }
+        default: return 0.0f;
+    }
+}
+
+void WaterSystem::resolve_pontoons_(Buoyancy& b, int subdivision_cap) {
+    using coopa::physx::collision::ShapeType;
+    b.resolved.clear();
+    coopa::scene::SceneObject* owner = b.owner;
+    const glm::vec3 scale = coopa::physx::util::world_trs(owner->get_transform()->transform()).scale;
+
+    std::vector<coopa::physx::collision::Shape> shapes;
+    for (auto* col : owner->get_components_in_children<coopa::physx::components::Collider>()) {
+        if (col->is_trigger()) continue;
+        // Child colliders: express in the owner's frame (compound bodies).
+        coopa::physx::collision::Shape s = col->make_shape(
+            coopa::physx::util::world_trs(col->owner->get_transform()->transform()).scale);
+        if (col->owner != owner) {
+            auto root = coopa::physx::util::world_trs(owner->get_transform()->transform());
+            auto child = coopa::physx::util::world_trs(col->owner->get_transform()->transform());
+            glm::quat inv = glm::inverse(root.rotation);
+            s.local_center   = inv * (child.position + child.rotation * s.local_center - root.position);
+            s.local_rotation = inv * child.rotation * s.local_rotation;
+        }
+        if (s.type != ShapeType::TriangleMesh) shapes.push_back(s);
+    }
+
+    float total_volume = 0.0f;
+    for (const auto& s : shapes) total_volume += shape_volume_(s);
+    if (b.volume >= 0.0f) total_volume = b.volume;
+
+    if (!b.pontoons.empty()) {
+        const float v = total_volume / static_cast<float>(b.pontoons.size());
+        for (const PontoonDesc& d : b.pontoons) {
+            float r = d.radius * std::max(scale.x, std::max(scale.y, scale.z));
+            b.resolved.push_back({d.position * scale, glm::vec3(r), v});
+        }
+        b.initialized = true;
+        b.resolved_subdivision_cap = subdivision_cap;
+        return;
+    }
+
+    const float geo_volume = std::max([&] {
+        float sum = 0.0f;
+        for (const auto& s : shapes) sum += shape_volume_(s);
+        return sum;
+    }(), 1e-6f);
+    const float vol_scale = total_volume / geo_volume;
+
+    for (const auto& s : shapes) {
+        const float shape_vol = shape_volume_(s) * vol_scale;
+        if (s.type == ShapeType::Box) {
+            const int n = std::clamp(std::min(b.subdivisions, subdivision_cap), 1, 4);
+            const glm::vec3 cell = s.half_extents * 2.0f / static_cast<float>(n);
+            const float v = shape_vol / static_cast<float>(n * n * n);
+            for (int z = 0; z < n; ++z)
+                for (int y = 0; y < n; ++y)
+                    for (int x = 0; x < n; ++x) {
+                        glm::vec3 off = -s.half_extents + cell * (glm::vec3(x, y, z) + 0.5f);
+                        // Half extents stay in the SHAPE's frame; rotated at sample time.
+                        b.resolved.push_back({s.local_center + s.local_rotation * off,
+                                              abs_mat3_(glm::mat3_cast(s.local_rotation)) * (cell * 0.5f), v});
+                    }
+        } else if (s.type == ShapeType::Sphere) {
+            // Equal-volume cube: side = r * cbrt(4 pi / 3).
+            b.resolved.push_back({s.local_center, glm::vec3(s.radius * 0.806f), shape_vol});
+        } else if (s.type == ShapeType::Capsule) {
+            glm::vec3 axis(0.0f);
+            axis[std::clamp(s.capsule_axis, 0, 2)] = 1.0f;
+            const float len = 2.0f * (s.capsule_half_height + s.capsule_radius);
+            const float seg = len / 3.0f;
+            glm::vec3 he(s.capsule_radius * 0.886f);
+            he[std::clamp(s.capsule_axis, 0, 2)] = seg * 0.5f;
+            he = abs_mat3_(glm::mat3_cast(s.local_rotation)) * he;
+            for (int i = -1; i <= 1; ++i) {
+                b.resolved.push_back({s.local_center + s.local_rotation * (axis * (seg * static_cast<float>(i))),
+                                      he, shape_vol / 3.0f});
+            }
+        }
+    }
+    b.initialized = !b.resolved.empty();
+    b.resolved_subdivision_cap = subdivision_cap;
+}
+
+void WaterSystem::gather_buoyant_(coopa::scene::Scene& scene) {
+    buoyant_.clear();
+    const float enter = settings_.sim_radius;
+    const float leave = settings_.sim_radius * settings_.sim_hysteresis;
+    for (Buoyancy* b : scene.get_components<Buoyancy>()) {
+        if (!b->owner) continue;
+        auto* rb = b->owner->get_component<coopa::physx::components::RigidbodyComponent>();
+        if (!rb || rb->is_kinematic) continue;
+        if (b->initialized && b->resolved_subdivision_cap != settings_.max_box_subdivisions) b->initialized = false;
+        if (!b->initialized) resolve_pontoons_(*b, settings_.max_box_subdivisions);
+        if (!b->initialized) continue;
+        BuoyantEntry e;
+        e.buoyancy = b;
+        e.rigidbody = rb;
+        for (const Pontoon& p : b->resolved) {
+            e.bound_radius = std::max(e.bound_radius,
+                                      glm::length(p.local - rb->local_center_of_mass()) + glm::length(p.half_extents));
+        }
+        // Simulation range, with hysteresis so a body on the boundary doesn't flip each frame.
+        if (has_focus_) {
+            const float d = glm::distance(rb->world_center_of_mass(), focus_) - e.bound_radius;
+            const bool was = b->simulated;
+            b->simulated = d <= enter || (was && d <= leave);
+            if (b->simulated != was) b->frozen_rest_time = 0.0f;
+        } else {
+            b->simulated = true;
+        }
+        buoyant_.push_back(e);
+    }
+}
+
+void WaterSystem::substep_(coopa::physx::PhysicsWorld& world, float h) {
+    time_ += h;
+    active_count_ = 0;
+    if (bodies_.empty() || buoyant_.empty()) return;
+    // active_bodies_ is gathered once per frame; a simulated floater may still be out of
+    // reach of every one of them (then it is simply dry).
+
+    const glm::vec3 gravity = world.gravity();
+    const WaveQueryOptions opt = wave_options_();
+
+    // Floaters are independent -- each reads the (const) water bodies and writes only its own
+    // Body and Buoyancy -- so they step across the job workers. Each body's lazily built
+    // WaveSet is warmed here first, so the parallel samples below only ever read it.
+    for (const WaterBody* wb : active_bodies_) (void)wb->wave_set();
+    std::atomic<int> active{0};
+    const ParallelFor par = parallel_(k_parallel_floaters);
+    run_range(&par, buoyant_.size(), [&](std::size_t begin, std::size_t end) {
+        int n = 0;
+        for (std::size_t i = begin; i < end; ++i) n += floater_substep_(buoyant_[i], world, gravity, h, opt) ? 1 : 0;
+        active.fetch_add(n, std::memory_order_relaxed);
+    });
+    active_count_ = active.load();
+}
+
+bool WaterSystem::floater_substep_(BuoyantEntry& e, coopa::physx::PhysicsWorld& world, const glm::vec3& gravity, float h,
+                      const WaveQueryOptions& opt) {
+    for (const WaterBody* wb : active_bodies_) {
+        if (wb->local_frame) return frame_floater_substep_(e, world, h, opt);
+    }
+    const float g = std::max(-gravity.z, 0.0f);
+    Buoyancy& buoy = *e.buoyancy;
+    auto* body = world.get_body(e.rigidbody->body_id());
+    if (!body || body->type != coopa::physx::dynamics::BodyType::Dynamic) return false;
+    if (!buoy.simulated) {
+        frozen_substep_(e, *body, gravity, h);
+        return false;
+    }
+
+    // Broad phase: which water bodies (near the focus) can this body touch at all?
+    std::array<const WaterBody*, 4> cand{};
+    int cand_n = 0;
+    glm::vec2 lo = glm::vec2(body->position) - e.bound_radius;
+    glm::vec2 hi = glm::vec2(body->position) + e.bound_radius;
+    for (const WaterBody* wb : active_bodies_) {
+        if (!wb->baked || !wb->query.overlaps_xy(lo, hi)) continue;
+        if (body->position.z - e.bound_radius > wb->query.bounds_max().z + wb->live_waves().amplitude * 2.0f) continue;
+        if (cand_n < 4) cand[cand_n++] = wb;
+    }
+    if (cand_n == 0) {
+        buoy.in_water = false;
+        buoy.submerged_fraction = 0.0f;
+        return false;
+    }
+
+    // A sleeping body on still water stays asleep -- nothing would move it.
+    if (!body->awake) {
+        bool moving = false;
+        for (int c = 0; c < cand_n; ++c) {
+            WaterSample s;
+            if (!cand[c]->live_waves().calm()) moving = true;
+            else if (cand[c]->sample(glm::vec2(body->position), time_, s, opt) && glm::length(s.flow) > 0.05f)
+                moving = true;
+        }
+        if (!moving) return false; // keeps its last in_water/submerged_fraction
+        body->wake();
+    }
+    buoy.in_water = false;
+
+    const glm::mat3 rot = glm::mat3_cast(body->orientation);
+    const glm::vec3 com_local = e.rigidbody->local_center_of_mass();
+    const float m_share = body->mass / static_cast<float>(buoy.resolved.size());
+    float vol_total = 0.0f, vol_sub = 0.0f;
+    glm::vec3 flow_acc(0.0f);   // submersion-weighted current under the body
+    float     area_sub = 0.0f;  // submersion-weighted frontal area, for form drag
+    float     density_acc = 0.0f;
+    const glm::vec3 up = g > 0.0f ? -gravity / g : glm::vec3(0.0f, 0.0f, 1.0f);
+
+    for (const Pontoon& p : buoy.resolved) {
+        const glm::vec3 wp = body->position + rot * (p.local - com_local);
+        vol_total += p.volume;
+
+        // Highest surface among candidate bodies (a river mouth overlapping its lake).
+        WaterSample s;
+        bool hit = false;
+        float density = 1000.0f;
+        for (int c = 0; c < cand_n; ++c) {
+            WaterSample sc;
+            if (!cand[c]->sample(glm::vec2(wp), time_, sc, opt)) continue;
+            if (!hit || sc.surface_height > s.surface_height) {
+                s = sc;
+                density = cand[c]->density;
+                hit = true;
+            }
+        }
+        if (!hit) continue;
+
+        // Submersion ramps over the pontoon's body-frame vertical half extent. Constant on
+        // purpose: an orientation-dependent ramp makes the buoyancy field non-conservative
+        // (the force would depend on rotation with no matching torque), and that pumps
+        // energy into a slow, never-damped rolling drift.
+        const float r = std::max(p.half_extents.z, 1e-3f);
+        const float f = glm::clamp((s.surface_height - (wp.z - r)) / (2.0f * r), 0.0f, 1.0f);
+        if (f <= 0.0f) continue;
+        buoy.in_water = true;
+        vol_sub     += p.volume * f;
+        flow_acc    += s.flow * (p.volume * f);
+        density_acc += density * (p.volume * f);
+        const float area = std::cbrt(p.volume * p.volume);
+        area_sub    += area * f;
+
+        // Archimedes, straight up (against gravity), plus the VERTICAL part of the drag,
+        // both at the pontoon: off-centre application is what rights the body and damps
+        // its pitch and roll. Drag is removed as a fraction of the relative velocity --
+        // exponential for the linear term, clamped to 1 with the quadratic form drag
+        // (0.5 rho Cd A |v|) -- so it is unconditionally stable and never reverses it.
+        const float v_up = glm::dot(body->velocity_at_point(wp) - s.flow, up);
+        const float quad = 0.5f * density * buoy.form_drag * area * f * std::abs(v_up) * h / std::max(m_share, 1e-4f);
+        const float removed = std::min(1.0f, (1.0f - std::exp(-buoy.linear_drag * f * h)) + quad);
+        const float j = density * g * p.volume * f * buoy.buoyancy_scale * h - v_up * removed * m_share;
+        body->apply_impulse_at_position(up * j, wp, /*wake_body=*/false);
+    }
+
+    buoy.submerged_fraction = vol_total > 0.0f ? vol_sub / vol_total : 0.0f;
+    if (vol_sub <= 0.0f) return true;
+
+    // HORIZONTAL drag acts on the centre-of-mass velocity relative to the mean current
+    // under the body, through the COM. Applied per pontoon instead, it is delivered
+    // almost entirely below the COM of a floating body, couples sway into roll and yaw,
+    // and leaves a slow rolling drift that never damps (and never lets a calm floater
+    // sleep). What carries a body downstream is exactly this term.
+    const float frac = buoy.submerged_fraction;
+    const glm::vec3 flow = flow_acc / vol_sub;
+    const float rho = density_acc / vol_sub;
+    glm::vec3 v_rel = body->linear_velocity - flow;
+    v_rel -= up * glm::dot(v_rel, up);
+    const float quad = 0.5f * rho * buoy.form_drag * area_sub * glm::length(v_rel) * h / std::max(body->mass, 1e-4f);
+    const float removed = std::min(1.0f, (1.0f - std::exp(-buoy.linear_drag * frac * h)) + quad);
+    body->linear_velocity -= v_rel * removed;
+    body->angular_velocity *= std::exp(-buoy.angular_drag * frac * h);
+    return true;
+}
+
+bool WaterSystem::frame_floater_substep_(BuoyantEntry& e, coopa::physx::PhysicsWorld& world, float h,
+                                         const WaveQueryOptions& opt) {
+    Buoyancy& buoy = *e.buoyancy;
+    auto* body = world.get_body(e.rigidbody->body_id());
+    if (!body || body->type != coopa::physx::dynamics::BodyType::Dynamic) return false;
+
+    // Each candidate body's frame: world -> local, and its up (local +Z) in world.
+    struct Candidate {
+        const WaterBody* wb;
+        glm::mat4 to_local;
+        glm::mat3 to_world;   // rotation only, local -> world
+    };
+    std::array<Candidate, 6> cand{};
+    int cand_n = 0;
+    for (const WaterBody* wb : active_bodies_) {
+        if (!wb->baked) continue;
+        const glm::mat4 to_local = wb->local_frame ? glm::inverse(wb->baked_world) : glm::mat4(1.0f);
+        const glm::vec3 lp = glm::vec3(to_local * glm::vec4(body->position, 1.0f));
+        const glm::vec2 lo = glm::vec2(lp) - e.bound_radius, hi = glm::vec2(lp) + e.bound_radius;
+        if (!wb->query.overlaps_xy(lo, hi)) continue;
+        if (lp.z - e.bound_radius > wb->query.bounds_max().z + wb->live_waves().amplitude * 2.0f) continue;
+        if (cand_n < static_cast<int>(cand.size()))
+            cand[cand_n++] = {wb, to_local, wb->local_frame ? glm::mat3(wb->baked_world) : glm::mat3(1.0f)};
+    }
+    if (cand_n == 0) {
+        buoy.in_water = false;
+        buoy.submerged_fraction = 0.0f;
+        return false;
+    }
+    if (!body->awake) body->wake();
+    buoy.in_water = false;
+
+    const glm::mat3 rot = glm::mat3_cast(body->orientation);
+    const glm::vec3 com_local = e.rigidbody->local_center_of_mass();
+    const float m_share = body->mass / static_cast<float>(buoy.resolved.size());
+    float vol_total = 0.0f, vol_sub = 0.0f, area_sub = 0.0f, density_acc = 0.0f;
+    glm::vec3 flow_acc(0.0f);
+    const glm::vec3 gravity = world.gravity_at(body->position);
+    const float g = glm::length(gravity);
+    const glm::vec3 up = g > 0.0f ? -gravity / g : glm::vec3(0.0f, 0.0f, 1.0f);
+
+    for (const Pontoon& p : buoy.resolved) {
+        const glm::vec3 wp = body->position + rot * (p.local - com_local);
+        vol_total += p.volume;
+        const float r = std::max(p.half_extents.z, 1e-3f);
+        // The deepest submersion among the candidates, each measured along its own up.
+        float best = 0.0f;
+        glm::vec3 flow(0.0f);
+        float density = 1000.0f;
+        bool hit = false;
+        for (int c = 0; c < cand_n; ++c) {
+            const glm::vec3 lp = glm::vec3(cand[c].to_local * glm::vec4(wp, 1.0f));
+            WaterSample sc;
+            const bool ok = cand[c].wb->local_frame ? frame_sample(*cand[c].wb, glm::vec2(lp), time_, opt, sc)
+                                                    : cand[c].wb->sample(glm::vec2(lp), time_, sc, opt);
+            if (!ok) continue;
+            const float f = glm::clamp((sc.surface_height - (lp.z - r)) / (2.0f * r), 0.0f, 1.0f);
+            if (!hit || f > best) {
+                best = f;
+                flow = cand[c].to_world * sc.flow;
+                density = cand[c].wb->density;
+                hit = true;
+            }
+        }
+        if (!hit || best <= 0.0f) continue;
+        const float f = best;
+        buoy.in_water = true;
+        vol_sub     += p.volume * f;
+        flow_acc    += flow * (p.volume * f);
+        density_acc += density * (p.volume * f);
+        const float area = std::cbrt(p.volume * p.volume);
+        area_sub    += area * f;
+        const float v_up = glm::dot(body->velocity_at_point(wp) - flow, up);
+        const float quad = 0.5f * density * buoy.form_drag * area * f * std::abs(v_up) * h / std::max(m_share, 1e-4f);
+        const float removed = std::min(1.0f, (1.0f - std::exp(-buoy.linear_drag * f * h)) + quad);
+        const float j = density * g * p.volume * f * buoy.buoyancy_scale * h - v_up * removed * m_share;
+        body->apply_impulse_at_position(up * j, wp, /*wake_body=*/false);
+    }
+
+    buoy.submerged_fraction = vol_total > 0.0f ? vol_sub / vol_total : 0.0f;
+    if (vol_sub <= 0.0f) return true;
+    const float frac = buoy.submerged_fraction;
+    const glm::vec3 flow = flow_acc / vol_sub;
+    const float rho = density_acc / vol_sub;
+    glm::vec3 v_rel = body->linear_velocity - flow;
+    v_rel -= up * glm::dot(v_rel, up);
+    const float quad = 0.5f * rho * buoy.form_drag * area_sub * glm::length(v_rel) * h / std::max(body->mass, 1e-4f);
+    const float removed = std::min(1.0f, (1.0f - std::exp(-buoy.linear_drag * frac * h)) + quad);
+    body->linear_velocity -= v_rel * removed;
+    body->angular_velocity *= std::exp(-buoy.angular_drag * frac * h);
+    return true;
+}
+
+void WaterSystem::frozen_substep_(BuoyantEntry& e, coopa::physx::dynamics::Body& body, const glm::vec3& gravity, float h) {
+    Buoyancy& buoy = *e.buoyancy;
+    if (!body.awake) return; // keeps its last in_water/submerged_fraction
+    const float g = glm::length(gravity);
+    const glm::vec3 world_up = g > 0.0f ? -gravity / g : glm::vec3(0.0f, 0.0f, 1.0f);
+
+    // The undisplaced surface under the centre of mass, any body (the frozen path is rare).
+    // Each candidate is measured in ITS OWN frame: a local-frame body (a planet's water, see
+    // WaterBody::local_frame) has its query over that frame and its up along its local +Z, so a
+    // world-XY lookup would miss it entirely -- which is how a floater more than `sim_radius`
+    // from the focus ended up reporting in_water false on a planet while sitting on the surface.
+    // For a world body the transform is the identity and this is the plain XY lookup it was.
+    WaterBaseSample base;
+    bool hit = false;
+    float density = 1000.0f;
+    float best_depth = 0.0f;
+    glm::mat4 to_local(1.0f);
+    glm::vec3 up = world_up;
+    for (const WaterBody* wb : bodies_) {
+        if (!wb->baked) continue;
+        const glm::mat4 wb_to_local = wb->local_frame ? glm::inverse(wb->baked_world) : glm::mat4(1.0f);
+        const glm::vec3 lp = glm::vec3(wb_to_local * glm::vec4(body.position, 1.0f));
+        WaterBaseSample bs;
+        if (!wb->query.sample_base(glm::vec2(lp), bs)) continue;
+        // Deepest wins, as in the world-space path -- compared as a submersion depth rather than
+        // as a height, since two bodies in different frames measure height in different spaces.
+        const float depth = bs.height - lp.z;
+        if (hit && depth <= best_depth) continue;
+        base       = bs;
+        density    = wb->density;
+        to_local   = wb_to_local;
+        best_depth = depth;
+        up         = wb->local_frame ? glm::normalize(glm::vec3(wb->baked_world[2])) : world_up;
+        hit        = true;
+    }
+    if (!hit) {
+        buoy.in_water = false;
+        buoy.submerged_fraction = 0.0f;
+        buoy.frozen_rest_time = 0.0f;
+        return;
+    }
+
+    // Vertical extent and volume from the pontoons, at the current orientation -- measured in
+    // the chosen body's frame, which `base.height` is in (the identity for a world body).
+    const glm::mat3 rot = glm::mat3_cast(body.orientation);
+    const glm::vec3 com_local = e.rigidbody->local_center_of_mass();
+    float z_lo = 1e30f, z_hi = -1e30f, volume = 0.0f;
+    for (const Pontoon& p : buoy.resolved) {
+        const glm::vec3 wp = body.position + rot * (p.local - com_local);
+        const float z = glm::vec3(to_local * glm::vec4(wp, 1.0f)).z;
+        const float r = std::max(p.half_extents.z, 1e-3f);
+        z_lo = std::min(z_lo, z - r);
+        z_hi = std::max(z_hi, z + r);
+        volume += p.volume;
+    }
+    const float f = glm::clamp((base.height - z_lo) / std::max(z_hi - z_lo, 1e-3f), 0.0f, 1.0f);
+    buoy.in_water = f > 0.0f;
+    buoy.submerged_fraction = f;
+    if (f > 0.0f) {
+        // Archimedes through the centre of mass, and still-water drag on the whole velocity.
+        body.linear_velocity += up * (density * g * volume * f * buoy.buoyancy_scale * h * body.inv_mass);
+        const float removed = 1.0f - std::exp(-(buoy.linear_drag + 2.0f) * f * h);
+        body.linear_velocity -= body.linear_velocity * removed;
+        body.angular_velocity *= std::exp(-(buoy.angular_drag + 2.0f) * f * h);
+    }
+
+    // Settled: sleep. Velocity is zeroed (Body::sleep()); it resumes from here when woken.
+    const bool resting = glm::length(body.linear_velocity) < 0.08f && glm::length(body.angular_velocity) < 0.08f;
+    buoy.frozen_rest_time = resting ? buoy.frozen_rest_time + h : 0.0f;
+    if (buoy.frozen_rest_time > 0.5f) {
+        body.sleep();
+        buoy.frozen_rest_time = 0.0f;
+    }
+}
+
+WaterSystem* install_water_system(coopa::scene::Scene& scene, coopa::gfx::core::Device* device,
+                                         coopa::gfx::memory::Allocator* allocator,
+                                         coopa::asset::AssetManager* assets,
+                                         int order) {
+    auto sys = std::make_unique<WaterSystem>(device, allocator, assets);
+    WaterSystem* raw = sys.get();
+    scene.add_system(std::move(sys), order);
+    return raw;
+}
+
+} // namespace water
+} // namespace toy

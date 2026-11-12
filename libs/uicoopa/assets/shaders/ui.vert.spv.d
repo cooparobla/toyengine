@@ -1,1 +1,0 @@
-/home/coopa/git/toyengine/libs/uicoopa/assets/shaders/ui.vert.spv: /home/coopa/git/toyengine/libs/uicoopa/assets/shaders/ui.vert /home/coopa/git/toyengine/libs/gfxcoopa/assets/shaders/gfx/surface2d/quad_vs.glsl

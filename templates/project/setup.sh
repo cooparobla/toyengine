@@ -74,7 +74,7 @@ if [[ -n "$link" ]]; then
         echo "[setup] .libs/toyengine -> $link (linked)"
     fi
     # The coopa libraries are committed inside the engine checkout, so they arrive with it.
-    [[ -f "$link/libs/libcoopa/CMakeLists.txt" ]] || warn "$link/libs is empty: that engine checkout is incomplete"
+    [[ -f "$link/src/libs/libcoopa/CMakeLists.txt" ]] || warn "$link/src/libs is empty: that engine checkout is incomplete"
 else
     command -v git >/dev/null 2>&1 || die "git is needed to fetch the engine (or point engine.link in $(basename "$TOY_FILE") at a local checkout)"
     if [[ -L "$ENGINE_DIR" ]]; then rm "$ENGINE_DIR"; fi
@@ -97,7 +97,7 @@ else
         echo "[setup] .libs/toyengine at $ref ($(git rev-parse --short HEAD))"
     fi
     # The coopa libraries are committed inside the engine, so the clone is complete as it stands.
-    [[ -f "$ENGINE_DIR/libs/libcoopa/CMakeLists.txt" ]] || warn ".libs/toyengine/libs is empty: that clone is incomplete"
+    [[ -f "$ENGINE_DIR/src/libs/libcoopa/CMakeLists.txt" ]] || warn ".libs/toyengine/src/libs is empty: that clone is incomplete"
 fi
 
 # Agent notes: link the engine's .claude (its CLAUDE.md build/test rules and skills) in here

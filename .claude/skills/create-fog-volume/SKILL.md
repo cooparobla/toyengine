@@ -13,8 +13,8 @@ Two separate systems:
 | Global fog | analytic distance + height fog over everything, `fog_*` keys | `fog_enabled` (on by default) |
 
 A scene **cannot** turn either switch on (startup-fixed); it can tune their runtime keys in
-`scene.settings.render`. Parser for Volume: `libs/gfxcoopa/gfxcoopa/engine/components/register.h`
-("Volume"); struct docs: `libs/gfxcoopa/gfxcoopa/engine/components/volume.h`. Worked example of
+`scene.settings.render`. Parser for Volume: `src/libs/gfxcoopa/gfxcoopa/engine/components/register.h`
+("Volume"); struct docs: `src/libs/gfxcoopa/gfxcoopa/engine/components/volume.h`. Worked example of
 every use: **`assets/scenes/rendering/fog_demo/scene.yaml`** (header explains each station).
 
 ## Volume

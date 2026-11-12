@@ -16,8 +16,8 @@ with no matching layer name falls back there.
 
 Copy from `assets/scenes/terrain/heightmap_terrain_demo/scene.yaml` (a 1 km valley: seven layers,
 grass / pines / bushes / boulders, a lake, a player). Component and keys:
-`toyengine/world/heightmap_terrain.h`; how it draws, collides and streams:
-`toyengine/world/heightmap_terrain_system.h`, `assets/shaders/heightmap_terrain_surface.glsl`.
+`src/toyengine/world/heightmap_terrain.h`; how it draws, collides and streams:
+`src/toyengine/world/heightmap_terrain_system.h`, `assets/shaders/heightmap_terrain_surface.glsl`.
 The other terrain kind, `TileTerrain` (mapcoopa tile worlds), is the create-terrain skill.
 
 ## Minimal recipe

@@ -110,7 +110,7 @@ def write_objects():
 
 
 SCENE = """\
-# procgraph_demo -- toyengine/procgraph/ end to end. Every element makes one claim checkable.
+# procgraph_demo -- src/toyengine/procgraph/ end to end. Every element makes one claim checkable.
 #
 #   * STAIR_A/B/C: ONE graph (graphs/parametric_stair) at three input sets, so a graph is a
 #     parameterized asset rather than a baked file.

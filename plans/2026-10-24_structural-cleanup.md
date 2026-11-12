@@ -1,6 +1,10 @@
 # Structural cleanup — engine, editor, hub, docs
 
-> **Status: Stages 0-4 implemented (2026-10-24); Stages 5-7 outstanding.**
+> **Status: every stage implemented.** Stages 0-4 on 2026-10-24, 5-7 after.
+>
+> Two of its records have since been superseded: Stage 4's `core/yaml_read.h` now lives at
+> `toyengine/io/yaml_read.h` (namespace `toy::io::yaml`), and Stage 7's panel migration is
+> complete rather than mid-flight -- `editor/app/README.md` describes the finished arrangement.
 > Behaviour-preserving with **one deliberate exception**: the default internal render
 > resolution changed from 480×270 to 1920×1080 (Stage 2d, category D).
 >
@@ -11,7 +15,7 @@
 > | 2 Docs + `.claude` map | done — 15 new READMEs, root README fixed, change map added |
 > | 2d Pixel-art framing | done — 29 mentions resolved; resolution default changed |
 > | 3 Header diet | done — see "Measured result" below |
-> | 4 YAML read helper | mostly done — `core/yaml_read.h` added; `scene/register.cpp` and `core/config.cpp` converted (`contains()` 153→62 and 312→62, 14 duplicate lambdas gone). Six small parsers still use their own value-returning helpers, which is a different idiom. |
+> | 4 YAML read helper | mostly done — `io/yaml_read.h` added (then in `core/`); `scene/register.cpp` and `core/config.cpp` converted (`contains()` 153→62 and 312→62, 14 duplicate lambdas gone). Six small parsers still use their own value-returning helpers, which is a different idiom. |
 > | 5 Render pipeline split | done — 5,171-line `.cpp` → 6 TUs (553 / 1138 / 982 / 1473 / 801 / 496). Header member order deliberately NOT reordered (destruction-order-critical). |
 > | 6 Thin `Engine` | done differently — split into sibling TUs (engine.cpp 2,697 → 1,712, plus `engine_render_sync` / `engine_scene_load` / `engine_services`) rather than extracting a `SceneRenderBridge` class. The plan's rationale for the class was that ~15 of `engine.h`'s includes would follow it out; Stage 3 already removed those, so the remaining gain was file organisation — achieved here with no state plumbing and no behaviour risk. |
 > | 7 `EditorApp` panels | **all 24 panels migrated.** Every `ui/*.inl` is gone except `layout.inl`, which is EditorApp's own `draw_()` dispatch and chrome helpers, not a panel. **Measured: a panel-header edit rebuilds 8-15 TUs (3 for a panel nothing else calls) vs 26 before.** New supporting headers: `editor_panel.h` (the base), `editor_types.h` (declaration-level types), `editor_context.h`. EditorApp keeps out-of-line forwarders so its public API is unchanged. **Caveat: EditorApp is still a large class** (~660 declarations / ~290 members) — the shared state stayed; only the `.inl`-declared state moved. See editor/app/README.md. |

@@ -7,7 +7,7 @@ description: Create a reusable toyengine object asset (prefab) -- assets/objects
 
 An object asset is a single object tree in its own file that scenes instantiate with
 `prefab:`. UI screens use the same mechanism (create-ui). Format reference:
-`libs/libcoopa/coopa/scene/scene_inherit.h` (merge rules, documented at the top of the file).
+`src/libs/libcoopa/coopa/scene/scene_inherit.h` (merge rules, documented at the top of the file).
 Component keys: [../create-scene/reference/components.md](../create-scene/reference/components.md).
 
 Examples: `assets/objects/props/campfire.yaml` (particles + flickering light + props, inline

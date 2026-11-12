@@ -331,5 +331,5 @@ greyed out. On Windows / Linux, use **Ctrl** wherever **Cmd** appears.
 
 ---
 
-Sources: `editor/app/editor_app.h`, `editor/app/ui/topbar.inl`, `editor/app/ui/viewport_chrome.inl`, `editor/app/ui/outliner.inl`, `editor/app/ui/mesh_tools.inl`, `editor/app/ui/sculpt.inl`, `editor/app/ui/paint.inl`, `editor/app/ui/timeline.inl`, `editor/app/ui/ui_canvas.inl`, `editor/app/ui/statusbar.inl`, `libs/uicoopa/uicoopa/immediate/imm_file_dialog.h`, `editor/viewport/modal_transform.h`, `editor/viewport/rect_gizmo.h`, `editor/app/trackpad.h`, `libs/uicoopa/uicoopa/immediate/imm.h`
+Sources: `src/editor/app/editor_app.h`, `editor/app/ui/topbar.inl`, `editor/app/ui/viewport_chrome.inl`, `editor/app/ui/outliner.inl`, `editor/app/ui/mesh_tools.inl`, `editor/app/ui/sculpt.inl`, `editor/app/ui/paint.inl`, `editor/app/ui/timeline.inl`, `editor/app/ui/ui_canvas.inl`, `editor/app/ui/statusbar.inl`, `src/libs/uicoopa/uicoopa/immediate/imm_file_dialog.h`, `src/editor/viewport/modal_transform.h`, `editor/viewport/rect_gizmo.h`, `src/editor/app/trackpad.h`, `src/libs/uicoopa/uicoopa/immediate/imm.h`
 Previous: [Project settings and packaging](project-settings.md) | Next: [Editor manual](README.md)

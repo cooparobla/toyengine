@@ -208,6 +208,6 @@ panel is saved with **Save Mesh** or **Ctrl+S**. See
 [Save your work and undo](modeling.md#save-your-work-and-undo).
 
 ---
-Sources: `editor/mesh/sculpt.h`, `editor/mesh/paint.h`, `editor/mesh/mesh_mirror.h`, `editor/mesh/auto_weights.h`, `editor/app/ui/sculpt.inl`, `editor/app/ui/paint.inl`, `editor/app/ui/weights.inl`, `editor/app/ui/viewport_chrome.inl`, `editor/app/editor_app.h`, `editor/app/asset_documents.h`
+Sources: `src/editor/mesh/sculpt.h`, `src/editor/mesh/paint.h`, `src/editor/mesh/mesh_mirror.h`, `src/editor/mesh/auto_weights.h`, `editor/app/ui/sculpt.inl`, `editor/app/ui/paint.inl`, `editor/app/ui/weights.inl`, `editor/app/ui/viewport_chrome.inl`, `src/editor/app/editor_app.h`, `src/editor/app/asset_documents.h`
 
 Previous: [Modeling](modeling.md) | Next: [Materials and textures](materials-and-textures.md)

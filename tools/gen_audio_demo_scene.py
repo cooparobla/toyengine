@@ -58,7 +58,7 @@ def source(clip, ind=8, volume=1.0, pitch=1.0, play=True, loop=True, min_d=1.0, 
 def label(text, z, width=420, ind=8):
     """A camera-facing world-space caption, as one WorldLabel component.
 
-    WorldLabel (toyengine/ui/world_label.h) builds its own world-space canvas and declares the
+    WorldLabel (src/toyengine/ui/world_label.h) builds its own world-space canvas and declares the
     caption per frame, so the caption is a component rather than a canvas plus a text child.
     """
     p = " " * ind
@@ -321,7 +321,7 @@ scene:
                     max_d=40.0, doppler=0.0)
     s += """
     # The panel: music transport, spatial toggles, UI sounds, mixer. Declared per frame in
-    # immediate mode (toyengine/audio/audio_demo_panel.h), so it is a component on an object
+    # immediate mode (src/toyengine/audio/audio_demo_panel.h), so it is a component on an object
     # rather than a tree of widgets authored into the scene.
     - name: audio_panel
       components:

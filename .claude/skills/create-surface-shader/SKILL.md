@@ -21,7 +21,7 @@ Study these first -- they are complete, small, and documented:
 
 All in `assets/shaders/`; the backbones are in `assets/shaders/gfx/surface/`. Shared lighting
 headers (`gfx/brdf.glsl`, `gfx/ibl.glsl`, `gfx/sky.glsl`, `gfx/spot_light.glsl`) come from
-`libs/gfxcoopa/assets/shaders/gfx/`.
+`src/libs/gfxcoopa/assets/shaders/gfx/`.
 
 ## The two domains
 
@@ -84,7 +84,7 @@ the snow cover layer automatically; define `GFX_SURFACE_NO_SNOW` before the back
 
 ## Registration (C++)
 
-1. `toyengine/core/engine.h`, `make_render_config_()`: add an entry next to the others
+1. `src/toyengine/core/engine.h`, `make_render_config_()`: add an entry next to the others
    (`foliage`, `terrain`, `triplanar`, `water`...):
    ```cpp
    rc.surface_shaders.add({
@@ -108,12 +108,12 @@ the snow cover layer automatically; define `GFX_SURFACE_NO_SNOW` before the back
 2. Editor catalogue: add a `SurfaceShaderInfo` (name, label, transparent flag matching the
    domain, note, up to 4 `ShaderParamDesc{label, default, min, max, speed}`) in
    `surface_shaders()` and the name to the `f_enum("shader", {...})` list in
-   `editor/schema/component_schema.h`. The editor test `editor_material_shader_catalogue`
+   `src/editor/schema/component_schema.h`. The editor test `editor_material_shader_catalogue`
    fails if the engine and editor lists disagree.
 3. Compilation is automatic: CMake globs top-level `assets/shaders/*.vert|*.frag|*.tesc|*.tese` into `.spv`
    in the build tree, `build/shaders/toyengine_shaders/` (a project's own shaders:
    `build/shaders/project_shaders/`); includes resolve `assets/shaders` then
-   `libs/gfxcoopa/assets/shaders`. No CMake edit; `.glsl` files are only included.
+   `src/libs/gfxcoopa/assets/shaders`. No CMake edit; `.glsl` files are only included.
 
 ## Procedure
 

@@ -3,9 +3,9 @@
 // Tells the engine library which project this executable was built for. Compiled straight into
 // the game and editor executables (never a static library), so this initializer always runs,
 // before main(), like a TOY_MODULE registration.
-#include <toyengine/core/runtime_paths.h>
+#include <toyengine/io/runtime_paths.h>
 
 namespace {
 const bool k_project_root_registered =
-    (toy::core::set_build_project_root("@TOY_PROJECT_ROOT_DIR@"), true);
+    (toy::io::set_build_project_root("@TOY_PROJECT_ROOT_DIR@"), true);
 }

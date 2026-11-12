@@ -56,7 +56,7 @@ lines. Point a screen at it with `theme_ref: ui/themes/my_theme`.
 | Section | Defined by | Read by |
 |---|---|---|
 | `metrics` + `colors` | `imm::visit_style()` (`immediate/imm_theme.h`) | every widget |
-| `bars` / `slots` / `feedback` / `world` | `toy::ui::visit_game_theme()` (`toyengine/ui/game_theme.h`) | the game composites |
+| `bars` / `slots` / `feedback` / `world` | `toy::ui::visit_game_theme()` (`src/toyengine/ui/game_theme.h`) | the game composites |
 
 Both are **single lists**: the loader, the serializer and the editor's Theme tab all walk them,
 so a role cannot exist in one and not the others. Adding a role means adding it to the struct
@@ -77,7 +77,7 @@ type and 30 px rows, and is the one to copy.
 
 ## Editor chrome is a different thing
 
-`editor/themes/*.yaml` style the editor itself (`chrome`, `viewport`, `outliner` sections) and
+`src/editor/themes/*.yaml` style the editor itself (`chrome`, `viewport`, `outliner` sections) and
 are not edited here. They share the same format, which is why the two can inherit from each
 other if you want the game to match the tool.
 

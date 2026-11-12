@@ -1,1 +1,0 @@
-/home/coopa/git/toyengine/libs/uicoopa/assets/shaders/ui_world_text.frag.spv: /home/coopa/git/toyengine/libs/uicoopa/assets/shaders/ui_world_text.frag /home/coopa/git/toyengine/libs/uicoopa/assets/shaders/ui_world_occlude.glsl

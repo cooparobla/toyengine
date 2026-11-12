@@ -1,0 +1,8 @@
+build/
+.docs/
+
+# Any build directory (build-tests/, build-asan/, ...)
+build*/
+
+# CMake test-runner scratch output
+Testing/

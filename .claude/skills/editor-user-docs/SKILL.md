@@ -14,7 +14,7 @@ read C++ and do not care how the editor is built.
 out game code (C++ calls, bindings stubs beyond the editor button that copies them), engine
 internals, class or file names from the source, YAML keys and file formats, build
 instructions, and anything about the engine that isn't reached through the editor's UI. The
-developer tour in `editor/README.md` covers internals; don't duplicate it. A file path appears
+developer tour in `src/editor/README.md` covers internals; don't duplicate it. A file path appears
 only when the user meets it in the editor (a file dialog, the asset list, a saved image).
 
 The source code is the only source of truth for behaviour. Never document a feature, menu item
@@ -28,7 +28,7 @@ editor area doesn't fit any of these, and add it to the index and this table.
 
 | Page | Covers | Primary sources | Screenshots |
 |---|---|---|---|
-| `README.md` | What the editor is, opening it and projects, the page list, a first-steps path | `editor/editor.cpp`, `editor/app/project.h` | `overview` |
+| `README.md` | What the editor is, opening it and projects, the page list, a first-steps path | `src/editor/editor.cpp`, `src/editor/app/project.h` | `overview` |
 | `interface.md` | Window layout, every menu, Asset panel, Hierarchy, Properties tabs, Console, status bar, unsaved-changes prompt, editor themes | `app/ui/topbar.inl`, `layout.inl`, `assets.inl`, `browser.inl`, `outliner.inl`, `statusbar.inl`, `theme_editor.inl`, `app/editor_theme.h` | `overview` (with a numbered list of the areas), `menu_file`, `asset_panel_meshes`, `unsaved_prompt`, `theme_light` |
 | `scenes-and-objects.md` | Scenes, adding / selecting / parenting / renaming objects, components and Add Component, object assets, Play / Pause / Step, undo | `app/ui/properties.inl`, `outliner.inl`, `schema/component_schema.h`, `schema/inspector.h`, `core/undo.h`, `app/editor_app.h` | `hierarchy_inspector`, `add_component`, `object_asset` |
 | `viewport.md` | Navigating, views, shading, X-Ray, grid, selecting, moving / rotating / scaling, snapping, hiding, Render Image | `viewport/*.h`, `app/ui/viewport_chrome.inl`, `app/trackpad.h`, `app/editor_app.h` | `viewport_solid`, `gizmo_move`, `xray_edit` |
@@ -40,13 +40,13 @@ editor area doesn't fit any of these, and add it to the index and this table.
 | `project-settings.md` | Project Settings modal, scene overrides (Render / World / Scene tabs), Rebuild Renderer, Package Project | `schema/settings_schema.h`, `app/ui/properties.inl`, `app/ui/project_settings.inl`, `build/packager.h` | `render_settings`, `world_settings`, `package_dialog` |
 | `shortcuts.md` | Every shortcut, grouped by where you are | the Controls modal in `app/editor_app.h` (`begin_modal("Controls"`), menu shortcut strings, every key handler | `controls_modal` |
 
-Primary source paths are relative to `editor/` unless they start with `editor/`.
+Primary source paths are relative to `src/editor/` unless they start with `src/editor/`.
 
 ## Screenshots
 
-Shots come from the `toyengine_editor_docs` tool (`tests/editor/docs/docs_test.cpp`, one
+Shots come from the `toyengine_editor_docs` tool (`src/tests/editor/docs/docs_test.cpp`, one
 test per shot in its `docs` suite, named `<shot>`; built on the editor tests' fixtures in
-`tests/editor/support/`, never registered with ctest): each shot copies `assets/` to a scratch
+`src/tests/editor/support/`, never registered with ctest): each shot copies `assets/` to a scratch
 project, stages one editor state through real input, and saves the window. Nothing opens on
 screen and the repo's assets are never written. Capture with:
 
@@ -64,7 +64,7 @@ known flaky MoltenVK segfault), and writes `docs/images/editor/<shot>.jpg`.
   that is mid-transition, shows scratch / temp paths in the Console, or doesn't show what the
   page says. Fix its test and recapture.
 - **New shot needed** (a new feature, a page without one): add a `COOPA_TEST(<shot>)` to
-  `tests/editor/docs/docs_test.cpp` modelled on its neighbours, add it to the Screenshots column
+  `src/tests/editor/docs/docs_test.cpp` modelled on its neighbours, add it to the Screenshots column
   above, capture it.
 - Never show the stylisation post effects (outline / palette / dither); the engine is presented
   at full resolution.
@@ -73,8 +73,8 @@ known flaky MoltenVK segfault), and writes `docs/images/editor/<shot>.jpg`.
 ## Procedure
 
 1. **Inventory.** Run `python3 .claude/skills/editor-user-docs/scripts/check_docs.py`: it
-   lists pages whose sources changed since the page did. Check `git log --oneline -- editor/`
-   and `git status editor/` too. Rewrite stale pages; leave current ones unless the user asked
+   lists pages whose sources changed since the page did. Check `git log --oneline -- src/editor/`
+   and `git status src/editor/` too. Rewrite stale pages; leave current ones unless the user asked
    for a full regeneration.
 
 2. **Capture screenshots** for the pages being written (see Screenshots), and look at them.
@@ -82,7 +82,7 @@ known flaky MoltenVK segfault), and writes `docs/images/editor/<shot>.jpg`.
 3. **Research from source, per page.** Read the primary sources. Harvest exact UI strings:
    `menu_item("...", "<shortcut>")`, `begin_menu("...")`, tab names, button labels, tooltips,
    key handlers (`ctx.shortcut(Key::...)`, `key_pressed`) and their modifiers. The existing
-   pages and `editor/README.md` are maps of features but may lag the code -- confirm every
+   pages and `src/editor/README.md` are maps of features but may lag the code -- confirm every
    claim. For a full regeneration, fan out one subagent per 2-3 pages in a single message,
    give each this whole file, and have them write the pages directly; then do steps 5-7
    yourself.
@@ -93,7 +93,7 @@ known flaky MoltenVK segfault), and writes `docs/images/editor/<shot>.jpg`.
    something explained on another page links to that section (`modeling.md#unwrap-uvs`).
    `shortcuts.md` links each group to the section that explains it.
 
-6. **Wire in.** Keep `editor/README.md`'s pointer line to `../docs/editor/README.md` (add it if
+6. **Wire in.** Keep `src/editor/README.md`'s pointer line to `../docs/editor/README.md` (add it if
    missing). Don't touch other documents.
 
 7. **Verify.** `check_docs.py` must report 0 errors (links, anchors, images, orphans, Sources

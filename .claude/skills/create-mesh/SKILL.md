@@ -6,7 +6,7 @@ description: Create a toyengine mesh asset -- assets/meshes/<name>.yaml (vertice
 # Create a mesh
 
 Mesh files are per-corner vertex arrays plus polygon index lists, in Blender's export style.
-Parser: `libs/gfxcoopa/gfxcoopa/engine/data/mesh.h` (`parse_unwelded_`, fan triangulation,
+Parser: `src/libs/gfxcoopa/gfxcoopa/engine/data/mesh.h` (`parse_unwelded_`, fan triangulation,
 tangent generation, slots, LODs). Helper library: `tools/mesh_yaml.py`. Generators to copy
 from: `tools/gen_tile_styles.py` (uses `mesh_yaml`), `tools/gen_particle_demo_assets.py`
 (lathe, flat shading, triangulating writer), `tools/gen_water_grid_mesh.py` (grid),
@@ -76,7 +76,7 @@ sits under (or on) the object carrying the `Rig`. See
 ## Procedure
 
 1. **Simple shape (< ~30 corners)**: write the YAML by hand, mirroring `cube.yaml` /
-   `tests/fixtures/scenes/kitchen_sink/meshes/pillar.yaml`.
+   `src/tests/fixtures/scenes/kitchen_sink/meshes/pillar.yaml`.
 2. **Anything procedural**: write a generator `tools/gen_<thing>.py` (standard library only --
    system python has no numpy) using `tools/mesh_yaml.py`:
    ```python

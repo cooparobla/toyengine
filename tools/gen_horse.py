@@ -4,10 +4,10 @@ rig's bones via BoneAttachment) and its gait clips.
 
 Outputs (all under assets/):
   * rigs/horse.yaml -- the skeleton as a RIG ASSET: a flat, parent-first bone list (head/tail/roll
-    in rig space; see coopa/rig/rig_asset.h).
+    in rig space; see src/toyengine/rig/rig_asset.h).
   * objects/animals/horse.yaml -- a Rig + SkeletalAnimator OBJECT ASSET (prefab), ready to ride: a
     CharacterController (`player_input: false`), a Mount (gaits, steering, sockets -- see
-    toyengine/scene/mount.h), a four-legged FootIK (hooves on the ground, the body pitched between
+    src/toyengine/scene/mount.h), a four-legged FootIK (hooves on the ground, the body pitched between
     front and hind legs), its capsule parts attached to bones via BoneAttachment.
   * meshes/animals/horse_*.yaml -- one capsule mesh per body part (Z-up, centred).
   * animations/horse/{idle,walk,trot,gallop}.yaml -- SKELETAL clips the SkeletalAnimator plays. The
@@ -149,7 +149,7 @@ def write_rig(path=RIG_PATH):
 
 
 # ---------------------------------------------------------------------------------------------
-# Bone rest basis (mirrors coopa/rig/rig_asset.h's bone_rest_matrix; see gen_mannequin.py's own
+# Bone rest basis (mirrors src/toyengine/rig/rig_asset.h's bone_rest_matrix; see gen_mannequin.py's own
 # bone_basis -- this is the same algorithm, over the horse's own bone table).
 # ---------------------------------------------------------------------------------------------
 
@@ -298,7 +298,7 @@ def write_object(speeds):
         "# horse: a rideable quadruped rig (rigs/horse.yaml); capsule parts ride its bones via",
         "# BoneAttachment, facing +Y, origin on the ground. Clips idle / walk / trot / gallop. Ride it",
         "# with a Rider on the player (F near a mount point) -- see tools/gen_horse.py and",
-        "# toyengine/scene/mount.h.",
+        "# src/toyengine/scene/mount.h.",
         f"# {GENERATED}",
         "object:",
         "  name: horse",

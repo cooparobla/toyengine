@@ -5,7 +5,7 @@ too coarse for a 0.03-0.6 m dent footprint -- displacing one of their vertices d
 corner rather than crushing a patch of surface. `camp_log_dense` and `sphere_dense` are the same
 shapes at a resolution that dents well, generated rather than hand-authored because of their
 vertex count. `metal_plate` in damage_demo instead stays on the coarse shared `cube` and is
-subdivided at runtime on first impact (toyengine/destruct/dent.h's subdivide_for_dent()) -- the
+subdivided at runtime on first impact (src/toyengine/destruct/dent.h's subdivide_for_dent()) -- the
 two demo objects together show both ways of getting enough resolution to dent.
 
 Winding for both shapes is derived by hand (not copied from gen_particle_demo_assets.lathe(),

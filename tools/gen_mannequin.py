@@ -4,14 +4,14 @@ the rig's bones via BoneAttachment) and its clips.
 
 Outputs (all under assets/):
   * rigs/mannequin.yaml -- the skeleton as a RIG ASSET: a flat, parent-first bone list
-    (head/tail/roll in rig space; see coopa/rig/rig_asset.h).
+    (head/tail/roll in rig space; see src/toyengine/rig/rig_asset.h).
   * objects/characters/mannequin.yaml -- a Rig + SkeletalAnimator OBJECT ASSET (prefab), its
     capsule parts attached to bones via BoneAttachment. Place it with `prefab: objects/mannequin`;
     add a CharacterController (+ CharacterAnimDriver) to the instance to make it a player (see
     scenes/gameplay/character_demo).
   * objects/characters/mannequin_ragdoll.yaml -- the same rig plus a Ragdoll (capsule/box bones,
     cone-twist hips/shoulders/spine/neck, hinge knees/elbows/ankles, addressed by BONE NAME; see
-    RAGDOLL below and toyengine/scene/ragdoll.h). A separate prefab, so plain mannequins carry no
+    RAGDOLL below and src/toyengine/scene/ragdoll.h). A separate prefab, so plain mannequins carry no
     bone bodies.
   * objects/characters/mannequin_ik.yaml -- the same rig FULLY IK-driven: a SkeletalAnimator
     plays the ordinary clips (only the pelvis bob/root-motion bone-space survives past IK, since
@@ -24,10 +24,10 @@ Outputs (all under assets/):
     auto -> targets).
   * meshes/characters/mannequin_*.yaml -- one capsule mesh per body part (Z-up, centred).
   * animations/mannequin/{idle,walk,run,jump,ride}.yaml -- the SKELETAL clips the SkeletalAnimator
-    plays (ride: seated in a saddle, for a Rider -- toyengine/scene/rider.h). walk and run carry
+    plays (ride: seated in a saddle, for a Rider -- src/toyengine/scene/rider.h). walk and run carry
     ROOT MOTION (the pelvis's travel, `root_motion: {bone: pelvis, translation: xy}`) and
     `footstep` events (string left / right) as each foot plants. Each bone's `location`/
-    `rotation` is a POSE DELTA from the Rig's rest pose (coopa/rig/rig_component.h's
+    `rotation` is a POSE DELTA from the Rig's rest pose (src/toyengine/rig/rig_component.h's
     Rig::PoseChannel), not a plain local Transform value -- see CONJUGATION below.
   * animations/mannequin_ik/{idle,walk,run,jump,ride}.yaml -- the same motion as OLD-style
     property clips on the target/pole empties (object paths, not bone names) -- these drive
@@ -51,7 +51,7 @@ about 1.8 m tall -- the default CharacterController capsule (radius 0.3, height 
 
 Bones are flat entries in rigs/mannequin.yaml (head/tail/roll in rig space; NOT SceneObjects),
 addressed by name. Limbs hang along local -Z; limbs' REST bone axis (head->tail) determines
-each bone's own basis (coopa/rig/rig_asset.h's bone_rest_matrix -- Y = head->tail, X/Z from a
+each bone's own basis (src/toyengine/rig/rig_asset.h's bone_rest_matrix -- Y = head->tail, X/Z from a
 stable seed). Each visible part is a `<bone>_shape` object carrying `BoneAttachment { bone:
 <bone> }`, flat (not nested) under the rig's root object. Bone names are the rig's contract:
 clips, IK, FootIK and ragdolls all address them by name -- renaming one here breaks every
@@ -239,7 +239,7 @@ def write_rig(path=RIG_PATH):
 
 
 # ---------------------------------------------------------------------------------------------
-# Bone rest basis (mirrors coopa/rig/rig_asset.h's bone_rest_matrix exactly) and quaternion math
+# Bone rest basis (mirrors src/toyengine/rig/rig_asset.h's bone_rest_matrix exactly) and quaternion math
 # ---------------------------------------------------------------------------------------------
 
 def vsub(a, b):
@@ -759,7 +759,7 @@ def jump():
 
 def ride():
     """Seated in a saddle (loop): thighs forward and spread round a barrel, shins hanging back,
-    hands held low in front, a slow breath. A Rider (toyengine/scene/rider.h) puts the root on
+    hands held low in front, a slow breath. A Rider (src/toyengine/scene/rider.h) puts the root on
     the saddle and IK takes the feet to the stirrups and the hands to the reins; this is the pose
     those blend from, and all a rig without IK gets."""
     length, n, tau = 2.4, 8, 2 * math.pi
@@ -803,7 +803,7 @@ JOINTS = _joints()
 
 
 def ease(mode, t):
-    """coopa::anim::apply_easing."""
+    """toy::anim::apply_easing."""
     if mode == "step":
         return 0.0
     if mode == "ease_in":

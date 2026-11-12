@@ -5,9 +5,9 @@ description: Create toyengine particle effects -- ParticleSystem components (fir
 
 # Create a particle effect
 
-Parser: `toyengine/particles/particle_yaml.h` (keys, value forms); defaults:
-`toyengine/particles/particle_system.h`; module-by-module guide:
-**`toyengine/particles/README.md`** (accurate -- read it). Examples:
+Parser: `src/toyengine/particles/particle_yaml.h` (keys, value forms); defaults:
+`src/toyengine/particles/particle_system.h`; module-by-module guide:
+**`src/toyengine/particles/README.md`** (accurate -- read it). Examples:
 `assets/objects/props/campfire.yaml` (glow, flames, scattered coals, ember bursts, smoke, flickering
 light) and `assets/scenes/effects/particles_demo/scene.yaml` (world-space torch trail, mesh scatter on a
 mound, orbiting mesh emission, fountain with collision + on-death sub-emitters). Run

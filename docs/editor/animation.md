@@ -278,8 +278,8 @@ Anywhere else they undo changes to the scene.
 
 ---
 
-Sources: `editor/app/ui/timeline.inl`, `editor/anim/clip_model.h`, `editor/anim/clip_pose.h`,
-`editor/app/ui/assets.inl`, `editor/app/ui/properties.inl`, `editor/app/editor_app.h`,
-`editor/app/ui/statusbar.inl`, `editor/schema/component_schema.h`
+Sources: `editor/app/ui/timeline.inl`, `src/editor/anim/clip_model.h`, `src/editor/anim/clip_pose.h`,
+`editor/app/ui/assets.inl`, `editor/app/ui/properties.inl`, `src/editor/app/editor_app.h`,
+`editor/app/ui/statusbar.inl`, `src/editor/schema/component_schema.h`
 
 Previous: [Materials and textures](materials-and-textures.md) | Next: [UI designer](ui-designer.md)

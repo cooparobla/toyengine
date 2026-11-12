@@ -319,8 +319,8 @@ The UI is now part of the scene and appears when the scene starts. See
 ---
 
 Sources: `editor/app/ui/ui_canvas.inl`, `editor/ui/ui_palette.h`, `editor/ui/ui_canvas_math.h`,
-`editor/viewport/rect_gizmo.h`, `editor/schema/ui_schema.h`, `editor/schema/ui_theme_schema.h`,
+`editor/viewport/rect_gizmo.h`, `editor/schema/ui_schema.h`, `src/editor/schema/ui_theme_schema.h`,
 `editor/app/ui/theme_editor.inl`, `editor/app/ui/assets.inl`, `editor/app/ui/properties.inl`,
-`editor/app/ui/layout.inl`, `editor/app/editor_app.h`
+`src/editor/app/ui/layout.inl`, `src/editor/app/editor_app.h`
 
 Previous: [Animation](animation.md) | Next: [Project settings](project-settings.md)

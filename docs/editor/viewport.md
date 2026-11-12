@@ -167,8 +167,8 @@ override. The default is the **Object Origins** section of the Overlays popover,
 | **Orb** | A small ball with a short tick down each axis -- the least cluttered when several overlap |
 
 A character's bones are **not** objects, and never draw an origin glyph of their own: a
-skeleton is a `Rig` component's own bone list (`libs/libcoopa/coopa/rig/README.md`), posed by
-a `SkeletalAnimator` and the bone-space IK components in `coopa/rig/`, not by Transforms parented
+skeleton is a `Rig` component's own bone list (`libs/libcoopa/toyengine/rig/README.md`), posed by
+a `SkeletalAnimator` and the bone-space IK components in `src/toyengine/rig/`, not by Transforms parented
 under an `Animator`. This is deliberate -- a mesh-less object near a rig (an IK target empty, an
 attach socket) is a plain marker, never a clickable bone of its own.
 
@@ -382,5 +382,5 @@ changes colour and the corner shows **PLAYING** or **PAUSED**.
 While the game has control, the editor only reacts to **Esc** and **F5**.
 
 ---
-Sources: `editor/viewport/editor_camera.h`, `editor/viewport/gizmo.h`, `editor/viewport/modal_transform.h`, `editor/app/ui/viewport_chrome.inl`, `editor/app/trackpad.h`, `editor/app/editor_app.h`, `editor/app/ui/topbar.inl`, `editor/app/ui/properties.inl`, `editor/app/ui/statusbar.inl`
+Sources: `src/editor/viewport/editor_camera.h`, `src/editor/viewport/gizmo.h`, `src/editor/viewport/modal_transform.h`, `editor/app/ui/viewport_chrome.inl`, `src/editor/app/trackpad.h`, `src/editor/app/editor_app.h`, `editor/app/ui/topbar.inl`, `editor/app/ui/properties.inl`, `editor/app/ui/statusbar.inl`
 Previous: [Scenes and objects](scenes-and-objects.md) | Next: [Modeling](modeling.md)

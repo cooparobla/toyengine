@@ -14,7 +14,7 @@ It writes four things:
   height map, written here rather than sculpted so this script knows the ground height exactly
   and can place instances ON it.
 * ``assets/scenes/terrain/instance_paint_demo/instances/scattered.instances`` -- the painted
-  records, in the binary format ``toyengine/instance/instance_set.h`` reads.
+  records, in the binary format ``src/toyengine/instance/instance_set.h`` reads.
 * ``assets/scenes/terrain/instance_paint_demo/scene.yaml`` -- the scene itself.
 
 The point of pre-painting here is that the demo has to *ship* with instances: a painter with an
@@ -77,7 +77,7 @@ def normal_at(x: float, y: float) -> tuple:
 
 
 def write_png16_grey(path: pathlib.Path, samples, width: int, height: int) -> None:
-    """A 16-bit greyscale PNG, the format toyengine/world/png16.h reads."""
+    """A 16-bit greyscale PNG, the format src/toyengine/world/png16.h reads."""
     def chunk(tag: bytes, data: bytes) -> bytes:
         return (struct.pack(">I", len(data)) + tag + data +
                 struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
@@ -292,12 +292,12 @@ object:
 # --- the scene -----------------------------------------------------------------------------
 #
 # Written in the EDITOR'S canonical form -- keys in the saver's order, no comments -- because
-# tests/editor/unit/asset_roundtrip_test.cpp holds every scene in the repository to loading and
+# src/tests/editor/unit/asset_roundtrip_test.cpp holds every scene in the repository to loading and
 # saving byte-for-byte unchanged, and the editor's saver sorts keys and drops comments. What the
-# scene is for is documented in toyengine/instance/README.md and in this script's docstring
+# scene is for is documented in src/toyengine/instance/README.md and in this script's docstring
 # rather than inside the file, where the first Ctrl S would delete it.
 #
-# What it shows (toyengine/instance/, editor/app/ui/instance_paint.h):
+# What it shows (src/toyengine/instance/, src/editor/app/ui/instance_paint.h):
 #   * ~1700 instances of four prototypes over a 256 m hill, all of them RECORDS in
 #     instances/scattered.instances rather than objects in the scene file -- which is the whole
 #     point: a world's worth of props costs nothing there.

@@ -58,10 +58,23 @@ BUSY_NAMES = [
     ("toyengine", "an engine run"),
 ]
 
-# Parallelism this box survives. Measured: the heaviest TU peaks at 2.4 GB, so -j6 worst-cases
-# at ~14 GB; -j20 demanded ~48 GB and hard-rebooted the machine twice (see .claude/CLAUDE.md).
+# Parallelism this box survives. The two caps are NOT comparable, because -j means a different
+# thing to each tool.
+#
+# For a build, -j IS the process count: the heaviest TU peaks at 2.4 GB, so -j6 worst-cases at
+# ~14 GB and -j20 demanded ~48 GB and hard-rebooted the machine twice (see .claude/CLAUDE.md).
+#
+# For ctest, -j is a WEIGHT BUDGET that it divides by each test's PROCESSORS. Every GPU suite
+# declares `PROCESSORS 4` (src/tests/CMakeLists.txt), so `ctest -j8` runs 8/4 = *two* GPU tests
+# at once, not eight -- which is exactly what `SLOT gpu:2` already bounds machine-wide as the hard
+# backstop. A cap of 2 here therefore meant 2/4 = ONE test at a time, silently serialising the
+# whole GPU tier.
+#
+# Measured 2026-11-11 on two editor GPU suites: -j2 took 73.05 s (serial), -j8 took 38.13 s
+# (concurrent) -- a 1.92x speedup for ~4% per-test contention, at ~412 MB RSS per test, so ~825 MB
+# for the pair against 25 GB free. Memory was never the constraint for ctest; the arithmetic was.
 MAX_BUILD_JOBS = 4
-MAX_TEST_JOBS = 2
+MAX_TEST_JOBS = 8
 
 
 def deny(reason: str) -> None:
@@ -145,9 +158,13 @@ def jobs_reason(code: str) -> str:
         jobs = int(match.group(1))
         cap = MAX_TEST_JOBS if re.search(r"\bctest\b", code) else MAX_BUILD_JOBS
         if jobs > cap:
-            return (f"-j{jobs} is over this machine's cap of {cap}. The heaviest TU here peaks "
-                    f"at 2.4 GB and the swapfile is 2 GB, so a high -j does not OOM-kill, it "
-                    f"wedges the desktop. Use -j{cap} or fewer.")
+            if cap == MAX_TEST_JOBS:
+                return (f"-j{jobs} is over this machine's ctest cap of {cap}. ctest divides -j by "
+                        f"each test's PROCESSORS (4 for every GPU suite), so -j{jobs} would ask for "
+                        f"{jobs // 4} concurrent Vulkan devices. Use -j{cap} or fewer.")
+            return (f"-j{jobs} is over this machine's build cap of {cap}. The heaviest TU here "
+                    f"peaks at 2.4 GB and the swapfile is 2 GB, so a high -j does not OOM-kill, "
+                    f"it wedges the desktop. Use -j{cap} or fewer.")
     # A bare `-j` means "unlimited", which is the worst case of all.
     if re.search(r"-j(\s|$)", code) and not re.search(r"-j\s*\d", code):
         return "a bare -j means one job per core (20 here). Pass an explicit -j4 or fewer."

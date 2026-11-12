@@ -6,7 +6,7 @@ description: Create or edit a PBR render material for toyengine -- a shared asse
 # Create a material
 
 A material is the PBR description a `MeshRenderer` or `SdfRenderer` draws with. The parser
-(`parse_pbr_material_()` in `libs/gfxcoopa/gfxcoopa/engine/components/register.h`) **silently
+(`parse_pbr_material_()` in `src/libs/gfxcoopa/gfxcoopa/engine/components/register.h`) **silently
 ignores unknown keys and unknown enum values**, so a misspelt key renders as the default with no
 error. Every key below is the exact spelling; check against this list, never guess.
 
@@ -89,7 +89,7 @@ sharpness, space, normal_strength]`, space 0 = world, 1 = object).
    stock shader. An unregistered name throws at scene load
    ("material references unregistered shader").
 6. **Editor**: the editor's material field list is `material_fields()` in
-   `editor/schema/component_schema.h`; a shared material written with only the keys above opens
+   `src/editor/schema/component_schema.h`; a shared material written with only the keys above opens
    there unchanged.
 7. **Document**: add a row to the Materials table in `assets/README.md` for a new shared
    material.

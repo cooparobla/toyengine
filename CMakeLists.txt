@@ -28,12 +28,18 @@ endforeach()
 # therefore TOYENGINE_DIR, never CMAKE_SOURCE_DIR -- which, in a project build, is the project.
 set(TOYENGINE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 
-# --- Vendored coopa libraries (libs/, committed in this repository) ---
+# Every compiled tree lives under src/: the engine, the editor, the hub, the vendored coopa
+# libraries and the tests. TOYENGINE_DIR still means "the checkout" (assets/, tools/, docs/
+# and the build tree hang off it); TOYENGINE_SRC_DIR is the include root, which is what makes
+# every <toyengine/...> and <editor/...> include resolve.
+set(TOYENGINE_SRC_DIR "${TOYENGINE_DIR}/src")
+
+# --- Vendored coopa libraries (src/libs/, committed in this repository) ---
 # ROOT_DIR_PARENT is "the directory the coopa repos live in" -- this repository's
-# own libs/ tree, so the build never depends on what happens to be checked out
+# own src/libs/ tree, so the build never depends on what happens to be checked out
 # beside toyengine. configuration/root_directory.h.in exports it as PROJ_DIR,
-# which toyengine/core/runtime_paths.h uses to locate gfxcoopa's and uicoopa's shaders.
-set(ROOT_DIR_PARENT "${TOYENGINE_DIR}/libs")
+# which toyengine/io/runtime_paths.h uses to locate gfxcoopa's and uicoopa's shaders.
+set(ROOT_DIR_PARENT "${TOYENGINE_SRC_DIR}/libs")
 
 set(LIBCOOPA_DIR   "${ROOT_DIR_PARENT}/libcoopa")
 set(CAML_DIR       "${ROOT_DIR_PARENT}/caml")
@@ -61,35 +67,38 @@ if(NOT EXISTS "${LIBCOOPA_DIR}/CMakeLists.txt")
         "checkout is incomplete. Re-clone, or restore libs/ with: git checkout -- libs")
 endif()
 
-# !! ORDER IS LOAD-BEARING -- DO NOT REORDER !!
-# The library repos are deliberately left unpatched, so each still computes its
-# own libcoopa path as "parent of CMAKE_SOURCE_DIR" -- which, with toyengine (or a
-# game project) as the top-level project, resolves OUTSIDE this checkout. Each only dereferences
-# that path inside an `if(NOT TARGET coopa::lib)` guard, so adding libs/libcoopa
-# FIRST defines coopa::lib, every guard goes false, and the outside path is
-# never used. Move this line down and the build silently compiles an unpinned
-# checkout from outside the repo -- the assertion after this block exists to
-# catch exactly that.
+# Order is not load-bearing. Each library resolves its siblings relative to its OWN directory
+# (CMAKE_CURRENT_SOURCE_DIR), so every path lands inside src/libs/ no matter which project is
+# top-level and no matter what order these lines appear in. libcoopa still goes first simply
+# because it is the base every other one links; the assertion after this block keeps that
+# honest if a sibling ever regresses to a CMAKE_SOURCE_DIR-relative path.
 #
-# Leaving the libraries unpatched preserves their standalone contract: each
-# builds on its own (cbuild/cplay) as long as the repos it needs sit beside it
-# under a shared parent, which libs/ satisfies -- so `cd libs/gfxcoopa && cbuild`
-# works in place.
+# Each library also still builds on its own (cbuild/cplay) in place, because a sibling-relative
+# path is correct in that case too.
 add_subdirectory(${LIBCOOPA_DIR}   ${CMAKE_CURRENT_BINARY_DIR}/libcoopa-build)
 
 # --- SMAA reference textures (SearchTex.h / AreaTex.h) ---
-# gfxcoopa's SMAA_TEXTURES_DIR cache default points at a fixed local checkout
-# (/home/coopa/third-party/smaa/Textures). Where that checkout exists -- or an
-# explicit -DSMAA_TEXTURES_DIR=... is given -- nothing here runs. Otherwise
-# (e.g. a macOS machine), fetch the reference implementation at a pinned commit
-# so render/toy_render_pipeline.h's unconditional SmaaPass include compiles.
-set(_toy_smaa_default "/home/coopa/third-party/smaa/Textures")
-if(DEFINED SMAA_TEXTURES_DIR)
+# render/toy_render_pipeline.h includes SmaaPass unconditionally, so the reference
+# implementation's SearchTex.h / AreaTex.h must resolve on every machine. Resolution order:
+#
+#   1. -DSMAA_TEXTURES_DIR=<dir>      an explicit path wins.
+#   2. $ENV{SMAA_TEXTURES_DIR}        a local checkout, for building offline.
+#   3. FetchContent at a pinned commit (below), which is what a fresh clone gets.
+#
+# No step names a particular machine's directory: a hardcoded default is a path that exists on
+# exactly one computer and silently resolves to nothing on every other one.
+if(SMAA_TEXTURES_DIR)
     set(_toy_smaa_dir "${SMAA_TEXTURES_DIR}")
+elseif(DEFINED ENV{SMAA_TEXTURES_DIR})
+    set(_toy_smaa_dir "$ENV{SMAA_TEXTURES_DIR}")
 else()
-    set(_toy_smaa_dir "${_toy_smaa_default}")
+    set(_toy_smaa_dir "")
 endif()
-if(NOT EXISTS "${_toy_smaa_dir}/AreaTex.h")
+if(NOT _toy_smaa_dir STREQUAL "" AND EXISTS "${_toy_smaa_dir}/AreaTex.h")
+    set(SMAA_TEXTURES_DIR "${_toy_smaa_dir}" CACHE PATH
+        "Directory containing the SMAA reference implementation's SearchTex.h/AreaTex.h" FORCE)
+endif()
+if(NOT EXISTS "${SMAA_TEXTURES_DIR}/AreaTex.h")
     include(FetchContent)
     FetchContent_Declare(smaa
         GIT_REPOSITORY https://github.com/iryoku/smaa.git
@@ -97,7 +106,7 @@ if(NOT EXISTS "${_toy_smaa_dir}/AreaTex.h")
     FetchContent_Populate(smaa)
     set(SMAA_TEXTURES_DIR "${smaa_SOURCE_DIR}/Textures" CACHE PATH
         "Directory containing the SMAA reference implementation's SearchTex.h/AreaTex.h" FORCE)
-    message(STATUS "toyengine: SMAA textures not found at ${_toy_smaa_dir}; fetched to ${SMAA_TEXTURES_DIR}")
+    message(STATUS "toyengine: fetched the SMAA reference textures to ${SMAA_TEXTURES_DIR}")
 endif()
 
 add_subdirectory(${GFXCOOPA_DIR}   ${CMAKE_CURRENT_BINARY_DIR}/gfxcoopa-build)
@@ -114,9 +123,9 @@ add_subdirectory(${MAPCOOPA_DIR}   ${CMAKE_CURRENT_BINARY_DIR}/mapcoopa-build)
 # resolve libcoopa through its own stale path, we end up building an unpinned
 # checkout from outside this repo. Fail at configure time instead of silently.
 get_target_property(_libcoopa_inc libcoopa_lib INTERFACE_INCLUDE_DIRECTORIES)
-if(NOT _libcoopa_inc MATCHES "${TOYENGINE_DIR}/libs/libcoopa")
+if(NOT _libcoopa_inc MATCHES "${TOYENGINE_SRC_DIR}/libs/libcoopa")
     message(FATAL_ERROR
-        "coopa::lib resolved to '${_libcoopa_inc}', outside libs/. "
+        "coopa::lib resolved to '${_libcoopa_inc}', outside src/libs/. "
         "Check add_subdirectory() order above -- libs/libcoopa must come first.")
 endif()
 
@@ -126,13 +135,15 @@ endif()
 # creates the global libzstd_static target this links. Its OpenSSL/zstd variables are
 # directory-scoped, so discovery is repeated below.
 #
-# Only toyengine/core/caml_codec.h includes caml.h; everything else reads YAML through
+# Only toyengine/io/caml_codec.h includes caml.h; everything else reads YAML through
 # libcoopa's coopa/yaml/document.h, which decodes .caml via the codec it registers.
 add_subdirectory(${CAML_DIR} ${CMAKE_CURRENT_BINARY_DIR}/caml-build)
 find_package(OpenSSL REQUIRED)
 add_library(toy_caml INTERFACE)
 add_library(coopa::caml ALIAS toy_caml)
-target_include_directories(toy_caml INTERFACE ${CAML_DIR}/includes)
+target_include_directories(toy_caml INTERFACE
+    ${CAML_DIR}/includes
+    ${ROOT_DIR_PARENT}/third_party)   # fkYAML, which caml.h includes -- shared, see its README
 target_link_libraries(toy_caml INTERFACE OpenSSL::Crypto)
 if(TARGET libzstd_static)
     target_link_libraries(toy_caml INTERFACE libzstd_static)
@@ -147,7 +158,7 @@ endif()
 # `CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR` guard its demos and ctest
 # registration sit behind: UiPass and UiWorldPass are constructed from .spv paths,
 # so this build needs them compiled too -- hence the add_dependencies() below, and
-# the uicoopa search root in RuntimeLayout::shader_roots() (toyengine/core/runtime_paths.h).
+# the uicoopa search root in RuntimeLayout::shader_roots() (toyengine/io/runtime_paths.h).
 
 configure_file(configuration/root_directory.h.in configuration/root_directory.h)
 
@@ -177,23 +188,18 @@ gfx_add_shader_target(toyengine_shaders
 # target-level include path rather than include_directories(), which is directory-scoped and
 # would not reach a game project's targets. The coopa libraries stay header-only (INTERFACE).
 #
-# coopa::ui LAST on purpose: uicoopa's includes/ also carries stb_image.h /
-# stb_image_write.h, whose implementations live in gfxcoopa_impl. Linking coopa::gfx
-# first keeps gfxcoopa's copies of those two headers ahead in the include search, so a
-# TU can never compile against uicoopa's copy while linking gfxcoopa's body.
+# Nothing in toyengine may include mapcoopa's image_writer.h / map_export.h, which compile stb's
+# *implementation*; toyengine/world/ uses only the data headers (map_config.h, map_data.h,
+# map_generator.h, noise.h, biome.h).
 #
-# coopa::maps sits between them for exactly the same reason -- mapcoopa's includes/ carries
-# a third copy of stb_image_write.h. Nothing in toyengine may include mapcoopa's
-# image_writer.h / map_export.h, which compile stb's *implementation*; toyengine/world/ uses
-# only the data headers (map_config.h, map_data.h, map_generator.h, noise.h, biome.h).
-#
-# coopa::caml after coopa::ui: its includes/ carries a second fkYAML copy, which must
-# never shadow libcoopa's.
-file(GLOB_RECURSE _toyengine_sources CONFIGURE_DEPENDS ${TOYENGINE_DIR}/toyengine/*.cpp)
+# Link order carries no meaning here. Every shared single-header library has exactly one copy, in
+# src/libs/third_party/, so no ordering of these targets can change which header a TU compiles
+# against.
+file(GLOB_RECURSE _toyengine_sources CONFIGURE_DEPENDS ${TOYENGINE_SRC_DIR}/toyengine/*.cpp)
 add_library(toyengine_engine STATIC ${_toyengine_sources})
 add_library(toyengine::engine ALIAS toyengine_engine)
 target_include_directories(toyengine_engine PUBLIC
-    ${TOYENGINE_DIR}
+    ${TOYENGINE_SRC_DIR}
     ${CMAKE_CURRENT_BINARY_DIR}/configuration)
 target_link_libraries(toyengine_engine PUBLIC coopa::gfx coopa::physx coopa::sfx coopa::maps coopa::ui)
 target_link_libraries(toyengine_engine PUBLIC coopa::caml)
@@ -208,13 +214,13 @@ target_link_libraries(toyengine_engine PUBLIC coopa::caml)
 # editor and test TU, which made all of them unique per tree and defeated ccache across them
 # entirely. Scoped here, the other ~100 objects compile to byte-identical commands everywhere,
 # so the second tree to build them gets cache hits instead of recompiling.
-set_source_files_properties(${TOYENGINE_DIR}/toyengine/core/runtime_paths.cpp PROPERTIES
+set_source_files_properties(${TOYENGINE_SRC_DIR}/toyengine/io/runtime_paths.cpp PROPERTIES
     COMPILE_DEFINITIONS TOY_SHADER_BUILD_DIR="${TOY_SHADER_BUILD_DIR}")
 
 # --- toyengine::editor: the editor (editor/), compiled once ---
 # Every project's editor executable links it, as do the editor tests and the docs tool; only
 # editor/editor.cpp (main) compiles into the executable itself.
-file(GLOB_RECURSE _toyengine_editor_sources CONFIGURE_DEPENDS ${TOYENGINE_DIR}/editor/*.cpp)
+file(GLOB_RECURSE _toyengine_editor_sources CONFIGURE_DEPENDS ${TOYENGINE_SRC_DIR}/editor/*.cpp)
 list(FILTER _toyengine_editor_sources EXCLUDE REGEX "/editor/editor\\.cpp$")
 add_library(toyengine_editor_lib STATIC ${_toyengine_editor_sources})
 add_library(toyengine::editor ALIAS toyengine_editor_lib)
@@ -249,7 +255,19 @@ toyengine_add_project(NAME toyengine DIR "${TOYENGINE_DIR}" EDITOR_NAME toyengin
 
 enable_testing()
 # Tests: tests/CMakeLists.txt (one suite per file, tiered unit / gpu / extended).
-add_subdirectory(tests)
+add_subdirectory(src/tests)
+
+# --- Projects shipped beside the engine (projects/) ---
+# Engine features that are NOT part of the engine. projects/planet is the planetary world: the
+# engine is flat-terrain only, and a round world is a project that overrides what it needs
+# through the module hooks (toyengine/core/module.h). Each is an ordinary toyengine project --
+# the same toyengine_add_project() this file uses for the engine's own targets -- kept in the
+# checkout so one build tree configures and tests both worlds. Guarded on the directory so a
+# trimmed checkout still configures, and inside the top-level gate above so a game project
+# consuming this engine never builds them.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/projects/planet/CMakeLists.txt")
+    add_subdirectory(projects/planet)
+endif()
 
 # --- Editor ---
 # toyengine_editor (defined by toyengine_add_project() above) embeds the same Engine, so its
@@ -258,14 +276,14 @@ add_subdirectory(tests)
 
 # toyengine_hub: the project launcher (hub/) -- a GUI over tools/toyhub, drawn with the editor's
 # UI and themes. Engine-level, so it is not part of a game project's build.
-add_executable(toyengine_hub hub/hub.cpp)
+add_executable(toyengine_hub src/hub/hub.cpp)
 add_dependencies(toyengine_hub toyengine_shaders uicoopa_shaders)
 target_link_libraries(toyengine_hub PRIVATE toyengine::editor)
 
 # toyengine_icon: exports the logo (toyengine/core/branding.h) as PNGs + a macOS .icns into
 # editor/branding/ for packaging (not assets/: that ships with games). Not needed at runtime -- Engine rasterizes the same shapes.
 add_executable(toyengine_icon tools/icon/export_icon.cpp)
-target_include_directories(toyengine_icon PRIVATE ${TOYENGINE_DIR})
+target_include_directories(toyengine_icon PRIVATE ${TOYENGINE_SRC_DIR})
 target_link_libraries(toyengine_icon PRIVATE coopa::gfx)
 
 # --- Vulkan/GLFW leak gate ---
@@ -274,20 +292,22 @@ target_link_libraries(toyengine_icon PRIVATE coopa::gfx)
 # ClearColor instead of VkClearColorValue, and so on). check_no_vulkan.sh enforces that.
 #
 # SCOPE: the script must be pointed at FIRST-PARTY directories only. Pointing it at
-# TOYENGINE_DIR scans libs/ as well, and gfxcoopa's own sources name these symbols by
+# TOYENGINE_SRC_DIR scans src/libs/ as well, and gfxcoopa's own sources name these symbols by
 # definition -- that reported ~2,400 false positives and is why the number was never
 # believable. One invocation per first-party root instead.
 #
-# OFF by default until the remaining leaks are gone. Current inventory, and the gfxcoopa
-# abstractions each one still needs, are tracked in plans/2026-10-24_vulkan-seal.md. Run
-# `cmake --build build --target toyengine_leak_check` (or the lines below by hand) for the
-# live count; flip this ON once it reaches zero so it can never regress.
-option(GFX_LEAK_CHECK "Fail the build if consumer source names raw Vulkan/GLFW symbols" OFF)
-set(_toy_leak_roots "${TOYENGINE_DIR}/toyengine" "${TOYENGINE_DIR}/editor" "${TOYENGINE_DIR}/hub")
+# ON, and every root is at zero. A raw Vulkan or GLFW name reaching first-party source now
+# fails the build rather than accumulating, which is the only state in which the count stays
+# believable -- `// gfx-allow-vulkan` is the deliberate escape hatch for the genuinely
+# unavoidable reference, and nothing under these roots uses it.
+option(GFX_LEAK_CHECK "Fail the build if consumer source names raw Vulkan/GLFW symbols" ON)
+set(_toy_leak_roots "${TOYENGINE_SRC_DIR}/toyengine" "${TOYENGINE_SRC_DIR}/editor"
+                    "${TOYENGINE_SRC_DIR}/hub" "${TOYENGINE_SRC_DIR}/tests")
 add_custom_target(toyengine_leak_check
-    COMMAND ${GFXCOOPA_DIR}/tools/check_no_vulkan.sh ${TOYENGINE_DIR}/toyengine
-    COMMAND ${GFXCOOPA_DIR}/tools/check_no_vulkan.sh ${TOYENGINE_DIR}/editor
-    COMMAND ${GFXCOOPA_DIR}/tools/check_no_vulkan.sh ${TOYENGINE_DIR}/hub
+    COMMAND ${GFXCOOPA_DIR}/tools/check_no_vulkan.sh ${TOYENGINE_SRC_DIR}/toyengine
+    COMMAND ${GFXCOOPA_DIR}/tools/check_no_vulkan.sh ${TOYENGINE_SRC_DIR}/editor
+    COMMAND ${GFXCOOPA_DIR}/tools/check_no_vulkan.sh ${TOYENGINE_SRC_DIR}/hub
+    COMMAND ${GFXCOOPA_DIR}/tools/check_no_vulkan.sh ${TOYENGINE_SRC_DIR}/tests
     COMMENT "Checking that no first-party source names raw Vulkan/GLFW symbols")
 if(GFX_LEAK_CHECK)
     set_target_properties(toyengine_leak_check PROPERTIES EXCLUDE_FROM_ALL FALSE)

@@ -9,7 +9,7 @@
 Two stacked panels over frame number:
   * GPU: per-feature pass time as stacked areas (the largest --top features, the rest
     folded into "other"), with gpu.total on top. The features sum to the total by
-    construction (see toyengine/render/gpu_profiler.h).
+    construction (see src/toyengine/render/gpu_profiler.h).
   * CPU: frame time, with the CPU phases (input, scene update, gather, record, and the
     time blocked on the GPU in submit/present) as lines.
 

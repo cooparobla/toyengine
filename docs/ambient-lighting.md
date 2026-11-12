@@ -47,8 +47,8 @@ single instance to every shading path, so one config edit is guaranteed
 consistent everywhere — there's no path that could end up a different
 brightness or hue than the others by accident:
 
-1. Parsed in `toyengine/core/config.h` into `ToyRenderConfig::indirect`
-   (`toyengine/render/toy_render_config.h`), a shared
+1. Parsed in `src/toyengine/core/config.h` into `ToyRenderConfig::indirect`
+   (`src/toyengine/render/toy_render_config.h`), a shared
    `coopa::gfx::engine::IndirectParams` (gfxcoopa's
    `gfxcoopa/engine/render_features.h`). The same instance feeds the lighting
    pass's push constants and `SsrPass::Params`, by design — see its doc

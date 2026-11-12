@@ -7,5 +7,10 @@
 #define ROOT_DIR "@TOYENGINE_DIR@"
 #define PROJ_DIR "@ROOT_DIR_PARENT@"
 
+// Every compiled tree lives under src/ (the engine, editor, hub, the coopa libraries and the
+// tests). SRC_DIR is how the few runtime lookups into that tree -- the editor's bundled themes
+// and branding, the test fixtures -- find it without each one spelling "src" itself.
+#define SRC_DIR "@TOYENGINE_SRC_DIR@"
+
 // The project directory an executable was built for is not here: toyengine_add_project()
-// registers it at startup (toy::core::build_project_root(), core/runtime_paths.h).
+// registers it at startup (toy::io::build_project_root(), io/runtime_paths.h).

@@ -62,7 +62,7 @@ Put it in a scene:
 ### `bind:` is a key, not a pointer
 
 That indirection is what lets a file hold a screen at all. By default a bound row reads and
-writes `toy::core::UserSettings`, which already persists -- so a settings screen works before
+writes `toy::io::UserSettings`, which already persists -- so a settings screen works before
 any game code exists. To drive something else, register a provider where you have the object:
 
 ```cpp
@@ -85,7 +85,7 @@ an object) must be queued on the scene's command buffer rather than done there.
 
 ## 2. A C++ screen
 
-Derive from `toy::ui::ImmScreen` (`toyengine/ui/imm_screen.h`) and override `draw()`. It is
+Derive from `toy::ui::ImmScreen` (`src/toyengine/ui/imm_screen.h`) and override `draw()`. It is
 called once per frame, so it reads live state directly -- nothing to bind, nothing to keep in
 step:
 
@@ -104,7 +104,7 @@ public:
 
 Then register it like any component (parser in `register.cpp` or a game's `TOY_MODULE()`, plus
 a `ComponentSchema`) -- see `CLAUDE.md`'s component chain. Worked examples:
-`toyengine/ui/demo_hud.h`, `toyengine/audio/audio_demo_panel.h`.
+`src/toyengine/ui/demo_hud.h`, `src/toyengine/audio/audio_demo_panel.h`.
 
 **Ask for boxes through `tune()`**, not inline: it costs the same, and it is what lets
 `assets/ui/<screen_name>.tune.yaml` (the type name in snake_case, like every other asset) move

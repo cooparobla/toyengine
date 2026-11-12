@@ -236,7 +236,7 @@ Place one in a scene as a component, not a prefab:
 ```
 
 Row kinds are `label`, `slider`, `toggle`, `int`, `combo`, `button`, `separator` and `spacer`.
-A row's `bind` key reads and writes `toy::core::UserSettings`, which persists between sessions;
+A row's `bind` key reads and writes `toy::io::UserSettings`, which persists between sessions;
 a game that wants a row to drive something of its own registers a provider for that key
 (`PanelScreen::bindings().provide()`) and the row goes through it instead. A `button` row
 reports its `action` through `bindings().on_action()`.

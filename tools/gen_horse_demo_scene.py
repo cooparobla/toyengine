@@ -92,7 +92,7 @@ HEADER = f"""# horse_demo -- riding: walk up to a horse, get on, ride it through
 #   y =  34  hills           a 30 x 30 m rolling MeshCollider patch; horse_hill stands on a slope
 #                            there with its hooves planted and its body pitched (FootIK body_pitch)
 #
-# How it fits together (toyengine/scene/mount.h, rider.h):
+# How it fits together (src/toyengine/scene/mount.h, rider.h):
 #   * The horse is a CharacterController (player_input: false) steered by its Mount, which picks
 #     the gait from its speed and plays the gait clip at speed / gait speed (no hoof sliding).
 #   * The player's Rider suspends its CharacterController and FootIK, crossfades to `ride`, and

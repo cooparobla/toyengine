@@ -170,7 +170,7 @@ HEADER = f"""# character_demo -- the CharacterController bench: a mannequin play
 # into idle where the body lies (the CharacterController's capsule switches off meanwhile).
 # Worth checking: physics debug draw (joints: anchors + cone-twist cones), the bodies settling.
 #
-# Save / load (toyengine/save/): F5 quick-saves, F9 quick-loads. The save holds the player's pose
+# Save / load (src/toyengine/save/): F5 quick-saves, F9 quick-loads. The save holds the player's pose
 # (its SaveId + CharacterController, an ISaveable), the collected coins and the weather clock
 # (SaveDemo's on_save / on_load hooks). The clock runs a 6-minute day so a load visibly rewinds it.
 #

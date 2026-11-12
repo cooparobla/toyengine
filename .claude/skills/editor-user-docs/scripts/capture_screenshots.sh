@@ -4,7 +4,7 @@
 #
 # Usage: .claude/skills/editor-user-docs/scripts/capture_screenshots.sh [shot-filter...]
 #   No filter: every shot (test) in toyengine_editor_docs' "docs" suite
-#   (tests/editor/docs/docs_test.cpp). A filter is a substring of a shot name, e.g.
+#   (src/tests/editor/docs/docs_test.cpp). A filter is a substring of a shot name, e.g.
 #   `capture_screenshots.sh sculpt timeline`.
 #
 # Each test runs on its own and is retried up to 3 times: the editor's headless UI tests hit a

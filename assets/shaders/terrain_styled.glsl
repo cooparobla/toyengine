@@ -36,7 +36,7 @@
 // z = height_step, w = tile_size (world units).
 //
 // This is the body of terrain_styled.frag; terrain_styled_planet.frag builds it with
-// TERRAIN_PLANET for a planet's chunks, which are bent onto a sphere: uv.y then carries each
+// TERRAIN_CURVED for a planet's chunks, which are bent onto a sphere: uv.y then carries each
 // vertex's "how far up it faces" (away from the planet), and wall strata have no one vertical to
 // band along. Without the define none of that code exists.
 
@@ -226,7 +226,7 @@ int styled_kind() {
             else                       kind = e.x < e.y ? k1 : k2;
         }
     } else if (type == 2u) {
-#ifdef TERRAIN_PLANET
+#ifdef TERRAIN_CURVED
         kind = frag_uv.y > k_lip_threshold ? k0 : k1;   // up = away from the planet (the warp's uv.y)
 #else
         kind = normalize(frag_world_normal).z > k_lip_threshold ? k0 : k1;
@@ -317,7 +317,7 @@ void gfx_surface_fragment(inout GfxSurface s) {
     // blotch standing in for one: broad patches that sit still under a moving camera, for the
     // same reason the detail above does. Analytic noise here would reintroduce exactly the
     // per-pixel flicker the mip chain was brought in to kill.
-#ifdef TERRAIN_PLANET
+#ifdef TERRAIN_CURVED
     float up = frag_uv.y;              // "up" is away from the planet, as styled_kind() reads it
     vec3 geo_n = normalize(s.normal_ws);
 #else

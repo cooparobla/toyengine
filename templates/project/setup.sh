@@ -57,7 +57,7 @@ if [[ -n "$link" ]]; then
             fi
         fi
     fi
-    if [[ ! -f "$link/CMakeLists.txt" || ! -d "$link/toyengine" ]]; then
+    if [[ ! -f "$link/CMakeLists.txt" || ! -d "$link/src/toyengine" ]]; then
         if [[ "$link" == "$PROJECT_DIR"/* ]]; then
             die "engine.link points at ${link#"$PROJECT_DIR"/}, which holds no toyengine checkout -- make one with 'toyhub worktree $PROJECT_DIR' (a branch of a local checkout) or 'toyhub own $PROJECT_DIR' (its own clone)"
         fi

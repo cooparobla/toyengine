@@ -261,7 +261,7 @@ inline void reveal_in_file_browser(const fs::path& p) { editor::open_with_system
 /** @brief True for a toyengine checkout a project can link to (its CMake + the engine headers). */
 inline bool is_toyengine_checkout(const fs::path& p) {
     std::error_code ec;
-    return fs::exists(p / "CMakeLists.txt", ec) && fs::exists(p / "toyengine" / "core" / "engine.h", ec) &&
+    return fs::exists(p / "CMakeLists.txt", ec) && fs::exists(p / "src" / "toyengine" / "core" / "engine.h", ec) &&
            fs::exists(p / "cmake" / "ToyProject.cmake", ec);
 }
 

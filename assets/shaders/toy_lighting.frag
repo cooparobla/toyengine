@@ -284,8 +284,8 @@ void main() {
         //
         // Casts no shadow, deliberately: the cascades belong to the sun, and a second shadowed
         // light would double this pass's most expensive term to light a hemisphere that is, by
-        // construction, dim. `night_floor` is 0 unless a PlanetAtmosphere authors a
-        // moon_intensity, so every scene that has not asked for one is untouched.
+        // construction, dim. `night_floor` (sky_extra.z) carries the fill, and the branch below
+        // also requires a curved world frame -- so a flat scene never pays for any of it.
         float moon_lum = lights.sky_extra.z;
         if (moon_lum > 0.0 && params.world_frame.w > 0.0) {
             vec3  up = gfx_world_up(world_pos, params.world_frame);

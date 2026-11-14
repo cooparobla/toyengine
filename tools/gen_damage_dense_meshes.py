@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Generates the dense demo meshes `damage_demo` dents at their authored resolution.
 
 `assets/meshes/primitives/sphere` (425 verts) and `assets/meshes/props/camp_log` (62 verts) are
@@ -18,12 +19,17 @@ import math
 import pathlib
 import sys
 
-sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import mesh_yaml
+# toyproject (python/) is stdlib-only, so one path entry is all it needs -- no venv and no
+# install, which is why this runs under a bare `python3`. See python/README.md.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "python" / "src"))
 
+from toyproject import fmt_g6, perpendicular_tangents, vertex_normals, write_mesh
 
 def _write(path, verts, faces, uvs):
     """Writes one mesh with explicit area-weighted normals and seam-safe tangents.
+
+    `fmt_g6` is the compact float format these meshes were generated with; writing them with
+    the other one would rewrite every vertex line without changing the geometry.
 
     Args:
         path (pathlib.Path): Destination file.
@@ -31,9 +37,11 @@ def _write(path, verts, faces, uvs):
         faces (list): Triangles as index lists.
         uvs (list): One UV per vertex.
     """
-    normals = mesh_yaml.vertex_normals(verts, faces)
-    tangents = mesh_yaml.perpendicular_tangents(normals)
-    mesh_yaml.write_mesh(path, verts, faces, uvs, normals=normals, tangents=tangents)
+    normals = vertex_normals(verts, faces)
+    tangents = perpendicular_tangents(normals)
+    written = write_mesh(path, verts, faces, uvs, normals=normals, tangents=tangents,
+                         fmt=fmt_g6)
+    print(f"wrote {len(verts)} vertices, {len(faces)} faces to {written}")
 
 
 def gen_camp_log_dense(path):

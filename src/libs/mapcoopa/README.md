@@ -205,8 +205,8 @@ outputs and details are in [`coopa/maps/passes/README.md`](coopa/maps/passes/REA
 
 ## Sphere maps
 
-`topology: sphere` generates on a globe instead of a rectangle, for a planet (toyengine's planet
-TileTerrain uses it). Nothing about a flat map changes; the sphere has its own branches.
+`topology: sphere` generates on a globe instead of a rectangle -- what a consumer that wraps a
+world onto a sphere asks for. Nothing about a flat map changes; the sphere has its own branches.
 
 - **Size.** `sphere_cells` cells (0: `(grid_size + 1)^2`) at radius `sqrt(cells / 4π)` grid units,
   so a cell is still about one grid unit across and every metre setting keeps its meaning

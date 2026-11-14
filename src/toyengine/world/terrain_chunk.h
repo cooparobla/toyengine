@@ -92,7 +92,7 @@ struct ChunkMeshData {
     /**
      * @brief The tallest column this chunk's pad held (its own tiles, not the neighbour skirt),
      *        in steps -- a byproduct of mesh_chunk_styled()'s per-tile walk, not a second pass.
-     *        A planet's horizon cull reads this per chunk; see TerrainChunk::max_steps.
+     *        A streaming policy's visibility cull reads this per chunk; see TerrainChunk::max_steps.
      */
     std::int32_t max_steps = 0;
 
@@ -125,8 +125,8 @@ struct ChunkWaterData {
      */
     std::vector<float>         wave_scales;
     std::vector<std::uint32_t> indices;
-    /// A planet chunk's water is given in its own frame (WaterBody::local_frame): `frame` maps it
-    /// to the chunk's space -- local Z out from the planet at the chunk's centre. Identity, and
+    /// A shaped chunk's water is given in its own frame (WaterBody::local_frame): `frame` maps it
+    /// to the chunk's space -- local Z out from the centre at the chunk's own centre. Identity, and
     /// unused, on a flat terrain.
     glm::mat4                  frame{1.0f};
     bool                       local_frame = false;
@@ -230,7 +230,7 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
  * function of `chunk_size / stride`, not of the terrain's shape) and in output, so two workers
  * meshing equal pads emit byte-identical buffers; and pure, with no simplifier involved, so
  * unlike a `ratio` level this one exists on every chunk. Meshed in face space, so
- * warp_chunk_to_planet() bends it onto a globe unchanged.
+ * a ChunkShaper bends it unchanged.
  *
  * **Why the seam holds.** A block's height is the tallest column it covers, never the mean, and
  * the chunk's boundary walls descend to the neighbouring chunk's OWN column height read from the
@@ -257,8 +257,8 @@ void mesh_chunk_field(const ColumnPad& pad, const TerrainParams& params, std::in
  * different levels overlap rather than crack. Faces are weighted by area, and a position whose
  * faces cancel keeps the flat normal it already had.
  *
- * Call it in the level's own space, before any planet warp: shared corners are exact grid values
- * there, and the warp carries the result onto the globe unchanged.
+ * Call it in the level's own space, before any shaping: shared corners are exact grid values
+ * there, and the shaping carries the result through unchanged.
  */
 void smooth_field_normals(ChunkMeshData& mesh);
 
@@ -338,7 +338,7 @@ const TerrainParams::ChunkLod* first_field_lod(const TerrainParams& params);
  *
  * What a rebuild compares to decide whether it may keep the chunk's existing water children
  * rather than hand back fresh ones -- see TerrainChunk::water_hash. Covers every field
- * WaterBody::set_geometry() is given, plus the planet frame.
+ * WaterBody::set_geometry() is given, plus the local frame.
  *
  * @param still   The chunk's sea and lakes.
  * @param flowing The chunk's rivers.
@@ -378,12 +378,12 @@ struct ChunkBuildJob {
     /**
      * @brief Build only the `field` LOD tiers, skipping the chunk's native tile geometry.
      *
-     * That skipped mesh_chunk_styled() pass is nearly the whole of a planet chunk's cost: a
-     * planet forces `max_merge = 1`, so every tile emits its own pieces and its own walls, and
-     * the result is resident for as long as the scene runs because a planet never evicts a
-     * chunk. For the overwhelming majority of a globe held in frame, no pixel ever draws it --
+     * That skipped mesh_chunk_styled() pass is nearly the whole of such a chunk's cost: a shaped
+     * world forces `max_merge = 1`, so every tile emits its own pieces and its own walls, and the
+     * result is resident for as long as the scene runs because such a world never evicts a
+     * chunk. For the overwhelming majority of a world held in frame, no pixel ever draws it --
      * the finest `field` tier's `screen_size` is the size at which the renderer starts asking
-     * for LOD 0, and most of a planet is far smaller than that.
+     * for LOD 0, and most of such a world is far smaller than that.
      *
      * The finest `field` tier becomes the mesh, and therefore LOD 0's buffer region. The
      * renderer needs no changes for that: select_lod() ignores `thresholds[0]` and draws level 0
@@ -392,12 +392,12 @@ struct ChunkBuildJob {
      * Water is still built -- it reads the `pad`, not the mesh, so a coarse and a full build of
      * the same columns produce the SAME `water_hash`, which is what lets the publish carry the
      * already-baked WaterBody children across a rebuild instead of blinking every ocean on the
-     * globe each time a chunk promotes.
+     * world each time a chunk promotes.
      *
      * Meaningless with `collision`: a collider is what the chunk is SHAPED like, and a character
      * walking on a quantised field tier -- a different surface depending on where the camera is
      * -- is worse than no optimisation. TerrainSystem resolves this as `want_coarse &&
-     * !collision`, so a `collision: true` planet behaves exactly as it did before this existed.
+     * !collision`, so a `collision: true` terrain behaves exactly as it did before this existed.
      * With no `field` tier configured it falls back to a full build: a degradation, not a failure.
      */
     bool                   coarse_only = false;

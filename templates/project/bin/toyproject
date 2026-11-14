@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# bin/toyproject <command> [args...]
+#
+# The asset API's own command line, run against this project.
+#
+#   bin/toyproject info                      where this project is, and what its assets hold
+#   bin/toyproject new-scene effects/my_demo  write a loadable starter scene
+#
+# `info` is the quick way to confirm a generator will find the project you think it will --
+# it prints the root it resolved, the engine behind .libs/toyengine, and a file count per
+# asset kind. For anything beyond these, write a script and run it with bin/toypy.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/../.toyenv.sh"
+
+case "${1:-}" in -h|--help|"") usage ;; esac
+
+py_dir="$ENGINE_DIR/python"
+[[ -d "$py_dir" ]] || die "$py_dir is missing -- run ./setup.sh to put the engine in place"
+command -v uv >/dev/null 2>&1 \
+    || die "uv is not installed (it manages the Python environment): https://docs.astral.sh/uv/"
+
+# Run from the project root so the command's own Project.find() lands here regardless of where
+# it was invoked from.
+cd "$PROJECT_DIR"
+exec uv run --project "$py_dir" toyproject "$@"

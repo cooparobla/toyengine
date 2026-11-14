@@ -2,7 +2,7 @@
  * @file ui_canvas.h
  * @brief The UI workspace: author a panel asset, and watch it run.
  *
- * A screen is data now (toyengine/ui/ui_panel.h) -- a title, a size, tabs of labelled rows --
+ * A screen is data (toyengine/ui/ui_panel.h) -- a title, a size, tabs of labelled rows --
  * so this edits that file and shows the result live, at whatever resolution a player might
  * have. It is deliberately its own workspace rather than part of the scene view: an interface
  * is built against a blank frame, not on top of the level, and a scene links to the finished

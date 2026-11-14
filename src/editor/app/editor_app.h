@@ -508,7 +508,6 @@ public:
     bool bind_targets(ObjectId& skin, ObjectId& rig);
     void close_world_generator();
     void open_world_generator(ObjectId id = 0);
-    bool& world_generator_planet();
     std::uint64_t world_generator_preview_serial() const;
 
     /** @brief Closes the Project Settings modal on its next draw (as its Close button does). */
@@ -562,8 +561,6 @@ public:
     /** @brief Creates an object carrying one component of `type` (lights, cameras, ...), named
      *         `name` in snake_case ("Point Light" -> point_light). */
     ObjectId create_with_component(const std::string& type, const std::string& name, ObjectId parent = 0);
-    /** @brief Add > Planet: a TileTerrain in planet mode (a small globe with its own gravity). */
-    ObjectId create_planet();
     /**
      * @brief Add > Armature: a new object with a Rig, one root bone, and its own
      *        `assets/rigs/<name>.yaml` -- then drops straight into Rig Edit on it.

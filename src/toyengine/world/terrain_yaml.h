@@ -11,6 +11,7 @@
 #ifndef TOYENGINE_WORLD_TERRAIN_YAML_H
 #define TOYENGINE_WORLD_TERRAIN_YAML_H
 
+#include <functional>
 #include <string>
 
 #include <fkYAML/node.hpp>
@@ -40,6 +41,26 @@ class TerrainComponent;
  * Note that `layers:` is NOT a signal: both modes have it.
  */
 TerrainMode infer_terrain_mode(const fkyaml::node& node);
+
+/**
+ * @brief Extra keys a project adds to a terrain, applied after the engine has parsed its own.
+ *
+ * The engine parses the keys it models and no others. A project whose world has a shape the
+ * engine does not describe -- and so keys the engine has never heard of -- registers one of
+ * these and reads them itself, installing whatever `ChunkShaper`/`TileGrid` they imply. It runs
+ * with the component fully built, so it can both read the engine's parsed values and override
+ * them.
+ *
+ * One hook, set from a project's `TOY_MODULE` (toyengine/core/module.h). Unset means a terrain
+ * is exactly what the engine parsed.
+ */
+using TerrainParseHook = std::function<void(const fkyaml::node& node, TerrainComponent& terrain)>;
+
+/** @brief Installs the project's terrain key reader; pass `{}` to remove it. */
+void set_terrain_parse_hook(TerrainParseHook hook);
+
+/** @brief The installed hook, or an empty function. */
+const TerrainParseHook& terrain_parse_hook();
 
 /**
  * @brief Reads `node`'s `layers:` sequence into `terrain`, resolving each layer's textures.

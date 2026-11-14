@@ -18,8 +18,11 @@ import os
 import pathlib
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import mesh_yaml  # noqa: E402
+# toyproject (python/) is stdlib-only, so one path entry is all it needs -- no venv and no
+# install, which is why this runs under a bare `python3`. See python/README.md.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "python" / "src"))
+
+from toyproject import Mesh, flow, fmt_g6, perpendicular_tangents, vertex_normals, write_mesh
 from gen_character_demo_scene import block, num, ramp, tint, v3  # noqa: E402
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "scenes", "gameplay", "horse_demo")
@@ -55,12 +58,12 @@ def hills_mesh():
             faces.append([a, a + 1, a + row + 1, a + row])
     os.makedirs(os.path.join(ROOT, "meshes"), exist_ok=True)
     r5 = lambda vs: [[round(c, 5) for c in v] for v in vs]
-    normals = r5(mesh_yaml.vertex_normals(verts, faces))
-    mesh_yaml.write_mesh(pathlib.Path(ROOT, "meshes", "horse_hills.yaml"), verts, faces, uvs, normals=normals,
-                         tangents=r5(mesh_yaml.perpendicular_tangents(normals)))
+    normals = r5(vertex_normals(verts, faces))
+    write_mesh(pathlib.Path(ROOT, "meshes", "horse_hills.yaml"), verts, faces, uvs, normals=normals,
+                         tangents=r5(perpendicular_tangents(normals)))
     with open(os.path.join(ROOT, "meshes", "horse_hills_collider.yaml"), "w") as fh:
         fh.write(f"# Collision copy of horse_hills (a MeshCollider needs its own file). {GENERATED}\n")
-        fh.write("vertices:\n" + "".join(f"  - {mesh_yaml.fmt_vec(p)}\n" for p in verts))
+        fh.write("vertices:\n" + "".join(f"  - {flow(p, fmt_g6)}\n" for p in verts))
         fh.write("faces:\n" + "".join(f"  - {f}\n" for f in faces))
     return verts, n
 

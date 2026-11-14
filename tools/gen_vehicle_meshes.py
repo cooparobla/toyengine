@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Generates the low-poly vehicle meshes the `vehicle_demo` scene drives.
 
 Every body is a soup of flat-shaded hexahedra -- boxes, and boxes with their eight corners moved
@@ -18,9 +19,12 @@ import math
 import pathlib
 import sys
 
-sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
-from mesh_yaml import perpendicular_tangents, write_mesh
+# toyproject (python/) is stdlib-only, so one path entry is all it needs -- no venv and no
+# install, which is why this runs under a bare `python3`. See python/README.md.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "python" / "src"))
+
+from toyproject import Mesh, fmt_g6, perpendicular_tangents, write_mesh
 
 OUT_DIR = pathlib.Path(__file__).parent.parent / "assets" / "meshes" / "vehicles"
 

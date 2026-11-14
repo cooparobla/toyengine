@@ -62,7 +62,7 @@ coopa::job::Priority chunk_priority(std::int32_t distance, std::int32_t view_rad
 } // namespace
 
 /**
- * @brief See terrain_system.h. Taking LOD 0's index count alone would under-report a planet
+ * @brief See terrain_system.h. Taking LOD 0's index count alone would under-report a coarse-built
  *        chunk by most of what it is actually holding, which is the quiet way to get this wrong.
  */
 std::uint64_t mesh_bytes(std::uint32_t vertex_count, std::uint32_t lod0_index_count,
@@ -93,7 +93,7 @@ void TerrainSystem::execute(coopa::scene::Scene& scene, const coopa::scene::Fram
     resident_chunks_ = 0;
     drawn_chunks_ = 0;
     coarse_chunks_ = 0;
-    planet_peak_ = 0.0f;
+    relief_peak_ = 0.0f;
     // Baked on the first frame that has terrain, not in the constructor: the bake submits a
     // one-shot upload, and a system is constructed before the device is necessarily ready to
     // take one. It registers itself with the asset manager, so this is one upload per run.
@@ -138,7 +138,7 @@ void TerrainSystem::execute(coopa::scene::Scene& scene, const coopa::scene::Fram
             "loaded " + std::to_string(resident_chunks_) + " chunks, " +
             std::to_string(resident_mesh_bytes_ / (1024 * 1024)) + " MB of mesh, in " +
             std::to_string(static_cast<int>(load_ms_)) + " ms" +
-            (planet_peak_ > 0.0f ? " (planet peak " + std::to_string(planet_peak_) + ")" : ""));
+            (relief_peak_ > 0.0f ? " (relief peak " + std::to_string(relief_peak_) + ")" : ""));
         // TOY_TERRAIN_SAVE: writes a freshly baked world to its `.terra` file once the load is
         // done. Normally saving is the editor's business (its Terrain and Tile panels call
         // TerraStore::save_dirty()), which leaves no way to regenerate a world from a headless
@@ -170,7 +170,7 @@ void TerrainSystem::execute(coopa::scene::Scene& scene, const coopa::scene::Fram
         if (terrain->chunks().empty()) it = releasing_.erase(it);
         else ++it;
     }
-    sync_planet_gravity_(scene);
+    after_terrains_(scene);
     // One diff per frame however many chunk colliders came or went (PhysicsSystem::refresh()).
     if (physics_dirty_) {
         if (auto* physics = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene.find_system("Physics"))) {
@@ -181,7 +181,7 @@ void TerrainSystem::execute(coopa::scene::Scene& scene, const coopa::scene::Fram
 
 void TerrainSystem::measure_(const TerrainComponent& terrain) {
     // One pass over the chunk map, after it has been ticked. A handful of loads per chunk, so a
-    // 1536-chunk globe is tens of microseconds -- cheaper than gating it would be, and gating
+    // 1536-chunk world is tens of microseconds -- cheaper than gating it would be, and gating
     // would need the debug overlay's state inside world/, which nothing here depends on.
     for (const auto& [coord, chunk] : terrain.chunks()) {
         (void)coord;
@@ -191,8 +191,7 @@ void TerrainSystem::measure_(const TerrainComponent& terrain) {
         if (chunk.object != nullptr && chunk.object->active()) ++drawn_chunks_;
         if (chunk.coarse) ++coarse_chunks_;
     }
-    // Qualified: the member accessor of the same name shadows the free function here.
-    if (terrain.params.planet) planet_peak_ = std::max(planet_peak_, world::planet_peak(terrain));
+    relief_peak_ = std::max(relief_peak_, relief_of_(terrain));
 }
 
 void TerrainSystem::tick_terrain_(TerrainComponent& terrain, coopa::scene::Scene& scene,
@@ -212,15 +211,12 @@ void TerrainSystem::tick_terrain_(TerrainComponent& terrain, coopa::scene::Scene
 
     advance_water_settles_(terrain);
     mark_edited_chunks_(terrain);
-    if (terrain.params.planet) {
-        // A planet is small and seen whole: every chunk stays loaded, nearest the camera first.
-        want_planet_chunks_(terrain);
-        sync_planet_detail_(terrain);
-        upload_finished_chunks_(terrain, scene);
-        submit_queued_chunks_(terrain, ChunkCoord{0, 0}, ctx);
-        cull_planet_horizon_(terrain);
-        return;
-    }
+    stream_(terrain, scene, ctx);
+}
+
+void TerrainSystem::stream_(TerrainComponent& terrain, coopa::scene::Scene& scene,
+                            const coopa::scene::FrameContext& ctx) {
+    // The flat policy: a square of chunks around the camera, and whatever leaves it is released.
     const ChunkCoord centre = latched_centre_(terrain);
     want_chunks_(terrain, centre, scene);
     release_distant_chunks_(terrain, centre, ctx);
@@ -228,6 +224,33 @@ void TerrainSystem::tick_terrain_(TerrainComponent& terrain, coopa::scene::Scene
     upload_finished_chunks_(terrain, scene);
     submit_queued_chunks_(terrain, centre, ctx);
 }
+
+void TerrainSystem::order_chunks_(const TerrainComponent& terrain,
+                                  std::vector<ChunkCoord>& coords) const {
+    // Nearest the streaming centre first, so the ground under the camera is built and uploaded
+    // before the horizon's. The coordinate tie-break keeps the order deterministic for a given
+    // camera position, which is what makes a scripted capture reproducible.
+    const ChunkCoord centre = terrain.stream_centre.centre;
+    std::sort(coords.begin(), coords.end(), [&](const ChunkCoord& a, const ChunkCoord& b) {
+        const std::int32_t da = chunk_distance(a, centre);
+        const std::int32_t db = chunk_distance(b, centre);
+        if (da != db) return da < db;
+        if (a.y != b.y) return a.y < b.y;
+        return a.x < b.x;
+    });
+}
+
+coopa::job::Priority TerrainSystem::chunk_job_priority_(const TerrainComponent& terrain,
+                                                        const ChunkCoord& coord) const {
+    return chunk_priority(chunk_distance(coord, terrain.stream_centre.centre),
+                          terrain.params.view_radius);
+}
+
+float TerrainSystem::relief_of_(const TerrainComponent&) const {
+    return 0.0f;   // a flat terrain measures no relief; nothing it feeds has any use for one
+}
+
+void TerrainSystem::after_terrains_(coopa::scene::Scene&) {}
 
 ChunkCoord TerrainSystem::latched_centre_(TerrainComponent& terrain) const {
     const ChunkCoord candidate = terrain.params.chunk_at(stream_centre_(terrain));
@@ -291,7 +314,7 @@ void TerrainSystem::mark_edited_chunks_(TerrainComponent& terrain) {
         if (terrain.topology != nullptr) {
             // Everything dirty at once: every chunk is stale, so say that directly. The walk
             // below is per TILE, and a large terrain has a great many -- 6144 x 1024 on
-            // planet_demo, which with the nine lookups each is 57 million hash probes on the
+            // a 1536-chunk world, which with the nine lookups each is 57 million hash probes on the
             // owner thread in one frame, for an answer that is just "all of them". It is not a
             // rare path either: TerraData reports the whole grid after any mark_all_dirty() (a
             // load, a bake, a reshape) and whenever its dirty journal overflows.
@@ -333,33 +356,6 @@ void TerrainSystem::mark_edited_chunks_(TerrainComponent& terrain) {
     terrain.applied_tile_revision = data.revision();
 }
 
-void TerrainSystem::want_planet_chunks_(TerrainComponent& terrain) {
-    if (terrain.field.empty()) return;
-    const std::int32_t size = std::max(1, terrain.params.chunk_size);
-    for (std::int32_t cy = 0; cy * size < terrain.field.geometry().tiles_y; ++cy) {
-        for (std::int32_t cx = 0; cx * size < terrain.field.geometry().tiles_x; ++cx) {
-            const ChunkCoord coord{cx, cy};
-            // Counted exactly as want_chunks_() counts the flat wanted square, and for the same
-            // two readers: warm_up_state(), which otherwise reports `participates = false` for a
-            // planet and lets the loading screen fade in on a half-built globe, and load_ms().
-            // Accumulated, not assigned -- execute() zeroes the pair.
-            ++wanted_chunks_;
-            auto it = terrain.chunks().find(coord);
-            if (it != terrain.chunks().end()) {
-                const TerrainChunk& chunk = it->second;
-                if (chunk.state != ChunkState::Live || chunk.stale || chunk.wants_collision) {
-                    ++unfinished_chunks_;
-                }
-                continue;
-            }
-            ++unfinished_chunks_;
-            TerrainChunk chunk;
-            chunk.coord = coord;
-            chunk.state = ChunkState::Queued;
-            terrain.chunks().emplace(coord, std::move(chunk));
-        }
-    }
-}
 
 void TerrainSystem::advance_water_settles_(TerrainComponent& terrain) {
     if (terrain.water_settles.empty() || terrain.field.empty()) return;
@@ -377,179 +373,10 @@ void TerrainSystem::advance_water_settles_(TerrainComponent& terrain) {
     }
 }
 
-glm::vec3 TerrainSystem::planet_eye_direction_(const TerrainComponent& terrain) const {
-    CameraComponent* camera = CameraComponent::main();
-    if (camera == nullptr || camera->owner == nullptr || camera->owner->get_transform() == nullptr) {
-        return glm::vec3(0.0f);
-    }
-    glm::mat4 to_local(1.0f);
-    if (terrain.owner != nullptr) {
-        if (auto* tc = terrain.owner->get_transform()) to_local = glm::inverse(tc->transform().get_world_matrix());
-    }
-    const glm::vec3 eye = glm::vec3(to_local * camera->owner->get_transform()->transform().get_world_matrix()[3]);
-    const float distance = glm::length(eye);
-    return distance > 1e-4f ? eye / distance : glm::vec3(0.0f);
-}
 
-bool TerrainSystem::planet_eye_local_(const TerrainComponent& terrain, glm::vec3& eye) const {
-    CameraComponent* camera = CameraComponent::main();
-    if (camera == nullptr || camera->owner == nullptr || camera->owner->get_transform() == nullptr) return false;
-    glm::mat4 to_local(1.0f);
-    if (terrain.owner != nullptr) {
-        if (auto* tc = terrain.owner->get_transform()) to_local = glm::inverse(tc->transform().get_world_matrix());
-    }
-    eye = glm::vec3(to_local * camera->owner->get_transform()->transform().get_world_matrix()[3]);
-    return true;
-}
 
-void TerrainSystem::cull_planet_horizon_(TerrainComponent& terrain) {
-    if (!terrain.params.planet || terrain.chunks().empty()) return;
-    glm::vec3 eye(0.0f);
-    if (!planet_eye_local_(terrain, eye)) return;
-    const float distance = glm::length(eye);
-    const PlanetLayout layout = terrain.params.layout();
-    const float radius = layout.radius();
-    // Inside the planet, or so near the surface that the horizon is on top of the camera: draw
-    // everything and let the frustum do the work. (It also keeps a camera at the surface, where
-    // radius / distance is ~1, from hiding the ground it is standing on.)
-    if (distance <= radius * 1.02f) {
-        for (auto& [coord, chunk] : terrain.chunks()) {
-            if (chunk.object != nullptr) chunk.object->set_active(true);
-        }
-        return;
-    }
 
-    const glm::vec3 view = eye / distance;
-    // How far round the globe anything can still be seen from here, as an angle from the camera's
-    // own direction: `alpha` to the horizon itself (where the view grazes the sphere), plus a
-    // PER-CHUNK `beta` for that chunk's own tallest column standing on it -- it sits on the
-    // tangent line `beta` further round than a bare sphere would -- plus half a chunk's angular
-    // width, since the test below asks about a chunk's CENTRE and its near edge reaches closer.
-    // Reading each chunk's own TerrainChunk::max_steps (its height at the last mesh, in world
-    // units via height_step) instead of one global height_scale margin means an archipelago
-    // planet's sea-level majority draws the tight, correct cap, and only the chunks that are
-    // actually tall widen their own -- rather than every chunk paying for the globe's tallest
-    // peak. A chunk never meshed yet (max_steps == 0) still gets a 1-step floor, so a chunk that
-    // has not finished its first build is not drawn as if it were flat.
-    const float alpha = std::acos(std::clamp(radius / distance, -1.0f, 1.0f));
-    const float chunk_angle = 0.75f * terrain.params.chunk_world_size() / radius;
-    const float height_step = std::max(0.0f, terrain.params.height_step);
 
-    const std::int32_t size = std::max(1, terrain.params.chunk_size);
-    for (auto& [coord, chunk] : terrain.chunks()) {
-        if (chunk.object == nullptr) continue;
-        // The chunk's centre, as a direction out of the planet's centre.
-        const glm::vec3 centre(layout.tile_direction(coord.x * size + size / 2, coord.y * size + size / 2));
-        const float facing = glm::dot(centre, view);
-        const float chunk_height = static_cast<float>(std::max(1, chunk.max_steps)) * height_step;
-        const float beta = std::acos(std::clamp(radius / (radius + chunk_height), -1.0f, 1.0f));
-        const float limit = std::cos(std::min(alpha + beta + chunk_angle, 3.14159265f));
-        // Hidden a little further round than it is shown again, so a chunk sitting on the limb of
-        // a camera that is barely moving cannot toggle every frame.
-        const bool visible = chunk.object->active();
-        if (visible && facing < limit - 0.02f) chunk.object->set_active(false);
-        else if (!visible && facing > limit) chunk.object->set_active(true);
-    }
-}
-
-void TerrainSystem::sync_planet_detail_(TerrainComponent& terrain) {
-    if (!terrain.params.planet || !terrain.planet_coarse_builds || terrain.chunks().empty()) return;
-    // A collider has to be the chunk's real shape; a quantised field tier that changes with the
-    // camera is not one. And with no `field` tier there is nothing to stand in for the native
-    // geometry, so there is nothing to decide.
-    if (terrain.collision) return;
-    const TerrainParams::ChunkLod* finest = first_field_lod(terrain.params);
-    if (finest == nullptr) return;
-
-    glm::vec3 eye(0.0f);
-    if (!planet_eye_local_(terrain, eye)) return;
-    CameraComponent* camera = CameraComponent::main();
-    if (camera == nullptr) return;
-
-    // The threshold IS the finest field tier's own screen_size -- the size at which the renderer
-    // starts asking for LOD 0, because select_lod() ignores thresholds[0] and draws level 0 for
-    // anything above thresholds[1]. Keying off the same number by construction is what stops the
-    // policy and the renderer disagreeing about what a chunk needs.
-    const float threshold = finest->screen_size;
-    if (threshold <= 0.0f) return;
-
-    const PlanetLayout layout = terrain.params.layout();
-    const float radius = layout.radius();
-    const std::int32_t size = std::max(1, terrain.params.chunk_size);
-    const float height_step = std::max(0.0f, terrain.params.height_step);
-    // The same bound cull_planet_horizon_() uses for a chunk's angular size, and the same
-    // projection the render gather's screen_height_fraction() uses: a sphere of radius `r` at
-    // depth `d` covers `r * cot(fov/2) / d` of the screen's height.
-    const float chunk_radius = 0.75f * terrain.params.chunk_world_size();
-    const float cot_half_fov = 1.0f / std::max(std::tan(glm::radians(std::max(camera->fov, 1.0f) * 0.5f)), 1e-4f);
-    const float eye_len = glm::length(eye);
-    const glm::vec3 view = eye_len > 1e-4f ? eye / eye_len : glm::vec3(0.0f, 0.0f, 1.0f);
-
-    for (auto& [coord, chunk] : terrain.chunks()) {
-        const glm::vec3 dir(layout.tile_direction(coord.x * size + size / 2, coord.y * size + size / 2));
-        // The far side of the globe: never promote something cull_planet_horizon_() is about to
-        // deactivate anyway. Cheap, and it halves the work every frame.
-        if (glm::dot(dir, view) <= 0.0f) {
-            if (!chunk.coarse) chunk.want_coarse = true;
-            continue;
-        }
-        const float chunk_height = static_cast<float>(std::max(0, chunk.max_steps)) * height_step;
-        const float depth = glm::length(eye - dir * (radius + chunk_height));
-        const float screen = depth > chunk_radius ? chunk_radius * cot_half_fov / depth : 1e9f;
-
-        // A dead band: promote well before the renderer needs the native geometry (the build has
-        // to land first), give it up well after. Inside the band the chunk keeps what it has.
-        bool want = chunk.want_coarse;
-        if (screen > threshold * k_planet_detail_promote) want = false;
-        else if (screen < threshold * k_planet_detail_demote) want = true;
-        if (want == chunk.want_coarse) continue;
-        // The dwell. A slow zoom crosses any band in a frame and can cross back, so the band
-        // alone does not stop churn -- this does, at the cost of one frame of coarser geometry.
-        if (chunk.state == ChunkState::Live && frame_ - chunk.detail_frame < k_planet_detail_dwell_frames) {
-            continue;
-        }
-        chunk.want_coarse = want;
-    }
-}
-
-void TerrainSystem::sync_planet_gravity_(coopa::scene::Scene& scene) {
-    auto* physics = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene.find_system("Physics"));
-    if (physics == nullptr) return;
-    coopa::physx::PhysicsWorld& world = physics->world();
-    std::unordered_map<const TerrainComponent*, std::uint32_t> registered;
-    for (TerrainComponent* terrain : scene.get_components<TerrainComponent>()) {
-        // `params` is the Tiles half, and a planet is a Tiles-only shape.
-        if (terrain->mode != TerrainMode::Tiles) continue;
-        if (!terrain->params.planet || terrain->gravity <= 0.0f) continue;
-        coopa::physx::PhysicsWorld::GravitySource source;
-        source.centre = terrain->owner && terrain->owner->get_transform()
-                            ? glm::vec3(terrain->owner->get_transform()->transform().get_world_matrix()[3])
-                            : glm::vec3(0.0f);
-        source.radius = terrain->params.layout().radius();
-        // No pull until every chunk (and so all the planet's ground) is in: anything dropped on
-        // it at the start would otherwise fall through ground that is still being built.
-        const int cs = std::max(1, terrain->params.chunk_size);
-        const int per_edge = (std::max(1, terrain->params.face_tiles) + cs - 1) / cs;
-        int live = 0;
-        for (const auto& [coord, chunk] : terrain->chunks()) live += chunk.state == ChunkState::Live ? 1 : 0;
-        if (live >= 6 * per_edge * per_edge) planet_ready_.insert(terrain);
-        source.strength = planet_ready_.count(terrain) ? terrain->gravity : 0.0f;
-        source.range = source.radius * 8.0f;
-        const auto found = planet_gravity_.find(terrain);
-        if (found != planet_gravity_.end() && world.update_gravity_source(found->second, source)) {
-            registered.emplace(terrain, found->second);
-        } else {
-            registered.emplace(terrain, world.add_gravity_source(source));
-        }
-    }
-    for (const auto& [terrain, id] : planet_gravity_) {
-        if (registered.find(terrain) == registered.end()) {
-            world.remove_gravity_source(id);
-            planet_ready_.erase(terrain);
-        }
-    }
-    planet_gravity_ = std::move(registered);
-}
 
 void TerrainSystem::want_chunks_(TerrainComponent& terrain, const ChunkCoord& centre,
                                  coopa::scene::Scene& scene) {
@@ -740,31 +567,8 @@ void TerrainSystem::upload_finished_chunks_(TerrainComponent& terrain, coopa::sc
     }
     if (finished_.empty()) return;
 
-    // Nearest the camera first, whichever way "nearest" means for this terrain's shape -- a
-    // planet never sets stream_centre (latched_centre_()/want_chunks_() are flat-only), so
-    // sorting by chunk_distance() against it would order by storage-space distance from (0, 0),
-    // a corner of face 0, which has nothing to do with what the camera is looking at. There, sort
-    // by ANGULAR distance instead: the chunk centre direction dotted against the camera's own
-    // direction out of the planet, biggest dot (nearest the camera) first.
-    const ChunkCoord centre = terrain.stream_centre.centre;
-    const PlanetLayout layout = terrain.params.planet ? terrain.params.layout() : PlanetLayout{};
-    const std::int32_t size = std::max(1, terrain.params.chunk_size);
-    const glm::vec3 eye_dir = terrain.params.planet ? planet_eye_direction_(terrain) : glm::vec3(0.0f);
-    std::sort(finished_.begin(), finished_.end(), [&](const ChunkCoord& a, const ChunkCoord& b) {
-        if (terrain.params.planet) {
-            const glm::vec3 ca(layout.tile_direction(a.x * size + size / 2, a.y * size + size / 2));
-            const glm::vec3 cb(layout.tile_direction(b.x * size + size / 2, b.y * size + size / 2));
-            const float fa = glm::dot(ca, eye_dir), fb = glm::dot(cb, eye_dir);
-            if (fa != fb) return fa > fb;
-            if (a.y != b.y) return a.y < b.y;
-            return a.x < b.x;
-        }
-        const std::int32_t da = chunk_distance(a, centre);
-        const std::int32_t db = chunk_distance(b, centre);
-        if (da != db) return da < db;
-        if (a.y != b.y) return a.y < b.y;
-        return a.x < b.x;
-    });
+    // Soonest-wanted first, whichever way "soonest" means for this terrain's shape.
+    order_chunks_(terrain, finished_);
 
     const auto   start  = std::chrono::steady_clock::now();
     const double budget = std::max(0.1f, terrain.upload_budget_ms);
@@ -857,32 +661,8 @@ void TerrainSystem::submit_queued_chunks_(TerrainComponent& terrain, const Chunk
     const int budget = std::min(std::max(1, terrain.max_chunk_jobs_per_frame), cap - in_flight);
     if (budget <= 0) return;
 
-    // Nearest first, so the ground under the camera appears before the horizon does. The tie
-    // break on coordinates keeps the order deterministic for a given camera position, which
-    // is what makes a scripted capture reproducible. `centre` is a flat ChunkCoord a planet
-    // never derives one from (tick_terrain_() passes {0, 0}), so planets sort by ANGULAR
-    // distance from the camera instead -- see upload_finished_chunks_()'s identical reasoning.
-    const PlanetLayout layout = terrain.params.planet ? terrain.params.layout() : PlanetLayout{};
-    const std::int32_t chunk_size = std::max(1, terrain.params.chunk_size);
-    const glm::vec3 eye_dir = terrain.params.planet ? planet_eye_direction_(terrain) : glm::vec3(0.0f);
-    std::sort(pending_.begin(), pending_.end(),
-              [&](const ChunkCoord& a, const ChunkCoord& b) {
-                  if (terrain.params.planet) {
-                      const glm::vec3 ca(layout.tile_direction(a.x * chunk_size + chunk_size / 2,
-                                                               a.y * chunk_size + chunk_size / 2));
-                      const glm::vec3 cb(layout.tile_direction(b.x * chunk_size + chunk_size / 2,
-                                                               b.y * chunk_size + chunk_size / 2));
-                      const float fa = glm::dot(ca, eye_dir), fb = glm::dot(cb, eye_dir);
-                      if (fa != fb) return fa > fb;
-                      if (a.y != b.y) return a.y < b.y;
-                      return a.x < b.x;
-                  }
-                  const std::int32_t da = chunk_distance(a, centre);
-                  const std::int32_t db = chunk_distance(b, centre);
-                  if (da != db) return da < db;
-                  if (a.y != b.y) return a.y < b.y;
-                  return a.x < b.x;
-              });
+    // Soonest first, so the ground under the camera appears before the horizon does.
+    order_chunks_(terrain, pending_);
 
     const int submitted_count = std::min<int>(budget, static_cast<int>(pending_.size()));
     for (int i = 0; i < submitted_count; ++i) {
@@ -927,18 +707,7 @@ void TerrainSystem::submit_queued_chunks_(TerrainComponent& terrain, const Chunk
         // its own without disturbing its neighbours. The priority is what gets the ground
         // under the camera built first whatever order this queue was in -- and what keeps the
         // far ring from competing with the frame's own parallel work.
-        // A planet has no RESIDENT-SET centre (every one of its chunks is wanted at once), but
-        // it still has a camera: the hemisphere actually in view gets the same Normal floor the
-        // flat path gives its near ring, so a busy JobEngine beats the far side to a worker with
-        // the visible side, not with whichever half happened to queue first.
-        coopa::job::Priority priority = coopa::job::Priority::Normal;
-        if (terrain.params.planet) {
-            const glm::vec3 dir(layout.tile_direction(chunk.coord.x * chunk_size + chunk_size / 2,
-                                                       chunk.coord.y * chunk_size + chunk_size / 2));
-            if (glm::dot(dir, eye_dir) < 0.0f) priority = coopa::job::Priority::Low;
-        } else {
-            priority = chunk_priority(chunk_distance(chunk.coord, centre), terrain.params.view_radius);
-        }
+        const coopa::job::Priority priority = chunk_job_priority_(terrain, chunk.coord);
         ctx.jobs->submit([build]() { build->run(); }, k_terrain_job_type, chunk.job, nullptr, 0u, priority);
     }
 }
@@ -988,9 +757,11 @@ void TerrainSystem::create_chunk_object_(TerrainComponent& terrain, coopa::scene
     // Chunks carry blend codes (encode_surface_blend()), not texture coordinates:
     // terrain_styled.frag picks each pixel's kind from them, takes its colour from the atlas and
     // adds world-space detail -- it needs the atlas grid and the cell size.
-    // A planet's chunks use the shader's planet build (terrain_styled.glsl): their "up" is the
-    // per-vertex uv.y the warp wrote, not world +Z.
-    renderer->material.shader        = terrain.params.planet ? "terrain_styled_planet" : "terrain_styled";
+    // A terrain whose geometry was shaped off the world plane names its own build of the shader
+    // (TerrainParams::surface_shader): "up" is then the per-vertex uv.y the shaping wrote.
+    renderer->material.shader        = terrain.params.surface_shader.empty()
+                                           ? "terrain_styled"
+                                           : terrain.params.surface_shader;
     renderer->material.shader_params = glm::vec4(static_cast<float>(k_atlas_columns), static_cast<float>(k_atlas_rows),
                                                  terrain.params.height_step, terrain.params.tile_size);
     // The surface detail: one baked, tiling, mipmapped texture shared by every chunk, bound in
@@ -1071,11 +842,11 @@ void TerrainSystem::add_chunk_water_(const TerrainComponent& terrain, coopa::sce
     auto* body = object->add_component<water::WaterBody>();
     water::copy_water_settings(terrain.water_look, *body);
     if (water.local_frame) {
-        // A planet's: placed in its own frame (ChunkWaterData::frame), and worked on in it.
+        // A shaped chunk's: placed in its own frame (ChunkWaterData::frame), and worked on in it.
         tc->transform().set_position(glm::vec3(water.frame[3]));
         tc->transform().set_rotation_quat(glm::quat_cast(glm::mat3(water.frame)));
         body->local_frame = true;
-        // A planet's sea is seen from orbit, where every ocean pixel is deep enough to read as
+        // A small world's sea is seen whole, where every ocean pixel is deep enough to read as
         // fully opaque (water_surface.glsl's WATER_LOCAL_FRAME branch). The engine-wide default
         // is a dark teal tuned for shallow lakes, which at full opacity reads near-black against
         // space, so an ocean blue is the better default out here. Only when the scene left the
@@ -1132,30 +903,8 @@ std::string TerrainSystem::chunk_asset_id_(const TerrainComponent& terrain, cons
            std::to_string(chunk.coord.y) + "_" + std::to_string(chunk.mesh_serial);
 }
 
-TerrainComponent* find_planet_terrain(coopa::scene::Scene& scene) {
-    for (TerrainComponent* terrain : scene.get_components<TerrainComponent>()) {
-        // `params` is the Tiles half, and a planet is a Tiles-only shape.
-        if (terrain->mode != TerrainMode::Tiles || !terrain->params.planet) continue;
-        return terrain;
-    }
-    return nullptr;
-}
 
-float planet_peak(const TerrainComponent& terrain) {
-    if (terrain.field.empty()) return 0.0f;
-    const TerraData* data = terrain.field.data();
-    return data != nullptr ? std::max(data->height_range().y, 0.0f) : 0.0f;
-}
 
-env::WorldFrame find_planet_frame(coopa::scene::Scene& scene) {
-    TerrainComponent* terrain = find_planet_terrain(scene);
-    // A planet with no transform has no centre to orbit, so it is no more use than none at all.
-    if (terrain == nullptr || terrain->owner == nullptr || terrain->owner->get_transform() == nullptr) {
-        return env::WorldFrame{};   // no planet: the flat Z-up world
-    }
-    return env::WorldFrame{glm::vec3(terrain->owner->get_transform()->get_world_matrix()[3]),
-                            terrain->params.layout().radius()};
-}
 
 TerrainSystem* install_terrain_system(coopa::scene::Scene& scene,
                                              coopa::gfx::core::Device& device,

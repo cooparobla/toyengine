@@ -76,7 +76,7 @@ void ToyRenderPipeline::update_lights_(coopa::scene::Scene& scene) {
     const float cloud_fill = volumetric_clouds_traced() ? cloud_quality_steps_().cloud_scale : 0.0f;
     if (config_.sky_model == "space" && sky_state_.active) {
         const SkyFrameState& st = sky_state_;
-        // (On a planet the sky's directions are in the camera's own frame: see sky_frame_().)
+        // (On a curved world the sky's directions are in the camera's own frame: see sky_frame_().)
         const glm::mat3 frame = world_frame_ ? sky_frame_() : glm::mat3(1.0f);
         ubo.sky_sun    = glm::vec4(world_frame_ ? frame * st.sun_to : st.sun_to, st.sun_disc_cos);
         ubo.sky_moon   = glm::vec4(world_frame_ ? frame * st.moon_to : st.moon_to, st.moon_disc_cos);
@@ -84,7 +84,7 @@ void ToyRenderPipeline::update_lights_(coopa::scene::Scene& scene) {
         ubo.sky_extra  = glm::vec4(st.sun_disc_radiance, st.moon_disc_radiance, st.night_floor, st.time);
     } else if (physical_sky_active()) {
         const SkyFrameState& st = sky_state_;
-        // (On a planet the sky's directions are in the camera's own frame: see sky_frame_().)
+        // (On a curved world the sky's directions are in the camera's own frame: see sky_frame_().)
         const glm::mat3 frame = world_frame_ ? sky_frame_() : glm::mat3(1.0f);
         ubo.sky_sun    = glm::vec4(world_frame_ ? frame * st.sun_to : st.sun_to, st.sun_disc_cos);
         ubo.sky_moon   = glm::vec4(world_frame_ ? frame * st.moon_to : st.moon_to, st.moon_disc_cos);

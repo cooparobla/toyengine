@@ -18,6 +18,42 @@ utilities every layer needs live in [`toyengine/io/`](../io/README.md) for exact
 
 Frame timing lives in `gfx::app::Context`, not here.
 
+## What a project can replace
+
+[`module.h`](module.h)'s three hooks are where a project gets in, and they fire at different
+moments for a reason:
+
+| Hook | When | What only it can do |
+|---|---|---|
+| `on_render_config` | inside `Engine`'s member-init list, before the pipeline is built | add a surface shader, or anything the pipeline bakes a variant from |
+| `on_engine_init` (the `TOY_MODULE()` body) | once per `Engine`, after construction | install the engine-wide hooks below |
+| `on_prepare_scene` | each time a scene is prepared, before its first update | install or replace a scene SYSTEM -- a streaming policy, a sizer |
+
+`on_render_config` fires once per config *derivation*, which is not once per `Engine`; a
+registration that throws on a duplicate is still safe, because each derivation starts from a
+fresh config.
+
+The engine-wide hooks a `TOY_MODULE()` body sets, all of them "the engine's own behaviour is the
+default, and a project may replace it":
+
+| Hook | Replaces |
+|---|---|
+| `Engine::set_world_frame_source()` | the flat Z-up world frame the renderer, fog and sky read ([`../env/world_frame.h`](../env/world_frame.h)) |
+| `Engine::set_sky_state_hook()` | the per-frame sky decisions -- the backdrop, the night floor; with `drive_sky_gradient()` to move the gradient |
+| `Engine::set_cloud_state_hook()` | the cloud deck's size, position and motion |
+| `world::set_terrain_parse_hook()` | nothing -- it ADDS terrain keys the engine does not model ([`../world/terrain_yaml.h`](../world/terrain_yaml.h)) |
+| `world::set_world_bake_hook()` | the flat tile walk a map bake fills a world with ([`../mapgen/world_bake.h`](../mapgen/world_bake.h)) |
+
+Plus the two per-terrain seams a parse hook installs, where `nullptr` is the flat behaviour and
+costs one null compare: `TerrainComponent::shaper` ([`../world/chunk_shaper.h`](../world/chunk_shaper.h))
+and `::topology` ([`../world/tile_grid.h`](../world/tile_grid.h)).
+
+`Engine::device()`, `allocator()` and `assets()` are public so a project's own GPU system can be
+installed with the same three things every built-in one is given.
+
+**The editor has no equivalent yet.** `on_engine_init` runs before `EditorApp` registers its own
+panels and inspector sections, so a project cannot currently replace or add one.
+
 ## Overlay layers and the debug overlay
 
 `set_overlay_scene()` is the host's single overlay (the editor UI). On top of it the engine

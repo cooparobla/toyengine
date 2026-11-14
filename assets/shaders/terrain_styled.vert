@@ -1,6 +1,6 @@
 #version 450
 
-// `terrain_styled` / `terrain_styled_planet` vertex stage: carries the packed surface-kind
+// `terrain_styled` vertex stage (shared with any TERRAIN_CURVED build of it): carries the packed surface-kind
 // code (toy::world::encode_surface_blend(), tile_topology.h; TileMeshLibrary::append_styled()
 // writes it into every stamped vertex's uv.x) through its OWN flat varying instead of the
 // backbone's smoothly-interpolated uv.

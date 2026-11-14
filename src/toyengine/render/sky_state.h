@@ -33,7 +33,7 @@ struct SkyAtmosphereMedia {
     float     mie_scale_height = 1.2f;                               ///< km.
     float     mie_g = 0.8f;                                          ///< Forward-scattering asymmetry.
     glm::vec3 ozone_absorption{0.650e-3f, 1.881e-3f, 0.085e-3f};     ///< 1/km at the layer's peak (25 km).
-    float     bottom_radius = 6360.0f;                               ///< Planet radius, km.
+    float     bottom_radius = 6360.0f;                               ///< Ground radius, km.
     float     top_radius = 6460.0f;                                  ///< Top of the atmosphere, km.
     glm::vec3 ground_albedo{0.3f};
 
@@ -98,11 +98,17 @@ struct CloudFrameState {
     bool active = false;              ///< Draw the layer (and its shadows) this frame.
     CloudType type = CloudType::Volumetric;
     float coverage = 0.0f;            ///< 0..1.
-    float altitude = 1500.0f;         ///< m; the layer's base. World z on a flat world, ALTITUDE above the datum on a planet.
+    float altitude = 1500.0f;         ///< m; the layer's base. World z on a flat world, ALTITUDE above the datum on a curved one.
     float thickness = 1500.0f;        ///< m.
     float density = 1.0f;             ///< Volumetric extinction multiplier.
     float scale = 1.0f;               ///< Volumetric: the cloud field's size relative to a real sky's.
     glm::dvec2 offset{0.0};           ///< Accumulated wind drift (m), unwrapped: each use wraps it to its own periods.
+    /// The wind driving that drift: unit direction in world XY, and its speed (m/s) after the
+    /// weather's own gust scaling. Published because a layer that cannot SLIDE needs the same
+    /// wind expressed its own way -- a shell turns about its pole at this speed -- and
+    /// recomputing it from the config would drift from the offset above.
+    glm::vec2 wind_dir{1.0f, 0.0f};
+    float wind_speed = 0.0f;
     float time = 0.0f;                ///< Seconds; the clouds' evolution.
     glm::vec3 light_to{0.0f, 0.0f, 1.0f};  ///< The light the clouds are lit by (sun, or the moon at night).
     glm::vec3 light_color{0.0f};           ///< Its illuminance at the layer (engine units).
@@ -111,22 +117,22 @@ struct CloudFrameState {
     bool atmosphere_lut = false;
     float fade = 1.0f;                ///< Camera fade (render cloud_camera_fade): 0 hidden .. 1 shown. Shadows ignore it.
 
-    /// The scene's planet, or a flat frame (the default). On a planet the layer is a real
-    /// spherical shell about the planet's centre rather than one pinned under the camera, and
+    /// The scene's curved world, or a flat frame (the default). When curved the layer is a real
+    /// spherical shell about its centre rather than one pinned under the camera, and
     /// `altitude` is measured from the datum. See toyengine/env/world_frame.h.
     env::WorldFrame world_frame{};
-    /// Planet only: the deck turns rigidly about this axis (the planet's pole) by `spin_angle`,
-    /// which is how a wind moves clouds on a globe -- `offset` above is a flat world's
+    /// Curved worlds only: the deck turns rigidly about this axis (the pole) by `spin_angle`,
+    /// which is how a wind moves clouds on a sphere -- `offset` above is a flat world's
     /// translation of the same field and the two are never both live. `spin_delta` is this
     /// frame's step, which the temporal reconstruction reprojects the history by.
     glm::vec3 spin_axis{0.0f, 0.0f, 1.0f};
     double spin_angle = 0.0;
     float spin_delta = 0.0f;
-    /// Planet only: the colours the deck's ambient blends between across the terminator --
+    /// Curved worlds only: the colours the deck's ambient blends between across the terminator --
     /// what a cloud sees looking around it at noon, and on the night side. On a `space` sky the
     /// scene's own sky_zenith family is the near-black STAR backdrop, which lights the deck
     /// with nothing and leaves the day side lit by direct sun alone; these come from the
-    /// planet's atmosphere instead (PlanetAtmosphere::day_sky_color / night_sky_color).
+    /// whatever fills them through the cloud-state hook instead.
     glm::vec3 day_fill{0.0f};
     glm::vec3 night_fill{0.0f};
 

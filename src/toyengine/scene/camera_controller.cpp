@@ -92,7 +92,7 @@ void CameraController::update_orbit_(coopa::util::Transform& t, float dt) {
     glm::vec3 desired = resolve_target_();
     if (field_ && target_offset != glm::vec3(0.0f)) {
         // In a gravity field the offset is in the target's own frame (z along its up): a world
-        // offset would point sideways, or into the ground, round the planet.
+        // offset would point sideways, or into the ground, as the target moves round the centre.
         desired += glm::mat3(glm::cross(field_y_, field_up_), field_y_, field_up_) * target_offset - target_offset;
     }
     if (follow_smoothing <= 0.0f) {
@@ -106,7 +106,7 @@ void CameraController::update_orbit_(coopa::util::Transform& t, float dt) {
     }
 
     // Zoom-coupled pitch (see the field's own doc) replaces manual pitch control entirely: a
-    // planet scene wants elevation to track how far the camera has zoomed out, not wherever the
+    // round-world scene wants elevation to track how far the camera has zoomed out, not wherever the
     // last drag left it.
     const bool zoom_coupled_pitch =
         pitch_at_min_distance_deg != kUnset || pitch_at_max_distance_deg != kUnset;
@@ -187,7 +187,7 @@ void CameraController::update_orbit_(coopa::util::Transform& t, float dt) {
         -smoothed_distance_ * std::cos(e) * std::cos(phi),
         smoothed_distance_ * std::sin(e));
 
-    // On a planet the orbit is measured in the target's own frame (up away from the planet).
+    // In a gravity field the orbit is measured in the target's own frame (up away from the pull).
     glm::mat3 frame(1.0f);
     const bool field = field_frame_(smoothed_target_, frame);
     if (field) offset = frame * offset;
@@ -318,7 +318,7 @@ void CameraController::update_fly_(coopa::util::Transform& t, float dt) {
     glm::vec3 pos = t.position();
     pos += right * move_input.x * move_speed * dt;
     pos += forward * move_input.y * move_speed * dt;
-    // World up, which avoids roll -- or, in a gravity field (a planet), the camera's own up.
+    // World up, which avoids roll -- or, in a gravity field, the camera's own up.
     glm::vec3 lift(0.0f, 0.0f, 1.0f);
     if (auto* physics = scene ? dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene->find_system("Physics")) : nullptr;
         physics && physics->world().gravity_source_count() > 0)

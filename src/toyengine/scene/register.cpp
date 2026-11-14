@@ -44,10 +44,6 @@
 #include <toyengine/water/water_body.h>
 #include <toyengine/water/water_yaml.h>
 #include <toyengine/world/heightmap_terrain.h>
-#include <toyengine/world/planet_atmosphere.h>
-#include <toyengine/world/planet_camera_fit.h>
-#include <toyengine/world/planet_chunk_shaper.h>
-#include <toyengine/world/planet_grid.h>
 #include <toyengine/world/terrain_yaml.h>
 #include <toyengine/world/terrain_component.h>
 #include <toyengine/mapgen/map_generator_component.h>
@@ -173,42 +169,6 @@ void register_scene_components() {
             read(node, "invert_y", tt->invert_y);
         });
 
-    // Sizes a sibling Volume (VolumeShape::Shell) to the nearest ancestor planet terrain's
-    // actual measured peak (toyengine/world/planet_atmosphere.h) -- not a fixed guess.
-    SceneLoader::register_component_parser("PlanetAtmosphere",
-        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
-            auto* pa = obj.add_component<world::PlanetAtmosphere>();
-            read(node, "thickness_scale", pa->thickness_scale);
-            read(node, "min_thickness", pa->min_thickness);
-            read(node, "radius_thickness_scale", pa->radius_thickness_scale);
-            read(node, "base_altitude_scale", pa->base_altitude_scale);
-            read(node, "radius_base_scale", pa->radius_base_scale);
-            read(node, "cloud_altitude_peak_scale", pa->cloud_altitude_peak_scale);
-            read(node, "cloud_altitude_radius_scale", pa->cloud_altitude_radius_scale);
-            read(node, "cloud_thickness_radius_scale", pa->cloud_thickness_radius_scale);
-            read(node, "cloud_thickness_altitude_scale", pa->cloud_thickness_altitude_scale);
-            read(node, "scale_height_fraction", pa->scale_height_fraction);
-            read(node, "limb_optical_depth", pa->limb_optical_depth);
-            read(node, "day_sky_altitude_scale", pa->day_sky_altitude_scale);
-            read(node, "moon_intensity", pa->moon_intensity);
-            if (node.contains("night_sky_color")) pa->night_sky_color = parse_rgb(node.at("night_sky_color"), pa->night_sky_color);
-            if (node.contains("day_sky_color")) pa->day_sky_color = parse_rgb(node.at("day_sky_color"), pa->day_sky_color);
-        });
-
-    // Frames the scene's planet (toyengine/world/planet_camera_fit.h). Authored on the camera
-    // object; writes the SCALE of the sibling CameraController and Camera, while the scene goes
-    // on authoring the rig's shape. Do not author min_distance/max_distance/zoom_speed beside it.
-    SceneLoader::register_component_parser("PlanetCameraFit",
-        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
-            auto* fit = obj.add_component<world::PlanetCameraFit>();
-            read(node, "frame_margin", fit->frame_margin);
-            read(node, "max_distance_scale", fit->max_distance_scale);
-            read(node, "min_clearance", fit->min_clearance);
-            read(node, "zoom_notches", fit->zoom_notches);
-            read(node, "far_clip_scale", fit->far_clip_scale);
-            read(node, "near_clip_ratio", fit->near_clip_ratio);
-            read(node, "set_distance", fit->set_distance);
-        });
 
     // A breakable mesh (toyengine/scene/destructible.h). DestructionSystem (order 70) does the
     // fracturing and the chunk spawning; this is the settings it reads.
@@ -794,38 +754,18 @@ void register_scene_components(coopa::gfx::core::Device& device,
                 params.soil_depth_steps = node.at("soil_depth_steps").get_value<std::int32_t>();
             }
             read(node, "water_inset", params.water_inset);
-            // A planet (toyengine/world/planet.h): six faces of tiles on a sphere.
-            read(node, "planet", params.planet);
-            read(node, "face_tiles", params.face_tiles);
             read(node, "gravity", terrain->gravity);
-            // Widest merged top or wall run, in tiles. A scene rarely sets it; a planet derives
-            // one from its own curvature below when it does not.
-            const bool authored_max_merge = node.contains("max_merge");
-            if (authored_max_merge) {
+            // Widest merged top or wall run, in tiles. A scene rarely sets it.
+            if (node.contains("max_merge")) {
                 params.max_merge = node.at("max_merge").get_value<std::int32_t>();
-            }
-            if (params.planet) {
-                // Every tile its own piece: a merged quad bent onto the sphere is a chord, and its
-                // edge then deviates from the per-tile geometry beside it by enough to see at
-                // ground level -- see TerrainParams::max_merge for the measurement.
-                if (!authored_max_merge) params.max_merge = 1;
-                read(node, "planet_coarse_builds", terrain->planet_coarse_builds);
-                params.face_tiles = std::max<std::int32_t>(params.chunk_size, params.face_tiles);
-                params.face_tiles -= params.face_tiles % std::max<std::int32_t>(1, params.chunk_size);
-                // The globe's shape, as the chunk builder sees it (world/chunk_shaper.h): one
-                // stateless instance serves every chunk on every worker.
-                terrain->shaper = std::make_shared<const world::PlanetChunkShaper>();
-                // And its tile layout (world/tile_grid.h). AFTER the face_tiles trim above:
-                // the topology holds the layout, and the stored tiles are at that width.
-                terrain->topology = std::make_shared<const world::PlanetGrid>(params.layout());
-                // No tile grid left in the world plane to round kind corners against.
-                params.allow_kind_corner_rounding = false;
             }
             read(node, "river_inset", params.river_inset);
             // The water's look: WaterBody's own keys, onto the terrain's stock look.
             if (node.contains("water") && node.at("water").is_mapping()) {
                 water::parse_water_settings(node.at("water"), terrain->water_look);
             }
+            // Only a shape that permits it acts on this (ChunkShaper::allows_coarse_builds()).
+            read(node, "coarse_builds", terrain->coarse_builds);
             if (node.contains("max_chunk_jobs_per_frame")) {
                 terrain->max_chunk_jobs_per_frame = node.at("max_chunk_jobs_per_frame").get_value<int>();
             }
@@ -1043,7 +983,7 @@ void register_scene_components(coopa::gfx::core::Device& device,
                         }
                         // A quantised heightfield level (mesh_chunk_field()): `field` tiles per
                         // cell, in place of `ratio`'s simplification or `tile_set`'s re-stamp.
-                        // The one re-meshed level a planet can carry.
+                        // The one re-meshed level a shaped world can carry.
                         if (level.contains("field") && num(level.at("field"))) {
                             const int stride = level.at("field").get_value<int>();
                             out.field_stride = static_cast<std::int8_t>(
@@ -1051,6 +991,12 @@ void register_scene_components(coopa::gfx::core::Device& device,
                         }
                     }
                 }
+            }
+            // Last: a project's own terrain keys, with the component fully built from the keys
+            // the engine models -- so a hook can read them and override what it needs to.
+            // See world/terrain_yaml.h's TerrainParseHook.
+            if (const world::TerrainParseHook& hook = world::terrain_parse_hook()) {
+                hook(node, *terrain);
             }
         };
     // One entry point under all three names. `Terrain` is the unified spelling; `TileTerrain`

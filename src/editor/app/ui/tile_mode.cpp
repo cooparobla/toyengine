@@ -189,7 +189,7 @@ bool TileModePanel::tile_hit_(const ViewProj& vp, glm::vec2 px, glm::ivec2& tile
     glm::vec3 o, d;
     vp.ray(px, o, d);
     const glm::mat4 m = t->owner->get_transform() ? t->owner->get_transform()->transform().get_world_matrix() : glm::mat4(1.0f);
-    // The march itself is the engine's (TerrainComponent::raycast_tiles), flat and planet alike,
+    // The march itself is the engine's (TerrainComponent::raycast_tiles), whatever the shape,
     // so the editor and a game's digging tool pick exactly the same tile.
     toy::world::TileHit hit;
     if (!t->raycast_tiles(o, d, 1e5f, hit)) return false;

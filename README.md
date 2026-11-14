@@ -146,7 +146,7 @@ diff and merge it. See [src/editor/README.md](src/editor/README.md) for the full
   also reads binary `.caml`, so a packaged project needs no path rewriting.
 - **Components.** Cameras (orbit, fly, tracking, first person), movers, skinned meshes, a
   multithreaded job system and named input actions.
-- **Animation** ([coopa/animation](libs/libcoopa/coopa/animation/README.md)). Keyframed and
+- **Animation** ([src/toyengine/anim](src/toyengine/anim/README.md)). Keyframed and
   procedural clips with crossfades, timeline events (footsteps), root motion, and two-bone,
   look-at and foot-placement IK.
 - **Async scene loading** ([src/toyengine/core](src/toyengine/core/README.md)). The next scene builds

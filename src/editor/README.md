@@ -7,7 +7,7 @@ slots), `materials/*.yaml`, `textures/`, `ui/*.yaml` (game UI: HUDs, menus, scre
 `config.yaml` (or `.caml`, via Build > Package).
 
 This file is the developer tour. For how to *use* the editor, see the
-[editor manual](../docs/editor/README.md).
+[editor manual](../../docs/editor/README.md).
 
 **Layout.** Left: the Asset panel -- a tab per asset type, listing the project's assets.
 Clicking one opens it (one asset at a time; unsaved changes prompt first). Middle: the viewer
@@ -135,7 +135,7 @@ none.
 | Viewport | `viewport/editor_camera.h`, `viewport/gizmo.h` | Orbit/pan/dolly/fly camera; translate/rotate/scale gizmo and picking, drawn and hit-tested at full window resolution. |
 | Themes | `themes/*.yaml`, `app/editor_theme.h` | The look, loaded at startup (`blender_dark` by default; Edit > Theme switches, the choice is saved in `~/.toyengine` prefs). Widget colours/metrics come from uicoopa's `imm_theme.h`; the editor's own roles live in the `chrome:`, `viewport:` and `outliner:` sections. Theme files hot-reload; Edit > Theme > Export Full Theme writes every role out as a starting point. |
 | Packaging | `build/packager.h` | Copies `assets/` with every YAML encoded to `.caml`. |
-| UI designer | `app/ui/ui_canvas.h`, `ui/ui_canvas_math.h`, `ui/ui_palette.h`, `viewport/rect_gizmo.h`, `schema/ui_schema.h` | See above. The math (view mapping, picking, anchors, snapping, the RectTransform block's canonical form) and the gizmo are headless and unit-tested; `schema/ui_schema.h` describes every uicoopa component and composite for the inspector (Vec2, Color4, Padding, StringList, ChildRef and ItemList fields). |
+| UI designer | `app/ui/ui_canvas.h`, `app/ui/ui_canvas.cpp` | The UI workspace, in two modes over two file kinds: **Panel** edits a panel asset (`toyengine/ui/ui_panel.h` -- a title, a size, tabs of labelled rows), **Placement** edits a screen's `.tune.yaml` (where each box a C++ `ImmScreen` declares sits). Both are forms over data beside a live preview, and the preview is the real runtime -- a `PanelScreen` drawing what is being edited at the chosen resolution. `UiPanel` carries ONE anchor for the whole panel; there is no per-element anchoring or nesting. |
 
 ## Notes
 

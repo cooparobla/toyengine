@@ -14,10 +14,10 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <string>
 
 #include <glm/glm.hpp>
 
-#include <toyengine/world/planet.h>
 #include <toyengine/world/tile_types.h>   // ChunkCoord, which chunk_at() answers with
 
 namespace toy {
@@ -156,30 +156,43 @@ struct TerrainParams {
      */
     bool allow_kind_corner_rounding = true;
 
-    // --- Planets (planet.h) ---
+    /**
+     * @brief Surface shader for this terrain's chunks; empty means the stock `terrain_styled`.
+     *
+     * A terrain whose geometry is bent off the world plane (world/chunk_shaper.h) needs a build
+     * of the terrain shader that takes "up" from the per-vertex `uv.y` the shaping wrote rather
+     * than from world +Z, so whatever installed the shaper names the matching shader here. The
+     * stock shader carries none of that code.
+     */
+    std::string surface_shader;
 
-    /** @brief A planet: six faces of `face_tiles^2` tiles bent onto a sphere, instead of one flat grid. */
-    bool planet = false;
-    /** @brief Planet only: tiles along one face's edge (a multiple of `chunk_size`). */
+    /**
+     * @brief Tiles along one edge of a shaped world's face; a multiple of `chunk_size`.
+     *
+     * A world whose geometry leaves the world plane (world/chunk_shaper.h) is not one square of
+     * `world_tiles`: it is a set of equal faces, stored side by side as one wide grid, and this
+     * is one face's width. A shaper is handed nothing but `const TerrainParams&`, so its grid
+     * dimension has to live here. Inert on a flat terrain, which uses `world_tiles`.
+     */
     std::int32_t face_tiles = 128;
     /**
-     * @brief Most tiles one merged top or wall run may span; 0 is unlimited. A planet meshes every
-     *        tile on its own (1), unless a scene authors `max_merge:` to say otherwise.
+     * @brief Most tiles one merged top or wall run may span; 0 is unlimited.
      *
-     * **Why a planet cannot merge.** On flat ground a merged rectangle is exactly coplanar with
-     * the per-tile geometry it borders, so the only thing that differs is the subdivision -- a
-     * T-junction, whose cracks are sub-pixel. Bent onto a sphere a merged quad becomes a CHORD,
-     * and its edge no longer lies on the surface its neighbours do: at four tiles on a 122-unit
-     * globe it deviates ~1.7 cm from them, which is a visible seam on a 1 m tile at ground level.
-     * Lifting the quad by its sagitta does not escape that -- it only turns the gap into a ledge
-     * of the same size, which reads just as badly at a grazing angle. The width can be solved for
-     * against a deviation tolerance, but no tolerance loose enough to be worth merging is tight
-     * enough to be invisible, so the deviation itself is the thing to avoid.
+     * **A world whose surface is not the world plane cannot merge; author 1.** On flat ground a
+     * merged rectangle is exactly coplanar with the per-tile geometry it borders, so the only
+     * thing that differs is the subdivision -- a T-junction, whose cracks are sub-pixel. Bent off
+     * the plane (world/chunk_shaper.h) a merged quad becomes a CHORD, and its edge no longer lies
+     * on the surface its neighbours do: at four tiles over a radius of 122 units it deviates
+     * ~1.7 cm from them, which is a visible seam on a 1 m tile at ground level. Lifting the quad
+     * by its sagitta does not escape that -- it only turns the gap into a ledge of the same size,
+     * which reads just as badly at a grazing angle. The width can be solved for against a
+     * deviation tolerance, but no tolerance loose enough to be worth merging is tight enough to
+     * be invisible, so the deviation itself is the thing to avoid.
      *
      * Measured before this was settled: deriving a width from curvature bought ~5% of the shadow
-     * triangles and ~11% of load time near the surface on `planet_demo`, and nothing at all when
-     * zoomed out (no chunk draws LOD 0 there). `lods:` field tiers are where a planet's cost
-     * actually goes -- see ChunkLod::field_stride.
+     * triangles and ~11% of load time near the surface, and nothing at all when zoomed out (no
+     * chunk draws LOD 0 there). `lods:` field tiers are where a curved world's cost actually goes
+     * -- see ChunkLod::field_stride.
      */
     std::int32_t max_merge = 0;
 
@@ -215,8 +228,8 @@ struct TerrainParams {
          * lip, no corner rounding. Three properties `ratio` and `style` levels lack: its cost is
          * a function of `chunk_size / field_stride` alone, it can never be rejected the way a
          * `ratio` level whose pinned seam vertex collapses is, and it is meshed in face space
-         * from the chunk's own columns, so **it is the one extra level a planet can carry** --
-         * warp_chunk_to_planet() bends it onto the globe like any other geometry.
+         * from the chunk's own columns, so **it is the one extra level a shaped world can
+         * carry** -- a ChunkShaper bends it like any other geometry.
          *
          * Resolved from a `field:` entry under `lods:` in scene YAML (register.cpp); `ratio` is
          * ignored for it.
@@ -249,7 +262,7 @@ struct TerrainParams {
      *
      * The defaults coarsen only what is genuinely small on screen: a chunk covering more than
      * 14% of the screen's height is untouched, so a camera on the ground sees exactly the mesh
-     * it always did, while a globe held whole in frame -- where one tile is a couple of pixels
+     * it always did, while a world held whole in frame -- where one tile is a couple of pixels
      * and the terrain runs to four triangles a pixel -- draws a twentieth of them. A streamed
      * flat terrain only reaches these sizes with a large `view_radius`, which is the case that
      * wants them.
@@ -258,9 +271,6 @@ struct TerrainParams {
      * at different levels meet on the same vertices and never crack.
      */
     std::array<ChunkLod, k_max_chunk_lods> chunk_lods{{{0.40f, 0.14f}, {0.15f, 0.07f}, {0.07f, 0.03f}, {}}};
-
-    /** @brief The planet's cube-sphere (planet.h). */
-    PlanetLayout layout() const { return PlanetLayout{face_tiles, tile_size}; }
 
     /** @brief World-space size of one chunk edge. */
     float chunk_world_size() const {

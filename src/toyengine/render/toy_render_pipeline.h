@@ -366,8 +366,8 @@ public:
     const SurfaceWorldUBO& surface_world_ubo() const { return surface_world_->last(); }
 
     void set_water_state(WaterFrameState state) { water_state_ = std::move(state); }
-    /** @brief The scene's planet, if it has one (see WorldFrameState); nullopt: a flat world. */
-    void set_world_frame(std::optional<WorldFrameState> planet) { world_frame_ = planet; }
+    /** @brief The scene's curved world, if it has one (see WorldFrameState); nullopt: flat. */
+    void set_world_frame(std::optional<WorldFrameState> frame) { world_frame_ = frame; }
 
     /**
      * @brief This frame's physical sky (render sky_model: physical): the sun and moon, the
@@ -602,7 +602,7 @@ private:
         /// Per directional LEVEL: the static casters drawn into the cache atlas -- filled only
         /// for levels whose depth is re-rendered this frame (see DirShadowCache). Empty
         /// throughout when the directional cache is off, in which case `cascade` holds every
-        /// caster, static and dynamic alike, exactly as it did before the cache existed.
+        /// caster, static and dynamic alike.
         std::array<std::vector<MeshBatch>,
                    coopa::gfx::engine::data::MAX_DIR_SHADOW_LEVELS> dir_static;
         /// Per local-shadow VIEW (LocalShadowSlot::first_view + v): the static casters drawn into
@@ -1557,8 +1557,8 @@ private:
     WaterFrameState water_state_;                                // set_water_state(), per frame
     std::optional<WorldFrameState> world_frame_;                     // set_world_frame(), per frame
     glm::vec3 frame_cam_pos_{0.0f};                              // this frame's camera (render())
-    /** @brief On a planet: the rotation taking world directions into the camera's own frame
-     *         there (its up to +Z), which the sky is evaluated in. Identity without a planet. */
+    /** @brief On a curved world: the rotation taking world directions into the camera's own
+     *         frame there (its up to +Z), which the sky is evaluated in. Identity when flat. */
     glm::mat3 sky_frame_() const;
     SkyFrameState sky_state_;                                    // set_sky_state(), per frame
     ParticleFrameState particle_state_;                          // set_particle_state(), per frame

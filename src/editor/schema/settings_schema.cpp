@@ -119,7 +119,7 @@ const std::vector<SettingsGroup>& render_settings_groups() {
                                 "based atmosphere -- sunsets, a sun and moon, stars at night -- that follows the scene's sun "
                                 "(or the weather's clock) and sets the sky colours, ambient and the sun's colour to match. "
                                 "space: no atmosphere at all -- the sky gradient colours stand as authored (make them "
-                                "near-black for a planet seen from orbit), with stars at full strength and the same sun/moon "
+                                "near-black, as from orbit), with stars at full strength and the same sun/moon "
                                 "discs physical draws. Clouds work with gradient or physical"), "gradient"))
             .add(F(f_float("ambient_intensity", 1.0f, 0.01f, 0.0f, 16.0f), "Ambient Intensity",
                    "How strongly the sky gradient lights surfaces as indirect diffuse light"))

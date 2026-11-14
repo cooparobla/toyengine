@@ -20,6 +20,12 @@ So this blocks exactly those: detaching, and starting a second heavy job while o
 Everything else passes straight through.
 
 Deliberately NOT an advisory warning. A warning is what the CLAUDE.md rules already were.
+
+**The binary names are derived, not written down.** A project builds `build/<target>` and
+`build/tests/<target>_tests` from the `target:` in its `.toy` file, so a guard that names the
+engine's binaries only polices the engine's own tree and waves a project's through. Everything
+heavy is matched through `project_targets()` instead -- keep it that way, and do not reintroduce
+a literal project name here.
 """
 
 import json
@@ -30,33 +36,76 @@ import sys
 
 # --- what counts as heavy -------------------------------------------------------------------
 
-# Each of these can saturate the machine on its own. Matched against the command text.
-HEAVY_PATTERNS = [
-    (r"\bcmake\s+--build\b", "a build"),
-    (r"\bmake\s+-C\s+build\b", "a build"),
-    (r"\bninja\b", "a build"),
-    (r"\bctest\b", "a test run"),
-    (r"(^|[\s;&|(])\.?/?build/toyengine(_editor|_hub)?\b", "an engine run"),
-    (r"(^|[\s;&|(])\.?/?build/tests/toyengine\w*\b", "a test run"),
-]
+# A project's executables are named after its `.toy` target, not after the engine: one project
+# builds `build/<name>` and `build/tests/<name>_tests`, the next builds its own. Naming the
+# engine's binaries literally here left every one of those invisible to this guard -- a build
+# started on top of a running GPU test was waved straight through, which is the exact pair that
+# wedges this box. So the names are DERIVED from the project directory, and the engine does not
+# need to know what is built on it.
+def project_targets():
+    """Executable stems this tree builds. Always includes the engine's own."""
+    names = []
+    root = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    if root:
+        try:
+            for entry in sorted(os.listdir(root)):
+                if not entry.endswith(".toy"):
+                    continue
+                with open(os.path.join(root, entry), encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        found = re.match(r"\s*target:\s*([A-Za-z0-9_.-]+)", line)
+                        if found:
+                            names.append(found.group(1))
+                            break
+                break   # one project per directory
+        except OSError:
+            pass        # cannot tell: fall back to the engine's own names
+    if "toyengine" not in names:
+        names.append("toyengine")
+    return names
 
-# Processes that mean one is already in flight. `cc1plus` rather than `cmake`, because a build's
-# cost is its compilers; `ctest` and the test binaries, because a GPU test is a Vulkan device.
-#
-# Matched against the process NAME (`pgrep -x`), never the command line. `pgrep -f ctest` would
-# match the shell about to run the very command being judged -- the self-match trap this repo
-# already warns about for wait-loops -- and would therefore block every heavy command forever.
-#
-# A name is the kernel's `comm`, capped at 15 characters, so `toyengine_editor`,
-# `toyengine_editor_tests` and `toyengine_editor_docs` all report `toyengine_edito`. One entry
-# covers all three, which is what we want: each is heavy.
-BUSY_NAMES = [
-    ("cc1plus", "a compile"),
-    ("ctest", "a test run"),
-    ("toyengine_tests", "a test run"),
-    ("toyengine_edito", "an editor or test run"),
-    ("toyengine", "an engine run"),
-]
+
+def heavy_patterns():
+    """(regex, what it is) for each command that can saturate the machine on its own."""
+    patterns = [
+        (r"\bcmake\s+--build\b", "a build"),
+        (r"\bmake\s+-C\s+build\b", "a build"),
+        (r"\bninja\b", "a build"),
+        (r"\bctest\b", "a test run"),
+        # A project's wrapper scripts. Each one builds, or runs the game or the editor, and
+        # carries no `-j` on the command line -- so without this row `./build.sh` passed through
+        # untouched while choosing its own job count (see jobs_reason).
+        (r"(^|[\s;&|(])\.?/?(build|run|editor|package)\.sh\b", "a build or an engine run"),
+    ]
+    # `build[-\w]*` so a debug tree (`build-debug/`, which build.sh makes) counts too.
+    for target in project_targets():
+        stem = re.escape(target)
+        patterns.append((rf"(^|[\s;&|(])\.?/?build[-\w]*/tests/{stem}\w*\b", "a test run"))
+        patterns.append((rf"(^|[\s;&|(])\.?/?build[-\w]*/{stem}(_editor|_hub)?\b",
+                         "an engine run"))
+    return patterns
+
+
+def busy_names():
+    """(process name, what it is) meaning a heavy job is already in flight.
+
+    Matched against the process NAME (`pgrep -x`), never the command line. `pgrep -f ctest`
+    would match the shell about to run the very command being judged -- the self-match trap this
+    repo already warns about for wait-loops -- and would therefore block every heavy command
+    forever.
+
+    A name is the kernel's `comm`, capped at 15 characters, which is why each entry is truncated:
+    `toyengine_editor`, `toyengine_editor_tests` and `toyengine_editor_docs` all report
+    `toyengine_edito`, and one entry covers all three. That is what we want -- each is heavy.
+    """
+    # `cc1plus` rather than `cmake`, because a build's cost is its compilers.
+    names = [("cc1plus", "a compile"), ("ctest", "a test run")]
+    for target in project_targets():
+        names.append((f"{target}_tests"[:15], "a test run"))
+        names.append((f"{target}_editor"[:15], "an editor or test run"))
+        names.append((target[:15], "an engine run"))
+    return names
+
 
 # Parallelism this box survives. The two caps are NOT comparable, because -j means a different
 # thing to each tool.
@@ -134,7 +183,7 @@ def detach_reason(code: str) -> str:
 
 def heavy_reason(code: str) -> str:
     """What kind of heavy job this command starts, or empty if it is not one."""
-    for pattern, what in HEAVY_PATTERNS:
+    for pattern, what in heavy_patterns():
         if re.search(pattern, code):
             return what
     return ""
@@ -142,7 +191,7 @@ def heavy_reason(code: str) -> str:
 
 def already_running() -> str:
     """What heavy job is already in flight, or empty if the machine is idle."""
-    for name, what in BUSY_NAMES:
+    for name, what in busy_names():
         try:
             found = subprocess.run(["pgrep", "-x", name], capture_output=True, timeout=5)
         except (OSError, subprocess.SubprocessError):
@@ -167,7 +216,16 @@ def jobs_reason(code: str) -> str:
                     f"it wedges the desktop. Use -j{cap} or fewer.")
     # A bare `-j` means "unlimited", which is the worst case of all.
     if re.search(r"-j(\s|$)", code) and not re.search(r"-j\s*\d", code):
-        return "a bare -j means one job per core (20 here). Pass an explicit -j4 or fewer."
+        return f"a bare -j means one job per core (20 here). Pass an explicit -j{MAX_BUILD_JOBS} or fewer."
+    # `./build.sh` carries no -j on the command line, so nothing above sees it -- and left to
+    # itself `.toyenv.sh`'s build_jobs() takes one job per core capped at one per 3 GB of RAM,
+    # which is 10 on a 31 GB box. Against a 2.4 GB peak TU behind a 2 GB swapfile that is the
+    # same arithmetic that hard-rebooted the machine, just reached by a different route.
+    if re.search(r"(^|[\s;&|(])\.?/?build\.sh\b", code) \
+            and not re.search(r"-j\s*\d|\bJOBS=\s*\d", code):
+        return (f"./build.sh chooses its own job count -- one per core, capped at one per 3 GB of "
+                f"RAM, which is 10 on this box. Pass -j{MAX_BUILD_JOBS} (or JOBS={MAX_BUILD_JOBS}) "
+                f"so the build cannot wedge the desktop.")
     return ""
 
 

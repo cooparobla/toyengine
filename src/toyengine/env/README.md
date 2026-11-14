@@ -11,7 +11,7 @@ It has two kinds of contributor, and this directory folds them into one answer.
 A consumer never asks which kind it is reading. It asks the field.
 
 Demo scene: `./build/toyengine environment_demo`
-([assets/scenes/effects/environment_demo](../../assets/scenes/effects/environment_demo/scene.yaml)).
+([assets/scenes/effects/environment_demo](../../../assets/scenes/effects/environment_demo/scene.yaml)).
 
 | File | Purpose |
 |---|---|
@@ -27,7 +27,7 @@ Every wind reactor in the engine already went through **one** function, duplicat
 GPU:
 
 - `toy::weather::wind_at(wind, gust, t, p)` — [`weather/wind.h`](../weather/wind.h)
-- `gfx_world_wind_at(vec3 p)` — [`assets/shaders/gfx/surface/world.glsl`](../../assets/shaders/gfx/surface/world.glsl)
+- `gfx_world_wind_at(vec3 p)` — [`assets/shaders/gfx/surface/world.glsl`](../../../assets/shaders/gfx/surface/world.glsl)
 
 Making those two field-aware is what made foliage sway *and its shadows*, CPU and GPU
 particles, cloth, rigidbody drag, fog drift and water all react to local influences. None of

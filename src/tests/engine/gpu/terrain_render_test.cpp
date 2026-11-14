@@ -680,8 +680,9 @@ COOPA_TEST(water_lies_over_the_beds_and_floats_a_crate) {
  * @brief A flat terrain's chunks carry LOD levels, and the frame draws a fraction of its
  *        triangles once they are small enough on screen to take them.
  *
- * The LOD is a TileTerrain feature, not a planet one: a streamed world's outer rings are the
- * same "small on screen, full density" waste a globe's far side is.
+ * The LOD is a TileTerrain feature, not one belonging to any particular world shape: a streamed
+ * world's outer rings are the same "small on screen, full density" waste a curved world's far
+ * side is.
  *
  * Size on screen is driven through `mesh_lod_bias` rather than by flying the camera back: the
  * bias is exactly what the selector multiplies the projected size by (see gather_meshes_()), so

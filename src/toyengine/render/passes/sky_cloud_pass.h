@@ -74,19 +74,19 @@ public:
         glm::vec4 history{0.0f};                        ///< xy drift (m), z history valid, w radians per region px
         glm::vec4 camera{0.0f};                         ///< xyz camera position, w this frame's relative lighting change
         glm::vec4 look{1.0f, 1.0f, 1.0f, 0.0f};         ///< x cloud scale, y camera fade, z light_color is above the atmosphere (1) / as is (0), w this frame's spin step (rad)
-        /// xyz the planet's centre (world m), w its radius (world m). w <= 0 is a FLAT world,
-        /// where the march keeps its fake planet pinned under the camera and every value below
+        /// xyz the world frame's centre (world m), w its radius (world m). w <= 0 is a FLAT world,
+        /// where the march keeps its fake sphere pinned under the camera and every value below
         /// is unused -- so a flat scene's pixels are untouched by any of this.
         glm::vec4 world_frame{0.0f};
-        /// xyz the axis the cloud deck turns about (unit, the planet's pole), w the total angle
-        /// turned so far (rad). A planet's wind moves the deck by ROTATING it, where a flat
+        /// xyz the axis the cloud deck turns about (unit, the pole), w the total angle
+        /// turned so far (rad). A curved world's wind moves the deck by ROTATING it, where a flat
         /// world translates the noise domain by `wind.xy`; the two are different frames of
         /// reference and only one is ever live.
         glm::vec4 spin{0.0f, 0.0f, 1.0f, 0.0f};
-        /// Planet only: rgb = the sky's colour at noon, the deck's ambient on the day side.
+        /// Curved worlds only: rgb = the sky's colour at noon, the deck's ambient on the day side.
         /// Zero on a flat world, where the scene's sky_zenith family is used as it always was.
         glm::vec4 day_fill{0.0f};
-        /// Planet only: rgb = the night side's fill (moonlight / airglow), already scaled by
+        /// Curved worlds only: rgb = the night side's fill (moonlight / airglow), already scaled by
         /// the moon's intensity -- zero gives the black night side the engine had before.
         glm::vec4 night_fill{0.0f};
     };
@@ -112,15 +112,15 @@ public:
         int       shadow_steps = 5;
         bool      history_valid = false;  ///< false: a camera cut, or the first frame clouds are on
         float     light_change = 0.0f;    ///< relative change of the clouds' light / ambient or layer settings since last frame
-        /// The scene's planet, or a flat frame (the default) -- see toyengine/env/world_frame.h.
-        /// On a planet the layer is a real shell about `centre` instead of one pinned under the
+        /// The scene's curved world, or a flat frame (the default) -- see toyengine/env/world_frame.h.
+        /// When curved the layer is a real shell about `centre` instead of one pinned under the
         /// camera, and `wind_offset` / `drift` give way to the spin below.
         env::WorldFrame world_frame{};
-        glm::vec3 spin_axis{0.0f, 0.0f, 1.0f};  ///< Planet only: the axis the deck turns about.
-        float     spin_angle = 0.0f;            ///< Planet only: total angle turned (rad).
-        float     spin_delta = 0.0f;            ///< Planet only: this frame's step (rad), for the resolve's reprojection.
-        glm::vec3 day_fill{0.0f};               ///< Planet only: the deck's day-side ambient (see CloudFrameState).
-        glm::vec3 night_fill{0.0f};             ///< Planet only: its night-side ambient, moon-scaled.
+        glm::vec3 spin_axis{0.0f, 0.0f, 1.0f};  ///< Curved worlds only: the axis the deck turns about.
+        float     spin_angle = 0.0f;            ///< Curved worlds only: total angle turned (rad).
+        float     spin_delta = 0.0f;            ///< Curved worlds only: this frame's step (rad), for the resolve's reprojection.
+        glm::vec3 day_fill{0.0f};               ///< Curved worlds only: the deck's day-side ambient (see CloudFrameState).
+        glm::vec3 night_fill{0.0f};             ///< Curved worlds only: its night-side ambient, moon-scaled.
     };
 
     SkyCloudPass(coopa::gfx::core::Device& device, coopa::gfx::memory::Allocator& allocator,

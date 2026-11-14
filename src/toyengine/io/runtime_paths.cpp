@@ -121,8 +121,15 @@ std::vector<std::string> RuntimeLayout::shader_roots(const std::filesystem::path
         roots.push_back(std::string(PROJ_DIR) + "/uicoopa/assets/shaders");
         return roots;
     }
-    if (own_shaders) {
+    // This build tree's project_shaders is searched when the project has shaders of its own OR
+    // when this build compiled some: the directory is a property of the BUILD, while
+    // `own_shaders` only says whether the project ROOT has shader sources. An editor GPU test is
+    // the case that separates them -- its session runs as a scratch project with no assets/ at
+    // all, while the shaders it needs were compiled into this tree by the real project's target.
+    if (own_shaders || std::filesystem::is_directory(built / "project_shaders", ec)) {
         roots.push_back((built / "project_shaders").string());
+    }
+    if (own_shaders) {
         const std::filesystem::path theirs = project_root / "build" / "shaders" / "project_shaders";
         if (!std::filesystem::equivalent(theirs, built / "project_shaders", ec)) roots.push_back(theirs.string());
     }

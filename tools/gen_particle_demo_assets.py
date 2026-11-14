@@ -18,7 +18,13 @@ import math
 import pathlib
 import random
 
-from mesh_yaml import perpendicular_tangents, vertex_normals, write_mesh
+import sys
+
+# toyproject (python/) is stdlib-only, so one path entry is all it needs -- no venv and no
+# install, which is why this runs under a bare `python3`. See python/README.md.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "python" / "src"))
+
+from toyproject import Mesh, fmt_g6, perpendicular_tangents, vertex_normals, write_mesh
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 MESHES = ROOT / "assets" / "meshes" / "props"

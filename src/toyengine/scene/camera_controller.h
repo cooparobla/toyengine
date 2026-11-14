@@ -120,7 +120,7 @@ public:
     /**
      * @brief Zoom-coupled pitch: with either set, `pitch_deg` is driven entirely from `distance`
      *        (linearly between these two, at `min_distance`/`max_distance`) instead of the mouse
-     *        or keys -- a planet held whole in frame at `max_distance` and a ground-level look
+     *        or keys -- a whole world in frame at `max_distance` and a ground-level look
      *        at `min_distance` need different elevations, not a user's drag to find them. Only
      *        one needs setting; the other end holds whatever pitch_deg already is (the seed
      *        transform's, or the other field, if both are set). kUnset (the default) leaves
@@ -135,10 +135,10 @@ public:
      *        local horizon, 0 = straight at the target, 1 = along the surface tangent.
      *
      * `pitch_at_*_distance_deg` moves the camera around the orbit sphere but the view still
-     * points at the target, so close up a planet is always seen straight down. These two tilt
+     * points at the target, so close up the ground is always seen straight down. These two tilt
      * the view itself, interpolated by `distance` exactly as the pitch pair is: set
      * `tangent_at_min_distance: 1` with `tangent_at_max_distance: 0` and zooming in swings the
-     * camera from holding the whole globe to looking out along its horizon, which is the
+     * camera from holding a whole round world to looking out along its horizon, which is the
      * difference between a map and standing on a world.
      *
      * The tilt is a rotation of 90 degrees * this amount in the orbit's own meridian plane, so
@@ -311,7 +311,7 @@ private:
     mutable bool warned_missing_tracker_ = false;
 
     /**
-     * @brief Orbit where gravity is a field (the physics world has gravity sources -- a planet):
+     * @brief Orbit where gravity is a field (the physics world has gravity sources):
      *        the frame the orbit's yaw and pitch are measured in, up away from the pull at the
      *        target and its yaw-0 forward carried along as the target moves (parallel transport,
      *        as CharacterController does). Returns false (and the orbit stays in the world frame,

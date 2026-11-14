@@ -28,7 +28,7 @@ every use: **`assets/scenes/rendering/fog_demo/scene.yaml`** (header explains ea
       scale: { x: 1.0, y: 1.0, z: 1.0 }
     - type: Volume
       kind: fog                          # READ FIRST: sets kind-specific defaults
-      shape: box                         # box | sphere (extent.x = radius)
+      shape: box                         # box | sphere (extent.x = radius) | shell
       extent: { x: 20.0, y: 20.0, z: 2.0 }   # HALF-extents
       density: 0.015
       falloff: 0.05                      # edge softness 0..1 (0 = hard)
@@ -41,6 +41,16 @@ every use: **`assets/scenes/rendering/fog_demo/scene.yaml`** (header explains ea
 
 | kind | Use | Defaults applied |
 |---|---|---|
+**`shape: shell`** is a hollow spherical layer rather than a solid one: dense at its inner
+radius and fading outward, reusing `height_base` as that inner radius, `height_falloff` as the
+layer's scale height and `extent.x` as its outer radius. It is for an air layer wrapped around a
+body, seen from outside as well as from within -- a shape the box and sphere volumes cannot
+express, since both are dense throughout. Two things behave differently in it: `occlusion` (not
+`density`) decides whether what is behind the layer still shows through, and a ray that only
+grazes the layer saturates long before one that crosses it head-on, so the rim reads much denser
+than the middle at the same settings. `density` is per metre, so a shell's look does not survive
+a change in its radius -- a project that scales one derives the density instead of authoring it.
+
 | `fog` | uniform pocket, ground mist, a lit room's air | static, density 0.5, occlusion 0.8, sun_amount 0.2, no height falloff |
 | `haze` | large soft drifting billows (fbm noise) | speed 0.6, density 0.1, noise_scale 0.05, coverage 0, height_falloff 12, occlusion 0.6 |
 | `wind` (default) | thin advected ribbons | density 0.3, coverage 0.86, streak 8, sharpness 3, occlusion 0.15 |

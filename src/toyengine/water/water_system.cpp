@@ -202,7 +202,7 @@ namespace {
  * @brief A local-frame body's surface at local XY `lp` (in its own frame), waves included -- the
  *        way water_surface.glsl draws it: the calm surface, lifted along the body's up by the
  *        waves of the world position there seen through the three axis planes (triplanar), so a
- *        planet's water pieces agree where they meet. False off the body.
+ *        curved world's water pieces agree where they meet. False off the body.
  */
 bool frame_sample(const WaterBody& wb, const glm::vec2& lp, float t, const WaveQueryOptions& opt, WaterSample& out) {
     if (!wb.baked) return false;
@@ -266,7 +266,7 @@ WaterSystem::UnderwaterInfo WaterSystem::underwater_at(const glm::vec3& p) const
         info.underwater = info.depth > 0.0f && info.depth < s.depth + 1.0f;
         return info;
     }
-    // Local-frame bodies (a planet's water): measured along each body's own up.
+    // Local-frame bodies (water on a curved world): measured along each body's own up.
     const WaveQueryOptions opt = wave_options_();
     for (const WaterBody* wb : bodies_) {
         if (!wb->local_frame || !wb->baked) continue;
@@ -531,7 +531,7 @@ void WaterSystem::bake_(coopa::scene::Scene& scene, WaterBody& body, const glm::
 
     const std::size_t n = local_pos.size();
     std::vector<glm::vec3> world_pos(n);
-    // A local-frame body (a planet's water) works in its own frame: its "world" is its local space.
+    // A local-frame body works in its own frame: its "world" is its local space.
     const bool frame = body.local_frame;
     run_range(&par_verts, n, [&](std::size_t begin, std::size_t end) {
         for (std::size_t i = begin; i < end; ++i)
@@ -936,7 +936,7 @@ void WaterSystem::apply_material_(WaterBody& body) {
     auto* renderer = body.owner->get_component<coopa::gfx::engine::components::MeshRenderer>();
     if (!renderer) return;
     auto& m = renderer->material;
-    // A local-frame body (a planet's water) draws with the water shader's planet build.
+    // A local-frame body draws with the water shader's local-frame build.
     m.shader               = body.local_frame ? "water_local_frame" : "water";
     m.shader_params        = body.live_waves().pack();
     m.shader_params_ext[0] = glm::vec4(body.foam_color, body.foam_amount);
@@ -1437,10 +1437,10 @@ void WaterSystem::frozen_substep_(BuoyantEntry& e, coopa::physx::dynamics::Body&
     const glm::vec3 world_up = g > 0.0f ? -gravity / g : glm::vec3(0.0f, 0.0f, 1.0f);
 
     // The undisplaced surface under the centre of mass, any body (the frozen path is rare).
-    // Each candidate is measured in ITS OWN frame: a local-frame body (a planet's water, see
+    // Each candidate is measured in ITS OWN frame: a local-frame body (see
     // WaterBody::local_frame) has its query over that frame and its up along its local +Z, so a
     // world-XY lookup would miss it entirely -- which is how a floater more than `sim_radius`
-    // from the focus ended up reporting in_water false on a planet while sitting on the surface.
+    // from the focus ended up reporting in_water false on a curved world while on the surface.
     // For a world body the transform is the identity and this is the plain XY lookup it was.
     WaterBaseSample base;
     bool hit = false;

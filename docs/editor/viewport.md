@@ -382,5 +382,5 @@ changes colour and the corner shows **PLAYING** or **PAUSED**.
 While the game has control, the editor only reacts to **Esc** and **F5**.
 
 ---
-Sources: `src/editor/viewport/editor_camera.h`, `src/editor/viewport/gizmo.h`, `src/editor/viewport/modal_transform.h`, `editor/app/ui/viewport_chrome.inl`, `src/editor/app/trackpad.h`, `src/editor/app/editor_app.h`, `editor/app/ui/topbar.inl`, `editor/app/ui/properties.inl`, `editor/app/ui/statusbar.inl`
+Sources: `src/editor/viewport/editor_camera.h`, `src/editor/viewport/gizmo.h`, `src/editor/viewport/modal_transform.h`, `editor/app/ui/viewport_chrome.cpp`, `src/editor/app/trackpad.h`, `src/editor/app/editor_app.h`, `editor/app/ui/topbar.cpp`, `editor/app/ui/properties.cpp`, `editor/app/ui/statusbar.cpp`
 Previous: [Scenes and objects](scenes-and-objects.md) | Next: [Modeling](modeling.md)

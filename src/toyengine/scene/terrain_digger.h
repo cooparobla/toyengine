@@ -9,7 +9,7 @@
  * from gameplay. A game with its own tools does not need this component at all.
  *
  * Picking goes through the terrain's own ray march, not through physics, so it works on a
- * terrain with `collision: false` -- which a planet drawn to be looked at usually has.
+ * terrain with `collision: false` -- which a terrain drawn to be looked at usually has.
  *
  * Input is PUSHED in by toy::core::Engine::drive_terrain_diggers_() before Scene::update(), the
  * same contract CameraController, Turntable and FreeMover follow: no component here reads

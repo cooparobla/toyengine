@@ -221,7 +221,7 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
                     // when it breaks. `wall_kind()` only changes at the soil/stone boundary, so a
                     // plain wall collapses to at most `soil_depth_steps + 1` runs whatever its
                     // height -- the fix for height scaling the whole chunk's cost. Valid on a
-                    // planet too: these pieces are a vertical extrusion of the plan profile
+                    // shaped world too: these pieces are a vertical extrusion of the plan profile
                     // (terrain/README.md), and a radial edge stays straight under
                     // ChunkShaper::shape()'s per-vertex map, unlike a horizontal merge, which
                     // is why only this axis is open to `max_merge == 1`.
@@ -379,7 +379,7 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
                     for (std::int32_t x = lx; x < lx + w && row; ++x) row = same(lx, ly, x, ly + h);
                     if (!row) break;
                 }
-                // max_merge == 1 means "never span a tile" (planets: a merged quad bent onto the
+                // max_merge == 1 means "never span a tile" (a merged quad bent off the world
                 // sphere would cut a chord under the tiles beside it). At half-tile granularity
                 // that additionally means never spanning past the tile a run started in.
                 if (params.max_merge == 1) {
@@ -957,8 +957,8 @@ std::vector<coopa::gfx::engine::data::MeshLod> build_chunk_lods(const TerrainPar
         // anchor before the style loop below appends behind it.
         //
         // The seam locks are only read by simplify_levels(), and only when it has `ratio` levels
-        // to simplify -- so they are computed inside this branch rather than above it. A planet
-        // carries no `ratio` levels at all, and the walk is per-vertex with a planet-space to
+        // to simplify -- so they are computed inside this branch rather than above it. A shaped
+        // world carries no `ratio` levels at all, and the walk is per-vertex with a grid-space to
         // face-space read-back on every one of them.
         if (!levels.empty()) {
             const std::vector<std::uint8_t> locks = shaper != nullptr
@@ -974,11 +974,11 @@ std::vector<coopa::gfx::engine::data::MeshLod> build_chunk_lods(const TerrainPar
     // Style levels re-mesh from the chunk's own columns and weld independently -- appended
     // behind every ratio level's vertices (simplify_levels() above has already read `ratio`
     // levels' extent off mesh.indices' size at entry, so this order is load-bearing). Skipped on
-    // a planet: see build_chunk_lods()'s doc.
+    // a shaped world: see build_chunk_lods()'s doc.
     //
     // A `field` level is appended the same way, and unlike a style level it is also built on a
-    // planet: it is meshed in face space from the same columns LOD 0 used, so the one thing a
-    // re-mesh here cannot otherwise do -- the planet warp -- applies to it unchanged.
+    // shaped world: it is meshed in grid space from the same columns LOD 0 used, so the one
+    // thing a re-mesh here cannot otherwise do -- the shaping -- applies to it unchanged.
     if (any_style || any_field) {
         int fields_seen = 0;
         for (const TerrainParams::ChunkLod& lod : params.chunk_lods) {

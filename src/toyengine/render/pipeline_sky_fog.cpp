@@ -112,8 +112,8 @@ void ToyRenderPipeline::record_clouds_(coopa::gfx::command::CommandBuffer& cmd, 
     const glm::vec2 drift = glm::vec2(cs.offset - cloud_prev_offset_);
     cp.drift = glm::length(drift) < 1000.0f ? drift : glm::vec2(0.0f);
     cloud_prev_offset_ = cs.offset;
-    // On a planet the deck turns instead of sliding: the shell is the real globe and the wind
-    // rotates the whole field about the planet's pole. Engine accumulates the angle (so a wind
+    // On a curved world the deck turns instead of sliding: the shell is real, and the wind
+    // rotates the whole field about the world's pole. Engine accumulates the angle (so a wind
     // speed edit never jumps the clouds) and hands over this frame's step for the temporal
     // reconstruction to reproject the history by. A flat scene leaves all of this zero.
     cp.world_frame = cs.world_frame;
@@ -234,7 +234,7 @@ void ToyRenderPipeline::fill_fog_block_(coopa::gfx::engine::data::LightUBO& ubo)
     }
     ubo.fog_water = glm::vec4(water_state_.surface_level, water_state_.underwater ? 1.0f : 0.0f, 0.0f, 0.0f);
     if (world_frame_) {
-        // On a planet world Z is no height: the fog is plain distance fog there (no height
+        // On a curved world world-Z is no height: the fog is plain distance fog there (no height
         // falloff, no blend toward the world-oriented sky gradient, no world-Z water cut). The
         // shaders are untouched -- these are values they already handle.
         ubo.fog_height.y = 0.0f;

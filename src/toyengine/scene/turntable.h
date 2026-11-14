@@ -1,17 +1,17 @@
 /**
  * @file turntable.h
- * @brief Mouse-dragged spinning of the object itself, for a model viewer: a globe, a prop, a
+ * @brief Mouse-dragged spinning of the object itself, for a model viewer: a round world, a prop, a
  *        character turned round in front of a camera that never moves.
  *
  * The counterpart to CameraController's orbit mode, and the opposite trade. An orbit rig turns
  * the *camera* round a subject, so the subject's lit side, its silhouette against the sky and
  * its shadows all change as you look. A turntable turns the *subject* in front of a fixed
  * camera, so the light keeps coming from the same place on screen and what moves is the model
- * through it -- which is what a planet spinning under a fixed sun, or a prop being inspected,
+ * through it -- which is what a world spinning under a fixed sun, or a prop being inspected,
  * actually wants. Pair it with an orbit camera whose `mouse_sensitivity` is 0: the scroll wheel
  * still zooms, and the drag goes here instead.
  *
- * The rotation is a globe's, not a trackball's: horizontal drag spins the object about its own
+ * The rotation is a spinning-world one, not a trackball's: horizontal drag spins the object about its own
  * polar `axis`, vertical drag tilts that axis toward or away from the viewer, clamped. Poles
  * stay poles and no amount of dragging rolls the model over sideways, which free trackball
  * rotation does within a few seconds of use.

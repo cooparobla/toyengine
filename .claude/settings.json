@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/tools/claude_build_guard.py\"",
+            "command": "python3 \"$(cd \"$CLAUDE_PROJECT_DIR/.claude\" && pwd -P)/../tools/claude_build_guard.py\"",
             "timeout": 10,
             "statusMessage": "Checking build safety"
           }

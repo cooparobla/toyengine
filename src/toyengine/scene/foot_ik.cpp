@@ -49,7 +49,7 @@ void FootIK::ik_pre_solve(float dt) {
 
     const glm::mat4 own_world = own_tc->get_world_matrix();
     const glm::vec3 base(own_world[3]);
-    // In a gravity field (a planet) the ground is "below" along the character's own up; the
+    // In a gravity field the ground is "below" along the character's own up; the
     // flat world keeps world +Z exactly.
     const bool field = physics && physics->world().gravity_source_count() > 0;
     up_ = field ? glm::normalize(glm::vec3(own_world[2])) : glm::vec3(0.0f, 0.0f, 1.0f);

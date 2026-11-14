@@ -65,7 +65,7 @@ void Turntable::update(float delta_time) {
 
     // Tilt OUTSIDE spin: the spin is about the model's own pole, which the tilt then leans
     // toward the viewer. The other order would swing the pole round the screen as the model
-    // spins, which is a trackball, not a globe.
+    // spins, which is a trackball, not a spinning world.
     const glm::quat rotation = glm::angleAxis(glm::radians(tilt_deg_), tilt_axis) *
                                glm::angleAxis(glm::radians(spin_deg_), spin_axis);
     tc->transform().set_rotation_quat(rotation);

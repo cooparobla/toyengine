@@ -71,7 +71,7 @@ void MapGeneratorComponent::begin(coopa::job::JobEngine* jobs) {
 
     // The values the CLI derives after reading a config (noise seeds from the master seed, the
     // island field scaled to the grid) -- without them one seed would make the same coastline as
-    // another. A globe is the same settings generated on a sphere.
+    // another. `sphere` only swaps the topology those same settings are generated on.
     coopa::maps::MapConfig authored = config;
     if (sphere) authored.topology = coopa::maps::MapTopology::Sphere;
     generated_config_ = coopa::maps::derived_config(authored);
@@ -212,8 +212,8 @@ bool MapGeneratorComponent::poll_apply() {
     terrain->applied_map = sampler_;
     // bake_params_() only ever wrote height_scale into the TEMPORARY copy the sampler baked
     // with -- the live terrain.params this generator's `height_scale:` was meant to set never
-    // saw it, so anything reading it afterward (the planet horizon cull, most notably) read the
-    // unrelated TerrainParams default instead of what the world was actually baked at.
+    // saw it, so anything reading it afterward (a streaming policy's visibility cull, most
+    // notably) read the unrelated TerrainParams default instead of what the world was baked at.
     terrain->params.height_scale = height_scale;
     terrain->sync_field();
     bake_.reset();
@@ -305,7 +305,6 @@ private:
         for (world::TerrainComponent* t : orphans) {
             auto* g = t->owner->add_component<MapGeneratorComponent>();
             g->config = t->generator;
-            g->sphere = t->params.planet;
             g->world_tiles = t->params.world_tiles;
             g->tiles_per_grid_unit = t->params.tiles_per_grid_unit;
             g->height_scale = t->params.height_scale;

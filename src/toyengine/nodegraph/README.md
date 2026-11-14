@@ -3,7 +3,7 @@
 A generic, job-parallel node-graph evaluator. It owns types, sockets, nodes, links, validation,
 compilation and evaluation, and **knows nothing about any particular domain** -- a consumer
 registers its own socket types and node types and the module drives them. Built on
-[`coopa::job`](../job/README.md) for parallelism, and on [`coopa::yaml`](../yaml/document.h) for
+[`coopa::job`](../../libs/libcoopa/coopa/job/README.md) for parallelism, and on [`coopa::yaml`](../../libs/libcoopa/coopa/yaml/document.h) for
 serialization.
 
 It suits more than one kind of graph, because nothing it owns is domain-specific: geometry graphs,
@@ -37,7 +37,7 @@ graph TD
    - A type-erased socket value. Small payloads live in a 32-byte inline buffer; larger ones share
      a reference-counted block, so fan-out is a refcount bump and writing is copy-on-write.
    - `as<T>(fallback)` **never throws** on a type mismatch, matching
-     [`EventValue`](../event/event_bus.h)'s contract: graph data is authored, so a mismatch is a
+     [`EventValue`](../../libs/libcoopa/coopa/event/event_bus.h)'s contract: graph data is authored, so a mismatch is a
      condition to report rather than crash on.
 3. **[`declaration.h`](./declaration.h)**
    - `SocketDecl` / `NodeDeclaration` / `DeclarationBuilder`, and `PropertyBag` for a node's
@@ -119,7 +119,7 @@ float run(const Graph& graph, coopa::job::JobEngine* jobs) {
 ## The four properties that drive the design
 
 **1. The inline path is not a fallback.** `jobs == nullptr` runs every chain on the calling thread,
-matching [`coopa::scene::FrameContext::jobs`](../scene/scene_system.h)' documented contract. Both
+matching [`coopa::scene::FrameContext::jobs`](../../libs/libcoopa/coopa/scene/scene_system.h)' documented contract. Both
 drivers share `run_step_()` and the same slot arithmetic, so "the parallel result equals the inline
 result" is structural rather than lucky -- and it is asserted directly in
 `tests/nodegraph_eval_test.cpp`.

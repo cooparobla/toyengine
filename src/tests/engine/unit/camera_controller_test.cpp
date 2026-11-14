@@ -122,7 +122,7 @@ COOPA_TEST(pitch_and_zoom_saturate_at_their_limits) {
 
 /**
  * @brief With either pitch_at_*_distance_deg set, elevation tracks the zoom linearly between
- *        min_distance and max_distance instead of the mouse/keys -- a planet demo's "overhead
+ *        min_distance and max_distance instead of the mouse/keys -- a demo's "overhead
  *        when far, ground-level when close" framing.
  */
 COOPA_TEST(zoom_coupled_pitch_tracks_distance_when_set) {

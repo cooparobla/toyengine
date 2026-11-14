@@ -85,10 +85,10 @@ public:
 
     /** @brief The tile under `px` (and the hit), from the live terrain's tiles. */
     bool tile_hit_(const ViewProj& vp, glm::vec2 px, glm::ivec2& tile, glm::vec3* world = nullptr) const;
-    /** @brief World position of a tile corner at a height (in steps), for the overlay. On a planet
+    /** @brief World position of a tile corner at a height (in steps), for the overlay. Under a
      *         the corner is on cube face `face` (-1: the face column `x` is on). */
     glm::vec3 tile_corner_(const toy::world::TerrainComponent& t, int x, int y, float steps, int face = -1) const;
-    /** @brief On a planet, `r` clipped to the cube face `anchor` is on: a rect of the stored grid
+    /** @brief Under a `topology`, `r` clipped to the region `anchor` is in: a rect of the stored grid
      *         only means a square of ground within one face. Unchanged on a flat terrain. */
     toy::world::IRect tile_face_clip_(const toy::world::IRect& r, const glm::ivec2& anchor) const;
 

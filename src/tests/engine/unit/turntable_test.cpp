@@ -69,7 +69,7 @@ COOPA_TEST(a_horizontal_drag_spins_the_model_the_way_the_mouse_went) {
     tt->damping = 1000.0f; // the fling is its own test below
     scene->start();
 
-    // The camera of planet_demo: at -Y looking toward the origin, so +X is across the screen to
+    // A model-viewer camera: at -Y looking toward the origin, so +X is across the screen to
     // the right and the point of the model facing it is the one at -Y.
     tt->view_right = glm::vec3(1.0f, 0.0f, 0.0f);
     drag(*scene, *tt, glm::vec2(240.0f, 0.0f), 24);

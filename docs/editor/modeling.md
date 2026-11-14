@@ -279,6 +279,6 @@ An object asset is a ready-made object you can place in any scene (see
 The editor saves the mesh, creates an object that uses it, and opens the new object asset.
 
 ---
-Sources: `src/editor/mesh/edit_mesh.h`, `src/editor/mesh/mesh_ops.h`, `src/editor/mesh/mesh_loops.h`, `src/editor/mesh/mesh_subdivide.h`, `src/editor/mesh/mesh_mirror.h`, `src/editor/mesh/primitives.h`, `editor/app/ui/mesh_tools.inl`, `editor/app/ui/viewport_chrome.inl`, `editor/app/ui/properties.inl`, `editor/app/ui/assets.inl`, `src/editor/app/editor_app.h`, `src/editor/app/asset_documents.h`, `src/editor/viewport/modal_transform.h`
+Sources: `src/editor/mesh/edit_mesh.h`, `src/editor/mesh/mesh_ops.h`, `src/editor/mesh/mesh_loops.h`, `src/editor/mesh/mesh_subdivide.h`, `src/editor/mesh/mesh_mirror.h`, `src/editor/mesh/primitives.h`, `editor/app/ui/mesh_tools.cpp`, `editor/app/ui/viewport_chrome.cpp`, `editor/app/ui/properties.cpp`, `editor/app/ui/assets.cpp`, `src/editor/app/editor_app.h`, `src/editor/app/asset_documents.h`, `src/editor/viewport/modal_transform.h`
 
 Previous: [Viewport](viewport.md) | Next: [Sculpt and paint](sculpt-and-paint.md)

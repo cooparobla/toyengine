@@ -10,8 +10,8 @@ stores exactly what was put down. Use a scatter for grass over a whole landscape
 for the trees, rocks, fences and clutter that make somewhere a place.
 
 Demo: `./build/toyengine instance_paint_demo`
-([assets/scenes/terrain/instance_paint_demo](../../assets/scenes/terrain/instance_paint_demo/scene.yaml),
-written by [`tools/gen_instance_paint_demo.py`](../../tools/gen_instance_paint_demo.py)).
+([assets/scenes/terrain/instance_paint_demo](../../../assets/scenes/terrain/instance_paint_demo/scene.yaml),
+written by [`tools/gen_instance_paint_demo.py`](../../../tools/gen_instance_paint_demo.py)).
 
 | File | Purpose |
 |---|---|

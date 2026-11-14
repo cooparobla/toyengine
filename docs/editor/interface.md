@@ -299,6 +299,6 @@ theme, see [UI designer](ui-designer.md#style-the-ui-with-a-theme).
 
 ---
 
-Sources: `editor/app/ui/topbar.inl`, `src/editor/app/ui/layout.inl`, `editor/app/ui/assets.inl`, `editor/app/ui/browser.inl`, `editor/app/ui/outliner.inl`, `editor/app/ui/statusbar.inl`, `editor/app/ui/properties.inl`, `editor/app/ui/theme_editor.inl`, `src/editor/app/editor_theme.h`, `src/editor/app/editor_app.h`, `editor/app/ui/build.inl`, `src/editor/app/project.h`
+Sources: `editor/app/ui/topbar.cpp`, `src/editor/app/ui/layout.inl`, `editor/app/ui/assets.cpp`, `editor/app/ui/outliner.cpp`, `editor/app/ui/statusbar.cpp`, `editor/app/ui/properties.cpp`, `editor/app/ui/theme_editor.cpp`, `src/editor/app/editor_theme.h`, `src/editor/app/editor_app.h`, `editor/app/ui/build.cpp`, `src/editor/app/project.h`
 
 Previous: [Editor manual](README.md) | Next: [Scenes and objects](scenes-and-objects.md)

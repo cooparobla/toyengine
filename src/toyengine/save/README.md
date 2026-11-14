@@ -4,7 +4,7 @@ Save games. The engine decides where saves are stored and how they are written a
 game decides what goes in them. Nothing is saved unless the game (or a component) asks for it.
 
 Demo: `./build/toyengine character_demo`
-([assets/scenes/tests/gameplay/character_demo](../../assets/scenes/gameplay/character_demo/scene.yaml)).
+([assets/scenes/tests/gameplay/character_demo](../../../assets/scenes/gameplay/character_demo/scene.yaml)).
 Pick up a coin or two, press **F5**, walk somewhere else, press **F9**: the player, the coins and
 the clock come back.
 

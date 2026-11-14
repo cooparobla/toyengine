@@ -1,8 +1,9 @@
 """Generates the subdivided grid mesh used by the kitchen_sink test scene's water plane (src/tests/fixtures/scenes/).
 
-Standalone generator, not part of the C++ build -- run it manually (`python3
-tools/gen_water_grid_mesh.py`) whenever
-assets/meshes/water/water_grid.yaml needs regenerating.
+Standalone generator, not part of the C++ build -- run it manually whenever
+assets/meshes/water/water_grid.yaml needs regenerating:
+
+    uv run --project python tools/gen_water_grid_mesh.py
 
 water_surface.glsl's wave displacement moves each vertex independently; a flat single-quad
 mesh (like plane, 4 vertices) can only tilt as a rigid whole under that displacement,
@@ -12,9 +13,16 @@ GRID_SIZE x GRID_SIZE quad grid in the same local space and orientation as plane
 enough vertices to bend into a visible surface, while staying exactly the same mesh YAML
 format Mesh::from_node() already parses for every other mesh in this scene (faces are
 quads, fan-triangulated on load -- see gfxcoopa/engine/data/mesh.h's own doc).
+
+The file is written by `toyproject.Mesh` (python/), which carries this schema and the float
+format that spells a whole number `-1.0` rather than `-1`. `python/tests/
+test_mesh_matches_committed.py` regenerates this very mesh and compares it to the committed
+file byte for byte, so the shared writer cannot drift from what is on disk here.
 """
 
 import pathlib
+
+from toyproject import Mesh, Project
 
 GRID_SIZE = 12
 """Quads per side. (GRID_SIZE + 1)^2 vertices, GRID_SIZE^2 quad faces. High enough that the
@@ -23,11 +31,9 @@ before the object's own Transform.scale) resolve visible crests rather than alia
 jagged few-vertex fold. The pond's WaterBody loads this mesh CPU-side and bakes it (see
 src/toyengine/water/water_system.h); the MeshRenderer itself names no mesh."""
 
-OUTPUT_PATH = pathlib.Path(__file__).parent.parent / "assets/meshes/water/water_grid.yaml"
-
-
-def fmt_vec(v):
-    return "[" + ", ".join(str(c) for c in v) + "]"
+ENGINE_DIR = pathlib.Path(__file__).resolve().parent.parent
+"""The engine checkout. Passed to Project() explicitly because an engine has no .toy file, so
+Project.find() -- which a game project's generator would use -- does not apply here."""
 
 
 def main():
@@ -51,22 +57,10 @@ def main():
             # CCW winding, matching plane's [0,1,2,3] convention.
             faces.append([idx(i, j), idx(i + 1, j), idx(i + 1, j + 1), idx(i, j + 1)])
 
-    lines = ["vertices:"]
-    lines += [f"  - {fmt_vec(v)}" for v in verts]
-    lines.append("normals:")
-    lines += [f"  - {fmt_vec(v)}" for v in normals]
-    lines.append("uvs:")
-    lines += [f"  - {fmt_vec(v)}" for v in uvs]
-    lines.append("faces:")
-    lines += [f"  - {fmt_vec(v)}" for v in faces]
-    lines.append("colors: []")
-    lines.append("weights:")
-    lines += ["  - {  }" for _ in verts]
-    lines.append("tangents:")
-    lines += [f"  - {fmt_vec(v)}" for v in tangents]
-
-    OUTPUT_PATH.write_text("\n".join(lines) + "\n")
-    print(f"wrote {len(verts)} vertices, {len(faces)} faces to {OUTPUT_PATH}")
+    project = Project(ENGINE_DIR)
+    mesh = Mesh(verts, faces, uvs, normals=normals, tangents=tangents)
+    path = mesh.write(project, "water/water_grid")
+    print(f"wrote {len(verts)} vertices, {len(faces)} faces to {path}")
 
 
 if __name__ == "__main__":

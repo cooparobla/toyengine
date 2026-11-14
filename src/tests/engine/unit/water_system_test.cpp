@@ -168,7 +168,7 @@ COOPA_TEST(new_bodies_bake_nearest_first) {
  *
  * `baked` goes true as soon as the CPU query is live -- a frame or two before the tile
  * build lands. A body that stops being live in that window has its build cancelled, and
- * deactivating an object is enough to do it: a planet chunk passing over the horizon
+ * deactivating an object is enough to do it: a terrain chunk culled out of view
  * leaves the live set without being destroyed. Before `WaterBody::tiles_published`, such
  * a body came back `baked` with `bake_stage == 2` and no mesh, which stage 1 skipped
  * ("already baked") and stage 2 skipped ("already final") -- so its water was gone for
@@ -180,7 +180,7 @@ COOPA_TEST(water_rebakes_after_leaving_the_live_set_mid_bake) {
     run(bs, 1.0f / 60.0f);
     require(bs.body != nullptr && bs.body->baked, "the body baked on its first frame");
 
-    // Deactivating the owner is what the planet's horizon cull does: the component lives,
+    // Deactivating the owner is what a visibility cull does: the component lives,
     // but WaterSystem::refresh_bodies() drops it from the live set.
     bs.body->tiles_published = false;   // as a cancelled in-flight build leaves it
     bs.body->owner->set_active(false);

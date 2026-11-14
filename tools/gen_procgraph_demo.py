@@ -14,9 +14,14 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import mesh_yaml
+import pathlib
+
+# toyproject (python/) is stdlib-only, so one path entry is all it needs -- no venv and no
+# install, which is why this runs under a bare `python3`. See python/README.md.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "python" / "src"))
+
+from toyproject import Mesh, fmt_g6, perpendicular_tangents, write_mesh
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCENE_DIR = os.path.join(ROOT, "assets", "scenes", "procedural", "procgraph_demo")
@@ -65,14 +70,14 @@ def write_meshes():
     # One stair tread. The graph scales nothing: it instances this at each point, so the mesh's
     # own size is the step size the graph's `width`/`run`/`rise` inputs describe at their defaults.
     verts, faces, uvs, normals = box((1.4, 0.3, 0.18))
-    mesh_yaml.write_mesh(Path(MESH_DIR) / "procgraph_step.yaml", verts, faces, uvs,
-                         normals, mesh_yaml.perpendicular_tangents(normals))
+    write_mesh(Path(MESH_DIR) / "procgraph_step.yaml", verts, faces, uvs,
+                         normals, perpendicular_tangents(normals))
 
     # A railing post, sitting on z = 0 so it reads as standing on the ground.
     verts, faces, uvs, normals = box((0.08, 0.08, 1.0))
     verts = [(x, y, z + 0.5) for (x, y, z) in verts]
-    mesh_yaml.write_mesh(Path(MESH_DIR) / "procgraph_post.yaml", verts, faces, uvs,
-                         normals, mesh_yaml.perpendicular_tangents(normals))
+    write_mesh(Path(MESH_DIR) / "procgraph_post.yaml", verts, faces, uvs,
+                         normals, perpendicular_tangents(normals))
     print("wrote 2 meshes to assets/meshes/")
 
 

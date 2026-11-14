@@ -2,13 +2,17 @@
  * @file mixer_test.cpp
  * @brief mixer/mixer.h: the audio-thread Mixer's command queue -- voices sum, commands carrying
  *        a stale handle generation are dropped, and every queued command drains before the
- *        block it was queued for renders.
+ *        block it was queued for renders. Also covers bus publication: create_bus() hands back
+ *        buses at stable addresses up to max_buses and then throws, rather than growing storage
+ *        that render() is concurrently walking.
  */
 #include <coopa/testing/test.h>
 
 #include <sfxcoopa/data/audio_format.h>
 #include <sfxcoopa/mixer/mixer.h>
 
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 COOPA_TEST_SUITE("mixer");
@@ -95,4 +99,59 @@ COOPA_TEST(commands_drain_before_the_same_block_renders) {
     // that would result if SetVoiceGain only took effect on the *next* call.
     EXPECT_NEAR(out[0], 1.0f + (0.5f - 1.0f) * 0.3f, 1e-4f);
     EXPECT_LT(out[0], 1.0f - 1e-4f);
+}
+
+COOPA_TEST(created_buses_are_published_at_stable_addresses) {
+    Mixer mixer(AudioFormat{48000, 1}, 4, 256, 256, /*max_buses=*/8);
+    mixer.prepare(64);
+
+    EXPECT_EQ(mixer.bus_count(), 1u);  // "Master", created by the constructor
+    const MixerBus* const master_before = &mixer.master();
+
+    for (uint32_t i = 1; i < 8; ++i) mixer.create_bus("Bus" + std::to_string(i), &mixer.master());
+    EXPECT_EQ(mixer.bus_count(), 8u);
+
+    // Filling the mixer moved nothing: every bus the audio thread had already seen is
+    // still where it was, which is the whole point of reserving the storage up front.
+    EXPECT_TRUE(master_before == &mixer.master());
+    EXPECT_TRUE(mixer.bus_at(0) == &mixer.master());
+    EXPECT_EQ(mixer.bus_at(7)->name(), std::string("Bus7"));
+    EXPECT_TRUE(mixer.bus_at(8) == nullptr);  // past the end, not out of bounds
+}
+
+COOPA_TEST(creating_a_bus_past_max_buses_throws) {
+    Mixer mixer(AudioFormat{48000, 1}, 4, 256, 256, /*max_buses=*/2);
+    mixer.prepare(64);
+    mixer.create_bus("Music", &mixer.master());
+
+    bool threw = false;
+    try {
+        mixer.create_bus("SFX", &mixer.master());
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    EXPECT_TRUE(threw);
+    EXPECT_EQ(mixer.bus_count(), 2u);  // the failed create left the graph untouched
+}
+
+COOPA_TEST(a_bus_created_after_prepare_carries_audio) {
+    Mixer mixer(AudioFormat{48000, 1}, 4);
+    mixer.prepare(64);  // prepared first, so a bus created now has to prepare itself
+
+    MixerBus& late = mixer.create_bus("Late", &mixer.master());
+    ASSERT_TRUE(mixer.bus_at(1) == &late);
+    late.set_volume(0.5f);
+    mixer.update_bus_mutes();
+
+    std::vector<float> clip(64, 1.0f);
+    Command play = play_command(mixer.voice_pool().allocate(0, 0), clip);
+    play.bus_index = late.index();
+    mixer.commands().push(play);
+
+    std::vector<float> out(64, 0.0f);
+    mixer.render(out.data(), 64);
+
+    // The late bus has a scratch buffer, is linked under Master, and applies its own
+    // gain -- none of which holds if create_bus() skipped prepare() or the link.
+    for (float sample : out) EXPECT_NEAR(sample, 0.5f, 1e-4f);
 }

@@ -12,14 +12,22 @@
 #include <sfxcoopa/util/db.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace coopa {
 namespace sfx {
 namespace mixer {
+
+/** @brief Most children one bus can hold; its storage is allocated up front. See MixerBus::add_child(). */
+constexpr uint32_t k_max_bus_children = 64;
+
+/** @brief Most effects one bus's chain can hold; its storage is allocated up front. See MixerBus::add_effect(). */
+constexpr uint32_t k_max_bus_effects = 16;
 
 /**
  * @class MixerBus
@@ -36,6 +44,17 @@ namespace mixer {
  * reads the precomputed effective_mute() flag, never scans graph state
  * itself.
  *
+ * ## Linking children and effects while the audio thread renders
+ *
+ * Both lists hold k_max_bus_children / k_max_bus_effects slots from
+ * construction and never grow, and each is published by a release store to
+ * its own atomic count that render() acquire-loads. A child or effect is
+ * therefore fully constructed -- and, for an effect, already prepare()d --
+ * before the count that exposes it is visible, so add_child() and
+ * add_effect() are safe to call from the control thread against a concurrent
+ * render(). Exceeding either capacity throws rather than reallocating,
+ * because a reallocation is exactly what the audio thread cannot survive.
+ *
  * Non-copyable, non-movable: children_ store raw pointers to sibling
  * MixerBus instances by address, which a copy or move would invalidate.
  * Mixer owns all MixerBus instances behind stable-address unique_ptrs for
@@ -44,7 +63,10 @@ namespace mixer {
 class MixerBus {
 public:
     MixerBus(std::string name, uint32_t index, MixerBus* parent)
-        : name_(std::move(name)), index_(index), parent_(parent) {}
+        : name_(std::move(name)), index_(index), parent_(parent) {
+        children_.resize(k_max_bus_children, nullptr);
+        effects_.resize(k_max_bus_effects);
+    }
 
     MixerBus(const MixerBus&) = delete;
     MixerBus& operator=(const MixerBus&) = delete;
@@ -57,10 +79,26 @@ public:
     uint32_t index() const { return index_; }
 
     MixerBus* parent() const { return parent_; }
-    const std::vector<MixerBus*>& children() const { return children_; }
 
-    /** @brief Links `child` under this bus. Called only by whoever builds the tree (Mixer::create_bus). */
-    void add_child(MixerBus* child) { children_.push_back(child); }
+    /** @brief How many children are linked. Every index below it is fully published; see the class doc. */
+    uint32_t child_count() const { return child_count_.load(std::memory_order_acquire); }
+
+    /** @brief Child `i`, valid for `i` < child_count(). */
+    MixerBus* child_at(uint32_t i) const { return children_[i]; }
+
+    /**
+     * @brief Links `child` under this bus, publishing it to render() only once it is stored.
+     * @throws std::runtime_error if this bus already holds k_max_bus_children children.
+     */
+    void add_child(MixerBus* child) {
+        const uint32_t count = child_count_.load(std::memory_order_relaxed);
+        if (count >= k_max_bus_children) {
+            throw std::runtime_error("[sfxcoopa] bus '" + name_ + "' already holds its maximum of " +
+                                     std::to_string(k_max_bus_children) + " children");
+        }
+        children_[count] = child;
+        child_count_.store(count + 1, std::memory_order_release);
+    }
 
     /** @brief Linear gain applied to this bus's own mix before it's read by its parent (or Mixer, for the root). */
     float volume() const { return volume_; }
@@ -76,16 +114,37 @@ public:
     /** @brief The control-side-computed flag the audio thread actually reads; see recompute_effective_mutes(). */
     bool effective_mute() const { return effective_mute_; }
 
-    /** @brief Appends an effect to this bus's chain, run in append order. */
+    /** @brief How many effects are in this bus's chain. */
+    uint32_t effect_count() const { return effect_count_.load(std::memory_order_acquire); }
+
+    /**
+     * @brief Appends an effect to this bus's chain, run in append order.
+     *
+     * The effect is prepare()d here when this bus already knows its format and
+     * block size, so one added after the graph was prepared arrives with its
+     * buffers allocated rather than processing against nothing. It becomes
+     * visible to render() only after that.
+     *
+     * @throws std::runtime_error if this bus's chain already holds k_max_bus_effects effects.
+     */
     void add_effect(std::unique_ptr<coopa::sfx::dsp::IEffect> effect) {
-        effects_.push_back(std::move(effect));
+        const uint32_t count = effect_count_.load(std::memory_order_relaxed);
+        if (count >= k_max_bus_effects) {
+            throw std::runtime_error("[sfxcoopa] bus '" + name_ + "' already holds its maximum of " +
+                                     std::to_string(k_max_bus_effects) + " effects");
+        }
+        if (max_frames_ > 0) effect->prepare(format_, max_frames_);
+        effects_[count] = std::move(effect);
+        effect_count_.store(count + 1, std::memory_order_release);
     }
 
     /** @brief Allocates this bus's scratch buffer and prepares its effect chain. */
     void prepare(const coopa::sfx::data::AudioFormat& format, uint32_t max_frames) {
         format_ = format;
+        max_frames_ = max_frames;
         scratch_.assign(static_cast<size_t>(max_frames) * format.channels, 0.0f);
-        for (auto& effect : effects_) effect->prepare(format, max_frames);
+        const uint32_t effects = effect_count_.load(std::memory_order_relaxed);
+        for (uint32_t e = 0; e < effects; ++e) effects_[e]->prepare(format, max_frames);
     }
 
     /** @brief This bus's scratch buffer -- voices targeting this bus accumulate directly into it. */
@@ -107,13 +166,16 @@ public:
      */
     void render(uint32_t frames) {
         const uint32_t n = frames * format_.channels;
-        for (MixerBus* child : children_) {
+        const uint32_t children = child_count_.load(std::memory_order_acquire);
+        for (uint32_t c = 0; c < children; ++c) {
+            MixerBus* child = children_[c];
             child->render(frames);
             const float* child_scratch = child->scratch_.data();
             for (uint32_t i = 0; i < n; ++i) scratch_[i] += child_scratch[i];
         }
 
-        for (auto& effect : effects_) effect->process(scratch_.data(), frames, format_.channels);
+        const uint32_t effects = effect_count_.load(std::memory_order_acquire);
+        for (uint32_t e = 0; e < effects; ++e) effects_[e]->process(scratch_.data(), frames, format_.channels);
 
         const float gain = effective_mute_ ? 0.0f : volume_;
         for (uint32_t i = 0; i < n; ++i) scratch_[i] *= gain;
@@ -150,8 +212,9 @@ public:
 private:
     static bool subtree_has_solo_(MixerBus* bus) {
         if (bus->solo_) return true;
-        for (MixerBus* child : bus->children_) {
-            if (subtree_has_solo_(child)) return true;
+        const uint32_t children = bus->child_count_.load(std::memory_order_relaxed);
+        for (uint32_t c = 0; c < children; ++c) {
+            if (subtree_has_solo_(bus->children_[c])) return true;
         }
         return false;
     }
@@ -160,6 +223,7 @@ private:
     uint32_t index_;
     MixerBus* parent_ = nullptr;
     std::vector<MixerBus*> children_;
+    std::atomic<uint32_t> child_count_{0};
 
     float volume_ = 1.0f;
     bool mute_ = false;
@@ -167,8 +231,10 @@ private:
     bool effective_mute_ = false;
 
     std::vector<std::unique_ptr<coopa::sfx::dsp::IEffect>> effects_;
+    std::atomic<uint32_t> effect_count_{0};
     std::vector<float> scratch_;
     coopa::sfx::data::AudioFormat format_{};
+    uint32_t max_frames_ = 0;
 };
 
 }  // namespace mixer

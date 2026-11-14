@@ -7,12 +7,21 @@
  * Cross-thread safety: voice control (Play/Stop/Pause/Resume/
  * SetVoiceGain/SetVoicePitch/SetVoiceSpatial) is applied only via Command,
  * generation-checked against each Voice's own generation() so a stale
- * handle can never affect a slot that has since been reused. MixerBus
- * parameter setters (volume/mute/solo) and the bus graph itself are plain,
- * non-atomic fields read by render(): changing them while an AudioDevice
- * callback is concurrently rendering is not synchronized. The headless
- * tests drive Mixer synchronously (render_offline()-style), where this
- * does not arise.
+ * handle can never affect a slot that has since been reused.
+ *
+ * The bus graph's *shape* is safe to extend while a render is in flight:
+ * create_bus() writes into storage reserved at construction and publishes
+ * the new bus by a release store to bus_count_, which render() acquire-
+ * loads, and MixerBus::add_child()/add_effect() do the same for their own
+ * lists (see bus.h). Growing past max_buses throws instead of reallocating,
+ * because a reallocation is what the audio thread cannot survive.
+ *
+ * MixerBus *parameter* setters (volume/mute/solo) remain plain non-atomic
+ * fields read by render(): changing them while an AudioDevice callback is
+ * concurrently rendering is not synchronized. Nothing here removes a bus
+ * either -- the graph only ever grows. find_bus() and update_bus_mutes()
+ * are control-thread only: the former reads a std::unordered_map the audio
+ * thread never touches, and the latter writes every bus's effective_mute_.
  */
 
 #ifndef SFXCOOPA_MIXER_MIXER_H
@@ -25,8 +34,10 @@
 #include <sfxcoopa/spatial/panner.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -34,6 +45,9 @@
 namespace coopa {
 namespace sfx {
 namespace mixer {
+
+/** @brief Default ceiling on how many buses one Mixer can hold; storage for them is allocated up front. */
+constexpr uint32_t k_default_max_buses = 64;
 
 /** @brief What a Command does. */
 enum class CommandType {
@@ -101,27 +115,58 @@ struct Event {
  */
 class Mixer {
 public:
+    /**
+     * @param max_buses Ceiling on create_bus() calls, including "Master". Storage for all of
+     *  them is allocated here so the bus list never reallocates under a concurrent render().
+     */
     Mixer(const coopa::sfx::data::AudioFormat& format, uint32_t max_voices = coopa::sfx::data::k_max_voices,
-          uint32_t command_ring_capacity = 256, uint32_t event_ring_capacity = 256)
+          uint32_t command_ring_capacity = 256, uint32_t event_ring_capacity = 256,
+          uint32_t max_buses = k_default_max_buses)
         : format_(format),
           voice_pool_(max_voices, format.sample_rate),
           commands_(command_ring_capacity),
           events_(event_ring_capacity) {
+        buses_.resize(std::max<uint32_t>(max_buses, 1u));
+        mute_scratch_.reserve(buses_.size());
         create_bus("Master", nullptr);
     }
 
-    /** @brief Creates a bus under `parent` (nullptr only valid for the very first call, which creates Master). */
+    /**
+     * @brief Creates a bus under `parent` (nullptr only valid for the very first call, which creates Master).
+     *
+     * Safe to call while a render is in flight: the bus is prepared, then published
+     * to render()'s own sweep, then linked under its parent -- so no render can reach
+     * it before its scratch buffer exists.
+     *
+     * @throws std::runtime_error if the mixer already holds max_buses buses.
+     */
     MixerBus& create_bus(const std::string& name, MixerBus* parent) {
-        const uint32_t index = static_cast<uint32_t>(buses_.size());
-        buses_.push_back(std::make_unique<MixerBus>(name, index, parent));
-        MixerBus* bus = buses_.back().get();
+        const uint32_t index = bus_count_.load(std::memory_order_relaxed);
+        if (index >= buses_.size()) {
+            throw std::runtime_error("[sfxcoopa] mixer already holds its maximum of " +
+                                     std::to_string(buses_.size()) +
+                                     " buses; raise Mixer's max_buses to create '" + name + "'");
+        }
+        buses_[index] = std::make_unique<MixerBus>(name, index, parent);
+        MixerBus* bus = buses_[index].get();
+        if (max_frames_ > 0) bus->prepare(format_, max_frames_);
+        bus_count_.store(index + 1, std::memory_order_release);
         if (parent) parent->add_child(bus);
         bus_by_name_[name] = bus;
-        if (max_frames_ > 0) bus->prepare(format_, max_frames_);
         return *bus;
     }
 
     MixerBus& master() { return *buses_[0]; }
+
+    /** @brief How many buses exist. Every index below it is fully constructed and prepared. */
+    uint32_t bus_count() const { return bus_count_.load(std::memory_order_acquire); }
+
+    /** @brief Bus `index`, or nullptr past the end. The audio-thread-safe way to reach a bus. */
+    MixerBus* bus_at(uint32_t index) {
+        return index < bus_count() ? buses_[index].get() : nullptr;
+    }
+
+    /** @brief Looks a bus up by name. Control thread only -- render() never touches this map. */
     MixerBus* find_bus(const std::string& name) {
         auto it = bus_by_name_.find(name);
         return it != bus_by_name_.end() ? it->second : nullptr;
@@ -129,10 +174,10 @@ public:
 
     /** @brief Recomputes every bus's effective_mute() from current mute()/solo() flags. Call after changing either. */
     void update_bus_mutes() {
-        std::vector<MixerBus*> all;
-        all.reserve(buses_.size());
-        for (auto& b : buses_) all.push_back(b.get());
-        MixerBus::recompute_effective_mutes(all);
+        const uint32_t count = bus_count_.load(std::memory_order_relaxed);
+        mute_scratch_.clear();
+        for (uint32_t i = 0; i < count; ++i) mute_scratch_.push_back(buses_[i].get());
+        MixerBus::recompute_effective_mutes(mute_scratch_);
     }
 
     VoicePool& voice_pool() { return voice_pool_; }
@@ -144,7 +189,8 @@ public:
     /** @brief Allocates scratch buffers for every bus sized for up to `max_frames` frames per render() call. */
     void prepare(uint32_t max_frames) {
         max_frames_ = max_frames;
-        for (auto& bus : buses_) bus->prepare(format_, max_frames);
+        const uint32_t count = bus_count_.load(std::memory_order_relaxed);
+        for (uint32_t i = 0; i < count; ++i) buses_[i]->prepare(format_, max_frames);
     }
 
     /**
@@ -157,7 +203,8 @@ public:
         Command cmd;
         while (commands_.pop(cmd)) apply_command_(cmd);
 
-        for (auto& bus : buses_) bus->clear_scratch(frames);
+        const uint32_t bus_n = bus_count_.load(std::memory_order_acquire);
+        for (uint32_t i = 0; i < bus_n; ++i) buses_[i]->clear_scratch(frames);
 
         for (uint32_t i = 0; i < voice_pool_.capacity(); ++i) {
             Voice& voice = voice_pool_.voice_at(i);
@@ -165,7 +212,7 @@ public:
 
             const uint32_t loops_before = voice.loop_count();
             const uint32_t target = voice.target_bus_index();
-            MixerBus* bus = (target < buses_.size()) ? buses_[target].get() : buses_[0].get();
+            MixerBus* bus = (target < bus_n) ? buses_[target].get() : buses_[0].get();
             voice.render_add(bus->scratch(), frames, format_.channels);
 
             if (voice.loop_count() != loops_before) {
@@ -215,7 +262,9 @@ private:
 
     coopa::sfx::data::AudioFormat format_;
     std::vector<std::unique_ptr<MixerBus>> buses_;
+    std::atomic<uint32_t> bus_count_{0};
     std::unordered_map<std::string, MixerBus*> bus_by_name_;
+    std::vector<MixerBus*> mute_scratch_;
     VoicePool voice_pool_;
     coopa::sfx::collections::RingBuffer<Command> commands_;
     coopa::sfx::collections::RingBuffer<Event> events_;

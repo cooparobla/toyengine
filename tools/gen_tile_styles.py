@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Generates the styled terrain tile pieces: assets/meshes/terrain/<style>/tile_<style>_<piece>.yaml.
 
 Standalone generator, not part of the C++ build -- run it manually (`python3
@@ -54,7 +55,13 @@ assets/shaders/terrain_styled.frag, which draws the surface detail procedurally 
 import math
 import pathlib
 
-from mesh_yaml import face_normal, write_mesh
+import sys
+
+# toyproject (python/) is stdlib-only, so one path entry is all it needs -- no venv and no
+# install, which is why this runs under a bare `python3`. See python/README.md.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "python" / "src"))
+
+from toyproject import Mesh, face_normal, fmt_g6, write_mesh
 
 # Pieces go in assets/meshes/terrain/<style>/ (tags `terrain` and the style; referenced by name).
 OUTPUT_DIR = pathlib.Path(__file__).resolve().parent.parent / "assets" / "meshes" / "terrain"

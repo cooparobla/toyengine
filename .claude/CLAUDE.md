@@ -223,9 +223,20 @@ To disable it deliberately, the human edits `.claude/settings.json` or uses `/ho
 
 # The engine is flat-terrain only
 
-**`src/toyengine`, `src/editor` and `src/tests` must not mention planets -- not in code, and not
-in a comment.** `tools/check_core_is_flat.sh` greps `planet|cube.?sphere` across those three roots
-and fails on a hit. Run it before you finish any terrain, render or world work.
+**`src/toyengine`, `src/editor`, `src/tests`, `docs/` and `.claude/skills/` must not mention
+planets -- not in code, not in a comment, and not in a doc.** `tools/check_core_is_flat.sh` greps
+`planet|cube.?sphere` across those five roots and fails on a hit. Run it before you finish any
+terrain, render or world work.
+
+**The rule is per line, and it is not "never say planet".** A line passes when it also names
+`planetoy`, because pointing at the project that has planets is exactly what these docs should
+do -- and the word is how a reader searching for planets finds that pointer. So "planetoy does
+it" passes and "set `planet: true`" does not. `docs/` and `.claude/skills/` were added to the
+roots because they had been missed: the `create-terrain` skill went on telling authors to write
+`planet: true` and `planet_coarse_builds` after the engine stopped parsing them, and an
+unparsed YAML key fails **silently**. `assets/` is deliberately not a root -- in the sky and
+cloud shaders "the planet" is the atmosphere model's ground sphere, which a flat world pins
+fake under the camera, so that is the flat path describing itself.
 
 The world plane is +Z up, and weather, fog, the sky and the streamer's square of chunks are all
 written for that one shape. Round worlds are **planetoy**'s -- its own project on its own engine
@@ -235,6 +246,8 @@ costing a flat terrain one null compare:
 | Seam | For |
 |---|---|
 | `world/chunk_shaper.h` `ChunkShaper` | bending a chunk's geometry off the world plane, on its worker |
+| `world/terrain_params.h` `TerrainParams::surface_shader` | the shader a chunk's material asks for -- a terrain parameter, not a sixth policy virtual |
+| `assets/shaders/terrain_styled.glsl` `TERRAIN_CURVED` | the shader side of the same bend: a project builds this body with the define, and `uv.y` carries "how far up it faces" instead of a height |
 | `world/tile_grid.h` `TileGrid` | a grid topology other than one flat square |
 | `world/terrain_system.h` policy virtuals | `stream_()`, `order_chunks_()`, `chunk_job_priority_()`, `relief_of_()`, `after_terrains_()` |
 | `world/terrain_yaml.h` `set_terrain_parse_hook()` | terrain keys the engine does not model |
@@ -281,6 +294,11 @@ YAML and PNG the engine loads directly. Each has a skill; use it rather than han
 **The one rule that crosses into C++:** a *new component key* is not an asset change. It needs
 section 2.
 
+**Generating assets programmatically** -- a level from a seed, a hundred materials from a table,
+a mesh from a formula -- is section 8's Python API rather than a skill. The skills are for
+authoring one asset well; the API is for writing many, or for a program outside the repo writing
+a project.
+
 ## 2. Engine changes
 
 ### Adding a component (the full chain)
@@ -311,17 +329,25 @@ binary silently drops the new component.
 | Change | Files | README |
 |---|---|---|
 | terrain (tile or heightmap), snow | `src/toyengine/world/` | [world](../src/toyengine/world/README.md) |
+| whole generated worlds -- a `MapGenerator` owns a mapcoopa `MapConfig` and the `MapGraph` it produces, and **applies** it to a terrain, then steps out of the way: from then on the terrain is the authority | `src/toyengine/mapgen/` | [mapgen](../src/toyengine/mapgen/README.md) |
 | water, waves, buoyancy | `src/toyengine/water/` | [water](../src/toyengine/water/README.md) |
 | weather, sky, atmosphere (the GLOBAL environment) | `src/toyengine/weather/` | [weather](../src/toyengine/weather/README.md) |
 | LOCAL environmental influences -- a rotor's downwash, a vent, a sword swing gusting foliage; the `EnvField` every wind reactor samples | `src/toyengine/env/` | [env](../src/toyengine/env/README.md) |
 | painted object instances -- brush-placed props, instanced rendering, streamed collision | `src/toyengine/instance/` | [instance](../src/toyengine/instance/README.md) |
 | fire -- authored flames (candles, campfires) and fire that SPREADS through vegetation; the first system that permanently consumes world state, hence `reset()` | `src/toyengine/fire/` | [fire](../src/toyengine/fire/README.md) |
 | procedural graphs -- a node graph baked into an object subtree (geometry, but also lights, colliders, instances, any component); reads the scene through snapshotted bindings | `src/toyengine/procgraph/` | [procgraph](../src/toyengine/procgraph/README.md) |
+| the node-graph machinery ITSELF -- types, sockets, links, validation, compilation, job-parallel evaluation, and no domain knowledge at all. `procgraph/` is one consumer; a new kind of graph is a new consumer, not a change here | `src/toyengine/nodegraph/` | [nodegraph](../src/toyengine/nodegraph/README.md) |
 | particles | `src/toyengine/particles/` | [particles](../src/toyengine/particles/README.md) |
 | save slots, `ISaveable` | `src/toyengine/save/` | [save](../src/toyengine/save/README.md) |
 | audio, music, buses | `src/toyengine/audio/` | [audio](../src/toyengine/audio/README.md) |
 | the F3 overlay, `toy::debug::watch()` | `src/toyengine/debug/` | [debug](../src/toyengine/debug/README.md) |
 | mesh fracture | `src/toyengine/destruct/` | [destruct](../src/toyengine/destruct/README.md) |
+| scene animation -- clip states, crossfades, keyframed and procedural tracks, and the string-keyed property registry that lets an `Animator` drive fields on component types libcoopa never names | `src/toyengine/anim/` | [anim](../src/toyengine/anim/README.md) |
+| skeletal animation -- a `RigAsset` skeleton, the live `Rig` pose, `SkeletalAnimator` clips that key BONES rather than objects, bone-space IK, and `BoneAttachment` to ride a bone. Separate from `anim/` because a bone is not an object | `src/toyengine/rig/` | [rig](../src/toyengine/rig/README.md) |
+| hair and fur grown from a scalp mesh's faces, shaped by guide curves | `src/toyengine/hair/` | [hair](../src/toyengine/hair/README.md) |
+| an authored Bezier path on an object -- `CurveData` and every function that reads one (arc-length spacing, frames, authoring edits). There is no CurveSystem: nothing runs per frame | `src/toyengine/curve/` | [curve](../src/toyengine/curve/README.md) |
+| game interfaces in C++ -- `ImmScreen` on uicoopa's immediate layer, drawn from the game's current state each frame, so there is nothing to bind. YAML-authored screens are the `create-ui` skill | `src/toyengine/ui/` | [ui](../src/toyengine/ui/README.md) |
+| inventories and hotbars -- the engine-agnostic model (item definitions, fixed-capacity storage, add/remove/move/merge/swap/split) that a UI only VISUALISES; every mutation routes back through `Inventory` | `src/toyengine/item/` | [item](../src/toyengine/item/README.md) |
 | engine lifecycle, scene loading, config | `src/toyengine/core/` | [core](../src/toyengine/core/README.md) |
 | paths, the `.caml` container, YAML read helpers, the user's settings file -- the leaf utilities every layer may use. Nothing here includes a `toyengine/` header from outside it, which is also why nothing depends back on `core/` | `src/toyengine/io/` | [io](../src/toyengine/io/README.md) |
 | vehicles -- suspension, tyres, drivetrain, steering | `src/libs/physxcoopa/physxcoopa/vehicle/` (header-only; the `Vehicle` component and `install_vehicle_system()` live in that library too, not in `src/toyengine/`) | [vehicle](../src/libs/physxcoopa/physxcoopa/vehicle/README.md) |
@@ -389,7 +415,7 @@ Start at [`src/editor/README.md`](../src/editor/README.md) (the developer tour) 
 | **a component inspector** — rows, widgets, ranges, defaults, sections | [`src/editor/schema/`](../src/editor/schema/README.md) ← *this is the one people mean by "upgrade the inspector"*. Keys in `component_schema.cpp`, their grouping in `component_sections.cpp`, hand-written blocks in `sections/` via `register_inspector_section()` |
 | **a settings screen** (Render / Project Settings) | `src/editor/schema/settings_schema.cpp` |
 | **a panel's contents** | `src/editor/app/ui/<panel>.cpp` (+ its `.h` for new members) -- one class per panel |
-| **the UI designer** | `src/editor/app/ui/ui_canvas.cpp`, `editor/ui/ui_canvas_math.h`, `editor/viewport/rect_gizmo.h` |
+| **the UI designer** | `src/editor/app/ui/ui_canvas.h` / `.cpp` -- the whole workspace, both its modes: **Panel** (a panel asset: tabs, labelled rows, `toyengine/ui/ui_panel.h`) and **Placement** (a screen's `.tune.yaml`: where each box a C++ `ImmScreen` declares sits). Both are forms over data beside a live preview, so there is no separate canvas-math or gizmo header |
 | **the animation timeline** | `src/editor/app/ui/timeline.cpp`, [`src/editor/anim/`](../src/editor/anim/README.md) |
 | **documents, undo, YAML access** | [`src/editor/core/`](../src/editor/core/README.md) |
 | **build / packaging** | [`src/editor/build/`](../src/editor/build/README.md) |
@@ -432,3 +458,37 @@ HEADLESS=1 MAX_FRAMES=120 ./build/toyengine <scene>
 Useful env vars: `FIXED_DT` (0 makes captures byte-identical), `NO_INPUT=1`,
 `CAPTURE_FRAMES` / `CAPTURE_RING`, `PROFILE`, `TOY_VALIDATION=0` (the Vulkan validation layer
 badly skews CPU profiles in dev builds).
+
+## 8. The Python asset API (`python/`)
+
+[`python/`](../python/README.md) is a uv project shipping `toyproject`, a library that **writes**
+a project's assets -- the YAML and PNG the engine loads. A project is self-contained in its
+`assets/` tree apart from its own C++, so this can author a game's whole content with nothing
+compiled. It does **not** talk to the engine: no bindings, no embedded interpreter, and nothing
+under `src/` imports it.
+
+```bash
+cd python && uv sync                       # once; creates python/.venv
+uv run pytest                              # 120 tests, ~0.1 s -- no C++ build involved
+uv run --project python tools/gen_prototype_grid.py    # a generator, from the engine root
+```
+
+From a game project, `bin/toypy` and `bin/toyproject` reach it through `.libs/toyengine/python`,
+so every project on the machine shares the one environment.
+
+| Change | Where |
+|---|---|
+| **a new asset kind, or a typed builder for one** | `python/src/toyproject/assets/`, and `ASSET_DIRS` in `project.py` for its directory and suffix |
+| **the YAML spelling of anything** | `python/src/toyproject/yamlwrite.py` -- but read its docstring first: the layout and the number formats match the committed assets deliberately, and changing one rewrites every regenerated asset |
+| **a `tools/` generator** | port it onto the API while you are there (`gen_water_grid_mesh.py` and `gen_prototype_grid.py` are the worked examples); `tools/mesh_yaml.py` stays standalone for the nine that still import it under a bare `python3` |
+| **a project's executables** | `templates/project/bin/` -- new projects get it. The six root `.sh` files stay at the root: `toyhub` and `hub_core.h` exec them by those exact paths |
+
+**Two traps:**
+
+1. **A misspelled component key is silent.** There is no reflection -- every key is parsed by
+   hand in C++ -- so the API cannot validate one, and the engine ignores what it does not know.
+   The authority is the `create-scene` skill's `reference/components.md`.
+2. **The float format is a parameter, not a default to ignore.** The tree genuinely holds two
+   spellings (`-1.0` and `-1`), and using the wrong one for an existing asset is a whole-file
+   diff. `python/tests/test_mesh_matches_committed.py` regenerates a committed mesh byte for
+   byte to hold that line.

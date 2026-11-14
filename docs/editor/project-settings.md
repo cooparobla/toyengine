@@ -287,6 +287,6 @@ holds a copy of your assets and, if the game program has been built, the game it
 
 ---
 
-Sources: `src/editor/schema/settings_schema.h`, `editor/app/ui/properties.inl`, `editor/app/ui/project_settings.inl`, `editor/app/ui/topbar.inl`, `src/editor/app/editor_app.h`, `src/editor/core/scene_document.h`, `src/editor/build/packager.h`, `src/editor/build/build_pipeline.h`, `src/editor/build/build_settings.h`, `editor/app/ui/build.inl`, `src/editor/app/project.h`
+Sources: `src/editor/schema/settings_schema.h`, `editor/app/ui/properties.cpp`, `editor/app/ui/project_settings.cpp`, `editor/app/ui/topbar.cpp`, `src/editor/app/editor_app.h`, `src/editor/core/scene_document.h`, `src/editor/build/packager.h`, `src/editor/build/build_pipeline.h`, `src/editor/build/build_settings.h`, `editor/app/ui/build.cpp`, `src/editor/app/project.h`
 
 Previous: [UI designer](ui-designer.md) | Next: [Shortcuts](shortcuts.md)

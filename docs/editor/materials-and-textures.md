@@ -211,6 +211,6 @@ Textures are images. **Textures** in the Asset panel lists your project's images
 Editing textures inside the editor is not yet available.
 
 ---
-Sources: `src/editor/app/asset_documents.h`, `editor/app/ui/properties.inl`, `editor/app/ui/assets.inl`, `src/editor/app/editor_app.h`, `src/editor/schema/component_schema.h`, `src/editor/schema/inspector.h`, `src/editor/mesh/shader_ball.h`
+Sources: `src/editor/app/asset_documents.h`, `editor/app/ui/properties.cpp`, `editor/app/ui/assets.cpp`, `src/editor/app/editor_app.h`, `src/editor/schema/component_schema.h`, `src/editor/schema/inspector.h`, `src/editor/mesh/shader_ball.h`
 
 Previous: [Sculpt and paint](sculpt-and-paint.md) | Next: [Animation](animation.md)

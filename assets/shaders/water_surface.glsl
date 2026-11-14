@@ -339,8 +339,8 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
     // How rough matters for more than blur. The grazing Fresnel the sky reflection is weighted by
     // tops out at max(1 - roughness, F0) (gfx/brdf.glsl's fresnel_schlick_roughness: at a grazing
     // angle its (1 - cos)^5 term is 1), so the floor is directly how much sky a distant surface
-    // hands back. A planet's sea is seen edge-on all the way to its horizon, where 0.2 returned
-    // ~80% of a sky PlanetAtmosphere has already repainted pale -- opaque water reading as a
+    // hands back. A curved world's sea is seen edge-on all the way to its horizon, where 0.2
+    // returned ~80% of a sky an atmosphere shell has already repainted pale -- opaque water as a
     // continuation of the sky. 0.6 halves that, and is the better description anyway: a pixel of
     // distant sea spans many waves, so the spread of normals inside it is wide, not mirror-flat.
 #ifdef WATER_LOCAL_FRAME

@@ -10,7 +10,7 @@ instead of this module knowing about them — see the parent
 [Scene Module README](../README.md).
 
 The scene-wide `Animator` component lives in the consumer's own animation module
-— see [Animation Module README](../../animation/README.md).
+— it is not part of this library.
 It is registered the same way as any external component (via
 `register_component_parser("Animator", ...)`, see
 its own `register_animation_components()`), not built into `SceneLoader`.

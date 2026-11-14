@@ -14,8 +14,7 @@ scene:
   #
   # Deliberately small (160 tiles a side, everything streamed in at once) and shallow
   # (height_scale 10, so a couple of digs reach the water line). The cursor stays visible, since
-  # aiming at a tile is the whole point; terrain_demo and planet_demo carry the same digger on
-  # their own worlds.
+  # aiming at a tile is the whole point; terrain_demo carries the same digger on its own world.
   settings:
     render:
       shadow_distance: 1.2e+02

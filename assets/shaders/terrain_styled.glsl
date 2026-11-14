@@ -35,10 +35,11 @@
 // shader_params (filled in by TerrainSystem): x = atlas cell columns, y = atlas cell rows,
 // z = height_step, w = tile_size (world units).
 //
-// This is the body of terrain_styled.frag; terrain_styled_planet.frag builds it with
-// TERRAIN_CURVED for a planet's chunks, which are bent onto a sphere: uv.y then carries each
-// vertex's "how far up it faces" (away from the planet), and wall strata have no one vertical to
-// band along. Without the define none of that code exists.
+// This is the body of terrain_styled.frag, and the shader-side seam for a world whose up is not
+// +Z: a project builds this body with TERRAIN_CURVED for chunks bent off the world plane (see
+// ChunkShaper), and uv.y then carries each vertex's "how far up it faces" rather than a height,
+// because wall strata have no one vertical to band along. Without the define none of that code
+// exists, which is what a flat terrain compiles.
 
 #define GFX_SURFACE_FRAGMENT
 // Term-level kill switches for bisecting a rendering artifact against individual detail terms
@@ -67,9 +68,9 @@ vec4 styled_sample(sampler2D tex, vec2 uv);
 layout(location = 6) flat in float frag_blend_code;
 
 // Twelve, though TileKind has THIRTEEN (cubeworld appended Road). The clamp below is doing real
-// work: planet chunks decode surface nibbles above the table's range, and raising this to 13
-// moved 1.2% of planet_demo's pixels -- 27x the capture noise -- by routing them to a new entry
-// instead of salt. Whatever those nibbles are, they are not roads: the engine's own bake never
+// work: a TERRAIN_CURVED build's chunks decode surface nibbles above the table's range, and
+// raising this to 13 moved 1.2% of such a world's pixels -- 27x the capture noise -- by routing
+// them to a new entry instead of salt. Whatever those nibbles are, they are not roads: the engine's own bake never
 // produces TileKind::Road. Extending this table means fixing that decode first.
 const int k_kind_count = 12;
 

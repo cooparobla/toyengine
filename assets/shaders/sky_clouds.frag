@@ -100,10 +100,10 @@ void main() {
     vec4 world = cf.inv_view_proj * vec4(ndc, 1.0);
     vec3 rd = normalize(world.xyz / world.w - cf.camera.xyz);
     vec3 ro = cf.camera.xyz / scale;
-    // The shell's geometry. On a PLANET it is the real globe, so the deck curves to the real
-    // horizon and the ground sphere below occludes it; everything from here down is unchanged
-    // and simply becomes correct. On a flat world the fake planet stays pinned under the camera
-    // at the atmosphere's own radius, exactly as before -- so flat scenes render identically.
+    // The shell's geometry. With a curved world frame (`world_frame.w > 0`) it is the real
+    // globe, so the deck curves to the real horizon and the ground sphere below occludes it.
+    // On a flat world that ground sphere stays pinned under the camera at the atmosphere's own
+    // radius, which is what lets one march serve both shapes.
     if (cf.world_frame.w > 0.0) {
         g_center = cf.world_frame.xyz / scale;
         g_radius = cf.world_frame.w / scale;
@@ -169,7 +169,7 @@ void main() {
     // Sunlight arriving at the layer: through the atmosphere from the layer's mid height.
     SkyAtmosphere atmo;
     // ATMO_BOTTOM_R, never g_radius: this is the transmittance table's own bottom radius in km.
-    // A toy planet's 122-unit radius here would index the LUT far outside the domain it was
+    // A small world's 122-unit radius here would index the LUT far outside the domain it was
     // built over and the deck's sunlight would be garbage. The layer's real altitude still
     // reaches the lookup through `mid_r` below, which is what physically matters.
     atmo.ozone.w = ATMO_BOTTOM_R * 0.001;
@@ -197,8 +197,8 @@ void main() {
 
         // The moon. Opposite the sun, so the direction toward it is -L, and the phase function
         // is the sun's evaluated at -cos_t. No shadow march: it is a dim fill, and a second
-        // 5-step march per sample to self-shadow it would not be visible. `sky_extra.z` is 0
-        // unless a PlanetAtmosphere authors a moon_intensity, so this costs nothing by default.
+        // 5-step march per sample to self-shadow it would not be visible. `sky_extra.z` is
+        // `SkyState::night_floor`, so wherever that is 0 this term costs nothing.
         moon_light = vec3(0.55, 0.75, 1.3) * lights.sky_extra.z * (1.0 - day);
 
         // Ambient from the planet's OWN atmosphere, blended across the same terminator: blue

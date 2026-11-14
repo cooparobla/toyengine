@@ -13,10 +13,10 @@ edges broken up by noise, and toon-banded cores. Every sprite is procedural, so 
 texture authoring. `sprite: texture` takes an albedo map or a flipbook atlas instead.
 
 Demo scene: `./build/toyengine particles_demo`
-([assets/scenes/tests/effects/particles_demo](../../assets/scenes/effects/particles_demo/scene.yaml), meshes from
-[`tools/gen_particle_demo_assets.py`](../../tools/gen_particle_demo_assets.py)). It shows:
+([assets/scenes/tests/effects/particles_demo](../../../assets/scenes/effects/particles_demo/scene.yaml), meshes from
+[`tools/gen_particle_demo_assets.py`](../../../tools/gen_particle_demo_assets.py)). It shows:
 - a campfire (`prefab: objects/campfire`, see
-  [assets/objects/props/campfire.yaml](../../assets/objects/props/campfire.yaml)) with flames, glow, coals,
+  [assets/objects/props/campfire.yaml](../../../assets/objects/props/campfire.yaml)) with flames, glow, coals,
   embers, smoke and a flickering light;
 - a torch whose world-space flames and smoke trail behind it as it circles;
 - mushrooms, pebbles and fallen leaves scattered over a mound;
@@ -35,7 +35,7 @@ Demo scene: `./build/toyengine particles_demo`
 Rendering code outside this directory:
 - [`render/particle_types.h`](../render/particle_types.h): the plain-data contract (`ParticleInstance`, `ParticleLook`, batches).
 - [`render/passes/particle_pass.h`](../render/passes/particle_pass.h) with
-  [`particle.vert`](../../assets/shaders/particle.vert) and [`particle.frag`](../../assets/shaders/particle.frag).
+  [`particle.vert`](../../../assets/shaders/particle.vert) and [`particle.frag`](../../../assets/shaders/particle.frag).
 - `Engine::sync_particle_render_state_()`, the per-frame bridge.
 
 ## Authoring

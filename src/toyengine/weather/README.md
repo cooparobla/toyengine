@@ -11,7 +11,7 @@ drive the sky gradient, ambient light, global fog, the scene's directional light
 effects (rain, snow, mist, dust). Every component can read the result.
 
 Demo scene: `./build/toyengine weather_demo`
-([assets/scenes/tests/effects/weather_demo](../../assets/scenes/effects/weather_demo/scene.yaml)).
+([assets/scenes/tests/effects/weather_demo](../../../assets/scenes/effects/weather_demo/scene.yaml)).
 It is a small hamlet. The clock runs a day in 4 minutes and the random schedule moves through the
 stock conditions. Street lamps light up at dusk, and a campfire goes out in the rain and relights
 afterwards. Both use `WeatherReactor`, with no code.
@@ -30,7 +30,7 @@ Outside this directory:
   every frame, and puts the config's own values back when the weather stops.
 - [`scene/runtime_object.h`](../scene/runtime_object.h) is the `RuntimeObject` marker for
   objects a system creates.
-- The effect object assets live in [`assets/objects/weather/`](../../assets/objects/weather).
+- The effect object assets live in [`assets/objects/weather/`](../../../assets/objects/weather).
 
 ## Authoring
 
@@ -181,7 +181,7 @@ Rain and snow are built to stay with the camera and to land on what is actually 
   age out in the air. Off: no splashes, the drops still land.
 
 The stock assets are `objects/weather_rain`, `weather_snow`, `weather_ground_mist` and
-`weather_dust` in [`assets/objects/weather/`](../../assets/objects/weather). Any object asset works,
+`weather_dust` in [`assets/objects/weather/`](../../../assets/objects/weather). Any object asset works,
 including your own: a wind-blown leaves effect, ash, fireflies.
 
 ## What it controls

@@ -27,8 +27,12 @@ import numpy as np
 from PIL import Image
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "tools"))
-from mesh_yaml import perpendicular_tangents, vertex_normals, write_mesh  # noqa: E402
+# toyproject (python/) is stdlib-only, so one path entry is all it needs -- no venv and no
+# install, which is why this runs under a bare `python3`. See python/README.md.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "python" / "src"))
+
+from toyproject import Mesh, fmt_g6, perpendicular_tangents, vertex_normals, write_mesh
+from toyproject import png
 
 SCENE = ROOT / "assets/scenes/terrain/heightmap_terrain_demo"
 LAYERS_DIR = ROOT / "assets/textures/terrain/layers"
@@ -175,14 +179,22 @@ def build_splats(h):
 
 
 def save_height(h, path):
+    """Writes the 16-bit heightmap `HeightmapTerrain` loads (src/toyengine/world/png16.h).
+
+    Through the asset API rather than Pillow: `Image.fromarray(..., mode="I;16")` is rejected
+    outright by Pillow 10 and later, so this call was broken: the mode argument no longer
+    overrides a dtype. `write_grey16` is the format's own writer and needs no image library.
+    """
     v = np.clip(np.round(h / HEIGHT_M * 65535.0), 0, 65535).astype(np.uint16)
     # Row 0 of the image is the north edge (max y): flip.
-    Image.fromarray(v[::-1].copy(), mode="I;16").save(path)
+    rows = v[::-1]
+    png.write_grey16(path, rows.shape[1], rows.shape[0], rows.ravel().tolist())
 
 
 def save_splat(q, k, path):
+    """Writes one RGBA splat plane: four painted layer weights per texel."""
     rgba = np.stack([q[4 * k + c] for c in range(4)], axis=-1)[::-1].copy()
-    Image.fromarray(rgba, mode="RGBA").save(path)
+    png.write_rgba8(path, rgba.shape[1], rgba.shape[0], rgba.ravel().tolist())
 
 
 # ------------------------------------------------------------------------------------ layer maps

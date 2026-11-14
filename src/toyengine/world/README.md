@@ -111,7 +111,7 @@ Older scenes still load: `styles:` / `kind_styles:` map onto the same thing, and
 voxel mesher's `side_mesh:` / `sides:` fall back to `tileset_voxel` with a warning. The panel's
 *Convert to Tile Set* button rewrites them.
 
-Demo: `./build/toyengine terrain_demo` ([assets/scenes/terrain/terrain_demo](../../assets/scenes/terrain/terrain_demo)),
+Demo: `./build/toyengine terrain_demo` ([assets/scenes/terrain/terrain_demo](../../../assets/scenes/terrain/terrain_demo)),
 rounded, with dynamic bodies dropped onto it. Its header says how to switch it to the voxel set.
 
 | File | Purpose |
@@ -702,7 +702,7 @@ assets/meshes/terrain/<set>/tile_<set>_<piece>.yaml
 assets/textures/terrain/terrain_atlas{,_mr}.png        (the palette)
 ```
 
-The folders under each type folder are tags (see [assets/README.md](../../assets/README.md));
+The folders under each type folder are tags (see [assets/README.md](../../../assets/README.md));
 a reference may name the asset alone (`objects/tileset_round` still finds
 `objects/terrain/tileset_round.yaml`).
 
@@ -740,11 +740,12 @@ the object it writes.
 `KINDS` in the atlas generator must stay in `TileKind` order — the shader reads a kind's cell from
 the enum value alone, so a kind is appended, never inserted.
 
-## Planets, and anything else round
+## Planets, and anything else round: see planetoy
 
 Not here, and not in this engine. `toyengine` is **flat-terrain only**: the world plane is +Z up,
 and every system above -- weather, fog, the sky, the streamer's square of chunks -- is written for
-that one shape. `tools/check_core_is_flat.sh` holds the line, and fails on the word.
+that one shape. `tools/check_core_is_flat.sh` holds the line across the code, `docs/` and
+`.claude/skills/`: it fails on the word unless the line also names `planetoy`, as this one does.
 
 What the engine offers instead is the seams a round world is built ON, each of which a flat
 terrain pays one null compare for:
@@ -761,9 +762,11 @@ terrain pays one null compare for:
 `nullptr` throughout **is** the flat world, as `WorldFrame::radius <= 0` is -- so there is no
 `FlatChunkShaper` to pay for.
 
-The planetary implementation lives in **planetoy**, its own project on its own engine branch:
-cube-sphere tiles on six faces, a derived atmosphere, horizon culling, coarse chunk builds and
-radial gravity. See its README for how a globe is authored and what one costs.
+The planetary implementation lives in **planetoy**, its own project on its own engine branch --
+planetoy's globe is cube-sphere tiles on six faces, with a derived atmosphere, horizon culling,
+coarse chunk builds and radial gravity. See its README for how a globe is authored and what one
+costs.
+
 ## Heightmap terrain
 
 `HeightmapTerrain` ([`heightmap_terrain.h`](heightmap_terrain.h)) is a plain height grid: a size
@@ -805,7 +808,7 @@ Its CPU store, change tracking and the `.terra` codec are `terra_data.h` / `terr
 
 **Drawing.** Every chunk is one instance of one shared flat patch mesh, so all chunks of a terrain
 batch into a single instanced draw. The `heightmap_terrain` surface shader
-([`heightmap_terrain_surface.glsl`](../../assets/shaders/heightmap_terrain_surface.glsl)) places each
+([`heightmap_terrain_surface.glsl`](../../../assets/shaders/heightmap_terrain_surface.glsl)) places each
 vertex on the grid -- the height texture is the chunks' material displacement map, the terrain's
 numbers a slot of the surface world UBO -- and its own tessellation control stages size edges
 from the placed points, so chunk borders never crack. A chunk's transform carries only its corner

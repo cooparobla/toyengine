@@ -80,6 +80,6 @@ Click an asset to open it. One asset is open at a time.
 > **Cmd** versions of the other main commands (Undo, Redo, New Scene, Open Scene, Quit).
 
 ---
-Sources: `src/editor/editor.cpp`, `src/editor/app/project.h`, `editor/app/ui/assets.inl`,
-`editor/app/ui/topbar.inl`
+Sources: `src/editor/editor.cpp`, `src/editor/app/project.h`, `editor/app/ui/assets.cpp`,
+`editor/app/ui/topbar.cpp`
 Next: [The interface](interface.md)

@@ -164,7 +164,7 @@ Water too: set it on the WaterBody's MeshRenderer (`water_quality` low / medium 
 ## Snow
 
 With the weather snowing below freezing, `snow_cover` builds up (and melts when it warms; see
-[toyengine/weather](../toyengine/weather/README.md)). Two looks follow it:
+[toyengine/weather](../src/toyengine/weather/README.md)). Two looks follow it:
 
 - **Cover layer** -- every opaque material gathers snow on its open, up-facing surfaces (nothing
   under a roof: the precipitation map decides). `snow: false` on a material opts it out.
@@ -200,7 +200,7 @@ In the editor, editing a Render / World / Physics setting while a scene is open 
 override -- the row is tinted -- and right-click reverts it or applies it to config.yaml.
 
 `settings.weather` is the scene's weather and time of day (not a config.yaml section): see
-[toyengine/weather](../toyengine/weather/README.md). While it is enabled it drives the sky,
+[toyengine/weather](../src/toyengine/weather/README.md). While it is enabled it drives the sky,
 ambient and fog render keys, which the editor then shows locked.
 
 ## UI assets

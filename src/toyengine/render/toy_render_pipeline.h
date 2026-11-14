@@ -602,7 +602,7 @@ private:
         /// Per directional LEVEL: the static casters drawn into the cache atlas -- filled only
         /// for levels whose depth is re-rendered this frame (see DirShadowCache). Empty
         /// throughout when the directional cache is off, in which case `cascade` holds every
-        /// caster, static and dynamic alike, exactly as it did before the cache existed.
+        /// caster, static and dynamic alike.
         std::array<std::vector<MeshBatch>,
                    coopa::gfx::engine::data::MAX_DIR_SHADOW_LEVELS> dir_static;
         /// Per local-shadow VIEW (LocalShadowSlot::first_view + v): the static casters drawn into

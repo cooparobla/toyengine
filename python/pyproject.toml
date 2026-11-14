@@ -1,0 +1,38 @@
+[project]
+name = "toyproject"
+version = "0.1.0"
+description = "Write toyengine projects and their assets from Python."
+readme = "README.md"
+requires-python = ">=3.10"
+# DELIBERATELY EMPTY, and worth keeping that way. Everything toyproject does is stdlib -- the
+# YAML is emitted by hand and the PNGs are built with zlib + struct -- which is what lets it be
+# imported by an interpreter that knows nothing about this environment. Blender's bundled Python
+# is the case that matters (tools/blender_to_toy.py runs inside Blender and cannot see .venv):
+# it needs one sys.path entry pointing at src/ and nothing else. A third-party dependency here
+# would break that, so numpy lives in the `generators` group below instead.
+dependencies = []
+
+[project.scripts]
+toyproject = "toyproject.__main__:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+# What the generators under tools/ need on top of the library, and nothing the library itself
+# imports. numpy is the mesh and heightmap maths; Pillow is image PROCESSING (ImageDraw,
+# ImageFilter, resampling, reading an existing PNG) in seven of them -- writing a PNG needs
+# neither, which is what `toyproject.png` is for. Synced by default (see [tool.uv]) so
+# `uv run --project python tools/<gen>.py` works.
+generators = ["numpy>=1.24", "pillow>=10"]
+
+[tool.uv]
+default-groups = ["dev", "generators"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/toyproject"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

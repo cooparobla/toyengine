@@ -285,7 +285,7 @@ void Engine::sync_sky_render_state_(coopa::scene::Scene& scene, float dt) {
         // else lights: the clouds' sun term is gated off past the terminator and a space sky's
         // authored sky_zenith family is near-black, so the dark side comes out a void with the
         // cloud deck still in it, unlit, occluding the stars at the limb. This is the fill for
-        // it, and 0 (the default) is exactly the black night side the engine had before.
+        // it, and 0 (the default) leaves that night side black.
         //
         // night_floor is the slot because it already means "the night sky is not pure black"
         // and already reaches every shader through LightUBO::sky_extra.z. The DIRECTION is not

@@ -102,59 +102,45 @@ Write `tile_set:` in new scenes.
   `kind_tile_sets` entries** -- pointing a kind at `tileset_rock` (or any set that uses
   `round_kind_corners: true`) softens exactly the corners the voxel set draws hard. See
   `terrain_voxel` in `assets/scenes/terrain/unified_terrain_demo`.
-- **Planets**: `planet: true` with `face_tiles` (tiles per cube-face edge; radius
-  `2 * face_tiles * tile_size / pi`), `chunk_size` dividing it, and `gravity` (m/s^2). Everything
-  stays loaded and the planet only starts pulling once every chunk is live, so bodies and the
-  player can be placed above the surface at any side (position = direction * (radius + a few m)).
-  Nothing in the engine or the `.terra` format limits `face_tiles`; the cost is memory, and it
-  is `face_tiles` SQUARED, because a planet never evicts a chunk. Three things bound it, in
-  order of payoff: **`planet_coarse_builds: true`** (a chunk too small on screen to draw its
-  native geometry is built with only its coarsest `field` tier -- worth 2 GB on a 1024-tile
-  globe), **a `field` tier no finer than 2** (a `field: 1` tier is as dense as the native tops
-  AND carries its own vertices -- worth another 784 MB), and `collision: false` with
-  `gravity: 0` for a globe nothing stands on. Measured on `planet_demo` at `face_tiles: 1024`,
-  `chunk_size: 64`: 3413 MB of resident chunk mesh with none of them, **590 MB** with all three
-  -- less than the 802 MB its 512-tile version cost. `TerrainSystem` logs the figure when a
-  terrain finishes loading, so check it rather than guessing.
-  **Raising `face_tiles` adds no map detail**, only finer geometric resolution of the landforms
-  already there: `grid_size` (the editor's "Map Cells") is what sets detail, and at
-  `grid_size: 40` a sphere is 1681 Voronoi cells -- already ~936 tiles per cell at 512.
-  Changing `face_tiles` or `chunk_size` does NOT invalidate the stored `.terra`; delete it and
-  re-bake (`TOY_TERRAIN_SAVE=1` saves from a headless run). The bake is single-threaded. Reference: `assets/scenes/terrain/planet_demo`, a globe spun by the
-  mouse (`Turntable` on the terrain object) in front of a fixed orbit camera that only zooms.
-- **A planet held whole in frame needs `field` LOD tiers, and nothing else comes close.** Every
-  chunk of a globe stays resident, so with no `lods:` the camera draws all of them at full
-  density. Measured on `planet_demo` (216 chunks, `face_tiles: 192`), adding three field tiers and
-  no ratio tier at all: **2,723k -> 119k camera triangles, 24.8 -> 4.1 ms a frame, and load+700
-  frames 17.8 -> 3.9 s wall.** A ratio tier is the wrong tool here twice over -- it costs 18 ms a
-  chunk to build (x216 chunks at load) and its coarsest level can be rejected. Start from:
+- **Round worlds are not this engine's.** A terrain here is one flat square with +Z up; there is
+  no `planet:` key. Planetary worlds are **planetoy**'s -- its own project on its own engine
+  branch -- and what the engine publishes instead is seams a project bends a world through
+  (`ChunkShaper`, `TileGrid`, `WorldFrame`, the `TerrainSystem` policy virtuals). See
+  `.claude/CLAUDE.md`'s "The engine is flat-terrain only". Three keys that a round world drove
+  stay here as ordinary terrain parameters: `face_tiles` (a face's width in tiles), `gravity`
+  (m/s^2), and `coarse_builds` (build a chunk's native tile geometry only while it is near enough
+  to draw it -- it pairs with `ChunkShaper::allows_coarse_builds()`, and needs a `field` tier in
+  `lods:` plus `collision: false`).
+- **A world held whole in frame needs `field` LOD tiers, and nothing else comes close.** When no
+  chunk is ever evicted -- a `view_radius` that covers the whole terrain, or a shaper that keeps
+  everything resident -- the camera draws every chunk at full density unless `lods:` says
+  otherwise. Measured on a 216-chunk world, adding three field tiers and no ratio tier at all:
+  **2,723k -> 119k camera triangles, 24.8 -> 4.1 ms a frame, and load+700 frames 17.8 -> 3.9 s
+  wall.** A ratio tier is the wrong tool here twice over -- it costs 18 ms a chunk to build (x216
+  chunks at load) and its coarsest level can be rejected. Start from:
   ```yaml
   lods:
     - { field: 1,  screen_size: 0.45, native_border: 1 }
     - { field: 4,  screen_size: 0.22, native_border: 1, smooth: true }
     - { field: 16, screen_size: 0.10, smooth: true }
   ```
-  Those thresholds are for a 122-unit globe seen from an orbit rig spanning 165-700 from its
-  CENTRE. Check yours against the camera you actually have: `planet_demo` shipped 0.20/0.12/0.085,
-  which engage past 268/447/630 units, and the surface sits at r~147 -- so nothing on screen was
-  ever far enough and a capture at orbit 300 came back pixel-identical to `TOY_TERRAIN_NO_LODS=1`.
+  Those thresholds suit a 122-unit world seen from an orbit rig spanning 165-700 from its centre.
+  Check yours against the camera you actually have, with the arithmetic below -- a table whose
+  coarsest threshold sits under what a chunk subtends at full zoom-out never engages at all, and a
+  full-zoom-out capture that matches `TOY_TERRAIN_NO_LODS=1` is how you catch that.
 
   **The arithmetic**, which is the only way to get this right rather than by eye: a chunk covers
   `0.75 * chunk_size * tile_size * cot(fov/2) / depth` of the screen's HEIGHT, and a tier draws
   while the chunk is SMALLER than its `screen_size`. So the coarsest tier's threshold must be
-  ABOVE what a chunk subtends at full zoom-out, or it never engages. `planet_demo` today, at
-  `face_tiles: 1024`, `chunk_size: 64`, fov 50 and an orbit of 2800 from a 651.9 radius: a chunk
-  subtends `48 * 2.1445 / (2800 - 651.9) = 0.048`, so `0.30 / 0.14 / 0.07` works and `0.055`
-  would not have. Doubling `chunk_size` doubles what every chunk subtends, so its thresholds
-  roughly double with it. Verify, always: a full-zoom-out capture that matches
-  `TOY_TERRAIN_NO_LODS=1` means the table is doing nothing. The current demo measures
-  23.3 ms with the tiers against 67.5 ms without them.
-- **Don't try to make a planet merge flat ground** (`max_merge`). It is pinned to 1 deliberately:
-  bent onto a sphere a merged quad is a chord, and its edge leaves the surface the per-tile
-  geometry beside it sits on -- ~1.7 cm at four tiles on a 122-unit globe, a visible seam on a 1 m
-  tile. Lifting it only turns the gap into a ledge of the same size. Measured, a curvature-derived
-  width bought ~5% of shadow triangles near the surface and nothing at all zoomed out, so it is
-  not a trade worth making. Spend the effort on `field` tiers instead.
+  ABOVE what a chunk subtends at full zoom-out. Worked through on a `chunk_size: 64` world at
+  fov 50, seen from 2800 with its surface at radius 651.9: a chunk subtends
+  `48 * 2.1445 / (2800 - 651.9) = 0.048`, so `0.30 / 0.14 / 0.07` works and `0.055` would not
+  have. Doubling `chunk_size` doubles what every chunk subtends, so its thresholds roughly double
+  with it.
+- **`max_merge` is in tiles, and a curved world forces it to 1.** Bent off the world plane a
+  merged quad is a chord, and its edge leaves the surface the per-tile geometry beside it sits on
+  -- a visible seam. That is a shaper's business (`terrain_chunk.h`), not something to author
+  around on a flat terrain; spend the effort on `field` tiers instead.
 - Every chunk mesh carries coarser LOD levels (`lods:`, coarsest last; `[]` turns them off).
   Seam vertices are pinned through every level, so chunks at different levels never crack. Three
   kinds of level, and the choice matters more than the thresholds:
@@ -164,11 +150,11 @@ Write `tile_set:` in new scenes.
     the coarsest was *rejected* for losing a pinned seam vertex.
   - `{tile_set, screen_size}` re-meshes the chunk in another style, so it cannot be rejected, at
     the cost of its own vertex buffer. Keep its radii matching the chunks it borders (`soft_lod`
-    is `soft`'s own radii at coarser segment counts) or the seam shows a step. Not on planets.
+    is `soft`'s own radii at coarser segment counts) or the seam shows a step.
   - `{field, screen_size, native_border}` re-meshes the chunk as a plain heightfield: one flat
-    quad per `field` x `field` tiles, no pieces, lip or rounding. **The cheapest by far and the
-    only re-meshed tier a planet carries** -- 0.7% of LOD 0's triangles at `field: 8` and 0.01 ms
-    to build. `native_border: 1` keeps the rim at one quad per tile. Prefer this for far tiers.
+    quad per `field` x `field` tiles, no pieces, lip or rounding. **The cheapest by far, and the
+    only re-meshed tier a curved world can carry** -- 0.7% of LOD 0's triangles at `field: 8` and
+    0.01 ms to build. `native_border: 1` keeps the rim at one quad per tile. Prefer this for far tiers.
     Add `smooth: true` to shade a level as a rounded surface instead of hard-edged blocks: it
     averages the level's normals across the faces meeting at each position, so the geometry --
     and with it the triangle count and the seam rule -- is untouched and only the staircase
@@ -199,7 +185,6 @@ FRAMES=240 .claude/skills/create-scene/scripts/render_scene.sh <scene>    # chun
 ./build/tests/toyengine_tests --suite terrain_chunk
 ./build/tests/toyengine_tests --suite styled_tiles
 ctest --test-dir build -L gpu -R terrain_render
-ctest --test-dir build -L gpu -R planet_world     # planets
 ```
 
 Look for holes (chunks not yet streamed -- give more frames), seams between chunks, the tile set

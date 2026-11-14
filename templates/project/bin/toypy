@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# bin/toypy <script.py> [args...]   |   bin/toypy -c '<code>'   |   bin/toypy
+#
+# Runs Python with this project's asset API (`toyproject`) importable, in the uv-managed
+# environment that ships with the engine. With no arguments it opens a REPL.
+#
+# The API writes a project's assets -- scenes, objects, materials, meshes, textures and the
+# rest -- as the YAML and PNG the engine loads directly. It does NOT talk to the engine: there
+# are no bindings and nothing is compiled, so a generator can run without a built game.
+#
+#   bin/toypy tools/gen_level.py                 run a generator in this project
+#   bin/toypy -c 'from toyproject import Project; print(Project.find().assets)'
+#
+# The environment lives in the engine checkout (.libs/toyengine/python/.venv) and is created on
+# first use, so every project on this machine shares one install rather than each carrying a
+# venv of its own. See .libs/toyengine/python/README.md for the API.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/../.toyenv.sh"
+
+case "${1:-}" in -h|--help) usage ;; esac
+
+py_dir="$ENGINE_DIR/python"
+[[ -d "$py_dir" ]] || die "$py_dir is missing -- run ./setup.sh to put the engine in place"
+command -v uv >/dev/null 2>&1 \
+    || die "uv is not installed (it manages the Python environment): https://docs.astral.sh/uv/"
+
+# --project, not --directory: it selects the environment without moving the working directory,
+# so a relative script path and a generator's own Project.find() both still resolve from where
+# the user ran this.
+exec uv run --project "$py_dir" python ${1+"$@"}

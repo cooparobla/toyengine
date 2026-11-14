@@ -18,6 +18,23 @@ directory (they resolve the project folder themselves).
 ./setup.sh                                       # re-sync .libs/toyengine with the .toy engine: block
 ```
 
+`bin/` holds this project's other executables, and is where new ones belong:
+
+```
+bin/toyproject info                              # where this project is, and what its assets hold
+bin/toyproject new-scene effects/my_demo         # write a loadable starter scene
+bin/toypy <script.py>                            # Python with the asset API importable
+```
+
+`toyproject` is a Python library that **writes** this project's assets -- scenes, objects,
+materials, meshes, textures -- as the YAML and PNG the engine loads. Since a project is
+self-contained in `assets/` apart from its own C++, a script can author its whole content with
+nothing compiled. It does not talk to the engine. See
+[`.libs/toyengine/python/README.md`](.libs/toyengine/python/README.md), and `bin/README.md` for
+the two commands. The environment is uv-managed and lives in the engine checkout, so every
+project on the machine shares one install; [uv](https://docs.astral.sh/uv/) is the only extra
+tool it needs.
+
 `./run.sh` and `./editor.sh` build first if the binary is not there yet, so a fresh clone is
 just `./editor.sh`. The first build compiles the whole engine -- several minutes; later ones
 only recompile what changed. `build.sh` uses one job per core, capped at one per 3 GB of RAM;
@@ -36,6 +53,7 @@ A missing tool is reported with that line by `./setup.sh` and `./build.sh`.
 | `@TARGET@.toy` | Project file: build target and the engine this project builds -- `engine.source`, `engine.ref`, `engine.link` (absolute: a checkout shared with other projects; project-relative: an engine of this project's own) and, for an own engine, `engine.mode` (`worktree` / `own`) and `engine.branch`. |
 | `assets/` | Scenes, meshes, materials, textures, UI, `config.yaml`. Shadows the engine's own `assets/`, which stays the fallback (shaders, fonts, shared meshes/materials). `assets/shaders/*.vert/.frag` compile with the engine's and gfxcoopa's shader headers on the include path. |
 | `src/` | C++ compiled into the game and the editor. Register components with `TOY_MODULE` (see `src/game_module.cpp`). `src/main.cpp` replaces the engine's game `main`. To change engine code, edit (or fork) `.libs/toyengine`. |
+| `bin/` | This project's executables -- the asset API's command line and a Python runner. Where new ones belong; the six scripts above stay at the root, because `toyhub` and the hub invoke them by those exact paths. |
 | `build/` | Release tree (`build-debug/` for `./build.sh debug`, which turns Vulkan validation on). |
 | `.libs/toyengine` | Where the build finds the engine: a clone, or a symlink to `engine.link` (git-ignored; `./setup.sh` recreates it, `./clean.sh --all` deletes it). |
 | `engine/` | Only when this project has an engine of its **own**: a git worktree of a toyengine checkout, or its own clone, symlinked from `.libs/toyengine`. A git checkout in its own right, so it is git-ignored here and committed in the engine's history, not the project's; `./setup.sh` clones it on a machine that does not have it. |

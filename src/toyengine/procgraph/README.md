@@ -14,7 +14,7 @@ The graph machinery itself is generic and domain-agnostic:
 on screen.
 
 Demo: `./build/toyengine procgraph_demo`
-([scene](../../assets/scenes/procedural/procgraph_demo/scene.yaml),
+([scene](../../../assets/scenes/procedural/procgraph_demo/scene.yaml),
 written by `tools/gen_procgraph_demo.py`).
 
 | File | Purpose |

@@ -11,7 +11,6 @@ values.
 | [`inspector_sections.h`](inspector_sections.h) | The registry of hand-written drawers, for a component (or one of its sections) that rows of fields cannot express. Drawers live in [`sections/`](sections/). |
 | [`inspector.h`](inspector.h) | Draws editable rows for a YAML block from a schema, with uicoopa's immediate-mode widgets. `EditResult` reports changed / still-dragging / finished so the caller can merge a drag into one undo step. `InspectorEnv` is what the inspector needs from the editor around it (asset lists, object names, the per-field hook the Components tab uses to mark prefab overrides). |
 | [`settings_schema.h`](settings_schema.h) | `config.yaml`'s sections, grouped for the **Render Settings** and **Project Settings** tabs. |
-| [`ui_schema.h`](ui_schema.h) | Schemas for uicoopa's UI components and composites — what the UI designer's Element and Components tabs show. |
 | [`ui_theme_schema.h`](ui_theme_schema.h) | The fields of a game UI theme (`assets/ui/themes/*.yaml`), for the Theme editor. |
 
 ## The contract: schemas only DESCRIBE

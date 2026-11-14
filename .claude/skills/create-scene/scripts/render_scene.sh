@@ -45,15 +45,26 @@ base="$(basename "${scene%/scene.yaml}")"; base="${base%.yaml}"
 mkdir -p "$(dirname "$out")"
 out="$(cd "$(dirname "$out")" && pwd)/$(basename "$out")"
 
-if [ ! -x build/toyengine ]; then
-    echo "build/toyengine not found -- build first: cmake --build build -j10" >&2
+# The game binary is named after the project's `.toy` target, so a project that builds
+# `build/<name>` is rendered by that and the engine's own checkout by `build/toyengine`.
+# A game project's tree also has a `build/toyengine` DIRECTORY (its CMake subtree for the engine
+# library), which `-x` alone accepts -- hence the explicit `-f`.
+game="toyengine"
+for toy in *.toy; do
+    [ -f "$toy" ] || continue
+    target="$(sed -n 's/^[[:space:]]*target:[[:space:]]*\([A-Za-z0-9_.-]*\).*/\1/p' "$toy" | head -1)"
+    [ -n "$target" ] && game="$target"
+    break
+done
+if [ ! -f "build/$game" ] || [ ! -x "build/$game" ]; then
+    echo "build/$game not found -- build first: cmake --build build --target $game -j4" >&2
     exit 1
 fi
 
 cfg="$scratch/config_$base.yaml"
 # Overrides by key name, in either layout the file may be in: block (`  key: value  # note`) or
 # the editor's flow style (`section: { key: value, ... }`). A value runs to the next `,` `}` `#`
-# or end of line, or is a whole [list]. Window hidden and the output path always set.
+# or end of line, or is a whole [list]. Window hidden, output path and exit-save always set.
 python3 - "$cfg" "$out" "$@" <<'PY'
 import re, sys
 cfg, out, overrides = sys.argv[1], sys.argv[2], sys.argv[3:]
@@ -64,6 +75,10 @@ def put(text, key, val):
     return new, n > 0
 text, _ = put(text, "visible", "false")
 text, _ = put(text, "filepath", '"' + out + '"')
+# Forced, not inherited: a project whose own config.yaml has save_on_exit false otherwise runs
+# to completion and writes nothing, which reads as "the scene is broken" rather than "the
+# harness never asked for a frame".
+text, _ = put(text, "save_on_exit", "true")
 for kv in overrides:
     key, _, val = kv.partition("=")
     text, ok = put(text, key, val)
@@ -75,8 +90,8 @@ PY
 rm -f "$out"
 log="${out%.png}.log"
 if ! HEADLESS=1 CONFIG="$cfg" SCENE="$scene" MAX_FRAMES="${FRAMES:-150}" FIXED_DT=0.016 NO_INPUT=1 \
-        ./build/toyengine > "$log" 2>&1; then
-    echo "toyengine exited with an error -- see $log" >&2
+        "./build/$game" > "$log" 2>&1; then
+    echo "$game exited with an error -- see $log" >&2
     tail -20 "$log" >&2
     exit 1
 fi

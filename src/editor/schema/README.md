@@ -81,3 +81,42 @@ when `config.yaml` doesn't) and `project_only` (baked in at engine start-up, so 
 override). `tests/editor/unit/render_settings_schema_test.cpp` asserts every render field's
 schema default equals the engine's own `ToyRenderConfig` default — **keep them in lockstep or
 that test fails.**
+
+## Item lists (`FieldKind::ItemList`)
+
+`f_items(key, item_fields, ...)` declares a list of mappings -- Vehicle `wheels`, a particle
+system's `bursts`, a heightmap terrain's `layers` -- drawn by `schema/inspector.cpp`'s
+`FieldKind::ItemList` case as a column of collapsible, grip-reorderable items, each with its
+own `item_fields` as rows. The naming and defaulting rules are pure functions in
+`schema/item_list.h`, unit-tested in `tests/editor/unit/item_list_test.cpp` -- read them
+there before changing this prose.
+
+**An item's header title**, in the order checked:
+1. `item_title_key`'s value, if the decorator is set and the key is present and non-empty;
+2. else the first of `label`, `name`, `title`, `id` the item carries, present and non-empty;
+3. else the first of the item's own `item_fields` that holds text (`String`, `AssetRef`,
+   `ChildRef`, `Enum`), non-empty -- this is how Vehicle `wheels` gets a sensible title
+   (`object`, e.g. `wheel_fl`) with no schema change at all;
+4. else `item_noun() + " " + (1-based index)` ("Wheel 3").
+
+A list declared `fixed_order()` prefixes the title with the item's index, because there the
+position *is* the meaning rather than an accident of ordering.
+
+**Decorators**, beyond the kind itself: `with_item_noun()` (the singular, when dropping a
+trailing "s" from the display name won't do), `with_item_title()` (pin the title to one key),
+`fixed_order()` (no reorder grip -- see `app/README.md`'s widget-conventions table for which
+lists need this and why), `collapsed_items()` (items start closed; for an item of many keys,
+like Vehicle's 17-key wheels), `capped(n)` (Add disables past `n` items).
+
+**`ShowWhen` works inside an item**, exactly as it does on a top-level field: an `item_fields`
+entry's `show` is checked against that item's own data, so one item schema can carry several
+mutually-exclusive key families (a TileTerrain LOD's `field` vs. `ratio` vs. `tile_set` keys,
+gated on a `mode` enum) instead of showing all of them at once with a tooltip explaining which
+are inert.
+
+**There is no per-element override marking.** `env.after_field` fires once per sub-row, same
+as any other field, but it is called with the *list's* key, not a per-element one
+(`wheels[2].radius` is not a thing this model understands). This is not a shortcut: a prefab
+override stores the whole sequence as one value, so there is no finer override to point at --
+"the list is marked overridden when any part of it is" is the honest answer, not an
+approximation of one.

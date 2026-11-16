@@ -551,6 +551,12 @@ const std::vector<SettingsGroup>& render_settings_groups() {
             .add(F(f_float("tilt_shift_angle", 0.0f, 0.5f, -180.0f, 180.0f), "Angle", "Tilts the band, in degrees off horizontal"))
             .done());
 
+        g.push_back(GroupBuilder(features, "UI Backdrop Blur", "A uniform blur behind glass UI panels (Context::glass()/glass_panel()), like a CSS backdrop-filter")
+            .toggle(startup(F(f_bool("ui_backdrop_blur_enabled", false), "Backdrop Blur", "Blur the frame behind glass UI panels")))
+            .add(F(f_float("ui_backdrop_blur_radius", 8.0f, 0.1f, 0.0f, 64.0f), "Blur Radius", "Furthest blur tap, in render pixels"))
+            .add(startup(F(f_int("ui_backdrop_blur_downscale", 2, 1, 4), "Downscale", "Backdrop resolution divisor; higher is cheaper and softer")))
+            .done());
+
         g.push_back(GroupBuilder(features, "Color Grading", "A colour look-up table applied after tonemapping")
             .toggle(F(f_bool("grading_enabled", true), "Color Grading", "Apply the grading LUT (nothing happens until one is chosen)"))
             .add(startup(F(root_relative(f_asset("grading_lut", "textures", ".png")), "LUT",

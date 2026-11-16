@@ -100,6 +100,7 @@ AppConfig AppConfig::from_node(const fkyaml::node& root) {
             }
             read(r, "world_ui_enabled", config.render.world_ui_enabled);
             read(r, "screen_ui_enabled", config.render.screen_ui_enabled);
+            read(r, "ui_backdrop_blur_enabled", config.render.ui_backdrop_blur_enabled);
 
             // --- Internal resolution ---
             read(r, "resolution_mode", config.render.resolution_mode);
@@ -423,6 +424,10 @@ AppConfig AppConfig::from_node(const fkyaml::node& root) {
             read(r, "tilt_shift_blur_bottom", config.render.tilt_shift_blur_bottom);
             read(r, "tilt_shift_max_radius", config.render.tilt_shift_max_radius);
             read(r, "tilt_shift_angle", config.render.tilt_shift_angle);
+
+            // --- UI backdrop blur ---
+            read(r, "ui_backdrop_blur_radius", config.render.ui_backdrop_blur_radius);
+            read(r, "ui_backdrop_blur_downscale", config.render.ui_backdrop_blur_downscale);
 
             // --- Depth of field ---
             read(r, "dof_focus_mode", config.render.dof_focus_mode);

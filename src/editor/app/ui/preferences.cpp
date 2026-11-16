@@ -216,9 +216,9 @@ void PreferencesPanel::draw_preferences_modal_(imm::Context& ctx) {
     const float footer_h = ctx.style.row_height + 8;
     const float box_bottom = std::floor((canvas.y - size.y) * 0.5f) + size.y;   // begin_modal() centres the box
     const float body_h = std::max(100.0f, box_bottom - ctx.style.padding - footer_h - top.y);
-    const float list_w = 170;
-    const imm::Box list{top.x, top.y, list_w, body_h};
-    const imm::Box pane{top.x + list_w + 6, top.y, w - list_w - 6, body_h};
+    const ui::ListPane body = ui::list_pane({top.x, top.y, w, body_h});
+    const imm::Box list = body.list;
+    const imm::Box pane = body.pane;
 
     static const std::vector<std::pair<I, std::string>> cats = {
         {I::Palette, "Interface"}, {I::Monitor, "Viewport"}, {I::Hand, "Navigation"},
@@ -396,7 +396,7 @@ void PreferencesPanel::draw_keymap_table_(imm::Context& ctx, std::string& filter
         }
         if (rows.empty()) continue;
         any = true;
-        app_.weather_panel_->weather_subhead_(ctx, g.title);
+        ctx.subhead(g.title);
         for (const KeyBinding* kb : rows) {
             const imm::Box row = ctx.next_box(ctx.style.row_height + 2);
             const float split = std::floor(row.w * 0.45f);

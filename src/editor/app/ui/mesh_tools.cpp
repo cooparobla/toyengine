@@ -297,7 +297,7 @@ void MeshToolsPanel::draw_mesh_tool_overlay_(imm::Context& ctx, const ViewProj& 
             if (a && b) ctx.line(*a, *b, col, 2.0f);
         }
     }
-    const float x = app_.viewport_box_.x + (app_.show_toolbar_ ? app_.viewport_chrome_panel_->kToolSize + 22 : 10);
+    const float x = app_.viewport_box_.x + (app_.show_toolbar_ ? ui::k_tool_size + 22 : 10);
     app_.viewport_chrome_panel_->shadow_text_(ctx, {x, app_.viewport_box_.y + 56}, "Loop Cut and Slide  -  " + std::to_string(app_.loopcut_.cuts) +
                                                    (app_.loopcut_.cuts == 1 ? " cut" : " cuts"), ctx.style.object_active);
 }

@@ -49,9 +49,9 @@ void ProjectSettingsPanel::draw_project_settings_modal_(imm::Context& ctx) {
     const float footer_h = ctx.style.row_height + 8;
     const float box_bottom = std::floor((canvas.y - size.y) * 0.5f) + size.y;   // begin_modal() centres the box
     const float body_h = std::max(100.0f, box_bottom - ctx.style.padding - footer_h - top.y);
-    const float list_w = 170;
-    const imm::Box list{top.x, top.y, list_w, body_h};
-    const imm::Box pane{top.x + list_w + 6, top.y, w - list_w - 6, body_h};
+    const ui::ListPane body = ui::list_pane({top.x, top.y, w, body_h});
+    const imm::Box list = body.list;
+    const imm::Box pane = body.pane;
 
     // Left: the categories.
     ctx.begin_region("ps_categories", list, false, &ctx.style.panel_alt);
@@ -76,9 +76,9 @@ void ProjectSettingsPanel::draw_project_settings_modal_(imm::Context& ctx) {
             const std::string key = project_section_key(g.title);
             if (cat == "Output" && !ctx.collapsing_header(g.title, true)) continue;
             Node& section = app_.config_.section(key);
-            ctx.indent(4);
+            ctx.indent(ctx.style.indent_small);
             for (const auto& f : g.fields) app_.draw_setting_row_(ctx, f, section, env, key);
-            ctx.unindent(4);
+            ctx.unindent(ctx.style.indent_small);
         }
         if (cat == "Output") ctx.label_dim("Window, jobs and debug settings apply the next time the game starts.");
     } else if (cat == "Unrecognized") {

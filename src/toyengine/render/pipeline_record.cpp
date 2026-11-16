@@ -791,6 +791,19 @@ void ToyRenderPipeline::record_post_chain_(coopa::gfx::command::CommandBuffer& c
 
 }
 
+void ToyRenderPipeline::record_ui_backdrop_(coopa::gfx::command::CommandBuffer& cmd) {
+    if (!ui_backdrop_pass_) return;
+    // Skip once the target has been written at least once and nothing gathered this frame
+    // wants it -- reading before the first write would read an UNDEFINED image, the same
+    // reason ui_world_layer_clear_ exists, so the unconditional first run below is deliberate.
+    if (ui_backdrop_primed_ && !ui_backdrop_wanted_this_frame_) return;
+    coopa::gfx::engine::passes::SeparableBlurPass::Params params{};
+    params.radius = config_.ui_backdrop_blur_radius;
+    ui_backdrop_pass_->execute(cmd, params);
+    ui_backdrop_primed_ = true;
+    gpu_mark_(cmd, GpuScope::UiBackdrop);
+}
+
 void ToyRenderPipeline::record_overlay_(coopa::gfx::command::CommandBuffer& cmd, const FrameContext& ctx) {
     // --- Overlay: both UI layers, above every post effect ---
     //
@@ -809,6 +822,11 @@ void ToyRenderPipeline::record_overlay_(coopa::gfx::command::CommandBuffer& cmd,
     overlay_target_->begin(cmd, coopa::gfx::ClearColor{0.0f, 0.0f, 0.0f, 1.0f});
     ui_composite_pass_->draw(cmd, ctx.letterbox);
     if (screen_ui_pass_) {
+        // Where the blurred backdrop sits in overlay_target_: the letterbox rect, since that
+        // is exactly where ui_composite_pass_ just put the scene it was blurred from.
+        screen_ui_pass_->set_backdrop_rect(
+            glm::vec2(static_cast<float>(ctx.letterbox.x), static_cast<float>(ctx.letterbox.y)),
+            glm::vec2(static_cast<float>(ctx.letterbox.w), static_cast<float>(ctx.letterbox.h)));
         for (coopa::ui::CanvasComponent* canvas : screen_canvases_) {
             // A canvas a host placed inside part of the window (Engine::set_scene_ui_placement())
             // draws at its own origin and size, clipped to them; every other canvas covers the

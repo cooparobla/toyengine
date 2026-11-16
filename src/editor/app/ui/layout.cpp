@@ -7,6 +7,10 @@
 #include "editor/app/ui/statusbar.h"
 #include "editor/app/ui/outliner.h"
 #include "editor/app/thumbnail_cache.h"
+#include "editor/app/ui/metrics.h"
+
+#include <algorithm>
+#include <cctype>
 
 namespace toy {
 namespace editor {
@@ -16,7 +20,7 @@ void EditorApp::draw_(imm::Context& ctx) {
     const glm::vec2 sz = ctx.canvas_size();
     // No full-window background fill: the 3D render shows through the viewport's rect,
     // so backgrounds are painted per area (and around the viewport) instead.
-    const float top_h = 28, status_h = 24;
+    const float top_h = ui::k_topbar_h, status_h = ui::k_statusbar_h;
     topbar_panel_->draw_topbar_(ctx, {0, 0, sz.x, top_h});
     const imm::Box content{0, top_h, sz.x, std::max(0.0f, sz.y - top_h - status_h)};
     draw_workspace_(ctx, content);
@@ -27,7 +31,7 @@ void EditorApp::draw_(imm::Context& ctx) {
 
 imm::Box EditorApp::area_(imm::Context& ctx, const imm::Box& b) {
     const imm::Box a{b.x + 1, b.y + 1, std::max(0.0f, b.w - 2), std::max(0.0f, b.h - 2)};
-    ctx.fill_rounded(a, ctx.style.panel_bg, 6);
+    ctx.fill_rounded(a, ctx.style.panel_bg, ui::k_area_radius);
     return a;
 }
 
@@ -42,7 +46,7 @@ imm::Box EditorApp::viewport_area_(imm::Context& ctx, const imm::Box& b) {
     const imm::Box a{b.x + 1, b.y + 1, std::max(0.0f, b.w - 2), std::max(0.0f, b.h - 2)};
     // Gaps around the area, then rounded-corner masks so the render reads as a rounded area.
     fill_around_(ctx, b, a, ctx.style.window_bg);
-    const float r = 6;
+    const float r = ui::k_area_radius;
     const glm::vec4 bg = ctx.style.window_bg;
     auto corner = [&](glm::vec2 c, float a0) {
         for (int i = 0; i < 6; ++i) {
@@ -61,11 +65,12 @@ imm::Box EditorApp::viewport_area_(imm::Context& ctx, const imm::Box& b) {
 void EditorApp::draw_workspace_(imm::Context& ctx, const imm::Box& c) {
     const bool mesh_edit = mesh_edit_view_();
     if (maximized_) { draw_viewport_(ctx, viewport_area_(ctx, c), mesh_edit); return; }
-    const float gap = 4;
-    left_w_ = std::clamp(left_w_, 200.0f, std::max(200.0f, c.w * 0.35f));
-    right_w_ = std::clamp(right_w_, 260.0f, std::max(260.0f, c.w * 0.4f));
-    bottom_h_ = std::clamp(bottom_h_, 60.0f, std::max(60.0f, c.h * 0.5f));
-    outliner_h_ = std::clamp(outliner_h_, 90.0f, std::max(90.0f, c.h - 160.0f));
+    const float gap = ui::k_area_gap;
+    left_w_   = ui::clamp_split(left_w_,   ui::k_min_left_w,   c.w, ui::k_max_left_frac);
+    right_w_  = ui::clamp_split(right_w_,  ui::k_min_right_w,  c.w, ui::k_max_right_frac);
+    bottom_h_ = ui::clamp_split(bottom_h_, ui::k_min_bottom_h, c.h, ui::k_max_bottom_frac);
+    outliner_h_ = std::clamp(outliner_h_, ui::k_min_outliner_h,
+                             std::max(ui::k_min_outliner_h, c.h - ui::k_outliner_slack));
     const float mid_w = std::max(100.0f, c.w - left_w_ - right_w_);
     const imm::Box left{c.x, c.y, left_w_, c.h};
     const imm::Box viewport{c.x + left_w_, c.y, mid_w, show_bottom_ ? c.h - bottom_h_ : c.h};
@@ -75,14 +80,18 @@ void EditorApp::draw_workspace_(imm::Context& ctx, const imm::Box& c) {
     const imm::Box props{c.x + left_w_ + mid_w, c.y + outliner.h, right_w_, c.h - outliner.h};
 
     float lx = left_w_;
-    if (ctx.splitter("ws_split_left", {c.x + left_w_ - gap * 0.5f, c.y, gap, c.h}, true, &lx, 200.0f, c.w * 0.35f).changed) left_w_ = lx;
+    if (ctx.splitter("ws_split_left", {c.x + left_w_ - gap * 0.5f, c.y, gap, c.h}, true, &lx,
+                     ui::k_min_left_w, c.w * ui::k_max_left_frac).changed) left_w_ = lx;
     float sx = c.w - right_w_;
-    if (ctx.splitter("ws_split_right", {c.x + c.w - right_w_ - gap * 0.5f, c.y, gap, c.h}, true, &sx, c.w * 0.6f, c.w - 260.0f).changed) {
+    // Stated as the splitter's own x, so this reads as the mirror of the left one's limits.
+    if (ctx.splitter("ws_split_right", {c.x + c.w - right_w_ - gap * 0.5f, c.y, gap, c.h}, true, &sx,
+                     c.w * (1.0f - ui::k_max_right_frac), c.w - ui::k_min_right_w).changed) {
         right_w_ = c.w - sx;
     }
     if (show_bottom_) {
         float by = viewport.h;
-        if (ctx.splitter("ws_split_bottom", {viewport.x, viewport.bottom() - gap * 0.5f, mid_w, gap}, false, &by, c.h * 0.5f, c.h - 60.0f).changed) {
+        if (ctx.splitter("ws_split_bottom", {viewport.x, viewport.bottom() - gap * 0.5f, mid_w, gap}, false, &by,
+                         c.h * (1.0f - ui::k_max_bottom_frac), c.h - ui::k_min_bottom_h).changed) {
             bottom_h_ = c.h - by;
         }
     }
@@ -102,14 +111,14 @@ void EditorApp::draw_workspace_(imm::Context& ctx, const imm::Box& c) {
     if (active_type_ == AssetType::NodeGraph) {
         // The asset list above the graph's own node list, mirroring the UI designer's split.
         const imm::Box a = area_(ctx, left);
-        const float split = std::max(140.0f, a.h * 0.4f);
+        const float split = std::max(ui::k_left_split_min, a.h * ui::k_left_split_frac);
         assets_panel_->draw_asset_panel_(ctx, {a.x, a.y, a.w, split});
         ctx.fill({a.x + 6, a.y + split, a.w - 12, 1}, ctx.style.border);
         node_graph_panel_->draw_graph_palette_(ctx, {a.x, a.y + split + 2, a.w, a.h - split - 2});
     } else if (active_type_ == AssetType::UI) {
         // The UI designer: the asset list above the Widgets palette.
         const imm::Box a = area_(ctx, left);
-        const float split = std::max(140.0f, a.h * 0.4f);
+        const float split = std::max(ui::k_left_split_min, a.h * ui::k_left_split_frac);
         assets_panel_->draw_asset_panel_(ctx, {a.x, a.y, a.w, split});
         ctx.fill({a.x + 6, a.y + split, a.w - 12, 1}, ctx.style.border);
         ui_canvas_panel_->draw_ui_palette_(ctx, {a.x, a.y + split + 2, a.w, a.h - split - 2});
@@ -128,8 +137,32 @@ bool EditorApp::asset_view_() const {
 
 imm::Box EditorApp::area_header_(imm::Context& ctx, const imm::Box& area, float h) {
     const imm::Box bar{area.x, area.y, area.w, h};
-    ctx.fill_rounded(bar, ctx.style.header, 6, imm::Context::kTop);
+    ctx.fill_rounded(bar, ctx.style.header, ui::k_area_radius, imm::Context::kTop);
     return bar;
+}
+
+std::string EditorApp::search_box_in_(imm::Context& ctx, const char* id, const imm::Box& box,
+                                      std::string& filter, const char* placeholder) {
+    ctx.input_text_box(id, box, &filter, "");
+    const std::string live = ctx.editing_text(id).value_or(filter);
+    if (live.empty()) {
+        // The magnifier and the prompt are drawn only while the field is empty, so neither
+        // has to be budgeted for in the space the typed text gets.
+        const float gw = 14.0f;
+        ctx.icon(imm::Icon::Search, {box.x + 4, box.y + (box.h - gw) * 0.5f, gw, gw}, ctx.style.text_disabled);
+        ctx.text_in({box.x + gw + 7, box.y, std::max(0.0f, box.w - gw - 7), box.h}, placeholder,
+                    ctx.style.text_disabled, 0.0f);
+    }
+    test_rects_[id] = box;
+    std::string needle = live;
+    std::transform(needle.begin(), needle.end(), needle.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return needle;
+}
+
+std::string EditorApp::search_box_(imm::Context& ctx, const char* id, std::string& filter,
+                                   const char* placeholder) {
+    return search_box_in_(ctx, id, ctx.next_box(22), filter, placeholder);
 }
 
 imm::Icon EditorApp::icon_for_component_(const std::string& type) {

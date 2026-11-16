@@ -18,8 +18,10 @@
 
 #include <cctype>
 #include <cmath>
+#include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace coopa {
 namespace ui {
@@ -78,21 +80,109 @@ inline const glm::vec4 kGreen{0.45f, 0.80f, 0.40f, 1.0f};
 inline const glm::vec4 kRed{0.92f, 0.36f, 0.36f, 1.0f};
 inline const glm::vec4 kPurple{0.70f, 0.50f, 0.90f, 1.0f};
 
+/** @brief The registry behind register_custom_icon(); index 0 is Icon::Count. */
+struct CustomIcon {
+    std::string name;
+    IconDrawFn  fn = nullptr;
+};
+inline std::vector<CustomIcon>& custom_icons() {
+    static std::vector<CustomIcon> v;
+    return v;
+}
+
 } // namespace icon_detail
 
-/** @brief The icon's name, for tooltips and tests. */
-inline const char* icon_name(Icon i) {
-    switch (i) {
-        case Icon::Cube: return "Mesh";
-        case Icon::Camera: return "Camera";
-        case Icon::Sun: return "Sun";
-        default: return "";
+/**
+ * @brief The 16x16 design-grid pen every built-in icon is drawn with.
+ *
+ * Construct one over the box an `IconDrawFn` is handed and draw in grid coordinates: `l()` for
+ * lines, `tri()`, `rect()`, `box()`, `circle()`, `ring()`, `arc()`, `arrow_head()`. The pen
+ * fits the grid to the box's shorter side and centres it, which is what keeps a custom icon
+ * the same weight and alignment as the built-ins beside it.
+ */
+using IconPen = icon_detail::Pen;
+
+inline Icon register_custom_icon(std::string_view name, IconDrawFn fn) {
+    auto& v = icon_detail::custom_icons();
+    const int base = static_cast<int>(Icon::Count);
+    for (size_t i = 0; i < v.size(); ++i) {
+        if (v[i].name == name) {
+            v[i].fn = fn;   // same name, same value: re-registering is idempotent by design
+            return static_cast<Icon>(base + static_cast<int>(i));
+        }
     }
+    v.push_back({std::string(name), fn});
+    return static_cast<Icon>(base + static_cast<int>(v.size()) - 1);
+}
+
+/**
+ * @brief Every icon's name, spelled exactly as its enumerator.
+ *
+ * One table behind both icon_name() and icon_from_name(), so a name cannot describe one
+ * icon in one direction and another icon back.
+ */
+inline constexpr std::pair<const char*, Icon> k_icon_names[] = {
+    {"Cube", Icon::Cube}, {"Mesh", Icon::Mesh}, {"Sphere", Icon::Sphere}, {"Cylinder", Icon::Cylinder},
+    {"Plane", Icon::Plane}, {"Empty", Icon::Empty}, {"Sun", Icon::Sun}, {"PointLight", Icon::PointLight},
+    {"SpotLight", Icon::SpotLight}, {"EnvLight", Icon::EnvLight}, {"Camera", Icon::Camera},
+    {"Terrain", Icon::Terrain}, {"Object", Icon::Object}, {"Material", Icon::Material},
+    {"Texture", Icon::Texture}, {"World", Icon::World}, {"Scene", Icon::Scene},
+    {"Collection", Icon::Collection}, {"Physics", Icon::Physics}, {"Collider", Icon::Collider},
+    {"Rigidbody", Icon::Rigidbody}, {"Component", Icon::Component}, {"Script", Icon::Script},
+    {"Render", Icon::Render}, {"Output", Icon::Output}, {"Tool", Icon::Tool}, {"Gear", Icon::Gear},
+    {"Eye", Icon::Eye}, {"EyeClosed", Icon::EyeClosed}, {"Monitor", Icon::Monitor},
+    {"MonitorOff", Icon::MonitorOff}, {"Check", Icon::Check}, {"Lock", Icon::Lock},
+    {"SelectBox", Icon::SelectBox}, {"Cursor", Icon::Cursor}, {"Move", Icon::Move}, {"Rotate", Icon::Rotate},
+    {"Scale", Icon::Scale}, {"Transform", Icon::Transform}, {"Extrude", Icon::Extrude},
+    {"Inset", Icon::Inset}, {"Bevel", Icon::Bevel}, {"Knife", Icon::Knife}, {"LoopCut", Icon::LoopCut},
+    {"Vertex", Icon::Vertex}, {"Edge", Icon::Edge}, {"Face", Icon::Face}, {"ObjectMode", Icon::ObjectMode},
+    {"EditMode", Icon::EditMode}, {"SculptMode", Icon::SculptMode}, {"LocalView", Icon::LocalView},
+    {"BrushDraw", Icon::BrushDraw}, {"BrushSmooth", Icon::BrushSmooth}, {"BrushInflate", Icon::BrushInflate},
+    {"BrushGrab", Icon::BrushGrab}, {"BrushFlatten", Icon::BrushFlatten}, {"ShadeWire", Icon::ShadeWire},
+    {"ShadeSolid", Icon::ShadeSolid}, {"ShadeMaterial", Icon::ShadeMaterial},
+    {"ShadeRendered", Icon::ShadeRendered}, {"Overlays", Icon::Overlays}, {"XRay", Icon::XRay},
+    {"Grid", Icon::Grid}, {"Snap", Icon::Snap}, {"Pivot", Icon::Pivot}, {"Orientation", Icon::Orientation},
+    {"ViewCamera", Icon::ViewCamera}, {"Ortho", Icon::Ortho}, {"Persp", Icon::Persp}, {"Zoom", Icon::Zoom},
+    {"Hand", Icon::Hand}, {"Play", Icon::Play}, {"Pause", Icon::Pause}, {"Step", Icon::Step},
+    {"Stop", Icon::Stop}, {"Folder", Icon::Folder}, {"File", Icon::File}, {"Image", Icon::Image},
+    {"Search", Icon::Search}, {"Filter", Icon::Filter}, {"Asset", Icon::Asset}, {"Console", Icon::Console},
+    {"Save", Icon::Save}, {"Package", Icon::Package}, {"Plus", Icon::Plus}, {"X", Icon::X},
+    {"Trash", Icon::Trash}, {"Duplicate", Icon::Duplicate}, {"Link", Icon::Link},
+    {"ArrowRight", Icon::ArrowRight}, {"ArrowDown", Icon::ArrowDown}, {"Dots", Icon::Dots},
+    {"Undo", Icon::Undo}, {"Redo", Icon::Redo}, {"Restart", Icon::Restart}, {"Info", Icon::Info},
+    {"Warning", Icon::Warning}, {"Error", Icon::Error}, {"Palette", Icon::Palette},
+    {"MouseLeft", Icon::MouseLeft}, {"MouseMiddle", Icon::MouseMiddle}, {"MouseRight", Icon::MouseRight},
+    {"Keyboard", Icon::Keyboard}, {"VertexPaint", Icon::VertexPaint}, {"WeightPaint", Icon::WeightPaint},
+    {"UiCanvas", Icon::UiCanvas}, {"UiText", Icon::UiText}, {"UiButton", Icon::UiButton},
+    {"UiLayout", Icon::UiLayout}, {"UiWidget", Icon::UiWidget}, {"UiAnchor", Icon::UiAnchor},
+    {"Tag", Icon::Tag}, {"Sort", Icon::Sort}, {"Proportional", Icon::Proportional},
+    {"Grip", Icon::Grip}, {"Pen", Icon::Pen},
+    {"AnchorCorner", Icon::AnchorCorner}, {"AnchorSmooth", Icon::AnchorSmooth},
+    {"AnchorVector", Icon::AnchorVector}, {"AnchorAuto", Icon::AnchorAuto},
+    {"ArrowUp", Icon::ArrowUp}, {"ArrowLeft", Icon::ArrowLeft},
+    {"Home", Icon::Home},
+};
+
+/** @brief The icon's name, for tooltips and tests, or "" for Icon::None and Icon::Count. */
+inline const char* icon_name(Icon i) {
+    for (const auto& [n, icon] : k_icon_names) {
+        if (icon == i) return n;
+    }
+    const auto& v = icon_detail::custom_icons();
+    const int idx = static_cast<int>(i) - static_cast<int>(Icon::Count);
+    if (idx >= 0 && static_cast<size_t>(idx) < v.size()) return v[static_cast<size_t>(idx)].name.c_str();
+    return "";
 }
 
 inline void draw_icon(Context& ctx, Icon icon, const Box& b, const glm::vec4& color) {
     using namespace icon_detail;
     if (icon == Icon::None) return;
+    if (static_cast<int>(icon) >= static_cast<int>(Icon::Count)) {
+        const auto& v = custom_icons();
+        const size_t idx = static_cast<size_t>(static_cast<int>(icon) - static_cast<int>(Icon::Count));
+        if (idx < v.size() && v[idx].fn) v[idx].fn(ctx, b, color);
+        return;
+    }
     Pen d(ctx, b, color);
     const glm::vec4 dim = with_alpha(color, color.a * 0.45f);
     switch (icon) {
@@ -410,6 +500,8 @@ inline void draw_icon(Context& ctx, Icon icon, const Box& b, const glm::vec4& co
         case Icon::Link: d.ring(5.5f, 10.5f, 3.0f); d.ring(10.5f, 5.5f, 3.0f); d.l(6.5f, 9.5f, 9.5f, 6.5f); break;
         case Icon::ArrowRight: d.tri(5.5f, 3.5f, 5.5f, 12.5f, 11.5f, 8); break;
         case Icon::ArrowDown: d.tri(3.5f, 5.5f, 12.5f, 5.5f, 8, 11.5f); break;
+        case Icon::ArrowLeft: d.tri(10.5f, 3.5f, 10.5f, 12.5f, 4.5f, 8); break;
+        case Icon::ArrowUp: d.tri(3.5f, 10.5f, 12.5f, 10.5f, 8, 4.5f); break;
         case Icon::Dots: d.circle(8, 3.5f, 1.3f); d.circle(8, 8, 1.3f); d.circle(8, 12.5f, 1.3f); break;
         case Icon::Undo: d.arc(8, 9, 5, -3.1416f, 0.9f, 1.2f); d.arrow_head(3, 9, 0, 1, 2.6f); break;
         case Icon::Redo: d.arc(8, 9, 5, 2.24f, 6.28f, 1.2f); d.arrow_head(13, 9, 0, 1, 2.6f); break;
@@ -512,6 +604,11 @@ inline void draw_icon(Context& ctx, Icon icon, const Box& b, const glm::vec4& co
             d.circle(8, 8, 1.8f);
             d.arc(6, 8, 3.0f, -1.5708f, 1.5708f); d.arc(10, 8, 3.0f, 1.5708f, 4.7124f);
             break;
+        case Icon::Home:   // a roofline over a walled box, with a door
+            d.l(2, 8, 8, 2); d.l(8, 2, 14, 8);
+            d.l(3.5f, 8, 3.5f, 13.5f); d.l(3.5f, 13.5f, 12.5f, 13.5f); d.l(12.5f, 13.5f, 12.5f, 8);
+            d.rect(7, 9.5f, 2, 4, color);
+            break;
     }
 }
 
@@ -523,51 +620,20 @@ inline void draw_icon(Context& ctx, Icon icon, const Box& b, const glm::vec4& co
  * icon by name.
  */
 inline Icon icon_from_name(std::string_view name) {
-    static const std::pair<const char*, Icon> table[] = {
-        {"Cube", Icon::Cube}, {"Mesh", Icon::Mesh}, {"Sphere", Icon::Sphere}, {"Cylinder", Icon::Cylinder},
-        {"Plane", Icon::Plane}, {"Empty", Icon::Empty}, {"Sun", Icon::Sun}, {"PointLight", Icon::PointLight},
-        {"SpotLight", Icon::SpotLight}, {"EnvLight", Icon::EnvLight}, {"Camera", Icon::Camera},
-        {"Terrain", Icon::Terrain}, {"Object", Icon::Object}, {"Material", Icon::Material},
-        {"Texture", Icon::Texture}, {"World", Icon::World}, {"Scene", Icon::Scene},
-        {"Collection", Icon::Collection}, {"Physics", Icon::Physics}, {"Collider", Icon::Collider},
-        {"Rigidbody", Icon::Rigidbody}, {"Component", Icon::Component}, {"Script", Icon::Script},
-        {"Render", Icon::Render}, {"Output", Icon::Output}, {"Tool", Icon::Tool}, {"Gear", Icon::Gear},
-        {"Eye", Icon::Eye}, {"EyeClosed", Icon::EyeClosed}, {"Monitor", Icon::Monitor},
-        {"MonitorOff", Icon::MonitorOff}, {"Check", Icon::Check}, {"Lock", Icon::Lock},
-        {"SelectBox", Icon::SelectBox}, {"Cursor", Icon::Cursor}, {"Move", Icon::Move}, {"Rotate", Icon::Rotate},
-        {"Scale", Icon::Scale}, {"Transform", Icon::Transform}, {"Extrude", Icon::Extrude},
-        {"Inset", Icon::Inset}, {"Bevel", Icon::Bevel}, {"Knife", Icon::Knife}, {"LoopCut", Icon::LoopCut},
-        {"Vertex", Icon::Vertex}, {"Edge", Icon::Edge}, {"Face", Icon::Face}, {"ObjectMode", Icon::ObjectMode},
-        {"EditMode", Icon::EditMode}, {"SculptMode", Icon::SculptMode}, {"LocalView", Icon::LocalView},
-        {"BrushDraw", Icon::BrushDraw}, {"BrushSmooth", Icon::BrushSmooth}, {"BrushInflate", Icon::BrushInflate},
-        {"BrushGrab", Icon::BrushGrab}, {"BrushFlatten", Icon::BrushFlatten}, {"ShadeWire", Icon::ShadeWire},
-        {"ShadeSolid", Icon::ShadeSolid}, {"ShadeMaterial", Icon::ShadeMaterial},
-        {"ShadeRendered", Icon::ShadeRendered}, {"Overlays", Icon::Overlays}, {"XRay", Icon::XRay},
-        {"Grid", Icon::Grid}, {"Snap", Icon::Snap}, {"Pivot", Icon::Pivot}, {"Orientation", Icon::Orientation},
-        {"ViewCamera", Icon::ViewCamera}, {"Ortho", Icon::Ortho}, {"Persp", Icon::Persp}, {"Zoom", Icon::Zoom},
-        {"Hand", Icon::Hand}, {"Play", Icon::Play}, {"Pause", Icon::Pause}, {"Step", Icon::Step},
-        {"Stop", Icon::Stop}, {"Folder", Icon::Folder}, {"File", Icon::File}, {"Image", Icon::Image},
-        {"Search", Icon::Search}, {"Filter", Icon::Filter}, {"Asset", Icon::Asset}, {"Console", Icon::Console},
-        {"Save", Icon::Save}, {"Package", Icon::Package}, {"Plus", Icon::Plus}, {"X", Icon::X},
-        {"Trash", Icon::Trash}, {"Duplicate", Icon::Duplicate}, {"Link", Icon::Link},
-        {"ArrowRight", Icon::ArrowRight}, {"ArrowDown", Icon::ArrowDown}, {"Dots", Icon::Dots},
-        {"Undo", Icon::Undo}, {"Redo", Icon::Redo}, {"Restart", Icon::Restart}, {"Info", Icon::Info},
-        {"Warning", Icon::Warning}, {"Error", Icon::Error}, {"Palette", Icon::Palette},
-        {"MouseLeft", Icon::MouseLeft}, {"MouseMiddle", Icon::MouseMiddle}, {"MouseRight", Icon::MouseRight},
-        {"Keyboard", Icon::Keyboard}, {"VertexPaint", Icon::VertexPaint}, {"WeightPaint", Icon::WeightPaint},
-        {"UiCanvas", Icon::UiCanvas}, {"UiText", Icon::UiText}, {"UiButton", Icon::UiButton},
-        {"UiLayout", Icon::UiLayout}, {"UiWidget", Icon::UiWidget}, {"UiAnchor", Icon::UiAnchor},
-        {"Tag", Icon::Tag}, {"Sort", Icon::Sort}, {"Proportional", Icon::Proportional},
-        {"Grip", Icon::Grip}, {"Pen", Icon::Pen},
-    };
-    for (const auto& [n, icon] : table) {
-        std::string_view other(n);
-        if (other.size() != name.size()) continue;
-        bool same = true;
-        for (size_t i = 0; i < name.size() && same; ++i) {
-            same = std::tolower(static_cast<unsigned char>(name[i])) == std::tolower(static_cast<unsigned char>(other[i]));
+    auto same_name = [&](std::string_view other) {
+        if (other.size() != name.size()) return false;
+        for (size_t i = 0; i < name.size(); ++i) {
+            if (std::tolower(static_cast<unsigned char>(name[i])) !=
+                std::tolower(static_cast<unsigned char>(other[i]))) return false;
         }
-        if (same) return icon;
+        return true;
+    };
+    for (const auto& [n, icon] : k_icon_names) {
+        if (same_name(n)) return icon;
+    }
+    const auto& v = icon_detail::custom_icons();
+    for (size_t i = 0; i < v.size(); ++i) {
+        if (same_name(v[i].name)) return static_cast<Icon>(static_cast<int>(Icon::Count) + static_cast<int>(i));
     }
     return Icon::None;
 }

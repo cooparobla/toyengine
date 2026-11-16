@@ -2412,7 +2412,7 @@ void EditorApp::draw_viewport_(imm::Context& ctx, const imm::Box& area, bool mes
                           falloff_name(proportional_.falloff));
             h += buf;
         }
-        const imm::Box b{viewport_box_.x + (show_toolbar_ ? viewport_chrome_panel_->kToolSize + 20 : 10), viewport_box_.bottom() - 34, ctx.text_width(h) + 18, 24};
+        const imm::Box b{viewport_box_.x + (show_toolbar_ ? ui::k_tool_size + 20 : 10), viewport_box_.bottom() - 34, ctx.text_width(h) + 18, 24};
         ctx.fill_rounded(b, et_.viewport.modal_backdrop);
         ctx.text_in(b, h, ctx.style.text);
     }

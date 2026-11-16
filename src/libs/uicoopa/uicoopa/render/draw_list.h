@@ -139,6 +139,19 @@ public:
     /** @brief The texture set via set_default_texture(); widgets with no sprite should bind this explicitly. */
     coopa::gfx::TextureView default_texture() const { return default_texture_view_; }
 
+    /**
+     * @brief Sets the host's blurred-backdrop image, for Context::glass()/glass_panel().
+     *
+     * A property of the CANVAS, like set_default_texture() -- not per-frame geometry state, so
+     * (like default_texture_view_) it is deliberately NOT cleared by begin(). A world-space
+     * canvas is never seeded with one: a glass call against an unset backdrop falls back to a
+     * flat fill, see Context::glass()'s doc.
+     */
+    void set_backdrop_texture(coopa::gfx::TextureView view) { backdrop_texture_view_ = view; }
+
+    /** @brief The texture set via set_backdrop_texture(), or an invalid view if none was set. */
+    coopa::gfx::TextureView backdrop_texture() const { return backdrop_texture_view_; }
+
     /** @brief Sets the texture for subsequent add_quad()/add_nine_slice() calls. */
     void set_texture(coopa::gfx::TextureView view) { current_texture_ = view; }
     coopa::gfx::TextureView current_texture() const { return current_texture_; }
@@ -455,6 +468,7 @@ private:
     std::vector<Rect>      clip_stack_{ Rect{} };
     coopa::gfx::TextureView current_texture_;
     coopa::gfx::TextureView default_texture_view_;
+    coopa::gfx::TextureView backdrop_texture_view_;
     /// See set_text_scale(). Not touched by begin() -- it describes the canvas, not the frame.
     float                   text_scale_ = 1.0f;
     bool                    pixel_snap_ = false;   ///< See set_pixel_snap().

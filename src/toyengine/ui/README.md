@@ -41,11 +41,22 @@ panel asset and needs no C++. Anything else — a HUD, a hotbar, a transport dec
 - **Author boxes at `reference_resolution` (default 1920x1080), not the window's actual size.**
   A Screen-space `ImmScreen` scales its canvas (`CanvasScaler` / `ScaleWithScreenSize`) so the
   authored layout always fits the real surface, whether that is a wide monitor or the editor's
-  narrower embedded play viewport. `{0, 0}` opts a screen back into raw device pixels.
+  narrower embedded play viewport. `{0, 0}` opts a screen back into raw device pixels. A
+  component field meant to differ from `ImmScreen`'s own default must be set before the object
+  is adopted into a running scene (at construction, or in a scene's YAML) — nothing calls
+  `SceneObject::start()` on an object added to a scene after it is already playing, only the
+  per-frame update walk reaches it, and `ImmScreen::start()` is where such a field would
+  otherwise need to be set.
+- **A frosted panel is `ctx.glass()` / `ctx.glass_panel()`**, a screen-locked pane over the
+  host's blurred backdrop (a `backdrop-filter: blur()` equivalent — `render/README.md`'s UI
+  layers section has the render-side story). With the feature off, on a world-space canvas, or
+  in a font-free headless test, both fall back to a flat fill with no branch required of the
+  caller — `has_glass()` exists only for a screen that wants to know, not one that needs to.
 
 ## What a host provides
 
 `Engine` drives every canvas each frame (`drive_ui_canvases_`): viewport sizing, HiDPI cursor
-scaling, the player's interface scale, editor placement, and — for world plates — the pointer
-ray. `Engine::set_ui_preview(false)` keeps an authored interface out of a scene view until the
-game actually runs, which is what the editor does everywhere except its UI workspace.
+scaling, the player's interface scale, editor placement, a blurred backdrop for glass panels,
+and — for world plates — the pointer ray. `Engine::set_ui_preview(false)` keeps an authored
+interface out of a scene view until the game actually runs, which is what the editor does
+everywhere except its UI workspace.

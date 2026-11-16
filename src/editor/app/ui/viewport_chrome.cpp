@@ -38,7 +38,7 @@ imm::Box ViewportChromePanel::toolbar_rect_(bool mesh_edit) const {
     // the four anchor modes, show-handles, and the Object Mode exit -- 8 buttons.
     const int n = app_.curve_pen_panel_->in_pen_mode_() ? 8
                 : app_.in_sculpt_mode_() ? 5 : app_.paint_panel_->in_paint_mode_() ? 3 : mesh_edit ? 9 : 6;
-    return {app_.viewport_box_.x + 6, app_.viewport_box_.y + 6, kToolSize + 6, n * (kToolSize + 2) + 14};
+    return {app_.viewport_box_.x + 6, app_.viewport_box_.y + 6, ui::k_tool_size + 6, n * (ui::k_tool_size + 2) + 14};
 }
 
 bool ViewportChromePanel::preview_only_view_() const {
@@ -498,9 +498,9 @@ void ViewportChromePanel::draw_toolbar_(imm::Context& ctx, bool mesh_edit) {
     ctx.fill_rounded(r, app_.et_.viewport.toolbar_bg, 6);
     float y = r.y + 4;
     auto tool_btn = [&](const char* id, I ic, const char* tip, bool on) {
-        const imm::Box b{r.x + 3, y, kToolSize, kToolSize};
-        y += kToolSize + 2;
-        return ctx.icon_button(id, ic, tip, on, kToolSize, imm::Context::kAll, b);
+        const imm::Box b{r.x + 3, y, ui::k_tool_size, ui::k_tool_size};
+        y += ui::k_tool_size + 2;
+        return ctx.icon_button(id, ic, tip, on, ui::k_tool_size, imm::Context::kAll, b);
     };
     if (app_.terrain_panel_->in_terrain_mode_()) { app_.terrain_panel_->draw_terrain_toolbar_(ctx, r); return; }
     if (app_.instance_paint_panel_->in_instance_mode_()) { app_.instance_paint_panel_->draw_instance_toolbar_(ctx, r); return; }
@@ -752,7 +752,7 @@ void ViewportChromePanel::shadow_text_(imm::Context& ctx, glm::vec2 p, const std
 }
 
 void ViewportChromePanel::draw_overlay_text_(imm::Context& ctx, const ViewProj& vp) {
-    const float x = app_.viewport_box_.x + (app_.show_toolbar_ ? kToolSize + 22 : 10);
+    const float x = app_.viewport_box_.x + (app_.show_toolbar_ ? ui::k_tool_size + 22 : 10);
     const float y0 = app_.viewport_box_.y + 8;
     shadow_text_(ctx, {x, y0}, view_name_(), app_.et_.viewport.overlay_text);
     (void)vp;

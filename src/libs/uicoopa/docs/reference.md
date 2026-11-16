@@ -234,6 +234,27 @@ frame's layer rects, so a widget under an open popup does not react.
   kinds with `kind_name` / `format_group` and add Favorites with `favorites` / `launch_dir`.
 - **`imm_theme.h`** — themes, below.
 
+**Reorderable rows.** `reorder_grip(list_id, where, index, count, pitch)` draws a drag
+handle (`Icon::Grip`) at `where` and returns a `ReorderRequest {from, to}` -- never both --
+asking to swap one step, never mutating anything itself: the caller performs the swap (on a
+`std::vector`, or on a document call that carries its own undo) and then calls
+`reorder_step(list_id, to)` so a held drag keeps stepping one row per `pitch` of travel
+instead of swapping once and sticking. `reorder_release(list_id)` ends the drag once, after
+the loop. `list_id` names the LIST, so take it with `get_id()` once, outside any per-row
+`push_id()` -- every row's grip shares the one drag. This is the primitive behind the
+toyengine editor's per-item inspector lists (`FieldKind::ItemList`), its node-graph socket
+list, and its UI-designer row list.
+
+Do not confuse this with **`drag_handle()`** (`imm_game.h`): that is a free 2-D move handle
+for a HUD box that can sit anywhere on screen, with no list, no index and no step -- unrelated
+despite the similar name.
+
+`Icon::ArrowUp` / `ArrowLeft` exist alongside `ArrowRight` / `ArrowDown`, and
+`arrow(box, ArrowDir, colour)` draws any of the four (the older `arrow(box, bool open, colour)`
+is a right/down-only convenience that still works). `icon_name()` / `icon_from_name()` share
+one table (`k_icon_names` in `imm_icons.h`), so every icon has exactly one spelling in both
+directions -- add a new `Icon` there, not just to the enum.
+
 `combo()` / `combo_box()` popups with more than 15 items get a search field that has the
 keyboard as soon as the popup opens: typing filters by substring (any case), Up / Down move a
 highlight, Enter picks it. An optional `int* hovered` out-parameter reports the item under

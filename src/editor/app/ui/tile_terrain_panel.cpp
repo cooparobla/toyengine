@@ -166,9 +166,7 @@ EditResult TileTerrainPanel::draw_tile_terrain_panel_(imm::Context& ctx, ObjectI
     };
     auto mark = [&](std::initializer_list<const char*> keys) { for (const char* k : keys) placed.insert(k); };
     auto section = [&](const char* title, I icon, const char* what, bool open) {
-        const bool o = ctx.collapsing_header(title, open, nullptr, icon);
-        if (o && what) ctx.paragraph(what, &dim);
-        return o;
+        return inspector_block(ctx, title, icon, what, open);
     };
     auto changed_key = [&r](const char* key) {
         r.changed = r.finished = true;

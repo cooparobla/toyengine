@@ -135,6 +135,7 @@
 #include <gfxcoopa/engine/passes/stylize_pass.h>
 #include <gfxcoopa/engine/passes/dof_pass.h>
 #include <gfxcoopa/engine/passes/bloom_pass.h>
+#include <gfxcoopa/engine/passes/separable_blur_pass.h>
 #include <gfxcoopa/engine/passes/tilt_shift_pass.h>
 #include <gfxcoopa/engine/passes/fxaa_pass.h>
 #include <gfxcoopa/engine/passes/smaa_pass.h>
@@ -167,6 +168,8 @@
     X(bloom_enabled) \
     X(dof_enabled) \
     X(tilt_shift_enabled) \
+    X(ui_backdrop_blur_enabled) \
+    X(ui_backdrop_blur_downscale) \
     X(ssr_enabled) \
     X(ssgi_traced) \
     X(ssao_enabled) \
@@ -332,6 +335,17 @@ public:
      */
     coopa::gfx::TextureView screen_ui_white_view() const {
         return screen_ui_pass_ ? screen_ui_pass_->white_view() : coopa::gfx::TextureView{};
+    }
+
+    /**
+     * @brief The blurred backdrop a glass UI panel samples, for seeding a screen canvas's
+     *        DrawList::set_backdrop_texture() -- or a default-constructed (null) view when
+     *        config_.ui_backdrop_blur_enabled was false at construction, or screen_ui_enabled
+     *        is off. Same seeding contract as screen_ui_white_view() above; Engine seeds both
+     *        from the same place.
+     */
+    coopa::gfx::TextureView screen_ui_backdrop_view() const {
+        return ui_backdrop_pass_ ? ui_backdrop_pass_->result_view_typed() : coopa::gfx::TextureView{};
     }
 
     /**
@@ -781,6 +795,16 @@ private:
      * chosen from that toggle when the pipeline was built.
      */
     void record_post_chain_(coopa::gfx::command::CommandBuffer& cmd, const FrameContext& ctx);
+
+    /**
+     * @brief Runs ui_backdrop_pass_, between the post chain and the overlay -- the backdrop a
+     *        glass panel samples is the frame BEFORE any UI, captured once per frame rather
+     *        than once per panel. No-op when ui_backdrop_pass_ is null (feature disabled), or
+     *        when no gathered batch wants it this frame AND the target has already been
+     *        written at least once (the same "never read an UNDEFINED image" guard
+     *        ui_world_layer_clear_ exists for).
+     */
+    void record_ui_backdrop_(coopa::gfx::command::CommandBuffer& cmd);
 
     /**
      * @brief Records the window-sized overlay: the letterboxed composite of scene + world UI,
@@ -1484,6 +1508,12 @@ private:
     std::unique_ptr<coopa::gfx::engine::targets::OffscreenTarget> ui_world_target_;
     /// ui_world_target_'s last write had no canvases, so it already holds transparent black.
     bool ui_world_layer_clear_ = false;
+    /// This frame's screen-UI gather saw at least one batch keyed to the backdrop view --
+    /// set in pipeline_gather.cpp, read by record_ui_backdrop_().
+    bool ui_backdrop_wanted_this_frame_ = false;
+    /// ui_backdrop_pass_'s result has been written at least once -- reading it before that
+    /// would be reading an UNDEFINED image (the same guard ui_world_layer_clear_ exists for).
+    bool ui_backdrop_primed_ = false;
     coopa::gfx::engine::targets::OffscreenTarget underwater_target_; // UnderwaterPass output, HDR
     coopa::gfx::engine::targets::OffscreenTarget volumetrics_target_; // wind composite, after fog, pre-post, HDR
     coopa::gfx::engine::targets::OffscreenTarget volumetrics_march_target_; // reduced-res march: in-scatter + transmittance
@@ -1692,6 +1722,17 @@ private:
     // bloom_pass_/fog_pass_'s bindings above.
     std::unique_ptr<coopa::gfx::engine::passes::TiltShiftPass> tilt_shift_pass_;
     std::unique_ptr<passes::UpscalePass>                         upscale_pass_;
+
+    /**
+     * Uniform backdrop blur for glass UI panels -- see ToyRenderConfig::ui_backdrop_blur_enabled
+     * and SeparableBlurPass's own file doc. Unlike tilt_shift_pass_ this is sized from
+     * render_extent_ / config_.ui_backdrop_blur_downscale, NOT the display/letterbox rect, which
+     * is what makes it startup-fixed rather than resize-aware: handle_resize_() does not touch
+     * it at all. Its SOURCE still follows the tilt-shift-on/off choice bind_composite_inputs_()
+     * makes for ui_composite_pass_, rebound there via set_source() rather than at construction,
+     * so the two consumers of that choice can never drift apart.
+     */
+    std::unique_ptr<coopa::gfx::engine::passes::SeparableBlurPass> ui_backdrop_pass_;
 
     /**
      * The final, WINDOW-sized composite target and the two passes that fill it.

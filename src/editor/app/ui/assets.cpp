@@ -1,3 +1,4 @@
+#include "editor/app/ui/metrics.h"
 #include "editor/app/ui/assets.h"
 #include "editor/app/ui/node_graph.h"
 #include "editor/app/ui/ui_canvas.h"
@@ -329,18 +330,17 @@ std::string AssetsPanel::draw_tag_chips_(imm::Context& ctx, const imm::Box& row,
     float x = row.right() - 4;
     const float h = row.h - 8;
     auto chip = [&](const std::string& text, const glm::vec4& col) -> imm::Box {
-        const float w = ctx.text_width(text) + 10;
+        const float w = ctx.chip_width(text);
         const imm::Box b{x - w, row.y + 4, w, h};
-        ctx.fill_rounded(b, col, h * 0.5f);
-        ctx.text_in(b, text, ctx.style.text, 0.0f, true);
+        ctx.chip_in(b, text, col);
         x -= w + 3;
         return b;
     };
     for (size_t i = tags.size(); i-- > 0;) {
-        const float need = ctx.text_width(tags[i]) + 13 + (i > 0 ? ctx.text_width("+" + std::to_string(i)) + 13 : 0);
+        const float need = ctx.chip_width(tags[i]) + 3 + (i > 0 ? ctx.chip_width("+" + std::to_string(i)) + 3 : 0);
         if (x - need < min_x) {
             const std::string more = "+" + std::to_string(i + 1);
-            if (x - ctx.text_width(more) - 10 >= min_x) chip(more, imm::with_alpha(ctx.style.text_dim, 0.35f));
+            if (x - ctx.chip_width(more) >= min_x) chip(more, imm::with_alpha(ctx.style.text_dim, 0.35f));
             break;
         }
         const imm::Box b = chip(tags[i], tag_color_(tags[i]));
@@ -672,7 +672,7 @@ ObjectId AssetsPanel::place_object_asset(const std::string& object_rel, std::opt
 
 void AssetsPanel::draw_asset_panel_(imm::Context& ctx, const imm::Box& area) {
     using I = imm::Icon;
-    const imm::Box hb = app_.area_header_(ctx, area, 30);
+    const imm::Box hb = app_.area_header_(ctx, area, ui::k_area_header_h);
     // Type tabs: one icon per asset type (tooltip names it).
     const auto& types = asset_types_();
     const float s = hb.h - 8;
@@ -766,10 +766,7 @@ void AssetsPanel::draw_asset_panel_(imm::Context& ctx, const imm::Box& area) {
         ctx.end_popup();
     }
     const imm::Box search{area.x + 6, title.bottom() + 2, area.w - 12, 22};
-    ctx.input_text_box("asset_filter", search, &app_.asset_filter_, "    Search");
-    if (ctx.editing_text("asset_filter").value_or(app_.asset_filter_).empty()) {
-        ctx.icon(I::Search, {search.x + 4, search.y + 4, 14, 14}, ctx.style.text_disabled);
-    }
+    app_.search_box_in_(ctx, "asset_filter", search, app_.asset_filter_);
     float list_top = search.bottom() + 4;
     // Tag filter: a dropdown of the tab's tags (several can be on; none = everything).
     auto& filter = tag_filter_();
@@ -1293,7 +1290,7 @@ void AssetsPanel::draw_asset_modals_(imm::Context& ctx) {
 
 void AssetsPanel::draw_console_area_(imm::Context& ctx, const imm::Box& area) {
     using I = imm::Icon;
-    const imm::Box hb = app_.area_header_(ctx, area, 24);
+    const imm::Box hb = app_.area_header_(ctx, area, ui::k_area_header_h);
     float x = hb.x + 4;
     auto tab = [&](const char* id, I ic, const char* label, int index) {
         const float w = ctx.text_width(label) + hb.h + 12;

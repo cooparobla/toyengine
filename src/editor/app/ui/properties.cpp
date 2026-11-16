@@ -515,7 +515,7 @@ void PropertiesPanel::draw_setting_group_(imm::Context& ctx, const SettingsGroup
         if (row_overrides > 0) ctx.fill({hb.x, hb.y + 2.0f, 2.0f, hb.h - 4.0f}, app_.et_.chrome.setting_override_bar);
     }
     if (!open && needle.empty()) { ctx.pop_id(); return; }
-    ctx.indent(6);
+    ctx.indent(ctx.style.indent_small);
     if (g.has_toggle() && !setting_bool_(sec, section, g.toggle)) ctx.label_dim("Off: these apply once " + g.title + " is on.");
     if (!g.needs.empty()) {
         if (const FieldDesc* need = render_field_(g.needs); need && !setting_bool_(sec, section, *need)) {
@@ -536,11 +536,7 @@ void PropertiesPanel::draw_setting_group_(imm::Context& ctx, const SettingsGroup
             const bool has_rows = std::any_of(match.begin() + static_cast<std::ptrdiff_t>(i), match.begin() + static_cast<std::ptrdiff_t>(end),
                                               [](bool b) { return b; });
             if (visible && has_rows) {
-                ctx.spacing(3);
-                const imm::Box hb = ctx.next_box(ctx.style.row_height - 4);
-                ctx.text_in(hb, s.title, ctx.style.text_dim, 0.0f);
-                const float tw = ctx.text_width(s.title) + 8;
-                ctx.fill({hb.x + tw, hb.y + hb.h * 0.5f, std::max(0.0f, hb.w - tw), 1.0f}, ctx.style.separator);
+                ctx.subhead(s.title);
             }
         }
         if (!visible || !match[i]) continue;
@@ -549,7 +545,7 @@ void PropertiesPanel::draw_setting_group_(imm::Context& ctx, const SettingsGroup
                      "config key: " + section + "." + f.key;
         app_.draw_setting_row_(ctx, f, sec, env, section);
     }
-    ctx.unindent(6);
+    ctx.unindent(ctx.style.indent_small);
     ctx.spacing(4);
     ctx.pop_id();
 }
@@ -904,7 +900,7 @@ void PropertiesPanel::draw_component_list_(imm::Context& ctx, ObjectId id, bool 
                 if (ctx.menu_item("Apply to Object Asset", "", nullptr, overridden, I::Save)) app_.instances_panel_->apply_component_to_asset_(id, comp);
                 ctx.tooltip("Apply to Object Asset\nWrite this component's overrides into the object asset (every instance follows)");
             } else {
-                if (ctx.menu_item("Move Up", "", nullptr, i > 0, I::ArrowRight)) app_.apply_(app_.doc_.move_component(id, static_cast<int>(i), -1));
+                if (ctx.menu_item("Move Up", "", nullptr, i > 0, I::ArrowUp)) app_.apply_(app_.doc_.move_component(id, static_cast<int>(i), -1));
                 if (ctx.menu_item("Move Down", "", nullptr, i + 1 < count, I::ArrowDown)) app_.apply_(app_.doc_.move_component(id, static_cast<int>(i), +1));
             }
             if (ctx.menu_item("Reset", "", nullptr, schema != nullptr, I::Restart)) {
@@ -937,7 +933,7 @@ void PropertiesPanel::draw_component_list_(imm::Context& ctx, ObjectId id, bool 
             break;
         }
         if (open) {
-            ctx.indent(6);
+            ctx.indent(ctx.style.indent_small);
             if (type == "DirectionalLight" && app_.weather_panel_->weather_drives_sun_()) {
                 // The weather aims, colours and dims the scene's first directional light.
                 const imm::Box nb = ctx.next_box(ctx.style.row_height);
@@ -974,7 +970,7 @@ void PropertiesPanel::draw_component_list_(imm::Context& ctx, ObjectId id, bool 
                 r = draw_component(ctx, comp, env, [this](const std::string& rel) { app_.assets_panel_->open_asset(AssetType::Material, rel); });
             }
             env.after_field = nullptr;
-            ctx.unindent(6);
+            ctx.unindent(ctx.style.indent_small);
             if (r.changed && editable && !(comp == before)) {
                 const std::string key = "c" + std::to_string(id) + ":" + std::to_string(i) + ":" + r.key;
                 if (instance) app_.instances_panel_->write_override_(id, before, app_.instances_panel_->minimal_override_(id, comp), r.active ? key : std::string());

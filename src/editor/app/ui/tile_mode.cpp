@@ -1,3 +1,4 @@
+#include "editor/app/ui/tool_strip.h"
 #include "editor/app/ui/tile_mode.h"
 #include "editor/app/ui/viewport_chrome.h"
 #include "editor/app/ui/terrain.h"
@@ -512,11 +513,7 @@ void TileModePanel::draw_tile_overlay_(imm::Context& ctx, const ViewProj& vp) {
 
 float TileModePanel::draw_tile_header_(imm::Context& ctx, float x, const imm::Box& hb) {
     const float bh = hb.h - 6;
-    auto label = [&](const char* text) {
-        const float w = ctx.text_width(text) + 6;
-        ctx.text_in({x, hb.y, w, hb.h}, text, ctx.style.text_dim, 0.0f);
-        x += w;
-    };
+    auto label = [&](const char* text) { ui::tool_header_label(ctx, hb, x, text); };
     label(tile_tool_name(tile_brush_.tool));
     x += 6;
     if (tile_brush_.tool != TileTool::Select) {
@@ -543,9 +540,9 @@ float TileModePanel::draw_tile_header_(imm::Context& ctx, float x, const imm::Bo
 void TileModePanel::draw_tile_toolbar_(imm::Context& ctx, const imm::Box& r) {
     float y = r.y + 4;
     for (const auto& b : k_tile_tools) {
-        const imm::Box bb{r.x + 3, y, app_.viewport_chrome_panel_->kToolSize, app_.viewport_chrome_panel_->kToolSize};
-        y += app_.viewport_chrome_panel_->kToolSize + 2;
-        if (ctx.icon_button(std::string("tile_") + tile_tool_name(b.tool), b.icon, b.tip, tile_brush_.tool == b.tool, app_.viewport_chrome_panel_->kToolSize,
+        const imm::Box bb{r.x + 3, y, ui::k_tool_size, ui::k_tool_size};
+        y += ui::k_tool_size + 2;
+        if (ctx.icon_button(std::string("tile_") + tile_tool_name(b.tool), b.icon, b.tip, tile_brush_.tool == b.tool, ui::k_tool_size,
                             imm::Context::kAll, bb)) {
             tile_brush_.tool = b.tool;
         }

@@ -495,6 +495,7 @@ bool ToyRenderPipeline::render(coopa::gfx::presentation::Renderer& renderer, coo
             frame_meshes_ = &meshes;
             record_post_chain_(cmd, ctx);
             frame_meshes_ = nullptr;
+            record_ui_backdrop_(cmd);
             record_overlay_(cmd, ctx);
             record_ms = std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - record_start).count();

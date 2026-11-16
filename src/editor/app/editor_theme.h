@@ -92,6 +92,26 @@ struct EditorTheme {
         glm::vec4 band_fill{0.35f, 0.55f, 0.95f, 0.18f};
         glm::vec4 band_outline{0.55f, 0.72f, 1.0f, 0.85f};
     } nodegraph;
+
+    /**
+     * @brief The animation and rig-pose dope sheets (editor/app/ui/timeline.h).
+     *
+     * Both sheets read these same roles, which is what keeps the two from drifting apart:
+     * a key drawn in one and a key drawn in the other are the same colour by construction.
+     */
+    struct Timeline {
+        glm::vec4 key{0.78f, 0.78f, 0.78f, 1.0f};
+        glm::vec4 key_summary{0.95f, 0.95f, 0.95f, 1.0f};   ///< a collapsed track's rolled-up key
+        glm::vec4 key_selected{1.0f, 0.62f, 0.18f, 1.0f};
+        glm::vec4 event{0.55f, 0.80f, 0.95f, 1.0f};         ///< a clip event's marker
+        glm::vec4 event_selected{1.0f, 0.62f, 0.18f, 1.0f};
+        glm::vec4 playhead{0.32f, 0.55f, 0.95f, 1.0f};      ///< the line and its frame tag
+        glm::vec4 row_alt{1.0f, 1.0f, 1.0f, 0.025f};        ///< every other track row
+        glm::vec4 out_of_range{0.0f, 0.0f, 0.0f, 0.18f};    ///< before 0 and past the clip's length
+        glm::vec4 record{0.55f, 0.12f, 0.12f, 1.0f};        ///< the record button while armed
+        glm::vec4 record_dot{0.85f, 0.25f, 0.25f, 1.0f};
+        glm::vec4 record_dot_armed{1.0f, 0.30f, 0.30f, 1.0f};
+    } timeline;
 };
 
 /** @brief Calls `v(section, role, colour&)` for every editor role -- the single list. */
@@ -153,6 +173,17 @@ void visit_editor_theme(T& t, V&& v) {
     v("nodegraph", "socket_object", t.nodegraph.socket_object);
     v("nodegraph", "band_fill", t.nodegraph.band_fill);
     v("nodegraph", "band_outline", t.nodegraph.band_outline);
+    v("timeline", "key", t.timeline.key);
+    v("timeline", "key_summary", t.timeline.key_summary);
+    v("timeline", "key_selected", t.timeline.key_selected);
+    v("timeline", "event", t.timeline.event);
+    v("timeline", "event_selected", t.timeline.event_selected);
+    v("timeline", "playhead", t.timeline.playhead);
+    v("timeline", "row_alt", t.timeline.row_alt);
+    v("timeline", "out_of_range", t.timeline.out_of_range);
+    v("timeline", "record", t.timeline.record);
+    v("timeline", "record_dot", t.timeline.record_dot);
+    v("timeline", "record_dot_armed", t.timeline.record_dot_armed);
 }
 
 /** @brief The editor roles a theme defines (others keep EditorTheme's values). */

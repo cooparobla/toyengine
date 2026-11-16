@@ -1,5 +1,8 @@
 #include "editor/schema/component_schema.h"
 
+// The splat-layer cap is the engine's, so the inspector cannot drift from what loads.
+#include "toyengine/world/terrain_types.h"
+
 namespace toy {
 namespace editor {
 
@@ -188,6 +191,16 @@ FieldDesc hidden_when(FieldDesc f, std::string key, std::vector<std::string> val
 FieldDesc as_slider(FieldDesc f) { f.slider = true; return f; }
 
 FieldDesc with_unit(FieldDesc f, std::string unit) { f.suffix = std::move(unit); return f; }
+
+FieldDesc with_item_noun(FieldDesc f, std::string noun) { f.item_noun = std::move(noun); return f; }
+
+FieldDesc with_item_title(FieldDesc f, std::string key) { f.item_title_key = std::move(key); return f; }
+
+FieldDesc fixed_order(FieldDesc f) { f.items_reorderable = false; return f; }
+
+FieldDesc collapsed_items(FieldDesc f) { f.items_collapsed = true; return f; }
+
+FieldDesc capped(FieldDesc f, int max) { f.max_items = max; return f; }
 
 const FieldDesc* ComponentSchema::field(const std::string& key) const {
     for (const auto& f : fields) if (f.key == key) return &f;
@@ -540,7 +553,7 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                      "Seconds upside down and still before it rights itself unasked; 0 never does"),
             f_bool("player_input", true),
             with_tip(f_bool("active", true), "The vehicle the player's input reaches; V cycles it"),
-            with_tip(f_items("wheels", {
+            with_tip(collapsed_items(with_item_noun(f_items("wheels", {
                 f_string("object", ""),
                 f_vec3("anchor", glm::vec3(0.0f), 0.01f),
                 f_float("radius", 0.40f, 0.005f, 0.01f, 5.0f),
@@ -558,7 +571,7 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                 f_float("handbrake_share", 0.0f, 0.05f, 0.0f, 10.0f),
                 f_int("anti_roll_group", -1, -1, 15),
                 f_enum("side", {"left", "right"}),
-            }), "One entry per wheel, in the preset's own order (front axle first, left then right). "
+            }), "Wheel")), "One entry per wheel, in the preset's own order (front axle first, left then right). "
                 "`object` names the child drawn there; `stiffness` 0 derives the rate from natural_frequency"),
         }});
         // physxcoopa joints (components/hinge_joint.h, ball_joint.h, cone_twist_joint.h): anchor and
@@ -608,7 +621,7 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             with_tip(f_bool("reposition_root", true), "Without a controller: stand up where the body fell"),
             with_tip(f_bool("input_toggle", false), "R goes limp / recovers"),
             with_tip(f_vec3("toggle_impulse", glm::vec3(0.0f), 1.0f), "Impulse (N s) applied when R goes limp"),
-            with_tip(f_items("bones", {
+            with_tip(collapsed_items(with_item_noun(f_items("bones", {
                 f_string("bone", "pelvis"),
                 f_enum("shape", {"capsule", "box", "sphere"}),
                 f_float("radius", 0.08f, 0.005f, 0.0f, 10.0f),
@@ -625,7 +638,7 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                 f_float("twist_max", 30.0f, 0.5f, -180.0f, 180.0f),
                 f_float("limit_min", -90.0f, 0.5f, -360.0f, 360.0f),
                 f_float("limit_max", 90.0f, 0.5f, -360.0f, 360.0f),
-            }), "Bone path, shape, mass, and the joint to the parent bone (degrees)"),
+            }), "Bone")), "Bone path, shape, mass, and the joint to the parent bone (degrees)"),
         }});
         // toyengine/water/: a body of water (baked by WaterSystem onto the sibling MeshRenderer)
         // and a floating Rigidbody. `size` uses x/y only (the procedural grid's extent).
@@ -851,11 +864,11 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                 f_float("noise_scroll", 0.5f, 0.01f, 0.0f, 100.0f),
                 f_int("noise_octaves", 2, 1, 3),
                 // Over lifetime
-                with_tip(f_items("color_over_life", {f_float("t", 0.0f, 0.01f, 0.0f, 1.0f), f_color4("color", glm::vec4(1.0f))}, fade, true),
+                with_tip(fixed_order(with_item_noun(f_items("color_over_life", {f_float("t", 0.0f, 0.01f, 0.0f, 1.0f), f_color4("color", glm::vec4(1.0f))}, fade, true), "Stop")),
                          "Multiplies start colour over normalized life (scatter: per-instance variety)"),
-                with_tip(f_items("size_over_life", {f_float("t", 0.0f, 0.01f, 0.0f, 1.0f), f_float("value", 1.0f, 0.01f, 0.0f, 1e4f)}, grow),
+                with_tip(fixed_order(with_item_noun(f_items("size_over_life", {f_float("t", 0.0f, 0.01f, 0.0f, 1.0f), f_float("value", 1.0f, 0.01f, 0.0f, 1e4f)}, grow), "Stop")),
                          "Multiplies start size over normalized life"),
-                with_tip(f_items("alpha_over_life", {f_float("t", 0.0f, 0.01f, 0.0f, 1.0f), f_float("value", 1.0f, 0.01f, 0.0f, 1.0f)}),
+                with_tip(fixed_order(with_item_noun(f_items("alpha_over_life", {f_float("t", 0.0f, 0.01f, 0.0f, 1.0f), f_float("value", 1.0f, 0.01f, 0.0f, 1.0f)}), "Stop")),
                          "Extra alpha multiplier over life"),
                 // Collision
                 with_tip(f_bool("collide", false), "Collide with a ground plane at ground_height (world space systems)"),
@@ -868,8 +881,8 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                                                                     "emitter) wrap back in on the other side -- precipitation that keeps up with a "
                                                                     "moving camera. 0 on an axis: no wrap"),
                 with_tip(f_float("wrap_fade", 0.15f, 0.01f, 0.0f, 1.0f), "Alpha fades over this fraction of the wrap box's half width at its sides"),
-                with_tip(f_items("on_death", {f_string("target"), f_vec2("count", glm::vec2(1.0f, 1.0f), 0.1f),
-                                              f_float("inherit_velocity", 0.0f, 0.01f, -10.0f, 10.0f)}),
+                with_tip(with_item_noun(f_items("on_death", {f_string("target"), f_vec2("count", glm::vec2(1.0f, 1.0f), 0.1f),
+                                              f_float("inherit_velocity", 0.0f, 0.01f, -10.0f, 10.0f)}), "Sub-Emitter"),
                          "Sub emitters: each death spawns into the named object's ParticleSystem"),
                 // Renderer
                 with_tip(f_enum("render_mode", {"billboard", "stretched", "horizontal", "vertical", "aligned", "mesh", "none"}, true),
@@ -1081,6 +1094,26 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             with_tip(f_int("hotbar_slots", 6, 1, 12), "Cells along the bottom"),
             with_tip(f_bool("animate", true), "Drift the vitals, so a still frame shows partly-empty bars"),
             with_tip(f_string("theme_ref", "ui/themes/game_dark", true), "Theme styling the HUD"),
+            with_tip(f_string("font_ref", ""), "Font, relative to an asset root; empty uses the stock face"),
+            with_tip(f_int("sort_order", 0, -10000, 10000), "Canvas draw order; higher draws on top"),
+            with_tip(f_string("tunables_ref", ""), "Placement overrides (.tune.yaml); empty derives one from the type name"),
+            with_tip(f_bool("ui_sounds", true), "Play the hover/click cues"),
+            f_bool("hidden", false),
+        }});
+
+        // A movable four-quadrant panel workspace with a dock -- Inventory/Character/Map/
+        // Quests/Settings, each panel draggable between quadrants and closable, growing into
+        // any adjacent quadrant left empty (toyengine/ui/quadrant_layout.h's growth rule).
+        add({"QuadrantDock", "UI", {
+            with_tip(f_bool("open_inventory", true), "Open at start"),
+            with_tip(f_bool("open_character", true), "Open at start"),
+            with_tip(f_bool("open_map", false), "Open at start"),
+            with_tip(f_bool("open_quests", true), "Open at start"),
+            with_tip(f_bool("open_settings", false), "Open at start"),
+            with_tip(f_bool("minimised", false), "Start minimised: only the dock, over the camera view"),
+            with_tip(f_bool("reduced_motion", false), "Pin every transition (dock hover, the minimise reveal) to its target instead of easing"),
+            with_tip(f_bool("reduced_transparency", false), "Swap every glass pane for an opaque fill and skip the backdrop blur"),
+            with_tip(f_string("theme_ref", "ui/themes/glass", true), "Theme styling the workspace -- the glass look lives in its own glass: section"),
             with_tip(f_string("font_ref", ""), "Font, relative to an asset root; empty uses the stock face"),
             with_tip(f_int("sort_order", 0, -10000, 10000), "Canvas draw order; higher draws on top"),
             with_tip(f_string("tunables_ref", ""), "Placement overrides (.tune.yaml); empty derives one from the type name"),
@@ -1517,7 +1550,7 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                 // entry is ONE of three kinds, by which key it carries: `ratio` simplifies the full
                 // mesh, `field` re-meshes it as a grid of flat quads, `tile_set` re-stamps it in
                 // another tile set. At most 4 are read; the rest are ignored.
-                f_items("lods", {
+                fixed_order(with_item_noun(f_items("lods", {
                     with_tip(f_float("screen_size", 0.0f, 0.005f, 0.0f, 2.0f),
                              "Drawn while the chunk covers less than this fraction of the screen's height -- "
                              "a BIGGER number takes over closer to the camera"),
@@ -1535,7 +1568,7 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                     with_tip(f_bool("smooth", false),
                              "Shade this level as a rounded surface instead of hard-edged blocks. Normals only -- "
                              "same triangles, same seams. Best left off on the first (closest) level"),
-                }, lods_default),
+                }, lods_default), "LOD")),
                 with_tip(f_string("physics_material", ""), "physics_materials/<name>.yaml for the colliders (friction, bounce)"),
                 f_material(),
             };
@@ -1584,7 +1617,7 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             fs.push_back(f_int("splat_resolution", 512, 4, 8192));
             fs.push_back(with_tip(f_int("height_sub", 2, 1, 64), "Height samples per tile edge; 1 is a terraced read with no "
                                                                  "height plane at all, matching Tiles mode's own ground"));
-            fs.push_back(f_items("layers", {
+            fs.push_back(capped(fixed_order(collapsed_items(with_item_title(with_item_noun(f_items("layers", {
                 f_string("name", "layer"),
                 f_asset("albedo", "textures", ".png"),
                 f_asset("normal", "textures", ".png"),
@@ -1595,7 +1628,7 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                 f_float("normal_strength", 1.0f, 0.01f, 0.0f, 4.0f),
                 with_tip(f_bool("triplanar", false), "Project from the sides on steep slopes (cliffs)"),
                 f_float("triplanar_sharpness", 4.0f, 0.05f, 1.0f, 16.0f),
-            }, layers_default, true));
+            }, layers_default, true), "Layer"), "name"))), toy::world::k_heightmap_layer_count));
             fs.push_back(with_tip(f_bool("deep_snow", false), "Deep snow (with trenches) piles on flat ground when it snows"));
             fs.push_back(with_tip(f_bool("puddles", true), "Rain gathers in hollows"));
             fs.push_back(f_bool("cast_shadows", true));
@@ -1678,7 +1711,7 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                          "default instances/<object>.instances"),
                 with_tip(f_float("chunk_size", 32.0f, 0.5f, 4.0f, 512.0f, true),
                          "Metres per chunk -- the draw, cull, collide and file unit. Match the terrain's chunks"),
-                f_items("prototypes", {
+                collapsed_items(with_item_noun(f_items("prototypes", {
                     with_tip(f_asset("object", "objects", ".yaml", true, false), "An object asset to paint; or use `mesh`"),
                     with_tip(f_asset("mesh", "meshes", ".yaml", true, true), "A bare mesh to paint, instead of an object asset"),
                     f_string("name", ""),
@@ -1698,7 +1731,7 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                     with_tip(f_float("draw_distance", 0.0f, 1.0f, 0.0f, 20000.0f), "Metres past which it is not drawn; 0 derives one from its height"),
                     with_tip(f_float("fade_start", 0.6f, 0.01f, 0.0f, 1.0f), "Thinning begins at this fraction of the draw distance"),
                     f_bool("cast_shadows", true),
-                }, prototypes_default, true),
+                }, prototypes_default, true), "Prototype")),
                 with_tip(f_float("collision_radius", 64.0f, 1.0f, 0.0f, 4000.0f, true),
                          "Metres from the camera within which collidable instances have colliders. "
                          "0 turns collision off entirely, whatever the prototypes ask for"),

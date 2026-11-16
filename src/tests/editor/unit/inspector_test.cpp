@@ -6,13 +6,19 @@
 
 #include <coopa/testing/test.h>
 
+#include <string>
+#include <vector>
+
 #include "editor/schema/inspector.h"
+#include "editor/schema/item_list.h"
 #include "editor/schema/settings_schema.h"
 #include "editor/support/imm_harness.h"
 
 COOPA_TEST_SUITE("inspector");
 
 namespace toy::editor::testing {
+
+using imm_box_t = coopa::ui::imm::Box;
 
 /** @brief Int-coded modes (fog_mode) show names, and picking one still writes the int. */
 COOPA_TEST(int_enums_show_labels_but_store_ints) {
@@ -181,6 +187,178 @@ COOPA_TEST(a_key_no_section_lists_still_shows_under_more) {
     expect(all_placed > 0.0f, "a sectioned component draws its section");
     expect(one_loose > all_placed, "the unplaced key adds a More header (" + std::to_string(all_placed) + " -> " +
                                    std::to_string(one_loose) + ")");
+}
+
+// ---------------------------------------------------------------------------------------
+// FieldKind::ItemList: a per-item foldout with a reorder grip, and an Add that defaults.
+// ---------------------------------------------------------------------------------------
+
+namespace {
+
+/** @brief A two-key item schema, shaped like Vehicle `wheels` (named by a text field). */
+FieldDesc wheels_list() {
+    return with_item_noun(f_items("wheels", {f_string("object"), f_float("radius", 0.35f, 0.01f, 0.0f, 10.0f)}),
+                          "Wheel");
+}
+
+Node list_of(const std::vector<std::string>& objects) {
+    Node seq = Node::sequence();
+    for (const auto& o : objects) {
+        Node m = Node::mapping();
+        m["object"] = Node(o);
+        m["radius"] = 0.35f;
+        seq.as_seq().push_back(m);
+    }
+    return seq;
+}
+
+std::string nth_object(const Node& block, size_t i) {
+    return block.at("wheels").as_seq()[i].at("object").get_value<std::string>();
+}
+
+} // namespace
+
+COOPA_TEST(a_collapsed_item_list_draws_one_header_per_item_and_no_rows) {
+    ImmHarness h;
+    const FieldDesc list = collapsed_items(wheels_list());
+    Node block = Node::mapping();
+    block["wheels"] = list_of({"wheel_fl", "wheel_fr"});
+    InspectorEnv env;
+    float used = 0.0f;
+    auto ui = [&](coopa::ui::imm::Context& c) {
+        c.begin_region("r", {0, 0, 400, 400}, false);
+        draw_field(c, list, block, env);
+        used = c.cursor().y;
+        c.end_region();
+    };
+    h.frame(ui);
+    const float collapsed_h = used;
+
+    const FieldDesc open_list = wheels_list();   // the same list, items open
+    float open_h = 0.0f;
+    auto ui2 = [&](coopa::ui::imm::Context& c) {
+        c.begin_region("r2", {0, 0, 400, 400}, false);
+        draw_field(c, open_list, block, env);
+        open_h = c.cursor().y;
+        c.end_region();
+    };
+    h.frame(ui2);
+    expect(open_h > collapsed_h + 20.0f,
+           "closed items hide their rows (" + std::to_string(collapsed_h) + " vs " + std::to_string(open_h) + ")");
+    expect(nth_object(block, 0) == "wheel_fl" && nth_object(block, 1) == "wheel_fr",
+           "and drawing changed nothing");
+}
+
+/**
+ * @brief The same grip drag on two lists: one reorderable, one fixed_order.
+ *
+ * Written as one differential case on purpose. Asserting only that a fixed_order list does
+ * not move proves nothing on its own -- a press that misses the grip entirely would pass it
+ * too -- so the gesture has to be shown working on the list that should move.
+ */
+COOPA_TEST(a_grip_drag_reorders_a_list_and_a_fixed_order_list_ignores_it) {
+    InspectorEnv env;
+
+    // Where the drawer puts the second item's grip: the region insets by `padding`, the
+    // list's caption takes one row, and each item header is row_height + 3 plus the gap.
+    auto gesture = [&](const FieldDesc& f) {
+        ImmHarness h;
+        Node block = Node::mapping();
+        block["wheels"] = list_of({"a", "b", "c"});
+        auto ui = [&](coopa::ui::imm::Context& c) {
+            c.begin_region("r", {0, 0, 400, 400}, false);
+            draw_field(c, f, block, env);
+            c.end_region();
+        };
+        h.frame(ui);
+        const coopa::ui::imm::Style& st = h.ctx.style;
+        const float pad = st.padding;
+        const float header_h = st.row_height + 3.0f;
+        const float pitch = header_h + st.spacing;
+        const float caption = st.row_height + st.spacing;
+        const float second_top = pad + caption + pitch;
+
+        h.mouse = {pad + 2.0f + (st.row_height - 2.0f) * 0.5f, second_top + header_h * 0.5f};
+        h.frame(ui);
+        h.down = true;
+        h.frame(ui);
+        h.mouse.y -= pitch;             // one item of travel, upwards
+        h.frame(ui);
+        h.down = false;
+        h.frame(ui);
+        return nth_object(block, 0) + nth_object(block, 1) + nth_object(block, 2);
+    };
+
+    expect(gesture(collapsed_items(wheels_list())) == "bac",
+           "dragging the second item's grip up one item swaps it with the first (got " +
+               gesture(collapsed_items(wheels_list())) + ")");
+    expect(gesture(fixed_order(collapsed_items(wheels_list()))) == "abc",
+           "the same drag on a fixed_order list moves nothing (got " +
+               gesture(fixed_order(collapsed_items(wheels_list()))) + ")");
+}
+
+COOPA_TEST(add_appends_an_item_at_its_defaults_and_stops_at_the_cap) {
+    ImmHarness h;
+    const FieldDesc list = capped(collapsed_items(wheels_list()), 2);
+    Node block = Node::mapping();
+    block["wheels"] = list_of({"a"});
+    InspectorEnv env;
+    imm_box_t add{};
+    auto ui = [&](coopa::ui::imm::Context& c) {
+        c.begin_region("r", {0, 0, 400, 400}, false);
+        draw_field(c, list, block, env);
+        add = c.last_rect();
+        c.end_region();
+    };
+    h.frame(ui);
+    h.click(add.center(), ui);
+    expect(block.at("wheels").size() == 2, "Add appends one item");
+    const Node& fresh = block.at("wheels").as_seq()[1];
+    expect(fresh.at("radius").get_value<double>() > 0.34 && fresh.at("radius").get_value<double>() < 0.36,
+           "the new item's float is at its schema default, not 0");
+
+    h.frame(ui);
+    h.click(add.center(), ui);
+    expect(block.at("wheels").size() == 2, "and Add does nothing once the cap is reached");
+}
+
+COOPA_TEST(an_empty_item_list_says_so_once) {
+    ImmHarness h;
+    const FieldDesc list = wheels_list();
+    Node block = Node::mapping();
+    InspectorEnv env;
+    auto ui = [&](coopa::ui::imm::Context& c) {
+        c.begin_region("r", {0, 0, 400, 400}, false);
+        draw_field(c, list, block, env);
+        c.end_region();
+    };
+    h.frame(ui);
+    expect(block.contains("wheels") && block.at("wheels").is_sequence() && block.at("wheels").size() == 0,
+           "an absent list is created empty, not filled");
+    expect(item_list_empty_text(list) == "No wheels yet.", "and the empty wording is the shared one");
+}
+
+COOPA_TEST(a_list_item_marks_its_override_with_the_lists_own_key) {
+    ImmHarness h;
+    const FieldDesc list = wheels_list();   // items open, so sub-rows draw
+    Node block = Node::mapping();
+    block["wheels"] = list_of({"a"});
+    InspectorEnv env;
+    std::vector<std::string> marked;
+    env.after_field = [&](coopa::ui::imm::Context&, const std::string& key, const imm_box_t&) {
+        marked.push_back(key);
+    };
+    auto ui = [&](coopa::ui::imm::Context& c) {
+        marked.clear();
+        c.begin_region("r", {0, 0, 400, 400}, false);
+        draw_field(c, list, block, env);
+        c.end_region();
+    };
+    h.frame(ui);
+    expect(!marked.empty(), "a field inside a list reaches after_field at all");
+    for (const std::string& k : marked) {
+        expect(k == "wheels", "and is marked with the list's key, not the item's (got '" + k + "')");
+    }
 }
 
 } // namespace toy::editor::testing

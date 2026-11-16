@@ -37,7 +37,7 @@ changes push-constant contents is free to flip every frame.
 
 | Startup-fixed | Runtime |
 |---|---|
-| `ssr_enabled`, `ssgi_traced`, `ssao_enabled`, `transparency_enabled`, `xray_enabled`, `refraction_enabled`, `fog_enabled`, `volumetrics_enabled`, `bloom_enabled`, `dof_enabled`, `tilt_shift_enabled`, `auto_exposure_enabled`, `grading_lut_path`, `aa_mode`, `skinning`, `world_ui_enabled`, `screen_ui_enabled`, and every resolution/capacity field | `sdf_enabled`, `shadows_enabled`, `sdf_shadows_enabled`, `shadow_pcss_enabled`, `contact_shadows_enabled`, `volumetrics_shadows_enabled`, `grading_enabled`, `ssr_reflect_transparent`, `debug_view`, and every numeric tunable |
+| `ssr_enabled`, `ssgi_traced`, `ssao_enabled`, `transparency_enabled`, `xray_enabled`, `refraction_enabled`, `fog_enabled`, `volumetrics_enabled`, `bloom_enabled`, `dof_enabled`, `tilt_shift_enabled`, `ui_backdrop_blur_enabled`, `ui_backdrop_blur_downscale`, `auto_exposure_enabled`, `grading_lut_path`, `aa_mode`, `skinning`, `world_ui_enabled`, `screen_ui_enabled`, and every resolution/capacity field | `sdf_enabled`, `shadows_enabled`, `sdf_shadows_enabled`, `shadow_pcss_enabled`, `contact_shadows_enabled`, `volumetrics_shadows_enabled`, `grading_enabled`, `ssr_reflect_transparent`, `debug_view`, `ui_backdrop_blur_radius`, and every numeric tunable |
 
 The list lives in one place, the `TOY_STARTUP_FIXED_FIELDS` X-macro at the top of
 `toy_render_pipeline.h`. `apply_live_config()` enforces the split: it restores any
@@ -190,13 +190,19 @@ three groups below.
 17. World-space UI → `ui_world_target_`, at the display rect.
 18. FXAA / SMAA / TAA → `aa_target_`, when `aa_mode != "off"`.
 19. Tilt shift, at display resolution.
+19b. `record_ui_backdrop_()`: the glass-UI backdrop blur, at `render_extent_ / ui_backdrop_blur_downscale`
+    — reading the SAME tilt-shift-on/off source `ui_composite_pass_`'s base image does, so the
+    two never disagree about which frame they show. Between the post chain and the overlay
+    deliberately: a glass pane's backdrop is the frame *before* any UI, captured once per frame
+    rather than once per panel.
 
 **Overlay** (`record_overlay_()`):
 
 20. `ui_composite_pass_` draws the post-processed scene into the letterbox sub-rect of
     `overlay_target_` with the world-UI layer over it — performing the nearest upscale
     itself when tilt shift is off — then screen-space UI draws as a guest at full window
-    resolution.
+    resolution, with `screen_ui_pass_->set_backdrop_rect()` pointed at that same letterbox rect
+    so a glass panel's `gl_FragCoord` fetch lands on the right part of step 19b's result.
 21. `record_fn`: `upscale_pass_` blits `overlay_target_` 1:1 into the swapchain.
 
 Each stage is gated on its own toggle and skipped entirely when off.
@@ -216,6 +222,18 @@ of the upscaled scene image, it is drawn on top of the finished one:
 | --- | --- | --- | --- |
 | `world_ui_enabled` | uicoopa `UiWorldPass` → `ui_world_target_` | display (letterbox) rect | `render_mode: WorldSpace` canvases, as real 3D geometry |
 | `screen_ui_enabled` | uicoopa `UiPass` → `overlay_target_` | full window | `ScreenSpaceOverlay` canvases — an HUD |
+
+A third thing lives alongside these but is not itself a UI layer: `ui_backdrop_blur_enabled`
+builds `ui_backdrop_pass_` (`SeparableBlurPass`), a uniform blur a glass panel samples as an
+ordinary texture (`toy::ui::Context::glass()`/`glass_panel()`). Unlike the two layers above it is
+sized from **`render_extent_`**, not the display/letterbox rect — a frosted pane has no
+focus-ramp structure to stair-step the way tilt shift's lens effect does, so there is nothing
+display resolution buys it, and sizing it smaller makes the whole pass startup-fixed: the result
+is stable for the pipeline's lifetime and `handle_resize_()` never touches it. The backdrop
+view is bound as an ordinary **set-0 UI texture**, not through `ExtraSets` — a glass quad's
+texture key IS the backdrop view, selected into its own batch and its own "glass" pipeline
+variant the same way a font atlas's view already selects the "text" variant (see `ui_pass.h`'s
+file doc for the full rationale and the one-line delta to move it to `ExtraSets`/set 1 later).
 
 The chain:
 

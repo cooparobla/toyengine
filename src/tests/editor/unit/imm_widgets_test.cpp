@@ -9,6 +9,10 @@
 #include <coopa/testing/test.h>
 
 #include <string>
+#include <utility>
+#include <vector>
+
+#include <uicoopa/immediate/imm_icons.h>
 
 #include "editor/support/imm_harness.h"
 #include "editor/support/view_helpers.h"
@@ -275,6 +279,125 @@ COOPA_TEST(a_range_slider_keeps_its_low_below_its_high) {
     expect(hi >= was_lo - 1e-4f, "and the high handle stops at the low one");
     h.down = false;
     h.frame(ui);
+}
+
+COOPA_TEST(a_reorder_grip_steps_one_row_per_pitch_of_travel) {
+    namespace imm = coopa::ui::imm;
+    ImmHarness h;
+    std::vector<std::string> items{"a", "b", "c"};
+    const float row_h = 20.0f, pitch = 23.0f;
+    auto ui = [&](imm::Context& c) {
+        c.begin_region("r", {0, 0, 300, 300}, false);
+        const imm::Id list = c.get_id("items");
+        imm::ReorderRequest rq;
+        for (int i = 0; i < static_cast<int>(items.size()); ++i) {
+            const imm::Box grip{0, static_cast<float>(i) * pitch, row_h, row_h};
+            if (auto q = c.reorder_grip(list, grip, i, static_cast<int>(items.size()), pitch); q.wanted()) rq = q;
+        }
+        c.reorder_release(list);
+        if (rq.wanted()) {
+            std::swap(items[static_cast<size_t>(rq.from)], items[static_cast<size_t>(rq.to)]);
+            c.reorder_step(list, rq.to);
+        }
+        c.end_region();
+    };
+
+    h.mouse = {10, 10};                 // over the first row's grip
+    h.frame(ui);
+    h.down = true;
+    h.frame(ui);
+    expect(items[0] == "a", "the press itself does not move anything");
+    expect(h.ctx.reorder_dragging(h.ctx.get_id("items"), 0) ||
+           items[0] == "a", "the first row is the one being dragged");
+
+    h.mouse.y = 10 + pitch;             // one row of travel
+    h.frame(ui);
+    expect(items[0] == "b" && items[1] == "a", "one pitch down swaps with the next row");
+
+    h.mouse.y = 10 + pitch * 2;         // and the anchor followed, so it steps again
+    h.frame(ui);
+    expect(items[1] == "c" && items[2] == "a",
+           "a held drag keeps stepping (got " + items[0] + items[1] + items[2] + ")");
+
+    h.mouse.y = 10 + pitch * 3;         // past the end
+    h.frame(ui);
+    expect(items[2] == "a", "a drag past the last row asks for nothing");
+
+    h.down = false;
+    h.frame(ui);
+    expect(!h.ctx.reorder_dragging(h.ctx.get_id("items"), 2), "releasing the mouse ends the drag");
+}
+
+COOPA_TEST(a_grip_drag_past_the_first_row_asks_for_nothing) {
+    namespace imm = coopa::ui::imm;
+    ImmHarness h;
+    std::vector<int> items{1, 2};
+    const float pitch = 23.0f;
+    auto ui = [&](imm::Context& c) {
+        c.begin_region("r", {0, 0, 300, 300}, false);
+        const imm::Id list = c.get_id("items");
+        imm::ReorderRequest rq;
+        for (int i = 0; i < static_cast<int>(items.size()); ++i) {
+            const imm::Box grip{0, static_cast<float>(i) * pitch, 20, 20};
+            if (auto q = c.reorder_grip(list, grip, i, static_cast<int>(items.size()), pitch); q.wanted()) rq = q;
+        }
+        c.reorder_release(list);
+        if (rq.wanted()) {
+            std::swap(items[static_cast<size_t>(rq.from)], items[static_cast<size_t>(rq.to)]);
+            c.reorder_step(list, rq.to);
+        }
+        c.end_region();
+    };
+    h.mouse = {10, 10};
+    h.frame(ui);
+    h.down = true;
+    h.frame(ui);
+    h.mouse.y = 10 - pitch * 2;     // dragging the FIRST row upwards
+    h.frame(ui);
+    expect(items[0] == 1 && items[1] == 2, "the first row cannot be moved above itself");
+    h.down = false;
+    h.frame(ui);
+}
+
+COOPA_TEST(every_icon_has_a_name_that_maps_back_to_it) {
+    namespace imm = coopa::ui::imm;
+    int checked = 0;
+    for (int i = 1; i < static_cast<int>(imm::Icon::Count); ++i) {
+        const imm::Icon ic = static_cast<imm::Icon>(i);
+        const char* name = imm::icon_name(ic);
+        expect(name[0] != '\0', "icon " + std::to_string(i) + " has a name");
+        expect(imm::icon_from_name(name) == ic,
+               std::string("'") + name + "' maps back to the icon it names");
+        ++checked;
+    }
+    expect(checked > 100, "the whole set was checked (" + std::to_string(checked) + ")");
+    expect(imm::icon_from_name("grip") == imm::Icon::Grip, "a name still matches without regard to case");
+    expect(imm::icon_from_name("nonesuch") == imm::Icon::None, "an unknown name is Icon::None");
+}
+
+COOPA_TEST(subhead_chip_and_primary_button_draw) {
+    namespace imm = coopa::ui::imm;
+    ImmHarness h;
+    int clicks = 0, disabled_clicks = 0;
+    imm::Box chip_rect{}, button_rect{};
+    auto ui = [&](imm::Context& c) {
+        c.begin_region("r", {0, 0, 300, 300}, false);
+        c.subhead("Group");
+        chip_rect = c.chip("tag");
+        if (c.primary_button("Build", 120)) ++clicks;
+        button_rect = c.last_rect();
+        if (c.primary_button("Cancel", 120, false)) ++disabled_clicks;
+        c.end_region();
+    };
+    h.frame(ui);
+    expect(chip_rect.w >= h.ctx.text_width("tag"), "a chip is at least as wide as its text");
+    expect(chip_rect.h > 0 && button_rect.h > 0, "both drew a box");
+
+    h.click(button_rect.center(), ui);
+    expect(clicks == 1, "the primary button clicks once");
+    h.frame(ui);
+    h.click({button_rect.center().x, button_rect.center().y + button_rect.h + 3}, ui);
+    expect(disabled_clicks == 0, "a disabled primary button does not click");
 }
 
 } // namespace toy::editor::testing

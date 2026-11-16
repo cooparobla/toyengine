@@ -1189,6 +1189,26 @@ struct ToyRenderConfig {
     float tilt_shift_angle        = 0.0f;  /**< Degrees; rotates the focus band off horizontal. */
 
     /**
+     * Uniform backdrop blur behind glass UI panels (toy::ui::Context::glass()/glass_panel())
+     * -- a `backdrop-filter: blur()` equivalent. Unlike tilt_shift above, this runs at RENDER
+     * resolution divided by ui_backdrop_blur_downscale, not at the display/letterbox size: a
+     * frosted panel has no focus-ramp structure to stair-step, so there is nothing display
+     * resolution buys it, and running it smaller makes the result STARTUP-FIXED -- no resize
+     * rebuild, unlike tilt_shift_pass_'s targets.
+     *
+     * ui_backdrop_blur_enabled and ui_backdrop_blur_downscale are both startup-fixed (same
+     * policy as tilt_shift_enabled above): the first decides whether the pass, its two
+     * targets and UiPass's "glass" pipeline variant exist at all, and the second sizes those
+     * targets. ui_backdrop_blur_radius is a push constant, free every frame.
+     *
+     * This is a UI look, not a `*_quality` tier: no tier sets these, since a tier that did
+     * would go inert the instant a project's config.yaml wrote one of these keys.
+     */
+    bool     ui_backdrop_blur_enabled   = false;
+    float    ui_backdrop_blur_radius    = 8.0f; /**< Furthest blur tap, in RENDER pixels. */
+    uint32_t ui_backdrop_blur_downscale = 2;    /**< Divides render_extent_ to size the blur targets; 1..4. */
+
+    /**
      * Physically-based depth of field -- see gfxcoopa's DofPass. Unlike
      * tilt_shift above, this runs at RENDER resolution, on linear HDR, before
      * bloom_enabled's pyramid: the circle of confusion is a function of scene

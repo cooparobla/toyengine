@@ -1,3 +1,4 @@
+#include "editor/app/ui/tool_strip.h"
 #include "editor/app/ui/timeline.h"
 #include "editor/app/ui/instances.h"
 #include "editor/app/ui/assets.h"
@@ -37,7 +38,7 @@ template<typename XOf, typename TOf>
         for (size_t i = 0; i < evs.size(); ++i) {
             const bool sel = static_cast<int>(i) == app_.anim_sel_event_;
             const float ex = x_of(evs[i].time) + (app_.anim_event_drag_.active && sel ? app_.anim_event_drag_.dt * pps : 0.0f);
-            const glm::vec4 col = sel ? glm::vec4(1.0f, 0.62f, 0.18f, 1) : glm::vec4(0.55f, 0.8f, 0.95f, 1);
+            const glm::vec4 col = sel ? app_.et_.timeline.event_selected : app_.et_.timeline.event;
             ctx.line({ex, y + 3}, {ex, y + row_h - 3}, col, 1.5f);
             ctx.triangle({ex, y + 3}, {ex + 9, y + 6.5f}, {ex, y + 10}, col);
             const imm::Box hit{ex - 4, y, 15, row_h};
@@ -878,9 +879,7 @@ void TimelinePanel::draw_timeline_(imm::Context& ctx, const imm::Box& hb, const 
         return;
     }
     auto icon_btn = [&](const char* id, I ic, const char* tip, bool on) {
-        const bool r = ctx.icon_button(id, ic, tip, on, bh, imm::Context::kAll, imm::Box{x, hb.y + 3, bh, bh});
-        x += bh + 3;
-        return r;
+        return ui::tool_header_button(ctx, hb, x, id, ic, tip, on);
     };
     if (icon_btn("tl_start", I::Undo, "Jump to Start\nHome", false)) app_.anim_time_ = 0.0f;
     if (icon_btn("tl_play", app_.anim_playing_ ? I::Pause : I::Play, "Play / Pause\nSpace (while the Timeline is open)", app_.anim_playing_)) {
@@ -897,8 +896,8 @@ void TimelinePanel::draw_timeline_(imm::Context& ctx, const imm::Box& hb, const 
         const imm::Box b{x, hb.y + 3, bh, bh};
         bool hov = false, held = false;
         if (ctx.invisible_button("tl_rec", b, &hov, &held)) app_.anim_record_ = !app_.anim_record_;
-        ctx.fill_rounded(b, app_.anim_record_ ? glm::vec4(0.55f, 0.12f, 0.12f, 1) : hov ? ctx.style.button_hover : ctx.style.button);
-        ctx.circle(b.center(), bh * 0.28f, app_.anim_record_ ? glm::vec4(1, 0.3f, 0.3f, 1) : glm::vec4(0.85f, 0.25f, 0.25f, 1));
+        ctx.fill_rounded(b, app_.anim_record_ ? app_.et_.timeline.record : hov ? ctx.style.button_hover : ctx.style.button);
+        ctx.circle(b.center(), bh * 0.28f, app_.anim_record_ ? app_.et_.timeline.record_dot_armed : app_.et_.timeline.record_dot);
         ctx.tooltip("Record\nPose the rig for keys: moving its objects changes only the animated pose, never the rest pose. "
                     "I keys the selection.");
         x += bh + 3;
@@ -1004,8 +1003,8 @@ void TimelinePanel::draw_dope_sheet_(imm::Context& ctx, const imm::Box& body) {
         if (major) ctx.line({x, ruler.bottom()}, {x, track.bottom()}, imm::with_alpha(ctx.style.text_dim, 0.12f), 1.0f);
     }
     // Outside the clip's range is shaded; its end is a line.
-    if (x_of(0.0f) > track.x) ctx.fill({track.x, ruler.bottom(), x_of(0.0f) - track.x, track.h - ruler_h}, glm::vec4(0, 0, 0, 0.18f));
-    if (x_of(len) < track.right()) ctx.fill({x_of(len), ruler.bottom(), track.right() - x_of(len), track.h - ruler_h}, glm::vec4(0, 0, 0, 0.18f));
+    if (x_of(0.0f) > track.x) ctx.fill({track.x, ruler.bottom(), x_of(0.0f) - track.x, track.h - ruler_h}, app_.et_.timeline.out_of_range);
+    if (x_of(len) < track.right()) ctx.fill({x_of(len), ruler.bottom(), track.right() - x_of(len), track.h - ruler_h}, app_.et_.timeline.out_of_range);
     ctx.line({x_of(len), track.y}, {x_of(len), track.bottom()}, imm::with_alpha(ctx.style.accent, 0.6f), 1.0f);
     ctx.pop_clip();
 
@@ -1074,7 +1073,7 @@ void TimelinePanel::draw_dope_sheet_(imm::Context& ctx, const imm::Box& body) {
         if (y > body.bottom()) break;
         const Row& row = rows[r];
         const imm::Box rb{body.x, y, body.w, row_h};
-        if (r % 2) ctx.fill(rb, glm::vec4(1, 1, 1, 0.025f));
+        if (r % 2) ctx.fill(rb, app_.et_.timeline.row_alt);
         const bool selected = !row.summary && row.property.empty() && app_.doc_.is_selected(row.id);
         if (selected) ctx.fill({names.x, y, names.w, row_h}, imm::with_alpha(ctx.style.selection, 0.6f));
         float tx = names.x + 6 + row.depth * 12.0f;
@@ -1107,8 +1106,9 @@ void TimelinePanel::draw_dope_sheet_(imm::Context& ctx, const imm::Box& body) {
             const bool sel_key = is_selected(row, t);
             const glm::vec2 c{x_of(t) + (app_.anim_drag_.active && sel_key ? app_.anim_drag_.dt * pps : 0.0f), y + row_h * 0.5f};
             const float rr = row.summary ? 5.5f : !row.property.empty() ? 4.0f : 4.5f;
-            const glm::vec4 fillc = sel_key ? glm::vec4(1.0f, 0.62f, 0.18f, 1) : row.summary ? glm::vec4(0.95f, 0.95f, 0.95f, 1)
-                                                                                : glm::vec4(0.78f, 0.78f, 0.78f, 1);
+            const glm::vec4 fillc = sel_key      ? app_.et_.timeline.key_selected
+                                    : row.summary ? app_.et_.timeline.key_summary
+                                                  : app_.et_.timeline.key;
             ctx.triangle({c.x, c.y - rr}, {c.x + rr, c.y}, {c.x, c.y + rr}, fillc);
             ctx.triangle({c.x, c.y - rr}, {c.x, c.y + rr}, {c.x - rr, c.y}, fillc);
             if (!in_track || on_key || glm::distance(m, c) > rr + 2.0f) continue;
@@ -1239,9 +1239,9 @@ void TimelinePanel::draw_dope_sheet_(imm::Context& ctx, const imm::Box& body) {
     // The playhead.
     ctx.push_clip(track);
     const float px = x_of(app_.anim_time_);
-    ctx.line({px, track.y}, {px, track.bottom()}, glm::vec4(0.32f, 0.55f, 0.95f, 1), 2.0f);
+    ctx.line({px, track.y}, {px, track.bottom()}, app_.et_.timeline.playhead, 2.0f);
     const imm::Box tag{px - 15, ruler.y + 1, 30, ruler_h - 2};
-    ctx.fill_rounded(tag, glm::vec4(0.32f, 0.55f, 0.95f, 1), 3);
+    ctx.fill_rounded(tag, app_.et_.timeline.playhead, 3);
     ctx.text_in(tag, std::to_string(static_cast<int>(std::round(app_.anim_time_ * kAnimFps))), glm::vec4(1), 0.0f, true);
     ctx.pop_clip();
 
@@ -1296,9 +1296,7 @@ void TimelinePanel::draw_bone_timeline_(imm::Context& ctx, const imm::Box& hb, c
         return;
     }
     auto icon_btn = [&](const char* id, I ic, const char* tip, bool on) {
-        const bool r = ctx.icon_button(id, ic, tip, on, bh, imm::Context::kAll, imm::Box{x, hb.y + 3, bh, bh});
-        x += bh + 3;
-        return r;
+        return ui::tool_header_button(ctx, hb, x, id, ic, tip, on);
     };
     if (icon_btn("rtl_start", I::Undo, "Jump to Start\nHome", false)) app_.anim_time_ = 0.0f;
     if (icon_btn("rtl_play", app_.anim_playing_ ? I::Pause : I::Play, "Play / Pause\nSpace (while the Timeline is open)", app_.anim_playing_)) {
@@ -1396,8 +1394,8 @@ void TimelinePanel::draw_bone_dope_sheet_(imm::Context& ctx, const imm::Box& bod
         }
         if (major) ctx.line({x, ruler.bottom()}, {x, track.bottom()}, imm::with_alpha(ctx.style.text_dim, 0.12f), 1.0f);
     }
-    if (x_of(0.0f) > track.x) ctx.fill({track.x, ruler.bottom(), x_of(0.0f) - track.x, track.h - ruler_h}, glm::vec4(0, 0, 0, 0.18f));
-    if (x_of(len) < track.right()) ctx.fill({x_of(len), ruler.bottom(), track.right() - x_of(len), track.h - ruler_h}, glm::vec4(0, 0, 0, 0.18f));
+    if (x_of(0.0f) > track.x) ctx.fill({track.x, ruler.bottom(), x_of(0.0f) - track.x, track.h - ruler_h}, app_.et_.timeline.out_of_range);
+    if (x_of(len) < track.right()) ctx.fill({x_of(len), ruler.bottom(), track.right() - x_of(len), track.h - ruler_h}, app_.et_.timeline.out_of_range);
     ctx.line({x_of(len), track.y}, {x_of(len), track.bottom()}, imm::with_alpha(ctx.style.accent, 0.6f), 1.0f);
     ctx.pop_clip();
 
@@ -1472,7 +1470,7 @@ void TimelinePanel::draw_bone_dope_sheet_(imm::Context& ctx, const imm::Box& bod
         if (y > body.bottom()) break;
         const Row& row = rows[r];
         const imm::Box rb{body.x, y, body.w, row_h};
-        if (r % 2) ctx.fill(rb, glm::vec4(1, 1, 1, 0.025f));
+        if (r % 2) ctx.fill(rb, app_.et_.timeline.row_alt);
         const bool selected = !row.summary && row.channel.empty() && row.bone_idx >= 0 &&
                               std::find(app_.pose_bones_selected_.begin(), app_.pose_bones_selected_.end(), row.bone_idx) !=
                                   app_.pose_bones_selected_.end();
@@ -1512,8 +1510,9 @@ void TimelinePanel::draw_bone_dope_sheet_(imm::Context& ctx, const imm::Box& bod
             const glm::vec2 c{x_of(t) + (app_.rig_pose_key_drag_.active && sel_key ? app_.rig_pose_key_drag_.dt * pps : 0.0f),
                              y + row_h * 0.5f};
             const float rr = row.summary ? 5.5f : !row.channel.empty() ? 4.0f : 4.5f;
-            const glm::vec4 fillc = sel_key ? glm::vec4(1.0f, 0.62f, 0.18f, 1) : row.summary ? glm::vec4(0.95f, 0.95f, 0.95f, 1)
-                                                                                : glm::vec4(0.78f, 0.78f, 0.78f, 1);
+            const glm::vec4 fillc = sel_key      ? app_.et_.timeline.key_selected
+                                    : row.summary ? app_.et_.timeline.key_summary
+                                                  : app_.et_.timeline.key;
             ctx.triangle({c.x, c.y - rr}, {c.x + rr, c.y}, {c.x, c.y + rr}, fillc);
             ctx.triangle({c.x, c.y - rr}, {c.x, c.y + rr}, {c.x - rr, c.y}, fillc);
             if (!in_track || on_key || glm::distance(m, c) > rr + 2.0f) continue;
@@ -1644,9 +1643,9 @@ void TimelinePanel::draw_bone_dope_sheet_(imm::Context& ctx, const imm::Box& bod
     }
     ctx.push_clip(track);
     const float px = x_of(app_.anim_time_);
-    ctx.line({px, track.y}, {px, track.bottom()}, glm::vec4(0.32f, 0.55f, 0.95f, 1), 2.0f);
+    ctx.line({px, track.y}, {px, track.bottom()}, app_.et_.timeline.playhead, 2.0f);
     const imm::Box tag{px - 15, ruler.y + 1, 30, ruler_h - 2};
-    ctx.fill_rounded(tag, glm::vec4(0.32f, 0.55f, 0.95f, 1), 3);
+    ctx.fill_rounded(tag, app_.et_.timeline.playhead, 3);
     ctx.text_in(tag, std::to_string(static_cast<int>(std::round(app_.anim_time_ * kAnimFps))), glm::vec4(1), 0.0f, true);
     ctx.pop_clip();
 
@@ -1718,7 +1717,7 @@ void TimelinePanel::draw_bone_events_lane_(imm::Context& ctx, const imm::Box& tr
     for (size_t i = 0; i < evs.size(); ++i) {
         const bool sel = static_cast<int>(i) == app_.rig_pose_sel_event_;
         const float ex = x_of(evs[i].time) + (app_.rig_pose_event_drag_.active && sel ? app_.rig_pose_event_drag_.dt * pps : 0.0f);
-        const glm::vec4 col = sel ? glm::vec4(1.0f, 0.62f, 0.18f, 1) : glm::vec4(0.55f, 0.8f, 0.95f, 1);
+        const glm::vec4 col = sel ? app_.et_.timeline.event_selected : app_.et_.timeline.event;
         ctx.line({ex, y + 3}, {ex, y + row_h - 3}, col, 1.5f);
         ctx.triangle({ex, y + 3}, {ex + 9, y + 6.5f}, {ex, y + 10}, col);
         const imm::Box hit{ex - 4, y, 15, row_h};

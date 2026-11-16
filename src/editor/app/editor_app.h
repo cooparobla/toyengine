@@ -22,6 +22,7 @@
 #define TOYEDITOR_APP_EDITOR_APP_H
 
 #include "editor_types.h"
+#include "editor/app/ui/metrics.h"
 #include "editor/app/ui/viewport_chrome.h"
 #include "editor/app/ui/topbar.h"
 #include "editor/app/ui/timeline.h"
@@ -329,6 +330,8 @@ public:
      *         "asset_new:<item>"), for tests driving the UI with real input. */
     /** @brief Tests: forget every recorded rect, so the next frame's are the only ones. */
     void clear_test_rects() { test_rects_.clear(); }
+    /** @brief Records where a named widget was drawn, so a test can click it. */
+    void set_test_rect(const std::string& name, const imm::Box& b) { test_rects_[name] = b; }
     std::optional<imm::Box> test_rect(const std::string& name) const;
     void set_asset_tab(AssetType t) { asset_tab_ = t; }
     /** @brief Window-space rect of an object's Outliner eye toggle (if its row is visible). */

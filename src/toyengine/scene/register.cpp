@@ -20,6 +20,7 @@
 #include <toyengine/audio/audio_demo_panel.h>
 #include <toyengine/ui/demo_hud.h>
 #include <toyengine/ui/panel_screen.h>
+#include <toyengine/ui/quadrant_dock.h>
 #include <toyengine/ui/screen_hint.h>
 #include <toyengine/ui/ui_tunables.h>
 #include <toyengine/ui/world_label.h>
@@ -520,6 +521,26 @@ void register_scene_components() {
             read(node, "tunables_ref", h->tunables_ref);
             read(node, "ui_sounds", h->ui_sounds);
             read(node, "hidden", h->hidden);
+        });
+
+    // A movable four-quadrant panel workspace with a dock -- see toyengine/ui/quadrant_dock.h.
+    SceneLoader::register_component_parser("QuadrantDock",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* q = obj.add_component<toy::ui::QuadrantDock>();
+            read(node, "open_inventory", q->open_inventory);
+            read(node, "open_character", q->open_character);
+            read(node, "open_map", q->open_map);
+            read(node, "open_quests", q->open_quests);
+            read(node, "open_settings", q->open_settings);
+            read(node, "minimised", q->minimised);
+            read(node, "reduced_motion", q->reduced_motion);
+            read(node, "reduced_transparency", q->reduced_transparency);
+            read(node, "theme_ref", q->theme_ref);
+            read(node, "font_ref", q->font_ref);
+            read(node, "sort_order", q->sort_order);
+            read(node, "tunables_ref", q->tunables_ref);
+            read(node, "ui_sounds", q->ui_sounds);
+            read(node, "hidden", q->hidden);
         });
 
     // The audio demo's control panel: an immediate-mode screen, so the scene names the

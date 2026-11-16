@@ -1713,6 +1713,7 @@ void Engine::drive_ui_canvases_(coopa::scene::Scene& scene, const std::optional<
     const uint32_t wh = ctx_.swapchain().extent().height;
     const coopa::gfx::TextureView white        = pipeline_->world_ui_white_view();
     const coopa::gfx::TextureView screen_white = pipeline_->screen_ui_white_view();
+    const coopa::gfx::TextureView screen_backdrop = pipeline_->screen_ui_backdrop_view();
 
     auto* cam = scene.find_first_component<coopa::gfx::engine::components::CameraComponent>();
     const float aspect = rh > 0 ? static_cast<float>(rw) / static_cast<float>(rh) : 1.0f;
@@ -1727,6 +1728,9 @@ void Engine::drive_ui_canvases_(coopa::scene::Scene& scene, const std::optional<
             // Same seeding as the world path below, and for the same reason: without it
             // a screen-space canvas emits every solid-colour quad against a null view.
             canvas->set_default_texture(screen_white);
+            // An invalid view when the feature is off, or on a world canvas (never reached
+            // here) -- Context::glass() falls back to a flat fill rather than asking.
+            canvas->set_backdrop_texture(screen_backdrop);
             if (placement && placement->rect.w > 0 && placement->rect.h > 0) {
                 // Placed inside part of the window (see set_scene_ui_placement()).
                 const float zoom = placement->zoom > 0.0f ? placement->zoom : 1.0f;

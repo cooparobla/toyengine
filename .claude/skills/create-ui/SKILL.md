@@ -116,9 +116,30 @@ the file holds only what someone changed.
 ### The composite vocabulary
 
 On `imm::Context`: `stat_bar` (with a damage trail), `slot_grid`, `hotbar`, `cooldown`,
-`message_log`, `prompt_bar`, `panel_frame`, `menu_list`, `drag_handle`, `floating_text`,
-`nameplate`, `value_bar`, plus the tool widgets (`button`, `slider_float`, `checkbox`, `combo`,
-`tab_bar`, `input_text`, `tree_node`...). Place with `ctx.anchor(...)` / `ctx.stretch()`.
+`message_log`, `prompt_bar`, `panel_frame`, `glass_panel` (a frosted pane over the host's
+blurred backdrop -- a `backdrop-filter: blur()` look; falls back to a flat fill with no feature
+flag needed when the engine's `ui_backdrop_blur_enabled` is off or on a world-space canvas),
+`menu_list`, `drag_handle`, `floating_text`, `nameplate`, `value_bar`, plus the tool widgets
+(`button`, `slider_float`, `checkbox`, `combo`, `tab_bar`, `input_text`, `tree_node`...). Place
+with `ctx.anchor(...)` / `ctx.stretch()`.
+
+### Your own icons
+
+The `Icon` set is uicoopa's shared vocabulary; a game's own glyphs belong to the game. Register
+one and use the returned value anywhere a built-in goes (`icon_button`, `menu_item`,
+`tree_node`, `draw_icon`), and `icon_name()` / `icon_from_name()` resolve it like any other:
+
+```cpp
+void draw_bag(imm::Context& ctx, const imm::Box& b, const glm::vec4& c) {
+    imm::IconPen d(ctx, b, c);      // the same 16x16 grid every built-in is drawn on
+    d.arc(8, 6, 3, 3.14159f, 6.28318f);
+    d.box(3, 6, 10, 8);
+}
+const imm::Icon kBag = imm::register_custom_icon("Inventory", &draw_bag);
+```
+
+Registering a name twice replaces its drawing function and returns the SAME value, so this is
+safe from a per-instance hook. `toyengine/ui/quadrant_dock.cpp` is the worked example.
 
 ## World-space plates
 

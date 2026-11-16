@@ -742,10 +742,10 @@ void CurvePenPanel::draw_pen_toolbar_(imm::Context& ctx, const imm::Box& r) {
     using I = imm::Icon;
     float y = r.y + 4;
     auto btn = [&](const char* id, I ic, const char* tip, bool on) {
-        const imm::Box b{r.x + 3, y, 32.0f, 32.0f};
-        y += 34.0f;
+        const imm::Box b{r.x + 3, y, ui::k_tool_size, ui::k_tool_size};
+        y += ui::k_tool_size + 2;
         app_.test_rects_[id] = b;
-        return ctx.icon_button(id, ic, tip, on, 32.0f, imm::Context::kAll, b);
+        return ctx.icon_button(id, ic, tip, on, ui::k_tool_size, imm::Context::kAll, b);
     };
     if (btn("pen_select", I::SelectBox,
             "Select\nClick an anchor to pick it, Shift to add. G moves, R rotates, S scales -- "

@@ -121,6 +121,7 @@ enum class GpuScope : uint32_t {
     WorldUi,
     Aa,
     TiltShift,
+    UiBackdrop,          ///< The uniform blur behind glass UI panels, before the overlay.
     Overlay,             ///< UI composite + upscale + screen UI.
     Present,             ///< Final swapchain copy.
     Count

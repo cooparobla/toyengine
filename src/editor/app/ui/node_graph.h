@@ -119,20 +119,6 @@ private:
     // --- input ---
     void handle_input_(imm::Context& ctx, const imm::Box& area);
     void commit_(const node::NodeGraphEdit& edit);
-    /**
-     * @struct InterfaceDrag
-     * @brief A grip being dragged to reorder one interface socket.
-     *
-     * `anchor_y` is where the mouse was when the row last moved, not where the drag began, so a
-     * drag across several rows steps once per row rather than swapping once and sticking.
-     */
-    struct InterfaceDrag {
-        bool        active = false;
-        bool        as_outputs = false;
-        std::size_t index = 0;
-        float       anchor_y = 0.0f;
-    };
-    InterfaceDrag iface_drag_;
 
     /// @brief The add/remove/rename/retype rows for the graph's inputs, or its outputs.
     void draw_interface_(imm::Context& ctx, bool as_outputs);

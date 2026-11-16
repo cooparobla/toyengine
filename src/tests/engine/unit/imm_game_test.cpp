@@ -784,3 +784,97 @@ COOPA_TEST(an_imm_screen_can_live_in_the_world_and_gets_a_tunables_set) {
     ASSERT_EQ(plate->tune().declared().size(), size_t(1));
     ASSERT_EQ(plate->tune().declared()[0].name, std::string("bar"));
 }
+
+COOPA_TEST(push_alpha_scales_everything_drawn_inside_it) {
+    // The mechanism a whole screen fades through: a widget colours itself from the theme and
+    // cannot be told to be half-transparent, so the scale is applied to what it EMITS.
+    auto alpha_of = [](const coopa::ui::DrawList& dl) {
+        int max_a = 0;
+        for (const auto& v : dl.vertices()) max_a = std::max(max_a, static_cast<int>((v.color >> 24) & 0xFF));
+        return max_a;
+    };
+
+    Harness full;
+    full.frame([](Context& c) { c.fill({10.0f, 10.0f, 50.0f, 50.0f}, glm::vec4(1.0f)); });
+    const int opaque = alpha_of(full.dl);
+    ASSERT_TRUE(opaque > 250);
+
+    Harness half;
+    half.frame([](Context& c) {
+        c.push_alpha(0.5f);
+        c.fill({10.0f, 10.0f, 50.0f, 50.0f}, glm::vec4(1.0f));
+        c.pop_alpha();
+    });
+    const int faded = alpha_of(half.dl);
+    ASSERT_TRUE(faded > 120 && faded < 136);
+
+    // Nests multiplicatively, so a faded screen containing a faded panel composes.
+    Harness quarter;
+    quarter.frame([](Context& c) {
+        c.push_alpha(0.5f);
+        c.push_alpha(0.5f);
+        c.fill({10.0f, 10.0f, 50.0f, 50.0f}, glm::vec4(1.0f));
+        c.pop_alpha();
+        c.pop_alpha();
+    });
+    ASSERT_TRUE(alpha_of(quarter.dl) < 75);
+
+    // After pop_alpha the scale is back to full -- the dock's dock strip must NOT fade with
+    // the overlay it sits beside.
+    Harness restored;
+    restored.frame([](Context& c) {
+        c.push_alpha(0.25f);
+        c.pop_alpha();
+        c.fill({10.0f, 10.0f, 50.0f, 50.0f}, glm::vec4(1.0f));
+    });
+    ASSERT_TRUE(alpha_of(restored.dl) > 250);
+}
+
+COOPA_TEST(an_unbalanced_push_alpha_is_reset_by_the_next_frame) {
+    // A screen that throws, or simply forgets to pop, costs one frame rather than leaving the
+    // whole UI permanently dimmed.
+    Harness h;
+    h.frame([](Context& c) { c.push_alpha(0.1f); });
+    h.frame([](Context& c) {
+        ASSERT_TRUE(c.alpha_scale() == 1.0f);
+        c.fill({10.0f, 10.0f, 50.0f, 50.0f}, glm::vec4(1.0f));
+    });
+    int max_a = 0;
+    for (const auto& v : h.dl.vertices()) max_a = std::max(max_a, static_cast<int>((v.color >> 24) & 0xFF));
+    ASSERT_TRUE(max_a > 250);
+}
+
+COOPA_TEST(the_focus_ring_is_raised_by_the_keyboard_not_by_a_click) {
+    // :focus-visible. A click still MOVES focus, so Tab continues from what you last touched,
+    // but it raises no ring: a ring the mouse put there tells its user nothing and then sits
+    // on the last-pressed widget until focus moves again, reading as a stuck selection.
+    // keyboard_focus is off by default on a bare Context; ImmScreen turns it on for every
+    // game screen (imm_screen.cpp), which is why a screen's buttons track focus at all.
+    const Box b{10.0f, 10.0f, 80.0f, 30.0f};
+
+    Harness clicked;
+    clicked.ctx.keyboard_focus = true;
+    clicked.mouse = b.center();
+    clicked.frame([&](Context& c) { c.invisible_button("btn", b); });   // hover, button down
+    clicked.down = true;
+    clicked.frame([&](Context& c) { c.invisible_button("btn", b); });
+    ASSERT_TRUE(clicked.ctx.focus_id() != 0);        // focus DID move, so Tab continues here
+    ASSERT_TRUE(!clicked.ctx.focus_visible());       // ...but no ring
+
+    Harness tabbed;
+    tabbed.ctx.keyboard_focus = true;
+    tabbed.frame([&](Context& c) { c.invisible_button("btn", b); });
+    tabbed.press_key(coopa::input::Key::Tab);
+    tabbed.frame([&](Context& c) { c.invisible_button("btn", b); });
+    ASSERT_TRUE(tabbed.ctx.focus_id() != 0);
+    ASSERT_TRUE(tabbed.ctx.focus_visible());         // Tab DOES raise it
+
+    // Programmatic focus is deliberate, so it shows too.
+    Harness programmatic;
+    programmatic.ctx.keyboard_focus = true;
+    programmatic.frame([&](Context& c) {
+        c.invisible_button("btn", b);
+        c.set_focus("btn");
+    });
+    ASSERT_TRUE(programmatic.ctx.focus_visible());
+}

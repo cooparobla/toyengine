@@ -472,7 +472,7 @@ void NodeGraphPanel::handle_input_(imm::Context& ctx, const Box& area) {
     if (ctx.key_pressed(coopa::input::Key::X) || ctx.key_pressed(coopa::input::Key::Delete)) {
         delete_selection();
     }
-    if (ctx.shortcut(coopa::input::Key::D, coopa::input::Mods::Super)) duplicate_selection();
+    if (ctx.shortcut(coopa::input::Key::D, imm::Context::command_mod())) duplicate_selection();
     if (ctx.key_pressed(coopa::input::Key::A) && has(in.mods, coopa::input::Mods::Shift)) {
         add_at_ = mg;
         ctx.open_popup("graph_add", m);
@@ -684,8 +684,9 @@ void NodeGraphPanel::draw_interface_(imm::Context& ctx, bool as_outputs) {
         return;
     }
 
-    const imm::FrameInput& in = ctx.input();
     node::NodeGraphEdit edit;
+    const imm::Id list_id = ctx.get_id(as_outputs ? "iface_out" : "iface_in");
+    imm::ReorderRequest rq;
 
     for (std::size_t i = 0; i < sockets.size(); ++i) {
         const ng::InterfaceSocket& s = sockets[i];
@@ -700,14 +701,9 @@ void NodeGraphPanel::draw_interface_(imm::Context& ctx, bool as_outputs) {
         const Box type_b{lab_b.right() + gap, row.y, field, row_h};
         const Box del_b {row.right() - row_h, row.y, row_h, row_h};
 
-        const bool dragging_this = iface_drag_.active && iface_drag_.as_outputs == as_outputs &&
-                                   iface_drag_.index == i;
-        ctx.icon_button(as_outputs ? "grip_out" : "grip_in", I::Grip, "Drag to reorder",
-                        dragging_this, 0.0f, imm::Context::kAll, grip, /*framed=*/false);
-        // The grip is a drag handle, not a button: what matters is the press and the travel
-        // since, so it is read from the raw hover/press rather than from a click.
-        if (!iface_drag_.active && ctx.is_hovered(grip) && in.pressed[0]) {
-            iface_drag_ = {true, as_outputs, i, ctx.mouse().y};
+        if (auto q = ctx.reorder_grip(list_id, grip, static_cast<int>(i),
+                                      static_cast<int>(sockets.size()), row_h + gap); q.wanted()) {
+            rq = q;
         }
 
         ctx.push_id(static_cast<int64_t>(i) + (as_outputs ? 10000 : 0));
@@ -733,26 +729,19 @@ void NodeGraphPanel::draw_interface_(imm::Context& ctx, bool as_outputs) {
         ctx.pop_id();
         if (del) edit = node::remove_interface_socket(graph_, as_outputs, i);
 
-        // A drag that has travelled a whole row swaps with the neighbour it passed, and the
-        // anchor moves with it so a long drag keeps stepping instead of swapping once.
-        if (dragging_this && in.down[0]) {
-            const float travel = ctx.mouse().y - iface_drag_.anchor_y;
-            const int   step   = static_cast<int>(travel / (row_h + gap));
-            if (step != 0) {
-                const node::NodeGraphEdit moved =
-                    node::move_interface_socket(graph_, as_outputs, i, step > 0 ? 1 : -1);
-                if (moved.changed) {
-                    iface_drag_.index  = step > 0 ? i + 1 : i - 1;
-                    iface_drag_.anchor_y += (step > 0 ? 1.0f : -1.0f) * (row_h + gap);
-                    edit = moved;
-                }
-            }
-        }
-
         if (edit.changed) break;   // The vector just moved under us; redraw before touching it.
     }
+    ctx.reorder_release(list_id);
 
-    if (iface_drag_.active && !in.down[0]) iface_drag_ = {};
+    // Applied after the loop, so no row is drawn against a vector that moved under it.
+    if (!edit.changed && rq.wanted()) {
+        const node::NodeGraphEdit moved = node::move_interface_socket(
+            graph_, as_outputs, static_cast<std::size_t>(rq.from), rq.dir());
+        if (moved.changed) {
+            ctx.reorder_step(list_id, rq.to);
+            edit = moved;
+        }
+    }
     if (edit.changed) commit_(edit);
 }
 

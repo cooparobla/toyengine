@@ -256,6 +256,16 @@ protected:
      */
     virtual void on_ready() {}
 
+    /**
+     * @brief Called once theme_ref has resolved and loaded, with the raw Theme -- the one
+     *        place a screen can read its own named section (one not covered by GameTheme's
+     *        fixed roles), via `theme.color(section, role, fallback)`.
+     *
+     * Not called when theme_ref is empty or fails to load, since there is then no Theme to
+     * read. context()/theme() are not valid yet here either -- on_ready() runs after this.
+     */
+    virtual void on_theme_loaded(const coopa::ui::imm::Theme&) {}
+
     /** @brief Per-frame work for a subclass. Runs after the canvas is up. */
     virtual void on_update(float delta_time) { (void)delta_time; }
 

@@ -1,3 +1,4 @@
+#include "editor/app/ui/tool_strip.h"
 #include "editor/app/ui/instance_paint.h"
 
 #include "editor/app/editor_app.h"
@@ -746,11 +747,7 @@ void InstancePaintPanel::draw_instance_overlay_(imm::Context& ctx, const ViewPro
 
 float InstancePaintPanel::draw_instance_header_(imm::Context& ctx, float x, const imm::Box& hb) {
     const float bh = hb.h - 6;
-    auto label = [&](const char* t) {
-        const float w = ctx.text_width(t) + 6;
-        ctx.text_in({x, hb.y, w, hb.h}, t, ctx.style.text_dim, 0.0f);
-        x += w;
-    };
+    auto label = [&](const char* t) { ui::tool_header_label(ctx, hb, x, t); };
     label(instance_tool_name(brush_.tool));
     x += 6;
     if (brush_.tool == InstanceTool::Cluster) {
@@ -780,7 +777,7 @@ float InstancePaintPanel::draw_instance_header_(imm::Context& ctx, float x, cons
 
 void InstancePaintPanel::draw_instance_toolbar_(imm::Context& ctx, const imm::Box& r) {
     float y = r.y + 4;
-    const float size = app_.viewport_chrome_panel_->kToolSize;
+    const float size = ui::k_tool_size;
     for (const auto& b : k_tools) {
         const imm::Box bb{r.x + 3, y, size, size};
         y += size + 2;

@@ -1,9 +1,12 @@
 #include "editor/schema/inspector.h"
+#include "editor/schema/item_list.h"
 
 #include "editor/schema/inspector_sections.h"
 #include "editor/ui/curve_widget.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <string>
 
 namespace toy {
 namespace editor {
@@ -503,53 +506,87 @@ EditResult draw_field(imm::Context& ctx, const FieldDesc& f, Node& block, const 
             }
             if (!present) block[f.key] = f.def_node.is_sequence() ? f.def_node : Node::sequence();
             Node& list = block[f.key];
+            const std::string noun = item_noun(f);
+            const int n = static_cast<int>(list.size());
+
             ctx.label_dim(f.display());
-            int remove = -1, move_up = -1;
-            for (size_t i = 0; i < list.size(); ++i) {
+            if (n == 0) ctx.label_dim(item_list_empty_text(f));
+
+            // The grip's column is reserved whenever the list can be reordered at all, so a
+            // list growing from one item to two does not shift every title sideways.
+            const float grip_w = f.items_reorderable ? ctx.style.row_height : 0.0f;
+            const imm::Id list_id = ctx.get_id(f.key);
+            imm::ReorderRequest rq;
+            int remove = -1;
+
+            for (int i = 0; i < n; ++i) {
                 ctx.push_id(static_cast<int64_t>(i));
-                Node& item = list.as_seq()[i];
+                Node& item = list.as_seq()[static_cast<size_t>(i)];
                 if (item.is_string()) {   // shorthand `- Label` -> a full item
                     Node m = Node::mapping();
                     m["label"] = item;
                     item = m;
                 }
-                ctx.indent(6);
-                for (const auto& sub : f.item_fields) {
-                    ctx.push_id(sub.key);
-                    EditResult er = draw_field(ctx, sub, item, env);
-                    if (er.changed) er.key = f.key;
-                    r.absorb(er);
-                    ctx.pop_id();
+                // Keyed by position, not by the title: the title is one of the item's own
+                // fields, so folding on the text would shut the item being renamed.
+                bool remove_this = false;
+                const bool open = ctx.collapsing_header_id(
+                    ctx.get_id("item"), item_title(f, item, static_cast<size_t>(i)), !f.items_collapsed,
+                    &remove_this, imm::Icon::None, nullptr, grip_w);
+                const imm::Box hdr = ctx.last_rect();
+                if (remove_this) remove = i;
+                if (grip_w > 0.0f) {
+                    const imm::Box grip{hdr.x + 2, hdr.y, grip_w - 2, hdr.h};
+                    if (auto q = ctx.reorder_grip(list_id, grip, i, n, hdr.h + ctx.style.spacing); q.wanted()) {
+                        rq = q;
+                    }
                 }
-                if (ctx.button("Remove", 80)) remove = static_cast<int>(i);
-                if (i > 0) {
-                    ctx.same_line();
-                    if (ctx.button("Move Up", 80)) move_up = static_cast<int>(i);
+                if (open) {
+                    // A sub-block's rows are indented, which narrows the row `property_row`
+                    // measures its label column against; widening the ratio by the same amount
+                    // keeps an item's labels in the enclosing section's column.
+                    const float ind = ctx.style.indent_small;
+                    const float avail = ctx.content_region().w;
+                    const float saved = ctx.style.label_ratio;
+                    if (avail > ind + 1.0f) {
+                        ctx.style.label_ratio = std::clamp((avail * saved - ind) / (avail - ind), 0.1f, 0.9f);
+                    }
+                    ctx.indent(ind);
+                    for (const auto& sub : f.item_fields) {
+                        if (!show_when_holds(item, sub.show, f.item_fields)) continue;
+                        ctx.push_id(sub.key);
+                        EditResult er = draw_field(ctx, sub, item, env);
+                        if (er.changed) er.key = f.key;
+                        r.absorb(er);
+                        ctx.pop_id();
+                        // Marked with the LIST's key: a prefab override stores the whole
+                        // sequence, so there is no per-element override to point at.
+                        if (env.after_field) env.after_field(ctx, f.key, ctx.last_label_box());
+                    }
+                    ctx.unindent(ind);
+                    ctx.style.label_ratio = saved;
                 }
-                ctx.unindent(6);
-                ctx.separator();
                 ctx.pop_id();
             }
-            if (ctx.button(("Add " + f.display()).c_str(), -1)) {
-                Node m = Node::mapping();
-                for (const auto& sub : f.item_fields) {
-                    // Each key starts at its OWN default rather than at an empty string: a blank
-                    // in a numeric key is not something a scene parser can read back, and a list
-                    // can be saved before the user has touched the row.
-                    if (sub.kind == FieldKind::Enum && !sub.options.empty())      m[sub.key] = Node(sub.options.front());
-                    else if (sub.key == "label")  m[sub.key] = Node(std::string("Item ") + std::to_string(list.size() + 1));
-                    else if (sub.key == "name")   m[sub.key] = Node(std::string("Item") + std::to_string(list.size() + 1));
-                    else if (sub.kind == FieldKind::Bool)  m[sub.key] = sub.def.x != 0.0f;
-                    else if (sub.kind == FieldKind::Int)   m[sub.key] = static_cast<int>(sub.def.x);
-                    else if (sub.kind == FieldKind::Float) m[sub.key] = sub.def.x;
-                    else m[sub.key] = Node(sub.default_string);
-                }
-                list.as_seq().push_back(m);
+            ctx.reorder_release(list_id);
+
+            const bool at_cap = f.max_items > 0 && n >= f.max_items;
+            if (ctx.button("Add " + noun, -1, !at_cap, imm::Icon::Plus)) {
+                list.as_seq().push_back(make_default_item(f, static_cast<size_t>(n)));
                 r.key = f.key; r.changed = r.finished = true;
             }
-            if (remove >= 0) { list.as_seq().erase(list.as_seq().begin() + remove); r.key = f.key; r.changed = r.finished = true; }
-            if (move_up > 0) {
-                std::swap(list.as_seq()[static_cast<size_t>(move_up)], list.as_seq()[static_cast<size_t>(move_up - 1)]);
+            if (at_cap) {
+                ctx.tooltip(f.display() + "\nAt most " + std::to_string(f.max_items) + " of these.");
+            }
+
+            // Applied after the loop, so no frame is half-drawn against a list that moved
+            // under it. A remove wins over a reorder: the row asking to go is the row to go.
+            if (remove >= 0) {
+                list.as_seq().erase(list.as_seq().begin() + remove);
+                r.key = f.key; r.changed = r.finished = true;
+            } else if (rq.wanted()) {
+                std::swap(list.as_seq()[static_cast<size_t>(rq.from)], list.as_seq()[static_cast<size_t>(rq.to)]);
+                ctx.reorder_step(list_id, rq.to);
                 r.key = f.key; r.changed = r.finished = true;
             }
             if (r.changed) r.key = f.key;
@@ -781,9 +818,9 @@ EditResult draw_material_block(imm::Context& ctx, Node& m, const InspectorEnv& e
         }
     }
     if ((rest.empty() && !unknown) || !ctx.collapsing_header("More", false, nullptr, imm::Icon::Dots)) return r;
-    ctx.indent(6);
+    ctx.indent(ctx.style.indent_small);
     r.absorb(draw_fields(ctx, rest, m, env, true, drawn));
-    ctx.unindent(6);
+    ctx.unindent(ctx.style.indent_small);
     return r;
 }
 
@@ -843,7 +880,7 @@ EditResult draw_material_field(imm::Context& ctx, Node& comp, const InspectorEnv
     if (mode == 0 || mode == 2) {
         if (!comp.contains("material") || !comp.at("material").is_mapping()) comp["material"] = Node::mapping();
         Node& m = comp["material"];
-        ctx.indent(6);
+        ctx.indent(ctx.style.indent_small);
         if (mode == 2) {
             // Overrides: only keys present on the block are shown; others can be added.
             std::vector<FieldDesc> present_fields;
@@ -873,10 +910,20 @@ EditResult draw_material_field(imm::Context& ctx, Node& comp, const InspectorEnv
         } else {
             r.absorb(draw_material_block(ctx, m, env));
         }
-        ctx.unindent(6);
+        ctx.unindent(ctx.style.indent_small);
     }
     ctx.pop_id();
     return r;
+}
+
+bool inspector_block(imm::Context& ctx, const char* title, imm::Icon ic, const char* blurb,
+                     bool default_open) {
+    const bool open = ctx.collapsing_header(title, default_open, nullptr, ic);
+    if (open && blurb) {
+        const glm::vec4 dim = ctx.style.text_dim;
+        ctx.paragraph(blurb, &dim);
+    }
+    return open;
 }
 
 EditResult draw_section(imm::Context& ctx, const InspectorSection& s, const ComponentSchema& schema, Node& comp,
@@ -915,7 +962,7 @@ EditResult draw_section(imm::Context& ctx, const InspectorSection& s, const Comp
     }
     if (!open) { claim_keys(); ctx.pop_id(); return r; }
 
-    ctx.indent(6);
+    ctx.indent(ctx.style.indent_small);
     if (!s.blurb.empty()) ctx.paragraph(s.blurb, &ctx.style.text_dim);
     if (const SectionDrawFn* fn = find_inspector_section(s.custom)) {
         SectionContext sc{comp, env, env.object_id, &drawn};
@@ -927,11 +974,7 @@ EditResult draw_section(imm::Context& ctx, const InspectorSection& s, const Comp
         while (next_sub < s.subheads.size() && s.subheads[next_sub].index == i) {
             const InspectorSubhead& h = s.subheads[next_sub++];
             if (!show_when_holds(comp, h.show, schema.fields)) continue;
-            ctx.spacing(3);
-            const imm::Box hb = ctx.next_box(ctx.style.row_height - 4);
-            ctx.text_in(hb, h.title, ctx.style.text_dim, 0.0f);
-            const float tw = ctx.text_width(h.title) + 8;
-            ctx.fill({hb.x + tw, hb.y + hb.h * 0.5f, std::max(0.0f, hb.w - tw), 1.0f}, ctx.style.separator);
+            ctx.subhead(h.title);
         }
         const std::string& key = s.keys[i];
         if (!drawn.insert(key).second) continue;            // a custom drawer already did it
@@ -950,7 +993,7 @@ EditResult draw_section(imm::Context& ctx, const InspectorSection& s, const Comp
         ctx.pop_id();
         if (env.after_field && f->kind != FieldKind::Padding) env.after_field(ctx, key, ctx.last_label_box());
     }
-    ctx.unindent(6);
+    ctx.unindent(ctx.style.indent_small);
     ctx.spacing(4);
     ctx.pop_id();
     return r;
@@ -988,10 +1031,10 @@ EditResult draw_sectioned_(imm::Context& ctx, const ComponentSchema& schema, Nod
     }
     if (rest.empty() && !unknown) return r;
     if (ctx.collapsing_header("More", false, nullptr, imm::Icon::Dots)) {
-        ctx.indent(6);
+        ctx.indent(ctx.style.indent_small);
         std::set<std::string> skip = drawn;
         r.absorb(draw_fields(ctx, rest, comp, env, true, skip));
-        ctx.unindent(6);
+        ctx.unindent(ctx.style.indent_small);
     }
     return r;
 }

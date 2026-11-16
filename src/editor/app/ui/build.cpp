@@ -157,10 +157,10 @@ void BuildPanel::draw_build_modal_(imm::Context& ctx) {
                                  (game_res.signed_with.empty() || game_res.signed_with == "n/a" ? std::string()
                                       : "  --  signed " + game_res.signed_with + (game_res.notarized ? ", notarized" : ""))
                            : "Build failed -- " + game_res.error;
-        col = game_res.ok ? glm::vec4(0.45f, 0.85f, 0.45f, 1.0f) : st.error;
+        col = game_res.ok ? st.ok : st.error;
     } else if (ok) {
         head = build_relaunch_offered_ ? "Build succeeded -- the editor was rebuilt" : "Build succeeded -- already up to date";
-        col = glm::vec4(0.45f, 0.85f, 0.45f, 1.0f);
+        col = st.ok;
     } else {
         int errors = 0;
         for (const auto& d : build_diags_) errors += d.error;
@@ -243,15 +243,7 @@ void BuildPanel::draw_build_modal_(imm::Context& ctx) {
 }
 
 bool BuildPanel::build_button_(imm::Context& ctx, const char* label, const imm::Box& b, bool primary) {
-    bool hov = false, held = false;
-    const bool clicked = ctx.invisible_button(label, b, &hov, &held);
-    const imm::Style& st = ctx.style;
-    glm::vec4 c = primary ? st.accent : st.button;
-    if (held) c = primary ? c * 0.85f + glm::vec4(0, 0, 0, 0.15f) : st.button_active;
-    else if (hov) c = primary ? glm::mix(c, glm::vec4(1.0f), 0.12f) : st.button_hover;
-    ctx.fill_rounded(b, c);
-    ctx.text_in(b, label, primary ? glm::vec4(1.0f) : st.text, 0.0f, true);
-    return clicked;
+    return primary ? ctx.primary_button(label, b) : ctx.button(label, b);
 }
 
 void BuildPanel::run_built_game_(const BuildResult& r) {

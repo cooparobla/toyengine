@@ -1,0 +1,45 @@
+# glass -- a glassmorphism look: frosted translucent panels over a bright blue->violet->pink
+# backdrop, built for toy::ui::QuadrantDock (and any screen that calls Context::glass()/
+# glass_panel()).
+#
+# `inherits: game_dark` keeps every widget colour and metric this look does not care about,
+# so this file states only what changes. The real glass look (the pane, the gradient, the
+# blobs) is not in `colors:` at all -- a theme's `glass:` section (below) carries it, read back
+# through GlassTheme (toyengine/ui/glass_theme.h) via ImmScreen::on_theme_loaded().
+#
+# Two departures from game_dark, both because glass must never be darkened (the reference CSS
+# is explicit about this: "Glass needs something colourful behind it to blur... never lay a
+# dark tint over the glass"):
+#   - modal_dim drops to a barely-there light tint instead of a black scrim.
+#   - accent becomes the secondary teal rather than the primary blue, which the backdrop
+#     itself already is -- a blue accent would disappear into it.
+name: Glass
+author: toyengine
+description: Frosted translucent panels over a blue-violet-pink backdrop
+inherits: game_dark
+
+colors:
+  panel_bg:     "#ffffff26"   # rgba(255,255,255,0.15) -- the glass pane itself
+  border:       "#ffffff33"   # rgba(255,255,255,0.2)
+  button:       "#ffffff1a"   # rgba(255,255,255,0.1)
+  button_hover: "#ffffff33"   # rgba(255,255,255,0.2)
+  text:         "#ffffff"
+  text_dim:     "#ffffffb3"
+  accent:       "#20b2aa"     # teal -- a blue accent would vanish into the blue backdrop
+  ok:           "#86efac"
+  shadow:       "#0000001f"   # 0 8px 32px rgba(0,0,0,0.12)
+  modal_dim:    "#ffffff14"   # glass must never be darkened; a light tint, not a black scrim
+  rounding: 16                # border-radius: 1.5rem
+
+# --- the look (toy::ui::GlassTheme) ---------------------------------------------------------
+
+glass:
+  fill:        "#ffffff26"   # rgba(255,255,255,0.15)
+  border:      "#ffffff33"   # rgba(255,255,255,0.2)
+  grad_blue:   "#0080ff"
+  grad_violet: "#8b00ff"
+  grad_pink:   "#ff1493"
+  blob_teal:   "#20b2aa"
+  blob_pink:   "#ff1493"
+  text_shadow: "#00000040"   # 0 1px 2px rgba(0,0,0,0.25)
+  opaque_fill: "#1e143cd9"   # prefers-reduced-transparency fallback

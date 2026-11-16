@@ -100,7 +100,7 @@ Each subdirectory has its own README with the details; this is the one-line orie
 | [`rig/`](rig/README.md) | the editable rest skeleton, bone selection, picking and the armature operators, as pure functions | Rig Edit / Pose Mode behaviour |
 | [`core/`](core/README.md) | documents, undo, YAML access, child processes, naming | the data layer |
 | [`build/`](build/README.md) | compile, stage, bundle, sign, package | build or packaging |
-| [`ui/`](ui/README.md) | widget palette, canvas math, log view, logo | editor chrome pieces |
+| [`ui/`](ui/README.md) | log view, logo, curve/gradient widgets, thumbnail downsampling | editor-specific chrome pieces |
 | `themes/` | editor colour themes (`*.yaml`) | how the editor looks |
 | `branding/` | generated icons (`toyengine_icon` writes here) | — |
 

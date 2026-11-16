@@ -162,7 +162,7 @@ void ThemeEditorPanel::draw_theme_props_(imm::Context& ctx) {
 
     // What it previews on, and whether that UI uses it.
     if (ctx.collapsing_header("Preview", true, nullptr, I::UiCanvas)) {
-        ctx.indent(4);
+        ctx.indent(ctx.style.indent_small);
         const auto uis = app_.assets_panel_->list_assets_(AssetType::UI);
         const std::string cur = app_.active_type_ == AssetType::UI ? app_.project_.relative(app_.active_path_) : std::string();
         int idx = -1;
@@ -188,7 +188,7 @@ void ThemeEditorPanel::draw_theme_props_(imm::Context& ctx) {
         } else if (app_.active_type_ == AssetType::UI) {
             ctx.label_dim("This UI uses this theme.");
         }
-        ctx.unindent(4);
+        ctx.unindent(ctx.style.indent_small);
         ctx.spacing(4);
     }
 
@@ -196,7 +196,7 @@ void ThemeEditorPanel::draw_theme_props_(imm::Context& ctx) {
     const InspectorEnv env = app_.inspector_env_();
     for (const auto& section : ui_theme_sections()) {
         if (!ctx.collapsing_header(section.title, section.key == "panel" || section.key == "text" || section.key == "button")) continue;
-        ctx.indent(4);
+        ctx.indent(ctx.style.indent_small);
         ctx.push_id(section.key);
         Node view = app_.game_theme_.node.contains(section.key) && app_.game_theme_.node.at(section.key).is_mapping() ? app_.game_theme_.node.at(section.key)
                                                                                                : Node::mapping();
@@ -207,14 +207,14 @@ void ThemeEditorPanel::draw_theme_props_(imm::Context& ctx) {
         }
         if (r.finished) app_.game_theme_.undo.end_merge();
         ctx.pop_id();
-        ctx.unindent(4);
+        ctx.unindent(ctx.style.indent_small);
         ctx.spacing(4);
     }
 }
 
 void ThemeEditorPanel::draw_theme_fonts_(imm::Context& ctx) {
     if (!ctx.collapsing_header("Fonts", false, nullptr, imm::Icon::UiText)) return;
-    ctx.indent(4);
+    ctx.indent(ctx.style.indent_small);
     const fs::path dir = app_.game_theme_.path.parent_path();
     std::vector<std::string> fonts;   // assets-relative
     for (const auto& f : app_.project_.list("fonts", "")) {
@@ -271,7 +271,7 @@ void ThemeEditorPanel::draw_theme_fonts_(imm::Context& ctx) {
             });
         }
     }
-    ctx.unindent(4);
+    ctx.unindent(ctx.style.indent_small);
     ctx.spacing(4);
 }
 

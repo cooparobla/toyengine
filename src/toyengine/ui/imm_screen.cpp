@@ -176,6 +176,7 @@ void ImmScreen::ensure_canvas_() {
                 // load_theme() has already resolved `font:` against the theme's own folder,
                 // so this is an absolute path -- resolve_font() passes it straight through.
                 if (font_want.empty() && !theme.font.empty()) font_want = theme.font;
+                on_theme_loaded(theme);
             } catch (const std::exception& e) {
                 std::fprintf(stderr, "[toy::ui] %s: theme '%s' failed to load (%s)\n",
                              type_name().c_str(), theme_ref.c_str(), e.what());

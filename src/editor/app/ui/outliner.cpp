@@ -21,8 +21,7 @@ void OutlinerPanel::draw_outliner_(imm::Context& ctx, const imm::Box& area) {
     ctx.text_in({hb.x + hb.h + 2, hb.y, title_w, hb.h}, title, ctx.style.text, 0.0f);
     const float sx = hb.x + hb.h + 2 + title_w + 4;
     const imm::Box search{sx, hb.y + 4, std::max(40.0f, hb.right() - hb.h - 6 - sx), hb.h - 8};
-    ctx.input_text_box("outliner_filter", search, &app_.outliner_filter_, "    Filter");
-    if (app_.outliner_filter_.empty()) ctx.icon(I::Search, {search.x + 4, search.y + 3, search.h - 6, search.h - 6}, ctx.style.text_disabled);
+    app_.search_box_in_(ctx, "outliner_filter", search, app_.outliner_filter_, "Filter");
     if (ctx.icon_button("outliner_new", I::Plus, "Add Object\nShift A in the viewport (object assets too)", false,
                         hb.h - 6, imm::Context::kAll, imm::Box{hb.right() - hb.h + 2, hb.y + 3, hb.h - 6, hb.h - 6})) {
         app_.open_add_menu_ = true;   // declared by the viewport (draw_viewport_popups_)

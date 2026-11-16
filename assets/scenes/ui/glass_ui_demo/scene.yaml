@@ -1,0 +1,139 @@
+# glass_ui_demo -- a movable four-quadrant panel workspace, glassmorphism-styled.
+#
+#  * dock         -- QuadrantDock: Inventory, Character and Quests open by default (one
+#    quadrant left free for Settings), each draggable between the four screen quadrants and
+#    growing into any adjacent one left empty (toyengine/ui/quadrant_layout.h). The dock on
+#    the right holds Home (closes every panel, or restores this default arrangement once
+#    nothing is open) and a Settings toggle.
+#  * the blocks    -- a few coloured cubes and a floor, so there is a recognisable, busy 3D
+#    world for the backdrop blur to actually soften, and something still visible in the
+#    margin outside the panel area and through the dock's partition.
+#  * camera        -- auto-orbits (`auto_rotate_deg_per_sec`), so the backdrop visibly moves
+#    behind the glass with no mouse input needed. Mouse look is off and the cursor is NOT
+#    captured, so the pointer is free to drag panels and click the dock.
+#
+# render.ui_backdrop_blur_enabled is OFF by default engine-wide (see ToyRenderConfig) -- this
+# scene turns it on for itself, which is what makes Context::glass()/glass_panel() actually
+# blur rather than fall back to a flat fill.
+#
+# Run: ./build/toyengine glass_ui_demo        (or SCENE=glass_ui_demo)
+
+scene:
+  scene_name: glass_ui_demo
+  settings:
+    render:
+      ui_backdrop_blur_enabled: true
+      ui_backdrop_blur_radius: 10.0
+  root_objects:
+    - name: floor
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: -0.5 }
+          scale: { x: 6.0, y: 6.0, z: 6.0 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material:
+            albedo: { r: 0.32, g: 0.30, b: 0.36 }
+            metallic: 0.0
+            roughness: 0.85
+            ao: 1.0
+      children: []
+
+    - name: block_a
+      active: true
+      components:
+        - type: Transform
+          position: { x: -1.6, y: 0.5, z: 0.0 }
+          scale: { x: 1.2, y: 1.2, z: 1.2 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material:
+            albedo: { r: 0.85, g: 0.32, b: 0.30 }
+            metallic: 0.0
+            roughness: 0.55
+            ao: 1.0
+      children: []
+
+    - name: block_b
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.2, y: -0.8, z: 0.3 }
+          rotation: { x: 0.0, y: 0.0, z: 25.0 }
+          scale: { x: 1.6, y: 1.6, z: 1.6 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material:
+            albedo: { r: 0.30, g: 0.75, b: 0.45 }
+            metallic: 0.0
+            roughness: 0.4
+            ao: 1.0
+      children: []
+
+    - name: block_c
+      active: true
+      components:
+        - type: Transform
+          position: { x: 2.0, y: 0.9, z: -0.15 }
+          rotation: { x: 0.0, y: 0.0, z: -15.0 }
+          scale: { x: 0.9, y: 0.9, z: 0.9 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material:
+            albedo: { r: 0.35, g: 0.45, b: 0.85 }
+            metallic: 0.1
+            roughness: 0.3
+            ao: 1.0
+      children: []
+
+    - name: dock
+      active: true
+      components:
+        - type: QuadrantDock
+          theme_ref: ui/themes/glass
+
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -7.0, z: 2.2 }
+          rotation: { x: 75.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 50.0
+          near_clip_plane: 0.1
+          far_clip_plane: 1000.0
+        - type: CameraController
+          mode: orbit
+          target: { x: 0.0, y: 0.0, z: 0.3 }
+          follow_smoothing: 10.0
+          movement_smoothing: 0.8
+          # Mouse look OFF and cursor NOT captured: the pointer belongs to the dock and its
+          # draggable panels, not the camera.
+          mouse_sensitivity: 0.0
+          capture_cursor: false
+          auto_rotate_deg_per_sec: 12.0
+          zoom_speed: 1.0
+          min_distance: 2.0
+          max_distance: 30.0
+          min_pitch_deg: 0.0
+          max_pitch_deg: 85.0
+      children: []
+
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: DirectionalLight
+          direction: { x: -0.35, y: -0.45, z: -0.82 }
+          color: { r: 1.0, g: 0.97, b: 0.9 }
+          intensity: 1.0
+          cast_shadows: true
+          shadow_intensity: 0.6
+      children: []

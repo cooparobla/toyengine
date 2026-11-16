@@ -787,15 +787,25 @@ void ToyRenderPipeline::gather_ui_canvases_(coopa::scene::Scene& scene, uint32_t
     // marked-view set is a member of each pass; an unmarked glyph atlas draws through the
     // "quad" variant as raw coverage.
     screen_canvases_.clear();
+    ui_backdrop_wanted_this_frame_ = false;
     if (screen_ui_pass_) {
         size_t ui_verts = 0;
         size_t ui_indices = 0;
+        const coopa::gfx::TextureView backdrop_view = screen_ui_pass_->backdrop_view();
         for (coopa::ui::CanvasComponent* canvas : all_canvases) {
             if (canvas->is_world_space()) continue;
             screen_canvases_.push_back(canvas);
             screen_ui_pass_->register_textures(canvas->draw_list());
             ui_verts   += canvas->draw_list().vertices().size();
             ui_indices += canvas->draw_list().indices().size();
+            // Whether any batch this canvas emitted actually drew a glass() quad -- its
+            // texture key IS the backdrop view (see UiPass::set_backdrop_view()) -- so
+            // record_ui_backdrop_() knows whether to bother running the blur this frame.
+            if (ui_backdrop_pass_ && backdrop_view.valid() && !ui_backdrop_wanted_this_frame_) {
+                for (const coopa::ui::DrawBatch& batch : canvas->draw_list().batches()) {
+                    if (batch.texture_view == backdrop_view) { ui_backdrop_wanted_this_frame_ = true; break; }
+                }
+            }
         }
         screen_ui_pass_->begin_frame(frame_slot, ui_verts, ui_indices);
         if (!screen_canvases_.empty()) {

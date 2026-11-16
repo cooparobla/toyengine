@@ -64,9 +64,9 @@ private:
 `std::unique_ptr<ConsolePanel> console_;`.
 
 **Why it matters, measured on this tree:** touching `ui/console_panel.h` rebuilds **3**
-translation units. Touching `ui/properties.h` rebuilds **26**.
+translation units. Touching `ui/properties.h` rebuilds **27**.
 
-[`ui/console_panel.h`](ui/console_panel.h) is the reference implementation, and all 24 panels
+[`ui/console_panel.h`](ui/console_panel.h) is the reference implementation, and all 27 panels
 follow it.
 
 The directory's one `.inl`, [`ui/layout.inl`](ui/layout.inl), is **not** a panel — it is
@@ -90,7 +90,7 @@ the panel without widening the editor's public API — nothing outside the edito
 
 **The build coupling is narrow.** A panel header recompiles only its own dependents: 8 for
 `properties.h`, 15 for `assets.h` (many panels call into the Asset panel), 3 for a panel
-nothing else calls. `editor_app.h` and `editor_types.h` recompile all 26 — they are genuine
+nothing else calls. `editor_app.h` and `editor_types.h` recompile all 27 — they are genuine
 hubs, and a panel's own change does not touch either.
 
 **`EditorApp` is still a large class.** Most *shared* state lives on it: ~660 declarations and
@@ -113,3 +113,61 @@ See `plans/2026-10-24_structural-cleanup.md`, Stage 7.
 | A viewport manipulator | [`../viewport/`](../viewport/README.md) |
 | A modelling operation | [`../mesh/`](../mesh/README.md) |
 | Build / packaging | [`../build/`](../build/README.md) |
+
+## Widget conventions: add, remove, reorder, empty state
+
+A list of items in a panel -- Material Slots, Vertex Groups, UI designer rows, a weather
+condition, a component -- follows one of these, so the next list does not invent a sixth:
+
+- **Add.** One full-width `ctx.button("Add " + noun, -1, under_cap, Icon::Plus)` at the
+  *bottom* of the list. The sole exception is a list drawn inside an area *header*, which has
+  no room for a row: a right-pinned `ctx.icon_button(id, Icon::Plus, "Add " + noun)` there
+  instead. Where a *type* must be chosen first, the Add button opens a popup of types -- one
+  affordance, then a choice -- rather than the choice standing in for the button. **Not this:**
+  a combo whose first item is a verb ("Add Object Asset..."), several differently-typed Add
+  buttons side by side, or an Add reachable only from a context menu.
+- **Remove.** The per-item header's built-in X (`collapsing_header`'s `remove_clicked`) for a
+  list of collapsible items; a right-edge *unframed* `icon_button(Trash)` for a single-line
+  item (a node-graph socket). A context-menu Remove may exist *in addition*, never instead.
+  **Not this:** a full-width `Trash` button, which reads as "delete the whole list"; a text
+  `"Remove"` button.
+- **Reorder.** `ctx.reorder_grip(list_id, grip_box, index, count, pitch)` at the row's left
+  edge, `style.row_height` wide, and nothing else -- see `imm.h` for the primitive and
+  `schema/inspector.cpp`'s `FieldKind::ItemList` case for the canonical caller. A list whose
+  index *is* the meaning (a splat channel, a face slot, a value sorted by time) declares
+  `fixed_order()` in its schema and shows the item's ordinal instead of a grip. **Not this:**
+  text `Move Up` / `Move Down` buttons; `Icon::ArrowRight`/`ArrowDown` or `Icon::Undo`/`Redo`
+  standing in for up/down (`Icon::ArrowUp`/`ArrowLeft` exist now -- use them); a reorder
+  reachable only from a context menu.
+- **Empty state.** `ctx.label_dim(plural + " -- none yet.")` (see
+  `item_list_empty_text()`), drawn once, where the items would be, above the Add button. A
+  *generative* empty state (Weather's "Using the engine's stock conditions" + a button that
+  creates them) is allowed only where there is a real default to create, and is then an
+  enabled `primary_button`, not a sentence.
+- **Per-item header**, for a list of more-than-one-row items:
+  `ctx.collapsing_header_id(ctx.get_id("item"), title, open, &remove, Icon::None, nullptr,
+  grip_w)` -- keyed by *position* (`collapsing_header_id`), not by the title text, because the
+  title is often one of the item's own editable fields and keying the fold on it would fold
+  the item shut on every keystroke while it's being renamed. Title by `item_title()`'s rule in
+  [`../schema/README.md`](../schema/README.md#item-lists-fieldkinditemlist).
+
+**Deliberately exempt**, each for a stated reason -- do not "fix" these to match the above:
+
+| List | Why it is different |
+|---|---|
+| The animation / rig-pose dope sheets (`timeline.cpp`) | A keyframe canvas, not a list: its order is time, not rank. Gets theme roles (`EditorTheme::Timeline`) only. |
+| The node-graph canvas (nodes themselves) | Position is the data; there is no row order to have. |
+| Material slots (`properties.cpp`) | The index is the mesh's face-slot attribute. `fixed_order`. |
+| Heightmap terrain splat layers (`terrain.cpp`'s hand-written panel) | The index is the splat channel the brush paints; reordering would repaint the terrain. `fixed_order`, capped at `toy::world::k_heightmap_layer_count`. The schema's own `layers` `ItemList` (reached from the Components tab) is declared the same way, so both read identically even though the panel keeps its own richer editor (a "paint this layer" button, a live brush binding) -- collapsing the two onto one widget is out of scope for a standardization pass, not an oversight. |
+| ParticleSystem `color_over_life` / `size_over_life` / `alpha_over_life` | Sorted by time; a grip there would silently un-sort a gradient. `fixed_order`. These are also the textbook case for the inspector's existing `Curve`/`Gradient` field kinds (`gradient_edit()` in `editor/ui/curve_widget.h`), which have no users today -- a real fix, left as a follow-up rather than folded into this pass. |
+| StringList fields (comma-separated text), including order-significant bone chains like `FootIK.left`/`right` | Turning a text field into a reorderable list is a new editor, not a standardized one. Follow-up. |
+| The Components tab's component list | `move_component()`'s reorder stays in the right-click menu (now with `Icon::ArrowUp`, not `ArrowRight`). A component row is a whole inspector -- hundreds of pixels, collapsible, no uniform pitch -- so `reorder_grip`'s stepping-by-pitch drag has nothing to measure against. A direct-manipulation reorder here needs a different primitive, one that compares against the neighbouring headers' actual drawn rects, not a follow-up grip. |
+| Outliner sibling order | Drag-and-drop already reparents (`outliner.cpp`); `SceneDocument::reparent()` already accepts an insertion index, but the drop site never passes one, so there is no drop-line indicator and no sibling reorder. Deferred with the tree-drop-between work below. |
+
+**Follow-ups this pass found but did not do:**
+- A drop-line indicator for the Outliner, so a drag can reorder siblings (not just reparent):
+  `TreeNodeResult::drop_edge { None, Above, Into, Below }` from where in the row the drop
+  lands, feeding `reparent()`'s already-accepted index.
+- Wiring the inspector's `Curve`/`Gradient` field kinds onto the three ParticleSystem ramps
+  above, instead of their `fixed_order()` `ItemList`s.
+- A direct-manipulation reorder for the component list (see the table).

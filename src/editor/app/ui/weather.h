@@ -77,7 +77,6 @@ public:
     void enable_weather_();
 
     /** @brief A sub-heading inside a weather group (as settings groups draw theirs). */
-    void weather_subhead_(imm::Context& ctx, const std::string& title);
 
     /** @brief A foldout inside the weather section; open state is kept per title. */
     bool weather_group_(imm::Context& ctx, const std::string& title, imm::Icon icon, bool default_open, const std::string& tip);

@@ -82,3 +82,10 @@ nodegraph:
   socket_object:   "#c7762e"
   band_fill:       "#4d7fd92e"
   band_outline:    "#3d6bb8d9"
+
+timeline:
+  key:               "#4d4d4d"
+  key_summary:       "#1f1f1f"
+  row_alt:           "#0000000a"   # a dark zebra on a light track
+  out_of_range:      "#0000001a"
+  event:             "#2e7fa6"

@@ -40,7 +40,7 @@ public:
     // --- layout of the overlay furniture (computed before input so clicks on it never
     //     reach the viewport's select / navigate handlers) ---
 
-    static constexpr float kToolSize = 32.0f;
+
 
     imm::Box toolbar_rect_(bool mesh_edit) const;
     float sidebar_w_() const;

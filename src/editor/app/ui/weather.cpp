@@ -70,13 +70,6 @@ void WeatherPanel::enable_weather_() {
     set_weather_block_(&block, "Enable Weather");
 }
 
-void WeatherPanel::weather_subhead_(imm::Context& ctx, const std::string& title) {
-    ctx.spacing(3);
-    const imm::Box hb = ctx.next_box(ctx.style.row_height - 4);
-    ctx.text_in(hb, title, ctx.style.text_dim, 0.0f);
-    const float tw = ctx.text_width(title) + 8;
-    ctx.fill({hb.x + tw, hb.y + hb.h * 0.5f, std::max(0.0f, hb.w - tw), 1.0f}, ctx.style.separator);
-}
 
 bool WeatherPanel::weather_group_(imm::Context& ctx, const std::string& title, imm::Icon icon, bool default_open, const std::string& tip) {
     ctx.spacing(2);
@@ -524,11 +517,11 @@ void WeatherPanel::draw_weather_section_(imm::Context& ctx) {
         else { block["enabled"] = Node(false); set_weather_block_(&block, "Disable Weather"); }
     }
     if (!open) return;
-    ctx.indent(6);
+    ctx.indent(ctx.style.indent_small);
     if (!on) {
         ctx.label_dim("Off: the scene uses the Lighting & Sky and Fog settings.");
         ctx.label_dim("Switch it on to drive them from a clock and weather conditions.");
-        ctx.unindent(6);
+        ctx.unindent(ctx.style.indent_small);
         ctx.spacing(4);
         return;
     }
@@ -541,12 +534,12 @@ void WeatherPanel::draw_weather_section_(imm::Context& ctx) {
     ctx.push_id("weather_ui");
     draw_weather_status_(ctx, parsed, w);
     if (weather_group_(ctx, "Live Preview", I::Play, true, "Try the weather out in the editor. Nothing here is saved.")) {
-        ctx.indent(4);
+        ctx.indent(ctx.style.indent_small);
         draw_weather_preview_(ctx, names, w);
-        ctx.unindent(4);
+        ctx.unindent(ctx.style.indent_small);
     }
     if (weather_group_(ctx, "Time & Sun", I::Sun, true, "The clock, and the path the sun takes across the sky.")) {
-        ctx.indent(4);
+        ctx.indent(ctx.style.indent_small);
         draw_weather_fields_(ctx, weather_time_fields_(), env);
         if (parsed.day_length_minutes > 0.0f) {
             char hint[96];
@@ -556,37 +549,37 @@ void WeatherPanel::draw_weather_section_(imm::Context& ctx) {
         } else {
             ctx.label_dim("Time stands still at the start time.");
         }
-        weather_subhead_(ctx, "Sun Path");
+        ctx.subhead("Sun Path");
         draw_weather_sun_path_(ctx, parsed, w);
         draw_weather_fields_(ctx, weather_sun_fields_(), env);
-        weather_subhead_(ctx, "Moon");
+        ctx.subhead("Moon");
         draw_weather_fields_(ctx, weather_moon_fields_(), env);
-        ctx.unindent(4);
+        ctx.unindent(ctx.style.indent_small);
     }
     if (weather_group_(ctx, "Sky Colours", I::Palette, true, "The sky's gradient by day, at sunrise / sunset and at night; the clock "
                                                              "blends them by the sun's height.")) {
-        ctx.indent(4);
+        ctx.indent(ctx.style.indent_small);
         draw_weather_palettes_(ctx, parsed, env);
-        ctx.unindent(4);
+        ctx.unindent(ctx.style.indent_small);
     }
     if (weather_group_(ctx, "Conditions", I::World, true, "The weather states (clear, rain, snow...) and how the scene moves between them.")) {
-        ctx.indent(4);
+        ctx.indent(ctx.style.indent_small);
         draw_weather_fields_(ctx, weather_schedule_fields_(names), env);
         draw_weather_conditions_(ctx, env, parsed);
-        ctx.unindent(4);
+        ctx.unindent(ctx.style.indent_small);
     }
     if (weather_group_(ctx, "Rain & Snow Landing", I::Terrain, false, "Where precipitation stops, and the splashes it makes.")) {
-        ctx.indent(4);
+        ctx.indent(ctx.style.indent_small);
         draw_weather_fields_(ctx, weather_ground_fields_(), env);
-        ctx.unindent(4);
+        ctx.unindent(ctx.style.indent_small);
     }
     if (weather_group_(ctx, "Lying Snow", I::Texture, false, "How snow builds up, melts and takes tracks.")) {
-        ctx.indent(4);
+        ctx.indent(ctx.style.indent_small);
         draw_weather_fields_(ctx, weather_snow_fields_(), env);
-        ctx.unindent(4);
+        ctx.unindent(ctx.style.indent_small);
     }
     ctx.pop_id();
-    ctx.unindent(6);
+    ctx.unindent(ctx.style.indent_small);
     ctx.spacing(4);
 }
 
@@ -715,7 +708,7 @@ void WeatherPanel::draw_weather_palettes_(imm::Context& ctx, const toy::weather:
     ctx.spacing(2);
     draw_weather_fields_(ctx, weather_palette_fields_(app_.weather_palette_), env);
     if (app_.weather_palette_ == 1) ctx.label_dim("The ground uses the day / night mix at twilight.");
-    weather_subhead_(ctx, "Brightness");
+    ctx.subhead("Brightness");
     draw_weather_fields_(ctx, weather_brightness_fields_(), env);
 }
 
@@ -751,19 +744,34 @@ void WeatherPanel::draw_weather_conditions_(imm::Context& ctx, const InspectorEn
     ctx.spacing(4);
     // One row per condition: a swatch of its sky at noon, its name, what it does, and start / live badges.
     const float rh = ctx.style.row_height + 4;
+    const bool ok = !app_.playing();
+    // Order is the random schedule's order, so each row carries a grip rather than the
+    // toolbar carrying a pair of arrows.
+    const float gw = ok ? ctx.style.row_height : 0.0f;
+    const imm::Id cond_list = ctx.get_id("conditions");
+    imm::ReorderRequest rq;
     for (int i = 0; i < count; ++i) {
         const Node& node = list.as_seq()[static_cast<size_t>(i)];
         const toy::weather::Condition c = toy::weather::parse_condition(node);
         ctx.push_id(static_cast<int64_t>(i));
         const imm::Box row = ctx.next_box(rh);
         bool hov = false;
-        if (ctx.invisible_button("cond_row", row, &hov)) app_.weather_sel_ = i;
+        // The selection hit box stops short of the grip, so the grip gets its own press.
+        if (ctx.invisible_button("cond_row", {row.x + gw, row.y, std::max(0.0f, row.w - gw), row.h}, &hov)) {
+            app_.weather_sel_ = i;
+        }
+        if (gw > 0.0f) {
+            if (auto q = ctx.reorder_grip(cond_list, {row.x + 2, row.y, gw - 4, row.h}, i, count,
+                                          rh + ctx.style.spacing); q.wanted()) {
+                rq = q;
+            }
+        }
         const bool sel = i == app_.weather_sel_;
         if (sel) ctx.fill_rounded(row, ctx.style.selection, 3);
         else if (hov) ctx.fill_rounded(row, ctx.style.row_hover, 3);
         const toy::weather::SkyFrame f = weather_condition_sky_(st, c, 12.0f);   // at noon: the clearest difference
-        draw_weather_dome_(ctx, {row.x + 3, row.y + 3, rh * 1.4f, rh - 6}, f.zenith, f.horizon, f.ground);
-        const float tx = row.x + rh * 1.4f + 9;
+        draw_weather_dome_(ctx, {row.x + gw + 3, row.y + 3, rh * 1.4f, rh - 6}, f.zenith, f.horizon, f.ground);
+        const float tx = row.x + gw + rh * 1.4f + 9;
         const std::string tags = weather_condition_tags_(c);
         std::string badge;
         if (live && live->condition() == c.name) badge = "live";
@@ -774,8 +782,8 @@ void WeatherPanel::draw_weather_conditions_(imm::Context& ctx, const InspectorEn
         if (!tags.empty()) ctx.text_in({tx + nw + 8, row.y, std::max(0.0f, row.right() - tx - nw - 8 - bw), rh}, tags, ctx.style.text_disabled, 0.0f);
         if (!badge.empty()) {
             const imm::Box bb{row.right() - bw - 2, row.y + 4, bw - 2, rh - 8};
-            ctx.fill_rounded(bb, badge.rfind("live", 0) == 0 ? glm::vec4(0.25f, 0.55f, 0.3f, 1.0f) : ctx.style.button, 3);
-            ctx.text_in(bb, badge, ctx.style.text, 0.0f, true);
+            const glm::vec4 bg = badge.rfind("live", 0) == 0 ? imm::with_alpha(ctx.style.ok, 0.55f) : ctx.style.button;
+            ctx.chip_in(bb, badge, bg);
         }
         app_.test_rects_["weather_condition:" + c.name] = row;
         if (hov) {
@@ -786,12 +794,19 @@ void WeatherPanel::draw_weather_conditions_(imm::Context& ctx, const InspectorEn
         }
         ctx.pop_id();
     }
-    const bool ok = !app_.playing();
+    ctx.reorder_release(cond_list);
     auto rewrite = [&](Node new_list, const std::string& label) {
         Node b = weather_block_();
         b["conditions"] = std::move(new_list);
         set_weather_block_(&b, label);
     };
+    if (rq.wanted()) {
+        Node nl = list;
+        std::swap(nl.as_seq()[static_cast<size_t>(rq.from)], nl.as_seq()[static_cast<size_t>(rq.to)]);
+        app_.weather_sel_ = rq.to;
+        ctx.reorder_step(cond_list, rq.to);
+        rewrite(nl, "Move Weather Condition");
+    }
     auto unique_name = [&](std::string base) {
         std::set<std::string> used;
         for (const auto& c : list.as_seq()) used.insert(get_string(c, "name"));
@@ -825,17 +840,7 @@ void WeatherPanel::draw_weather_conditions_(imm::Context& ctx, const InspectorEn
         nl.as_seq().erase(nl.as_seq().begin() + app_.weather_sel_);
         app_.weather_sel_ = std::max(0, app_.weather_sel_ - 1);
         rewrite(nl, "Remove Weather Condition");
-    } else if (tool("wc_up", I::Undo, "Move Up", 3, ok && app_.weather_sel_ > 0)) {
-        Node nl = list;
-        std::swap(nl.as_seq()[static_cast<size_t>(app_.weather_sel_)], nl.as_seq()[static_cast<size_t>(app_.weather_sel_ - 1)]);
-        --app_.weather_sel_;
-        rewrite(nl, "Move Weather Condition");
-    } else if (tool("wc_down", I::Redo, "Move Down", 4, ok && app_.weather_sel_ + 1 < count)) {
-        Node nl = list;
-        std::swap(nl.as_seq()[static_cast<size_t>(app_.weather_sel_)], nl.as_seq()[static_cast<size_t>(app_.weather_sel_ + 1)]);
-        ++app_.weather_sel_;
-        rewrite(nl, "Move Weather Condition");
-    } else if (tool("wc_reset", I::Restart, "Reset to Stock Conditions\nReplaces the list with the engine's defaults", 5, ok)) {
+    } else if (tool("wc_reset", I::Restart, "Reset to Stock Conditions\nReplaces the list with the engine's defaults", 3, ok)) {
         Node nl = Node::sequence();
         for (const auto& c : toy::weather::default_conditions()) nl.as_seq().push_back(toy::weather::to_node(c));
         app_.weather_sel_ = 0;
@@ -843,7 +848,7 @@ void WeatherPanel::draw_weather_conditions_(imm::Context& ctx, const InspectorEn
     }
     if (live && count > 0 && ok) {
         const std::string sel_name = get_string(list.as_seq()[static_cast<size_t>(app_.weather_sel_)], "name");
-        const float pw = std::min(110.0f, std::max(0.0f, bar.w - 6 * bw - 4));
+        const float pw = std::min(110.0f, std::max(0.0f, bar.w - 4 * bw - 4));
         if (pw > 40 && ctx.icon_button("wc_preview", I::Play, "Preview It\nBlend the live weather into the selected condition (not saved)",
                                        live->condition() == sel_name, bw - 2, imm::Context::kAll,
                                        imm::Box{bar.right() - bw + 2, bar.y, bw - 2, bw - 2})) {
@@ -886,7 +891,7 @@ void WeatherPanel::draw_weather_conditions_(imm::Context& ctx, const InspectorEn
     EditResult total;
     for (int p = 0; p < 6; ++p) {
         if (!weather_group_(ctx, parts[p], icons[p], p == 1 || p == 3, tips[p])) continue;
-        ctx.indent(4);
+        ctx.indent(ctx.style.indent_small);
         if (p == 1) {   // the condition's sky through the day
             static const float hours[] = {7.0f, 12.0f, 18.5f, 0.0f};
             static const char* labels[] = {"Morning", "Noon", "Dusk", "Night"};
@@ -919,7 +924,7 @@ void WeatherPanel::draw_weather_conditions_(imm::Context& ctx, const InspectorEn
         if (p == 4 && cond.precipitation > 0.01f) {
             ctx.label_dim(cond.temperature <= 0.0f ? "Falls as snow (at or below 0 C) and lies." : "Falls as rain (above 0 C).");
         }
-        ctx.unindent(4);
+        ctx.unindent(ctx.style.indent_small);
     }
     ctx.pop_id();
     if (total.changed && ok) {

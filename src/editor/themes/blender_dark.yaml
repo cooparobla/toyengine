@@ -10,7 +10,8 @@ metrics:
   row_height: 21
   padding: 6
   spacing: 3
-  indent: 16
+  indent: 16                      # one level of tree depth
+  indent_small: 6                 # one level of a property sub-block
   label_ratio: 0.46
   label_align: 1                  # property labels against the widget (0 = flush left)
   scrollbar: 7
@@ -46,6 +47,7 @@ colors:
   axis_z: "#2890ff"
   object_selected: "#f15800"      # viewport selection
   object_active: "#ffaa40"        # viewport active object
+  ok: "#73d973"                   # a succeeded operation, a healthy status
   warning: "#facc4c"
   error: "#f26159"
   hover_tint: "#ffffff1a"         # overlay on hovered flat widgets
@@ -118,3 +120,16 @@ nodegraph:
   socket_object:   "#e69447"
   band_fill:       "#598cf22e"
   band_outline:    "#8cb8ffd9"
+
+timeline:
+  key:               "#c7c7c7"
+  key_summary:       "#f2f2f2"   # a collapsed track's rolled-up key
+  key_selected:      "#ff9e2e"
+  event:             "#8cccf2"   # a clip event's marker
+  event_selected:    "#ff9e2e"
+  playhead:          "#528cf2"   # the line and its frame tag
+  row_alt:           "#ffffff06"  # every other track row
+  out_of_range:      "#0000002e"  # before 0 and past the clip's length
+  record:            "#8c1f1f"   # the record button while armed
+  record_dot:        "#d94040"
+  record_dot_armed:  "#ff4d4d"

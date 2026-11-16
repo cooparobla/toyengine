@@ -920,6 +920,27 @@ void ToyRenderPipeline::build_post_chain_(coopa::gfx::pipeline::RenderPass& swap
         config_.shaders("fullscreen.vert"),
         config_.shaders("tilt_shift.frag"));
 
+    // Uniform backdrop blur for glass UI panels -- sized from render_extent_ / downscale, NOT
+    // the display/letterbox rect tilt_shift_pass_ above uses: a frosted panel has no focus-ramp
+    // structure to stair-step, so there is nothing display resolution buys it, and sizing it
+    // smaller makes the result STARTUP-FIXED -- handle_resize_() never touches ui_backdrop_pass_
+    // at all. Gated on screen_ui_enabled too: nothing reads this image when screen UI is off.
+    // Reads the SAME tilt-shift-on/off source choice bind_composite_inputs_() uses for
+    // ui_composite_pass_'s base image, so the two consumers of that choice start in agreement;
+    // bind_composite_inputs_() rebinds it there on every resize for the same reason.
+    if (config_.ui_backdrop_blur_enabled && config_.screen_ui_enabled) {
+        const uint32_t downscale = std::max<uint32_t>(1, config_.ui_backdrop_blur_downscale);
+        const uint32_t backdrop_w = std::max<uint32_t>(1, render_extent_.width / downscale);
+        const uint32_t backdrop_h = std::max<uint32_t>(1, render_extent_.height / downscale);
+        const coopa::gfx::TextureView backdrop_source =
+            config_.tilt_shift_enabled ? tilt_shift_pass_->result_view_typed() : display_source_view;
+        ui_backdrop_pass_ = std::make_unique<coopa::gfx::engine::passes::SeparableBlurPass>(
+            device_, allocator_, backdrop_w, backdrop_h,
+            backdrop_source, linear_sampler_,
+            config_.shaders("fullscreen.vert"),
+            config_.shaders("ui_backdrop_blur.frag"));
+    }
+
     upscale_pass_ = std::make_unique<passes::UpscalePass>(
         device_, swapchain_pass,
         config_.shaders("fullscreen.vert"),
@@ -1026,12 +1047,19 @@ void ToyRenderPipeline::rebuild_overlay_chain_(uint32_t w, uint32_t h) {
 
     if (config_.screen_ui_enabled) {
         // No ExtraSets, unlike world_ui_pass_: a screen-space overlay has nothing to be
-        // occluded by, so there is no scene-depth compare and no set 1.
+        // occluded by, so there is no scene-depth compare and no set 1. Glass is bound the
+        // same way: the backdrop view IS a glass quad's texture key (see UiPass::
+        // set_backdrop_view()), so a scene-depth-style extra set was never needed for it
+        // either -- an ordinary set-0 texture already gets it its own batch and its own
+        // "glass" pipeline variant.
         screen_ui_pass_ = std::make_unique<coopa::ui::UiPass>(
             device_, allocator_, cmd_pool_, overlay_target_->render_pass_object(),
             config_.shaders("ui.vert"),
             config_.shaders("ui_quad.frag"),
-            config_.shaders("ui_text.frag"));
+            config_.shaders("ui_text.frag"),
+            ui_backdrop_pass_ ? config_.shaders("ui_glass.frag") : std::string());
+        screen_ui_pass_->set_backdrop_view(
+            ui_backdrop_pass_ ? ui_backdrop_pass_->result_view_typed() : coopa::gfx::TextureView{});
     }
 
     upscale_pass_->set_source_image(overlay_target_->color_view_typed(), nearest_sampler_);
@@ -1070,6 +1098,16 @@ void ToyRenderPipeline::bind_composite_inputs_() {
     // equally exact at 1:1 but would silently turn into a blur the moment the two sizes
     // drift by a pixel, which is exactly the failure this binding should not hide.
     ui_composite_pass_->set_ui_image(ui_world_target_->color_view_typed(), nearest_sampler_);
+
+    // The SAME tilt-shift-on/off choice as the composite's base image above, rebound here
+    // every time this function reruns (every resize) so the two consumers of that choice
+    // can never drift apart -- a hand-written second copy of the selection is exactly how
+    // that happened before display_source_view_ was cached as the single source of truth.
+    if (ui_backdrop_pass_) {
+        ui_backdrop_pass_->set_source(
+            config_.tilt_shift_enabled ? tilt_shift_pass_->result_view_typed() : display_source_view_,
+            linear_sampler_);
+    }
 }
 
 void ToyRenderPipeline::rebuild_world_ui_pass_() {

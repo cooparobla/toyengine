@@ -63,7 +63,8 @@ BootSplash::BootSplash(coopa::gfx::core::Device& device,
     // the one texture this screen ever binds: white.
     ui_pass_ = std::make_unique<coopa::ui::UiPass>(
         device, allocator, cmd_pool, pass,
-        shaders("ui.vert"), shaders("ui_quad.frag"), shaders("ui_text.frag"), /*max_textures=*/8);
+        shaders("ui.vert"), shaders("ui_quad.frag"), shaders("ui_text.frag"),
+        /*glass_frag_spv=*/"", /*max_textures=*/8);
     dl_.set_default_texture(ui_pass_->white_view());
     dl_.set_text_scale(1.0f);   // One canvas pixel is one target pixel; the layout scales itself.
 }

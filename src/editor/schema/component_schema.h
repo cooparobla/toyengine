@@ -84,6 +84,11 @@ struct FieldDesc {
     ShowWhen    show;                  ///< When this row is drawn at all.
     Node def_node;                     ///< Default for list kinds (StringList / ItemList); null: empty.
     std::vector<FieldDesc> item_fields;        ///< ItemList: the keys of one item.
+    std::string item_noun;             ///< ItemList: one item's name ("Wheel"); empty: display() less a trailing "s".
+    std::string item_title_key;        ///< ItemList: the item key whose value titles that item's header.
+    bool items_reorderable = true;     ///< ItemList: false where the INDEX is the meaning (a splat channel, a face slot).
+    bool items_collapsed = false;      ///< ItemList: items start closed, for an item of many keys.
+    int  max_items = 0;                ///< ItemList: 0 is unbounded; at the cap, Add is disabled.
 
     std::string display() const;
 };
@@ -177,6 +182,21 @@ FieldDesc hidden_when(FieldDesc f, std::string key, std::vector<std::string> val
 FieldDesc as_slider(FieldDesc f);
 /** @brief The unit shown after the number ("m", "Nm", "deg"). */
 FieldDesc with_unit(FieldDesc f, std::string unit);
+/** @brief An ItemList item's singular noun, where dropping a trailing "s" will not do. */
+FieldDesc with_item_noun(FieldDesc f, std::string noun);
+/** @brief The item key whose value titles each of an ItemList's item headers. */
+FieldDesc with_item_title(FieldDesc f, std::string key);
+/**
+ * @brief An ItemList whose order is its meaning: no reorder grip, and each item shows its index.
+ *
+ * Declared where moving an item would silently remap data rather than re-rank it -- a splat
+ * layer is a channel, a material slot is a face attribute, a ramp stop is sorted by its time.
+ */
+FieldDesc fixed_order(FieldDesc f);
+/** @brief An ItemList whose items start collapsed, for an item of more than a few keys. */
+FieldDesc collapsed_items(FieldDesc f);
+/** @brief The most items an ItemList accepts; past it, Add is disabled. */
+FieldDesc capped(FieldDesc f, int max);
 
 /**
  * @brief Builds one InspectorSection, so a layout table reads as prose.

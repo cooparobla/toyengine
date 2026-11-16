@@ -1,3 +1,4 @@
+#include "editor/app/ui/tool_strip.h"
 #include "editor/app/ui/terrain.h"
 
 #include "editor/app/editor_app.h"
@@ -372,11 +373,7 @@ void TerrainPanel::draw_terrain_overlay_(imm::Context& ctx, const ViewProj& vp) 
 
 float TerrainPanel::draw_terrain_header_(imm::Context& ctx, float x, const imm::Box& hb) {
     const float bh = hb.h - 6;
-    auto label = [&](const char* t) {
-        const float w = ctx.text_width(t) + 6;
-        ctx.text_in({x, hb.y, w, hb.h}, t, ctx.style.text_dim, 0.0f);
-        x += w;
-    };
+    auto label = [&](const char* t) { ui::tool_header_label(ctx, hb, x, t); };
     label(terrain_tool_name(terrain_brush_.tool));
     x += 6;
     label("Radius");
@@ -393,10 +390,10 @@ float TerrainPanel::draw_terrain_header_(imm::Context& ctx, float x, const imm::
 void TerrainPanel::draw_terrain_toolbar_(imm::Context& ctx, const imm::Box& r) {
     float y = r.y + 4;
     for (const auto& b : k_tools) {
-        const imm::Box bb{r.x + 3, y, app_.viewport_chrome_panel_->kToolSize, app_.viewport_chrome_panel_->kToolSize};
-        y += app_.viewport_chrome_panel_->kToolSize + 2;
+        const imm::Box bb{r.x + 3, y, ui::k_tool_size, ui::k_tool_size};
+        y += ui::k_tool_size + 2;
         if (ctx.icon_button(std::string("terrain_") + terrain_tool_name(b.tool), b.icon, b.tip, terrain_brush_.tool == b.tool,
-                            app_.viewport_chrome_panel_->kToolSize, imm::Context::kAll, bb)) {
+                            ui::k_tool_size, imm::Context::kAll, bb)) {
             terrain_brush_.tool = b.tool;
         }
     }

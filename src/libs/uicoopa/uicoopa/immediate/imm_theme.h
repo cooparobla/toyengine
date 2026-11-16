@@ -63,6 +63,7 @@ void visit_style(S& s, V&& v) {
     v.metric("padding", s.padding);
     v.metric("spacing", s.spacing);
     v.metric("indent", s.indent);
+    v.metric("indent_small", s.indent_small);
     v.metric("label_ratio", s.label_ratio);
     v.metric("label_align", s.label_align);
     v.metric("scrollbar", s.scrollbar);
@@ -97,6 +98,7 @@ void visit_style(S& s, V&& v) {
     v.color("axis_z", s.axis_z);
     v.color("object_selected", s.object_selected);
     v.color("object_active", s.object_active);
+    v.color("ok", s.ok);
     v.color("warning", s.warning);
     v.color("error", s.error);
     v.color("hover_tint", s.hover_tint);

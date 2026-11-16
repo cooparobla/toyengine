@@ -122,6 +122,17 @@ EditResult draw_fields(imm::Context& ctx, const std::vector<FieldDesc>& fields, 
  */
 EditResult draw_shader_section(imm::Context& ctx, Node& m);
 
+/**
+ * @brief A collapsing header with an optional blurb paragraph underneath, drawn only while
+ *        the header is open.
+ *
+ * `draw_section()`'s own header, pulled out for the two hand-written inspectors
+ * (ParticleSystem, TileTerrain) that build the same sectioning by hand because they are a
+ * full takeover rather than a schema -- so there is one drawer behind both shapes.
+ */
+bool inspector_block(imm::Context& ctx, const char* title, imm::Icon ic, const char* blurb,
+                     bool default_open = true);
+
 /** @brief Every field of a material block: the Shader section first, then the PBR fields. */
 EditResult draw_material_block(imm::Context& ctx, Node& m, const InspectorEnv& env, bool show_unknown = true);
 

@@ -530,6 +530,9 @@ public:
     /** @brief Sets the texture used for untextured/solid-color quads (typically a 1x1 white texel). */
     void set_default_texture(coopa::gfx::TextureView view) { draw_list_.set_default_texture(view); }
 
+    /** @brief Sets the host's blurred-backdrop image, for Context::glass()/glass_panel(). */
+    void set_backdrop_texture(coopa::gfx::TextureView view) { draw_list_.set_backdrop_texture(view); }
+
     /** @brief The geometry this canvas emitted on its most recent late_update(). */
     const DrawList& draw_list() const { return draw_list_; }
 

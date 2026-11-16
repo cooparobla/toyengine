@@ -31,7 +31,19 @@
     bool asset_view_() const;
 
     /** @brief A Blender area header strip at the top of an area (rounded top corners). */
-    imm::Box area_header_(imm::Context& ctx, const imm::Box& area, float h = 26.0f);
+    imm::Box area_header_(imm::Context& ctx, const imm::Box& area, float h = ui::k_area_header_h);
+
+    /**
+     * @brief A filter field at an explicit box: a magnifier and a prompt while it is empty.
+     *
+     * The one search box in the editor, so a list that gains a filter gains the same one.
+     * @return What to match against, lowercased, including the edit in progress.
+     */
+    std::string search_box_in_(imm::Context& ctx, const char* id, const imm::Box& box, std::string& filter,
+                               const char* placeholder = "Search");
+    /** @brief A search box flowed into the layout, one row high. */
+    std::string search_box_(imm::Context& ctx, const char* id, std::string& filter,
+                            const char* placeholder = "Search");
 
     /** @brief The icon a component type shows in the Outliner and Properties. */
     static imm::Icon icon_for_component_(const std::string& type);

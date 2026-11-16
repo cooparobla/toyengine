@@ -1,3 +1,4 @@
+#include "editor/app/ui/tool_strip.h"
 #include "editor/app/ui/paint.h"
 #include "editor/app/ui/viewport_chrome.h"
 #include "editor/app/ui/sculpt.h"
@@ -322,11 +323,7 @@ void PaintPanel::draw_paint_overlay_(imm::Context& ctx, const ViewProj& vp) {
 float PaintPanel::draw_paint_header_(imm::Context& ctx, float x, const imm::Box& hb) {
     const float bh = hb.h - 6;
     PaintSettings& s = paint_settings_();
-    auto label = [&](const char* t) {
-        const float w = ctx.text_width(t) + 6;
-        ctx.text_in({x, hb.y, w, hb.h}, t, ctx.style.text_dim, 0.0f);
-        x += w;
-    };
+    auto label = [&](const char* t) { ui::tool_header_label(ctx, hb, x, t); };
     if (app_.mode_ == InteractionMode::VertexPaint) {
         // Primary and secondary swatches (X swaps): click opens the colour picker.
         auto swatch = [&](const char* id, glm::vec4& c, const char* tip) {
@@ -374,9 +371,9 @@ void PaintPanel::draw_paint_toolbar_(imm::Context& ctx, const imm::Box& r) {
         {PaintTool::Average, I::BrushFlatten, "Average\nPull everything under the brush toward its average"},
     };
     for (const auto& b : kTools) {
-        const imm::Box bb{r.x + 3, y, app_.viewport_chrome_panel_->kToolSize, app_.viewport_chrome_panel_->kToolSize};
-        y += app_.viewport_chrome_panel_->kToolSize + 2;
-        if (ctx.icon_button(std::string("ptool_") + paint_tool_name(b.t), b.ic, b.tip, s.tool == b.t, app_.viewport_chrome_panel_->kToolSize,
+        const imm::Box bb{r.x + 3, y, ui::k_tool_size, ui::k_tool_size};
+        y += ui::k_tool_size + 2;
+        if (ctx.icon_button(std::string("ptool_") + paint_tool_name(b.t), b.ic, b.tip, s.tool == b.t, ui::k_tool_size,
                             imm::Context::kAll, bb)) {
             s.tool = b.t;
         }

@@ -252,6 +252,17 @@ inline void Context::prompt_bar(const Box& b,
 // Menus and frames
 // =====================================================================================
 
+inline Box Context::glass_panel(const Box& b, const GlassStyle& s) {
+    if (b.empty()) return b;
+    const float r = s.rounding >= 0.0f ? s.rounding : style.rounding;
+    const float pad = s.padding >= 0.0f ? s.padding : style.padding;
+    if (s.shadow_size > 0.0f) shadow_soft(b, s.shadow_size, style.shadow, r);
+    glass(b, with_alpha(s.tint, s.tint.a * s.opacity), r);
+    if (s.film.a > 0.0f) fill_rounded_aa(b, s.film, r);
+    if (s.rim.a > 0.0f) outline_rounded_aa(b, s.rim, r, s.rim_width);
+    return b.shrink(pad);
+}
+
 inline Box Context::panel_frame(std::string_view id, const Box& b, std::string_view title,
                                 bool* close_clicked) {
     if (close_clicked) *close_clicked = false;
@@ -476,7 +487,7 @@ inline bool Context::drag_handle(std::string_view id, const Box& b, glm::vec2* o
     push_id(id);
     bool hov = false;
     bool held = false;
-    invisible_button("grab", b, &hov, &held);
+    drag_region("grab", b, &hov, &held);   // pointer-only: no focus ring outliving the drag
     float& ox = persistent("grab", 0);
     float& oy = persistent("grab", 1);
     float& grabbed = persistent("grab", 2);

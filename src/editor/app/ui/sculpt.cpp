@@ -1,3 +1,4 @@
+#include "editor/app/ui/tool_strip.h"
 #include "editor/app/ui/sculpt.h"
 #include "editor/app/ui/paint.h"
 
@@ -299,11 +300,7 @@ void SculptPanel::draw_brush_overlay_(imm::Context& ctx, const ViewProj& vp, flo
 float SculptPanel::draw_sculpt_header_(imm::Context& ctx, float x, const imm::Box& hb) {
     using I = imm::Icon;
     const float bh = hb.h - 6;
-    auto label = [&](const char* t) {
-        const float w = ctx.text_width(t) + 6;
-        ctx.text_in({x, hb.y, w, hb.h}, t, ctx.style.text_dim, 0.0f);
-        x += w;
-    };
+    auto label = [&](const char* t) { ui::tool_header_label(ctx, hb, x, t); };
     label("Radius");
     ctx.drag_float_box("sc_radius", {x, hb.y + 3, 62, bh}, &app_.sculpt_.radius_px, 0.5f, 2.0f, 600.0f, "%.0f px");
     ctx.tooltip("Radius\nBrush radius in screen pixels (F)");
@@ -365,9 +362,9 @@ void SculptPanel::draw_sculpt_toolbar_(imm::Context& ctx, const imm::Box& r) {
         {SculptBrush::Flatten, I::BrushFlatten, "Flatten\nPress the surface onto its average plane (Shift T)"},
     };
     for (const auto& b : kBrushes) {
-        const imm::Box bb{r.x + 3, y, app_.viewport_chrome_panel_->kToolSize, app_.viewport_chrome_panel_->kToolSize};
-        y += app_.viewport_chrome_panel_->kToolSize + 2;
-        if (ctx.icon_button(std::string("brush_") + sculpt_brush_name(b.b), b.ic, b.tip, app_.sculpt_.brush == b.b, app_.viewport_chrome_panel_->kToolSize,
+        const imm::Box bb{r.x + 3, y, ui::k_tool_size, ui::k_tool_size};
+        y += ui::k_tool_size + 2;
+        if (ctx.icon_button(std::string("brush_") + sculpt_brush_name(b.b), b.ic, b.tip, app_.sculpt_.brush == b.b, ui::k_tool_size,
                             imm::Context::kAll, bb)) {
             app_.sculpt_.brush = b.b;
         }

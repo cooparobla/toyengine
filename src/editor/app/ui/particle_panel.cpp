@@ -65,9 +65,7 @@ EditResult ParticlePanel::draw_particle_panel_(imm::Context& ctx, ObjectId id, N
     };
     auto mark = [&](std::initializer_list<const char*> keys) { for (const char* k : keys) placed.insert(k); };
     auto section = [&](const char* title, I icon, const char* what, bool open) {
-        const bool o = ctx.collapsing_header(title, open, nullptr, icon);
-        if (o && what) ctx.paragraph(what, &dim);
-        return o;
+        return inspector_block(ctx, title, icon, what, open);
     };
 
     const bool scatter = str_of(comp, "mode", "emitter") == "scatter";

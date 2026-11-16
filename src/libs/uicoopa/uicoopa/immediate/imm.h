@@ -187,11 +187,43 @@ enum class Icon : int {
     Pen,
     // curve anchor modes (appended)
     AnchorCorner, AnchorSmooth, AnchorVector, AnchorAuto,
+    // the remaining two arrow directions (appended)
+    ArrowUp, ArrowLeft,
+    // a dock/navigation "home" affordance (appended)
+    Home,
+
+    Count,   ///< One past the last icon; the bound for iterating the set.
 };
 
 class Context;
 /** @brief Draws `icon` fitted (square, centred) into `b`. Defined in imm_icons.h. */
 void draw_icon(Context& ctx, Icon icon, const Box& b, const glm::vec4& color);
+
+/** @brief How a custom icon draws itself -- the contract draw_icon() fulfils for a built-in. */
+using IconDrawFn = void (*)(Context& ctx, const Box& b, const glm::vec4& color);
+
+/**
+ * @brief Registers a named icon drawn by `fn` and returns the `Icon` value that selects it.
+ *
+ * The returned value is at or past `Icon::Count`, so it is usable anywhere a built-in is --
+ * `icon_button()`, `menu_item()`, `tree_node()`, `draw_icon()` -- and `icon_name()` /
+ * `icon_from_name()` resolve it like any other. This is how an application adds icons the
+ * shared set has no business carrying: a game's inventory bag or quest scroll belongs to the
+ * game, not to uicoopa.
+ *
+ * Draw on the same 16x16 design grid the built-ins use by constructing an `IconPen` over the
+ * box handed to `fn`, so a custom icon stays crisp at every UI scale and matches their weight.
+ *
+ * Registering a name already present replaces its drawing function and returns the SAME value,
+ * which is what lets a caller register from a per-instance hook without the set growing each
+ * time. Registration is not thread-safe and belongs on the UI thread, like every other call
+ * in this header.
+ *
+ * @param name Unique, and the spelling `icon_from_name()` matches (case-insensitively).
+ * @param fn   Draws the icon into the box it is given, in the colour it is given.
+ * @return The `Icon` value selecting this icon.
+ */
+Icon register_custom_icon(std::string_view name, IconDrawFn fn);
 
 // =====================================================================================
 // Style
@@ -206,7 +238,8 @@ struct Style {
     float row_height  = 21.0f;
     float padding     = 6.0f;
     float spacing     = 3.0f;
-    float indent      = 16.0f;
+    float indent      = 16.0f;   ///< One level of tree depth (tree_node).
+    float indent_small = 6.0f;   ///< One level of a property sub-block (a section's rows, a list item's fields).
     float label_ratio = 0.46f;   ///< Property rows: fraction of the row width given to the label.
     float label_align = 1.0f;    ///< Property rows: label placement in its column, 0 = left edge, 1 = against the widget (Blender).
     float scrollbar   = 7.0f;
@@ -241,6 +274,7 @@ struct Style {
     glm::vec4 axis_z        {0.157f, 0.565f, 1.000f, 1.0f};   ///< #2890ff
     glm::vec4 object_selected {0.945f, 0.345f, 0.000f, 1.0f}; ///< #f15800 -- viewport selection
     glm::vec4 object_active   {1.000f, 0.667f, 0.251f, 1.0f}; ///< #ffaa40 -- viewport active object
+    glm::vec4 ok            {0.45f, 0.85f, 0.45f, 1.0f};   ///< a succeeded operation, a healthy status
     glm::vec4 warning       {0.98f, 0.80f, 0.30f, 1.0f};
     glm::vec4 error         {0.95f, 0.38f, 0.35f, 1.0f};
     glm::vec4 hover_tint     {1.0f, 1.0f, 1.0f, 0.10f};   ///< overlay on hovered flat widgets
@@ -435,6 +469,25 @@ struct SlotStyle {
     float     rounding = -1.0f;
 };
 
+/**
+ * @struct GlassStyle
+ * @brief How Context::glass_panel() looks: a frosted pane over the host's blurred backdrop.
+ *
+ * With no backdrop (the feature disabled, a world-space canvas, a headless/font-free test)
+ * glass_panel() falls back to a flat fill in `tint`, so a screen authored against this style
+ * never needs its own fallback branch.
+ */
+struct GlassStyle {
+    float     rounding    = -1.0f;        /**< Corner radius; negative takes the theme's. */
+    glm::vec4 tint        {1.0f, 1.0f, 1.0f, 1.0f}; /**< Multiplies the sampled backdrop. */
+    float     opacity     = 1.0f;         /**< 1 = fully frosted; lower blends toward the sharp frame. */
+    glm::vec4 film        {1.0f, 1.0f, 1.0f, 0.06f}; /**< Lightening wash drawn over the pane. */
+    glm::vec4 rim         {1.0f, 1.0f, 1.0f, 0.18f}; /**< The AA'd 1px highlight border. */
+    float     rim_width   = 1.0f;
+    float     shadow_size = 0.0f;         /**< > 0 draws shadow_soft() under the pane first. */
+    float     padding     = -1.0f;        /**< Content inset; negative takes style.padding. */
+};
+
 /** @brief What a Context::slot_grid() callback is told about one cell. */
 struct SlotInfo {
     int  index = 0;          /**< Cell index, row-major from the top-left. */
@@ -529,6 +582,25 @@ struct TreeNodeResult {
 struct DragState {
     bool active = false;
     bool changed = false;
+};
+
+/** @brief Which way a solid arrow points. */
+enum class ArrowDir { Right, Down, Left, Up };
+
+/**
+ * @brief The move a reorder grip asked for this frame, or nothing.
+ *
+ * The grip does not own the list: `from` and `to` are a request the caller performs, so one
+ * primitive serves both a vector it can swap and a document mutation that carries undo.
+ */
+struct ReorderRequest {
+    int from = -1;   ///< The row to move; -1 when nothing was asked for.
+    int to   = -1;   ///< Always `from` +/- 1.
+
+    /** @brief True when a move was asked for. */
+    bool wanted() const { return from >= 0; }
+    /** @brief +1 to move the row down the list, -1 to move it up. */
+    int  dir() const { return to > from ? 1 : -1; }
 };
 
 /**
@@ -627,6 +699,8 @@ public:
         hot_id_ = 0;
         last_item_ = {};
         focusables_.clear();
+        alpha_stack_.clear();
+        alpha_scale_ = 1.0f;
         keyboard_consumed_ = false;
         wheel_consumed_ = false;
         tooltip_.clear();
@@ -875,6 +949,16 @@ public:
     Box panel_frame(std::string_view id, const Box& b, std::string_view title, bool* close_clicked = nullptr);
 
     /**
+     * @brief A frosted glass pane: shadow, frosted body (glass()), a lightening film, an AA'd
+     *        rim, and (with no backdrop) a flat fallback fill -- the glassmorphism LOOK, as
+     *        panel_frame() is the editor-style one. Returns the content box.
+     *
+     * Draws no title bar and takes no close button -- a glass screen that wants one composes
+     * this with its own drag handle / icon button, since the chrome differs per screen.
+     */
+    Box glass_panel(const Box& b, const GlassStyle& s = {});
+
+    /**
      * @brief A vertical list of names, one selected -- an inventory's category column.
      *
      * @param active In/out: which entry is selected.
@@ -1019,13 +1103,13 @@ public:
     Id focus_id() const { return focus_id_; }
 
     /** @brief Focuses the widget `id_str` (same id scope as the widget itself). */
-    void set_focus(std::string_view id_str) { focus_id_ = get_id(id_str); }
+    void set_focus(std::string_view id_str) { focus_id_ = get_id(id_str); focus_ring_ = true; }
 
     /** @brief Drops focus, so nothing is reachable by Enter until Tab moves again. */
     void clear_focus() { focus_id_ = 0; }
 
     /** @brief Whether this frame drew a focus ring -- i.e. the keyboard is driving the UI. */
-    bool focus_visible() const { return focus_id_ != 0; }
+    bool focus_visible() const { return focus_id_ != 0 && focus_ring_; }
 
     /** @brief Marks the keyboard as used this frame, so later shortcut() calls return false. */
     void consume_keyboard() { keyboard_consumed_ = true; }
@@ -1088,7 +1172,7 @@ public:
     void fill(const Box& b, const glm::vec4& c) {
         if (b.empty() || c.a <= 0.0f) return;
         dl_->set_texture(dl_->default_texture());
-        dl_->add_quad(to_canvas_(b), Rect{{0.5f, 0.5f}, {0.5f, 0.5f}}, pack(c));
+        dl_->add_quad(to_canvas_(b), Rect{{0.5f, 0.5f}, {0.5f, 0.5f}}, pack_(c));
     }
     void outline(const Box& b, const glm::vec4& c, float t = 1.0f) {
         fill({b.x, b.y, b.w, t}, c);
@@ -1098,18 +1182,30 @@ public:
     }
     void line(glm::vec2 a, glm::vec2 b, const glm::vec4& c, float t = 1.0f) {
         dl_->set_texture(dl_->default_texture());
-        dl_->add_line(flip_(a), flip_(b), t, pack(c));
+        dl_->add_line(flip_(a), flip_(b), t, pack_(c));
     }
     void triangle(glm::vec2 a, glm::vec2 b, glm::vec2 c, const glm::vec4& col) {
         dl_->set_texture(dl_->default_texture());
-        dl_->add_triangle(flip_(a), flip_(b), flip_(c), pack(col));
+        dl_->add_triangle(flip_(a), flip_(b), flip_(c), pack_(col));
+    }
+    /** @brief A small solid triangle centred in `b`, pointing `d`. */
+    void arrow(const Box& b, ArrowDir d, const glm::vec4& c) {
+        const glm::vec2 m = b.center();
+        const float r = std::min(b.w, b.h) * 0.28f;
+        switch (d) {
+            case ArrowDir::Down:
+                triangle({m.x - r, m.y - r * 0.6f}, {m.x + r, m.y - r * 0.6f}, {m.x, m.y + r * 0.7f}, c); break;
+            case ArrowDir::Up:
+                triangle({m.x - r, m.y + r * 0.6f}, {m.x + r, m.y + r * 0.6f}, {m.x, m.y - r * 0.7f}, c); break;
+            case ArrowDir::Right:
+                triangle({m.x - r * 0.6f, m.y - r}, {m.x - r * 0.6f, m.y + r}, {m.x + r * 0.7f, m.y}, c); break;
+            case ArrowDir::Left:
+                triangle({m.x + r * 0.6f, m.y - r}, {m.x + r * 0.6f, m.y + r}, {m.x - r * 0.7f, m.y}, c); break;
+        }
     }
     /** @brief Expander arrow centred in `b`: pointing right (closed) or down (open). */
     void arrow(const Box& b, bool open, const glm::vec4& c) {
-        const glm::vec2 m = b.center();
-        const float r = std::min(b.w, b.h) * 0.28f;
-        if (open) triangle({m.x - r, m.y - r * 0.6f}, {m.x + r, m.y - r * 0.6f}, {m.x, m.y + r * 0.7f}, c);
-        else      triangle({m.x - r * 0.6f, m.y - r}, {m.x - r * 0.6f, m.y + r}, {m.x + r * 0.7f, m.y}, c);
+        arrow(b, open ? ArrowDir::Down : ArrowDir::Right, c);
     }
     /** @brief Filled disc. */
     void circle(glm::vec2 c, float r, const glm::vec4& col, int segments = 0) {
@@ -1246,6 +1342,48 @@ public:
             fill_rounded({b.x - g + 2, b.y - g + 4, b.w + g * 2 - 4, b.h + g * 2 - 4}, style.shadow, r + g);
         }
     }
+
+    /**
+     * @brief A filled rounded rectangle with a true anti-aliased edge (DrawList::add_rounded_rect),
+     *        unlike fill_rounded()'s hand-rolled triangle fan.
+     *
+     * A distinct name on purpose: fill_rounded() is what every existing panel, button, row and
+     * popup already draws, its vertex counts are what layout unit tests see, and the editor's
+     * GPU image suites compare real pixels against it -- this is opt-in, not a silent swap.
+     *
+     * `corners` takes the SAME flags as fill_rounded() (kTL/kTR/kBR/kBL): despite canvas space
+     * running +Y up while Box runs +Y down, DrawList::kRoundTL/kRoundTR/kRoundBR/kRoundBL were
+     * defined to track the same ON-SCREEN corner, so the bit values already agree and no
+     * conversion is needed here (verified against draw_list.h's corner table -- do not "fix"
+     * this with a swap).
+     */
+    void fill_rounded_aa(const Box& b, const glm::vec4& c, float r = -1.0f, int corners = kAll) {
+        if (!dl_ || b.empty() || c.a <= 0.0f) return;
+        if (r < 0) r = style.rounding;
+        dl_->set_texture(dl_->default_texture());
+        dl_->add_rounded_rect(to_canvas_(b), r, corners, pack_(c));
+    }
+
+    /** @brief A rounded outline `w` canvas pixels thick, anti-aliased on both sides. See fill_rounded_aa(). */
+    void outline_rounded_aa(const Box& b, const glm::vec4& c, float r = -1.0f, float w = 1.0f, int corners = kAll) {
+        if (!dl_ || b.empty() || c.a <= 0.0f || w <= 0.0f) return;
+        if (r < 0) r = style.rounding;
+        dl_->set_texture(dl_->default_texture());
+        dl_->add_rounded_border(to_canvas_(b), r, corners, w, pack_(c));
+    }
+
+    /**
+     * @brief A soft drop shadow, `size` canvas pixels beyond `b`'s rounded edge, fading out --
+     *        DrawList::add_rounded_shadow's two-band falloff, a closer approximation to a
+     *        gaussian than shadow()'s three stacked hard-edged fills. Draw BEFORE the rect.
+     */
+    void shadow_soft(const Box& b, float size, const glm::vec4& c, float r = -1.0f, int corners = kAll) {
+        if (!dl_ || b.empty() || c.a <= 0.0f || size <= 0.0f) return;
+        if (r < 0) r = style.rounding;
+        dl_->set_texture(dl_->default_texture());
+        dl_->add_rounded_shadow(to_canvas_(b), r, corners, size, pack_(c));
+    }
+
     /** @brief Draws an icon (see imm_icons.h) fitted into `b`. */
     void icon(Icon i, const Box& b, const glm::vec4& c) { draw_icon(*this, i, b, c); }
 
@@ -1260,17 +1398,46 @@ public:
     void image(coopa::gfx::TextureView view, const Box& b, const glm::vec4& tint = glm::vec4(1.0f)) {
         if (!dl_ || b.empty() || !view.valid()) return;
         dl_->set_texture(view);
-        dl_->add_quad(to_canvas_(b), Rect{{0.0f, 1.0f}, {1.0f, 0.0f}}, pack(tint));
+        dl_->add_quad(to_canvas_(b), Rect{{0.0f, 1.0f}, {1.0f, 0.0f}}, pack_(tint));
+        dl_->set_texture(dl_->default_texture());
+    }
+
+    /** @brief True when the host supplied a blurred backdrop, so glass() will really blur. */
+    bool has_glass() const { return dl_ && dl_->backdrop_texture().valid(); }
+
+    /**
+     * @brief A frosted pane: the host's blurred-scene backdrop, multiplied by `tint`.
+     *
+     * Screen-locked -- the backdrop is sampled at this fragment's position on the WINDOW (via
+     * the glass pipeline variant's gl_FragCoord fetch; the uv this call emits is unused by that
+     * variant), so the pane does not scroll with its contents, which is what a backdrop filter
+     * is. With no backdrop (feature off, a world-space canvas, headless) this falls back to
+     * fill_rounded_aa() with `fallback`, so a screen never has to ask has_glass() itself.
+     * @param fallback Left at its sentinel (negative alpha) resolves to a dim version of
+     *                 style.panel_bg, so a glass screen stays legible without the feature.
+     */
+    void glass(const Box& b, const glm::vec4& tint = glm::vec4(1.0f), float r = -1.0f,
+               int corners = kAll, const glm::vec4& fallback = glm::vec4(-1.0f)) {
+        if (!dl_ || b.empty()) return;
+        if (r < 0) r = style.rounding;
+        if (!has_glass()) {
+            const glm::vec4 fb = fallback.a >= 0.0f ? fallback
+                                                    : with_alpha(style.panel_bg, style.panel_bg.a * 0.9f);
+            fill_rounded_aa(b, fb, r, corners);
+            return;
+        }
+        dl_->set_texture(dl_->backdrop_texture());
+        dl_->add_rounded_rect(to_canvas_(b), r, corners, pack_(tint));
         dl_->set_texture(dl_->default_texture());
     }
 
     void gradient(const Box& b, const glm::vec4& tl, const glm::vec4& tr, const glm::vec4& br, const glm::vec4& bl) {
         dl_->set_texture(dl_->default_texture());
         dl_->add_quad_gradient(flip_(b.pos()), flip_({b.right(), b.y}), flip_({b.right(), b.bottom()}),
-                               flip_({b.x, b.bottom()}), pack(tl), pack(tr), pack(br), pack(bl));
+                               flip_({b.x, b.bottom()}), pack_(tl), pack_(tr), pack_(br), pack_(bl));
     }
     void draw_text(glm::vec2 pos, std::string_view s, const glm::vec4& c, float size = 0.0f) {
-        text.draw(*dl_, size_.y, pos, s, size > 0 ? size : style.font_size, pack(c));
+        text.draw(*dl_, size_.y, pos, s, size > 0 ? size : style.font_size, pack_(c));
     }
     /** @brief Text vertically centred in `b`, left-aligned with `pad`, clipped to b. */
     void text_in(const Box& b, std::string_view s, const glm::vec4& c, float pad = -1.0f, bool center = false) {
@@ -1432,6 +1599,22 @@ public:
         text_in(b, label_text(s), style.accent, 0.0f);
         set_last_(0, b, false);
     }
+    /**
+     * @brief A small dim title with a hairline rule filling the rest of its row.
+     *
+     * The divider between blocks of property rows inside one section, where a second
+     * collapsing_header would imply a nesting level that is not there.
+     */
+    void subhead(std::string_view s) {
+        spacing(3);
+        const Box b = next_box(style.row_height - 4);
+        const std::string_view shown = label_text(s);
+        text_in(b, shown, style.text_dim, 0.0f);
+        const float tw = text_width(shown) + 8;
+        fill({b.x + tw, b.y + b.h * 0.5f, std::max(0.0f, b.w - tw), 1.0f}, style.separator);
+        set_last_(0, b, false);
+    }
+
     /** @brief Wrapped paragraph text (word wrap at the region width). */
     void paragraph(std::string_view s, const glm::vec4* color = nullptr) {
         const float w = available_width();
@@ -1474,6 +1657,62 @@ public:
      */
     bool button(std::string_view lbl, const Box& b, bool enabled = true, Icon ic = Icon::None) {
         return button_in_(lbl, b, enabled, ic);
+    }
+
+    /**
+     * @brief The accent-coloured default action of a dialog or a toolbar (Open, Save, Build).
+     *
+     * One of several buttons may be the one the dialog is for; this is how it says so.
+     */
+    bool primary_button(std::string_view lbl, const Box& b, bool enabled = true, Icon ic = Icon::None) {
+        const Id id = get_id(lbl);
+        const std::string_view shown = label_text(lbl);
+        bool hovered = false, held = false;
+        const bool clicked = enabled && behavior_(id, b, hovered, held);
+        glm::vec4 c = style.accent;
+        if (!enabled)     c = with_alpha(style.accent, 0.35f);
+        else if (held)    c = c * 0.85f + glm::vec4(0, 0, 0, 0.15f);
+        else if (hovered) c = glm::mix(c, glm::vec4(1.0f), 0.12f);
+        fill_rounded(b, c);
+        const glm::vec4 tc = enabled ? glm::vec4(1.0f) : style.text_disabled;
+        if (ic != Icon::None) {
+            const float iw = style.row_height - 4;
+            const float tw = text_width(shown);
+            const float total = iw + (tw > 0 ? tw + 4 : 0);
+            const float x0 = b.x + (b.w - total) * 0.5f;
+            icon(ic, {x0, b.y + 2, iw, b.h - 4}, tc);
+            if (!shown.empty()) text_in({x0 + iw + 4, b.y, b.w, b.h}, shown, tc, 0.0f);
+        } else {
+            text_in(b, shown, tc, 0.0f, true);
+        }
+        set_last_(id, b, hovered);
+        return clicked;
+    }
+    /** @brief A primary button in the next layout box; `w` negative fits it to its label. */
+    bool primary_button(std::string_view lbl, float w = -1.0f, bool enabled = true, Icon ic = Icon::None) {
+        const float iw = ic != Icon::None ? style.row_height - 4 : 0.0f;
+        if (w < 0) w = text_width(label_text(lbl)) + style.padding * 3 + iw;
+        return primary_button(lbl, next_box(style.row_height, w), enabled, ic);
+    }
+
+    /** @brief The width a chip needs for `text`. */
+    float chip_width(std::string_view text) { return text_width(text) + 10.0f; }
+    /**
+     * @brief A pill of text at an explicit box: a tag, a status badge.
+     *
+     * Placed rather than flowed, because the lists that carry chips pack them from the right
+     * edge of a row that is already drawing something else.
+     */
+    void chip_in(const Box& b, std::string_view text, const glm::vec4& bg, const glm::vec4* fg = nullptr) {
+        fill_rounded(b, bg, b.h * 0.5f);
+        text_in(b, text, fg ? *fg : style.text, 0.0f, true);
+    }
+    /** @brief A chip flowed into the layout. @return Its box. */
+    Box chip(std::string_view text, const glm::vec4* bg = nullptr, const glm::vec4* fg = nullptr) {
+        const Box b = next_box(style.row_height - 4, chip_width(text));
+        chip_in(b, text, bg ? *bg : style.button, fg);
+        set_last_(0, b, false);
+        return b;
     }
 
     /**
@@ -1523,6 +1762,73 @@ public:
         }
         pop_id();
         return changed;
+    }
+
+    /**
+     * @brief The grip at a reorderable row's left edge: draws Icon::Grip, owns the drag, and
+     *        asks for ONE neighbour swap per row of travel.
+     *
+     * `list_id` identifies the LIST, not the row, so take it outside any per-row push_id() and
+     * pass the same value for every row: one drag is shared by all of them. The grip never
+     * touches the data -- the caller performs the returned move and then calls reorder_step()
+     * with the row's new index, which advances the drag's anchor so a held mouse keeps stepping
+     * instead of swapping once. A request whose target is off either end is not made, so a drag
+     * past the top asks for nothing rather than wedging.
+     *
+     * @param where The grip's box; conventionally row_height square at the row's left edge.
+     * @param pitch One step's vertical travel: a row's height plus the gap between rows.
+     * @return The move asked for, or a default ReorderRequest.
+     */
+    ReorderRequest reorder_grip(Id list_id, const Box& where, int index, int count, float pitch,
+                                std::string_view tip = "Drag to reorder") {
+        State& st = state_(list_id);
+        const bool dragging_this = st.b[0] && static_cast<int>(st.f[1]) == index;
+
+        const Id gid = hash_int(static_cast<uint64_t>(index) + 1, list_id);
+        bool hovered = false, held = false;
+        behavior_(gid, where, hovered, held);
+        if (dragging_this)   fill_rounded(where, with_alpha(style.accent, 0.8f));
+        else if (hovered)    fill_rounded(where, style.hover_tint);
+        icon(Icon::Grip, where.shrink(std::max(2.0f, where.h * 0.16f)),
+             dragging_this || hovered ? style.text : style.text_dim);
+        set_last_(gid, where, hovered);
+        if (!tip.empty()) tooltip(tip);
+
+        // A grip is a drag handle, not a button: what matters is the press and the travel
+        // since it, so both are read from the raw hover and press rather than from a click.
+        if (!st.b[0] && hovered && in_.pressed[0]) {
+            st.init = true; st.b[0] = true;
+            st.f[0] = in_.mouse.y; st.f[1] = static_cast<float>(index); st.f[2] = pitch;
+            return {};
+        }
+        if (dragging_this && in_.down[0] && pitch > 0.0f) {
+            const int step = static_cast<int>((in_.mouse.y - st.f[0]) / pitch);
+            if (step != 0) {
+                const int to = index + (step > 0 ? 1 : -1);
+                if (to >= 0 && to < count) return {index, to};
+            }
+        }
+        return {};
+    }
+
+    /** @brief True while `list_id`'s grip is dragging row `index`, to highlight that row. */
+    bool reorder_dragging(Id list_id, int index) {
+        const State& st = state_(list_id);
+        return st.b[0] && static_cast<int>(st.f[1]) == index;
+    }
+
+    /** @brief Confirms a performed move: the dragged row now sits at `index`. */
+    void reorder_step(Id list_id, int index) {
+        State& st = state_(list_id);
+        if (!st.b[0]) return;
+        st.f[0] += static_cast<float>(index - static_cast<int>(st.f[1])) * st.f[2];
+        st.f[1] = static_cast<float>(index);
+    }
+
+    /** @brief Call once after the list: ends a drag whose button is no longer down. */
+    void reorder_release(Id list_id) {
+        State& st = state_(list_id);
+        if (st.b[0] && !in_.down[0]) st.b[0] = false;
     }
 
     /** @brief A toggle-able button (toolbar). @return True when clicked. */
@@ -1900,23 +2206,34 @@ public:
      * @return True while open (emit the section's contents).
      */
     bool collapsing_header(std::string_view lbl, bool default_open = true, bool* remove_clicked = nullptr,
-                           Icon ic = Icon::None, bool* enabled = nullptr) {
-        const Id id = get_id(lbl);
+                           Icon ic = Icon::None, bool* enabled = nullptr, float reserve_left = 0.0f) {
+        return collapsing_header_id(get_id(lbl), lbl, default_open, remove_clicked, ic, enabled, reserve_left);
+    }
+
+    /**
+     * @brief A foldout header whose fold state is keyed by `id` instead of by its label.
+     *
+     * For a header titled by data the user can edit -- a list item named by one of its own
+     * fields -- where keying the fold on the text would fold it shut on every keystroke.
+     */
+    bool collapsing_header_id(Id id, std::string_view lbl, bool default_open = true,
+                              bool* remove_clicked = nullptr, Icon ic = Icon::None,
+                              bool* enabled = nullptr, float reserve_left = 0.0f) {
         State& st = state_(id);
         if (!st.init) { st.init = true; st.b[0] = default_open; }
         Box b = next_box(style.row_height + 3);
         bool hovered = false, held = false;
+        // reserve_left keeps the header's own left edge clear for something the caller draws
+        // there -- a reorder grip -- so the toggle does not swallow that press.
         Box toggle = b;
-        float x = b.x + style.row_height;
-        if (enabled) x += style.row_height - 4;
-        if (ic != Icon::None) x += style.row_height - 2;
+        toggle.x += reserve_left; toggle.w -= reserve_left;
         if (remove_clicked) toggle.w -= style.row_height;
         if (enabled) { toggle.x += style.row_height + style.row_height - 4; toggle.w -= style.row_height + style.row_height - 4; }
         if (behavior_(id, toggle, hovered, held)) st.b[0] = !st.b[0];
         // Blender sub-panel: rounded header, darker body when open.
         fill_rounded(b, hovered ? style.header_hover : style.header, -1, st.b[0] ? kTop : kAll);
-        arrow({b.x + 3, b.y, style.row_height - 6, b.h}, st.b[0], style.text_dim);
-        float cx = b.x + style.row_height;
+        arrow({b.x + 3 + reserve_left, b.y, style.row_height - 6, b.h}, st.b[0], style.text_dim);
+        float cx = b.x + style.row_height + reserve_left;
         if (enabled) {
             const Box cb{cx, b.y + (b.h - (style.row_height - 8)) * 0.5f, style.row_height - 8, style.row_height - 8};
             bool eh = false, eheld = false;
@@ -1934,7 +2251,6 @@ public:
             if (xh) fill_rounded(xb, style.hover_tint);
             icon(Icon::X, xb.shrink(5), xh ? style.text : style.text_dim);
         }
-        (void)x;
         return st.b[0];
     }
 
@@ -2349,6 +2665,49 @@ public:
         set_last_(id, b, hovered);
         return clicked;
     }
+    /**
+     * @brief invisible_button() for a POINTER-ONLY affordance: a drag handle, a splitter.
+     *
+     * Hit-tests and reports hover/held exactly as invisible_button() does, but takes no
+     * keyboard focus, so it raises no focus ring and is not a Tab stop. Use it wherever the
+     * only gesture is a drag -- Enter and Space have nothing to do there, and a ring left on
+     * the thing you last dragged does not go away when the drag does.
+     */
+    bool drag_region(std::string_view id_str, const Box& b, bool* hovered_out = nullptr, bool* held_out = nullptr) {
+        const Id id = get_id(id_str);
+        bool hovered = false, held = false;
+        const bool clicked = behavior_(id, b, hovered, held, /*focusable=*/false);
+        if (hovered_out) *hovered_out = hovered;
+        if (held_out) *held_out = held;
+        set_last_(id, b, hovered);
+        return clicked;
+    }
+
+    /**
+     * @brief Scales the alpha of EVERYTHING drawn until the matching pop_alpha().
+     *
+     * Fades a whole screen as one -- panes, borders, text, icons and any composite widget
+     * alike -- without each widget having to take a fade parameter it would then have to pass
+     * down. A widget colours itself from the theme and cannot be told to be half-transparent;
+     * this scales what it emits instead, which is the only way the content and the panel
+     * behind it fade together rather than one popping in after the other.
+     *
+     * Nests multiplicatively, and is reset at the start of every frame, so an unbalanced push
+     * costs one frame rather than leaking a permanently dimmed UI.
+     */
+    void push_alpha(float a) {
+        alpha_stack_.push_back(alpha_scale_);
+        alpha_scale_ = std::clamp(alpha_scale_ * a, 0.0f, 1.0f);
+    }
+    /** @brief Undoes the matching push_alpha(). */
+    void pop_alpha() {
+        if (alpha_stack_.empty()) return;
+        alpha_scale_ = alpha_stack_.back();
+        alpha_stack_.pop_back();
+    }
+    /** @brief The alpha multiplier currently in force; 1 when nothing is faded. */
+    float alpha_scale() const { return alpha_scale_; }
+
     /** @brief True if `b` is under the mouse and nothing (popup, active widget) blocks it. */
     bool is_hovered(const Box& b) const { return hoverable_(b); }
 
@@ -2443,6 +2802,11 @@ private:
     void pop_clip_() { if (clip_stack_.size() > 1) clip_stack_.pop_back(); apply_clip_(); }
 
     bool any_pressed_() const { return in_.pressed[0] || in_.pressed[1] || in_.pressed[2]; }
+    /** @brief pack() with the current push_alpha() scale folded in; every colour goes through here. */
+    uint32_t pack_(const glm::vec4& c) const {
+        return alpha_scale_ >= 1.0f ? pack(c) : pack(glm::vec4(c.r, c.g, c.b, c.a * alpha_scale_));
+    }
+
     bool any_down_() const { return in_.down[0] || in_.down[1] || in_.down[2]; }
     bool layer_ok_() const { return layer_stack_.back().id == hovered_layer_; }
     bool hoverable_(const Box& b, Id self = 0) const {
@@ -2451,8 +2815,16 @@ private:
     }
     bool press_origin_hit_(Mouse b, const Box& r) const { return r.contains(press_pos_[static_cast<int>(b)]); }
 
-    /** @brief Button behaviour: returns true on click (press + release inside). */
-    bool behavior_(Id id, const Box& b, bool& hovered, bool& held) {
+    /**
+     * @brief Button behaviour: returns true on click (press + release inside).
+     *
+     * `focusable` false is for POINTER-ONLY affordances -- a drag handle, a splitter between
+     * panes. They take no focus, raise no focus ring and are not Tab stops, because there is
+     * no keyboard gesture that would drive a drag: a focus stop that Enter and Space do
+     * nothing on is a dead stop, and the ring it leaves behind outlives the drag that put it
+     * there.
+     */
+    bool behavior_(Id id, const Box& b, bool& hovered, bool& held, bool focusable = true) {
         hovered = layer_ok_() && b.contains(in_.mouse) && clip_stack_.back().contains(in_.mouse) &&
                   (active_id_ == 0 || active_id_ == id);
         // Hover fires on the frame the pointer ARRIVES, not every frame it stays: comparing
@@ -2464,10 +2836,10 @@ private:
         bool clicked = false;
         // Declaration order IS tab order: every widget that can be clicked registers here, so
         // a new widget is reachable by keyboard without having to say so.
-        if (keyboard_focus && id && layer_ok_()) focusables_.push_back(id);
+        if (keyboard_focus && id && layer_ok_() && focusable) focusables_.push_back(id);
         // Enter/Space on the focused widget is a click. Guarded on the text editor, which owns
         // Enter while it is open, and on keyboard_consumed_ so a shortcut wins.
-        if (keyboard_focus && id && id == focus_id_ && !text_edit_.active && !keyboard_consumed_) {
+        if (keyboard_focus && id && focusable && id == focus_id_ && !text_edit_.active && !keyboard_consumed_) {
             if (key_pressed(coopa::input::Key::Enter) || key_pressed(coopa::input::Key::Space)) {
                 clicked = true;
                 keyboard_consumed_ = true;
@@ -2478,7 +2850,10 @@ private:
             active_id_ = id;
             press_pos_[0] = in_.mouse;
             activated_id_ = id;
-            if (keyboard_focus) focus_id_ = id;   // Tab continues from where you were
+            if (keyboard_focus && focusable) {
+                focus_id_ = id;             // Tab continues from where you were...
+                focus_ring_ = false;        // ...but a CLICK raises no ring; see set_last_()
+            }
             if (on_sound) on_sound(UiSound::Press);
         }
         held = active_id_ == id && in_.down[0];
@@ -2508,6 +2883,9 @@ private:
         const bool fwd = key_pressed(Key::Tab, Mods::None, true);
         const bool back = key_pressed(Key::Tab, Mods::Shift, true);
         if (!fwd && !back) return;
+        // Past every early-out, so this is a real Tab: focus is moving by keyboard, which is
+        // exactly when its ring should be visible.
+        focus_ring_ = true;
         if (focusables_.empty()) {
             focus_id_ = 0;
             return;
@@ -2554,7 +2932,11 @@ private:
         if (last_item_.deactivated) deactivated_id_ = 0;
         // Drawn here rather than in each widget: every widget calls this after painting
         // itself, so the ring lands on top and no widget has to opt in.
-        if (keyboard_focus && id != 0 && id == focus_id_) {
+        // Only when focus was moved by the KEYBOARD -- the web's :focus-visible rule. A ring
+        // raised by a mouse click has nothing to tell the person who made the click, and it
+        // outlives the click: it sits on whatever was last pressed until focus moves again,
+        // which reads as a leftover selection highlight rather than as focus.
+        if (keyboard_focus && id != 0 && id == focus_id_ && focus_ring_) {
             outline_rounded(b.shrink(-1.0f), style.accent, -1.0f, 1.5f);
         }
     }
@@ -3072,6 +3454,10 @@ private:
     bool keyboard_consumed_ = false;
     /// The focused widget, or 0. Survives the frame; everything else about focus does not.
     Id focus_id_ = 0;
+    /** @brief Whether focus was last moved by the keyboard, and so should show its ring. */
+    bool focus_ring_ = false;
+    float alpha_scale_ = 1.0f;
+    std::vector<float> alpha_stack_;
     /// Every focusable id declared this frame, in order. Rebuilt per frame, which is what lets
     /// Tab follow a UI whose shape changes between frames.
     std::vector<Id> focusables_;

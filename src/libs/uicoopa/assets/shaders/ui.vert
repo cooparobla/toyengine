@@ -16,11 +16,14 @@ layout(location = 0) out vec2 v_uv;
 layout(location = 1) out vec4 v_color;
 
 layout(push_constant) uniform Push {
-    vec2 scale;  // = inv_canvas_size * 2 -- see UiPushConstants' own doc
-    vec2 offset; // = vec2(-1.0) always, for uicoopa's bottom-left-origin canvas space --
-                 // declared as a field (not folded into the shared function as a constant)
-                 // so this block matches gfx_quad_2d_transform()'s (scale, offset) contract
-                 // byte-for-byte, the same shape pixengine's sprite.vert also declares.
+    vec2 scale;            // = inv_canvas_size * 2 -- see UiPushConstants' own doc
+    vec2 offset;           // = vec2(-1.0) always, for uicoopa's bottom-left-origin canvas space --
+                            // declared as a field (not folded into the shared function as a constant)
+                            // so this block matches gfx_quad_2d_transform()'s (scale, offset) contract
+                            // byte-for-byte, the same shape pixengine's sprite.vert also declares.
+    vec2 backdrop_origin;  // fragment-only (ui_glass.frag's gl_FragCoord -> backdrop-UV remap);
+    vec2 backdrop_inv_size;// declared here too since one push range covers both stages -- see
+                            // UiPushConstants' own doc.
 } pc;
 
 void main() {

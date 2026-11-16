@@ -629,20 +629,6 @@ private:
         return clicked && enabled;
     }
 
-    /** @brief The accent-coloured default button (Open / Save). */
-    bool primary_button_(Context& ctx, const char* label, const Box& b, bool enabled) {
-        bool hov = false, held = false;
-        const bool clicked = ctx.invisible_button(label, b, &hov, &held);
-        const Style& st = ctx.style;
-        glm::vec4 c = st.accent;
-        if (!enabled) c = with_alpha(st.accent, 0.35f);
-        else if (held) c = c * 0.85f + glm::vec4(0, 0, 0, 0.15f);
-        else if (hov) c = glm::mix(c, glm::vec4(1.0f), 0.12f);
-        ctx.fill_rounded(b, c);
-        ctx.text_in(b, label, enabled ? glm::vec4(1.0f) : st.text_disabled, 0, true);
-        return clicked && enabled;
-    }
-
     bool flat_button_(Context& ctx, const char* label, const Box& b) {
         bool hov = false, held = false;
         const bool clicked = ctx.invisible_button(label, b, &hov, &held);
@@ -1044,7 +1030,7 @@ private:
         const Box cancel{ok.x - bw - 8, bar.y, bw, bar.h};
         if (flat_button_(ctx, "Cancel", cancel)) cancel_();
         const char* ok_label = mode_ == Mode::SaveFile ? (replace_armed_.empty() ? "Save" : "Replace") : mode_ == Mode::PickFolder ? "Choose" : "Open";
-        if (primary_button_(ctx, ok_label, ok, can_accept_())) accept_();
+        if (ctx.primary_button(ok_label, ok, can_accept_())) accept_();
     }
 
     Mode mode_ = Mode::OpenFile;

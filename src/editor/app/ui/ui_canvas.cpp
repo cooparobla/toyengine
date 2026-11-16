@@ -597,6 +597,12 @@ void UiCanvasPanel::draw_ui_palette_(imm::Context& ctx, const Box& area) {
 
     Node* rows = rows_();
     if (rows) {
+        // Order is the layout here -- rows draw top to bottom in the order the file states
+        // them -- so each row carries a grip, dragged to re-rank it.
+        const float gw = ctx.style.row_height;
+        const imm::Id list_id = ctx.get_id("ui_row_list");
+        const int n = static_cast<int>(rows->size());
+        imm::ReorderRequest rq;
         for (size_t i = 0; i < rows->size(); ++i) {
             const Node& r = (*rows)[i];
             const std::string kind = r.contains("kind") ? r["kind"].get_value<std::string>() : "label";
@@ -604,24 +610,33 @@ void UiCanvasPanel::draw_ui_palette_(imm::Context& ctx, const Box& area) {
             const RowKindInfo* info = kind_info(kind);
             ctx.push_id(static_cast<int64_t>(i));
             const bool sel = row_ == static_cast<int>(i);
+            ctx.indent(gw);
             if (ctx.selectable(label.empty() ? kind : label, sel, 0.0f,
                                info ? info->icon : imm::Icon::Dots)) {
                 row_ = static_cast<int>(i);
             }
+            const imm::Box rb = ctx.last_rect();
+            ctx.unindent(gw);
+            if (auto q = ctx.reorder_grip(list_id, {rb.x - gw, rb.y, gw - 2, rb.h},
+                                          static_cast<int>(i), n, rb.h + ctx.style.spacing); q.wanted()) {
+                rq = q;
+            }
             ctx.pop_id();
+        }
+        ctx.reorder_release(list_id);
+        if (rq.wanted()) {
+            row_ = rq.from;                       // move_row_ moves the SELECTED row
+            move_row_(rq.dir());
+            ctx.reorder_step(list_id, rq.to);
         }
         if (rows->empty()) ctx.label_dim("No rows yet.");
     }
 
-    // Reorder, duplicate, remove. A list you can only append to is not an editor: order is
-    // the layout here, since rows draw top to bottom in the order the file states them.
+    // Duplicate and remove. Reorder is the grip above; these are the row actions that have
+    // nowhere else to live, and they live HERE only -- beside the list they act on.
     if (selected_row_()) {
         ctx.spacing();
         ctx.separator();
-        if (ctx.button("Up")) move_row_(-1);
-        ctx.same_line();
-        if (ctx.button("Down")) move_row_(1);
-        ctx.same_line();
         if (ctx.button("Copy")) duplicate_row_();
         ctx.same_line();
         if (ctx.button("Delete")) remove_row_();
@@ -911,31 +926,6 @@ void UiCanvasPanel::draw_ui_object_props_(imm::Context& ctx) {
     }
     if (kind != "separator" && kind != "spacer") edit_string("tooltip", "Tooltip");
 
-    ctx.spacing();
-    ctx.separator();
-    Node* rows = rows_();
-    const int n = rows ? static_cast<int>(rows->size()) : 0;
-    const float w = ctx.available_width() / 3.0f - ctx.style.spacing;
-    if (ctx.button("Up", w, row_ > 0)) {
-        push_undo_();
-        std::swap((*rows)[static_cast<size_t>(row_)], (*rows)[static_cast<size_t>(row_ - 1)]);
-        --row_;
-        ui_refresh_preview_();
-    }
-    ctx.same_line();
-    if (ctx.button("Down", w, row_ + 1 < n)) {
-        push_undo_();
-        std::swap((*rows)[static_cast<size_t>(row_)], (*rows)[static_cast<size_t>(row_ + 1)]);
-        ++row_;
-        ui_refresh_preview_();
-    }
-    ctx.same_line();
-    if (ctx.button("Delete", w)) {
-        push_undo_();
-        rows->as_seq().erase(rows->as_seq().begin() + row_);
-        row_ = -1;
-        ui_refresh_preview_();
-    }
 }
 
 void UiCanvasPanel::ui_store_editor_extras_() {}

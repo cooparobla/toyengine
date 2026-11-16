@@ -76,3 +76,7 @@ nodegraph:
   socket_object:   "#e69447"
   band_fill:       "#598cf22e"
   band_outline:    "#8cb8ffd9"
+
+timeline:
+  key_selected:      "#f2a33d"
+  playhead:          "#4d8ce6"

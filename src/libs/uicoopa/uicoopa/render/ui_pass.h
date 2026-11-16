@@ -20,6 +20,29 @@
  * updates descriptor sets immediately, which is unsafe once a render
  * pass has begun. register_textures() must run before Renderer::begin_frame();
  * draw() only ever looks up already-registered descriptor sets.
+ *
+ * ## The "glass" variant
+ *
+ * A third pipeline variant, alongside "" (quad) and "text", for Context::glass()/glass_panel():
+ * it samples the host's blurred-backdrop image (set_backdrop_view()) by gl_FragCoord instead of
+ * the quad's own uv, so a frosted UI pane does not scroll with its contents. Selected the exact
+ * same way "text" is -- a side-table of TextureViews (glass_views_, mirroring text_views_), not
+ * a vertex flag or a push-constant branch, because UiVertex has no spare attribute to carry one
+ * and a glass quad already needs a unique texture key to batch correctly.
+ *
+ * The backdrop is bound as an ORDINARY set-0 texture, not through ExtraSets: a glass quad's
+ * texture key IS the backdrop view, so it gets its own batch and its own pipeline bind for free
+ * through the same machinery that already separates font-atlas batches from sprite batches --
+ * no second descriptor set, no new layout, no ordering question with the rest of the pipeline
+ * (compare how adding a wrongly-ordered ExtraSets set once rendered a plausible-looking but
+ * unlit frame with no Vulkan error, in an unrelated part of the engine). The cost: a glass batch
+ * cannot also sample an authored texture (a noise map for "wobbly" glass, say). If that is ever
+ * needed, the delta is small and worth stating here rather than guessing at migration time: add
+ * an `ExtraSets` parameter to the ctor (forwarded to `desc.extra`, as world_ui_pass_ already
+ * does), call `pass_->bind_extra(cmd)` right after the per-batch pipeline bind in draw() below,
+ * and move `u_backdrop` in ui_glass.frag to `set = 1, binding = 0`. Everything else -- the
+ * sentinel-view batching, set_backdrop_view()'s refusal when no "glass" variant exists, the
+ * push-constant remap -- stays exactly as it is.
  */
 
 #ifndef UICOOPA_RENDER_UI_PASS_H
@@ -51,12 +74,23 @@ namespace ui {
  * @struct UiPushConstants
  * @brief Matches the `Push` block declared in ui.vert exactly -- see
  *        gfx/surface2d/quad_vs.glsl's doc for the scale/offset convention. Text vs quad
- *        is a pipeline variant, not a push-constant flag (see ui_quad.frag/ui_text.frag).
+ *        vs glass is a pipeline variant, not a push-constant flag (see ui_quad.frag/
+ *        ui_text.frag/ui_glass.frag).
+ *
+ * The trailing pair is fragment-only (ui_glass.frag's gl_FragCoord -> backdrop-UV remap,
+ * see backdrop_remap()) but declared in ui.vert's block too, since one push range covers
+ * both stages -- a block that differs in size per stage is the kind of thing validation
+ * layers flag. 32 bytes, well inside the 128 Vulkan guarantees, and still pushed ONCE PER
+ * FRAME (see draw()): the backdrop rect is a property of the frame's letterbox, not of any
+ * one batch.
  */
 struct UiPushConstants {
     float scale[2];
     float offset[2];
+    float backdrop_origin[2];    ///< Target pixels, top-left of the backdrop rect.
+    float backdrop_inv_size[2];  ///< 1 / that rect's size in target pixels; 0 if the rect is empty.
 };
+static_assert(sizeof(UiPushConstants) == 32, "must match ui.vert byte-for-byte");
 
 /**
  * @class UiPass
@@ -83,6 +117,11 @@ public:
      * @param quad_frag_spv   Path to ui_quad.frag.spv -- the stock RGBA-sampling variant.
      * @param text_frag_spv   Path to ui_text.frag.spv -- the R8-coverage variant, bound for
      *                        batches whose texture was mark_as_text_atlas()'d.
+     * @param glass_frag_spv  Path to ui_glass.frag.spv -- samples the view passed to
+     *                        set_backdrop_view() by gl_FragCoord instead of the quad's own
+     *                        uv. Empty (the default) registers no "glass" variant at all, so
+     *                        a host that never built a backdrop pays nothing for it, and
+     *                        set_backdrop_view() refuses any view it is given.
      * @param max_textures    Upper bound on distinct textures drawn in a single frame
      *                        (sprites + font atlases); sizes the descriptor pool.
      */
@@ -93,6 +132,7 @@ public:
            const std::string& vert_spv,
            const std::string& quad_frag_spv,
            const std::string& text_frag_spv,
+           const std::string& glass_frag_spv = "",
            uint32_t max_textures = 256)
     {
         using namespace coopa::gfx;
@@ -123,6 +163,7 @@ public:
         pass_ = std::make_unique<TexturedQuad2DPass>(
             device, allocator, cmd_pool, swapchain_pass, vert_spv, quad_frag_spv, desc);
         pass_->add_variant("text", vert_spv, text_frag_spv);
+        if (!glass_frag_spv.empty()) pass_->add_variant("glass", vert_spv, glass_frag_spv);
     }
 
     /** @brief Returns the default white texture's view, for callers that need to seed DrawList::set_default_texture(). */
@@ -231,20 +272,27 @@ public:
         push.scale[1]  = canvas_h > 0.0f ? (1.0f / canvas_h) * 2.0f : 0.0f;
         push.offset[0] = -1.0f;
         push.offset[1] = -1.0f;
-        // Scale/offset are per-FRAME (canvas size), not per-batch -- pushed once. The pipeline
-        // bind below (quad vs text variant) is what varies per batch.
+        const BackdropRemap remap = backdrop_remap(backdrop_origin_, backdrop_size_);
+        push.backdrop_origin[0] = remap.origin[0]; push.backdrop_origin[1] = remap.origin[1];
+        push.backdrop_inv_size[0] = remap.inv_size[0]; push.backdrop_inv_size[1] = remap.inv_size[1];
+        // Scale/offset/backdrop are per-FRAME (canvas size, letterbox rect), not per-batch --
+        // pushed once. The pipeline bind below (quad/text/glass variant) is what varies per batch.
         cmd.push_constants(coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment, push);
 
-        bool last_is_text = false;
-        bool have_bound = true; // "quad" bound just above
+        enum class Variant { Quad, Text, Glass };
+        Variant last_variant = Variant::Quad; // "quad" bound just above
+        bool have_bound = true;
 
         for (const DrawBatch& batch : draw_list.batches()) {
             if (batch.index_count == 0) continue;
 
-            bool is_text = is_text_view_(batch.texture_view);
-            if (!have_bound || is_text != last_is_text) {
-                pass_->bind(cmd, is_text ? "text" : "");
-                last_is_text = is_text;
+            // Glass checked first: a view can only ever be in one of these two sets, but
+            // ordering the check makes that explicit rather than depending on it.
+            const Variant want = is_glass_view_(batch.texture_view) ? Variant::Glass
+                                : is_text_view_(batch.texture_view)  ? Variant::Text : Variant::Quad;
+            if (!have_bound || want != last_variant) {
+                pass_->bind(cmd, want == Variant::Glass ? "glass" : want == Variant::Text ? "text" : "");
+                last_variant = want;
                 have_bound = true;
             }
 
@@ -275,6 +323,65 @@ public:
     void mark_as_text_atlas(coopa::gfx::TextureView view) { text_views_.insert(view); }
 
     /**
+     * @brief Sets the host's blurred-backdrop image, for Context::glass()/glass_panel() batches.
+     *
+     * Registers the view and marks it so draw() binds the "glass" pipeline variant for any
+     * batch that uses it as its texture (a glass quad's texture key IS the backdrop view --
+     * see DrawList::set_backdrop_texture()). Refuses an invalid view, or any view at all when
+     * no "glass" variant was built (glass_frag_spv was empty at construction): the degrade
+     * path is a flat fill, drawn by the host via Context::glass()'s own fallback, not a quad
+     * variant sampling an unset backdrop at a fixed uv.
+     *
+     * Must run before Renderer::begin_frame(), same as register_textures() -- it calls
+     * register_view() when the view is accepted.
+     */
+    void set_backdrop_view(coopa::gfx::TextureView view) {
+        if (!pass_->has_variant("glass")) return;
+        if (!view.valid()) { backdrop_view_ = {}; return; }
+        backdrop_view_ = view;
+        pass_->register_view(view);
+        glass_views_.insert(view);
+    }
+
+    /** @brief The view set by set_backdrop_view(), or an invalid view if none was accepted. */
+    coopa::gfx::TextureView backdrop_view() const { return backdrop_view_; }
+
+    /**
+     * @brief Where the backdrop image sits in the TARGET this pass draws into, in target
+     *        pixels (the letterbox rect) -- ui_glass.frag's gl_FragCoord fetch is relative to
+     *        the whole framebuffer, so this is what maps a fragment back onto the backdrop.
+     *
+     * Pure per-frame CPU state (no descriptor work), so safe to call any time before this
+     * frame's draw(), including mid-render-pass.
+     */
+    void set_backdrop_rect(glm::vec2 origin, glm::vec2 size) { backdrop_origin_ = origin; backdrop_size_ = size; }
+
+    /** @brief The gl_FragCoord -> backdrop-UV remap, as the push constants carry it. */
+    struct BackdropRemap { float origin[2]; float inv_size[2]; };
+
+    /**
+     * @brief Computes the remap from a backdrop rect -- public and pure so a CPU test can
+     *        check this exact arithmetic with no device. ui_glass.frag's first lines mirror
+     *        this function (and backdrop_uv() below); the duplication is real and a future
+     *        edit to either one must keep both in step, since no test can catch a C++/GLSL
+     *        divergence directly.
+     */
+    static BackdropRemap backdrop_remap(glm::vec2 origin, glm::vec2 size) {
+        BackdropRemap r{};
+        r.origin[0] = origin.x; r.origin[1] = origin.y;
+        r.inv_size[0] = size.x > 0.0f ? 1.0f / size.x : 0.0f;
+        r.inv_size[1] = size.y > 0.0f ? 1.0f / size.y : 0.0f;
+        return r;
+    }
+
+    /** @brief frag_coord (framebuffer pixels) -> backdrop uv in [0,1], clamped. Mirrors ui_glass.frag. */
+    static glm::vec2 backdrop_uv(glm::vec2 frag_coord, const BackdropRemap& r) {
+        const float u = (frag_coord.x - r.origin[0]) * r.inv_size[0];
+        const float v = (frag_coord.y - r.origin[1]) * r.inv_size[1];
+        return glm::vec2(std::clamp(u, 0.0f, 1.0f), std::clamp(v, 0.0f, 1.0f));
+    }
+
+    /**
      * @brief Forgets everything this pass knows about `view` -- call before destroying the
      *        Texture that owns it.
      *
@@ -297,6 +404,8 @@ public:
     void unregister_texture(coopa::gfx::TextureView view) {
         pass_->unregister_view(view);
         text_views_.erase(view);
+        glass_views_.erase(view);
+        if (backdrop_view_ == view) backdrop_view_ = {};
     }
 
     /** @brief A clamped, screen-pixel scissor rect. */
@@ -349,9 +458,16 @@ private:
     bool is_text_view_(coopa::gfx::TextureView view) const {
         return view != pass_->fallback_view() && text_views_.count(view) != 0;
     }
+    bool is_glass_view_(coopa::gfx::TextureView view) const {
+        return view != pass_->fallback_view() && glass_views_.count(view) != 0;
+    }
 
     std::unique_ptr<coopa::gfx::engine::passes::TexturedQuad2DPass> pass_;
     std::unordered_set<coopa::gfx::TextureView> text_views_;
+    std::unordered_set<coopa::gfx::TextureView> glass_views_;
+    coopa::gfx::TextureView backdrop_view_;
+    glm::vec2 backdrop_origin_{0.0f};
+    glm::vec2 backdrop_size_{0.0f};
 };
 
 }  // namespace ui

@@ -72,6 +72,9 @@ AppConfig AppConfig::from_node(const fkyaml::node& root) {
             if (r.contains("sky_quality"))         config.render.sky_quality         = parse_render_quality(r.at("sky_quality").get_value<std::string>());
             config.render.apply_quality_presets();
 
+            // An explicit key still wins over the preset, same rule as every *_quality tier.
+            read(r, "water_detail_distance", config.render.water_detail_distance);
+
             // --- Feature toggles ---
             read(r, "outline_enabled", config.render.outline_enabled);
             read(r, "palette_enabled", config.render.palette_enabled);

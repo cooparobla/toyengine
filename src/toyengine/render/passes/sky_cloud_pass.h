@@ -85,6 +85,9 @@ public:
         glm::vec4 spin{0.0f, 0.0f, 1.0f, 0.0f};
         /// Curved worlds only: rgb = the sky's colour at noon, the deck's ambient on the day side.
         /// Zero on a flat world, where the scene's sky_zenith family is used as it always was.
+        /// w = the parallax rate (region px per frame): the camera's translation since last
+        /// frame over its distance to the layer's near edge -- the resolve scales its
+        /// temporal blend by it.
         glm::vec4 day_fill{0.0f};
         /// Curved worlds only: rgb = the night side's fill (moonlight / airglow), already scaled by
         /// the moon's intensity -- zero gives the black night side the engine had before.
@@ -112,6 +115,7 @@ public:
         int       shadow_steps = 5;
         bool      history_valid = false;  ///< false: a camera cut, or the first frame clouds are on
         float     light_change = 0.0f;    ///< relative change of the clouds' light / ambient or layer settings since last frame
+        float     cam_delta = 0.0f;       ///< the camera's translation per 60 Hz-normalised frame (world m), smoothed; 0 on a cut
         /// The scene's curved world, or a flat frame (the default) -- see toyengine/env/world_frame.h.
         /// When curved the layer is a real shell about `centre` instead of one pinned under the
         /// camera, and `wind_offset` / `drift` give way to the spin below.

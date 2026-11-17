@@ -304,6 +304,21 @@ protected:
     /// execute() calls, so a policy can hold a decision for a number of frames.
     std::uint64_t frame_ = 0;
 
+    /**
+     * @brief Brings a Live chunk's collider in line with `collision_radius`.
+     *
+     * Crossing inward needs geometry the chunk was not built with, so it raises
+     * TerrainChunk::wants_collision and a collider-only job supplies it -- the chunk goes on
+     * drawing what it already has throughout. Crossing outward only has to let the collider go,
+     * which is a component removal and a retired shape.
+     *
+     * Protected rather than private: a layout whose chunks have no single streaming centre
+     * (planetoy's globe keeps every chunk resident and scopes collision to a topology-measured
+     * region instead, see TileGrid::wants_collision_at()) still needs to bring an already-Live
+     * chunk's collider in line as that region moves, exactly as this does for the flat radius.
+     */
+    void sync_chunk_collision_(TerrainComponent& terrain, TerrainChunk& chunk, bool wanted);
+
 private:
     /**
      * @brief Follows AssetManager::k_asset_io_job_type's precedent: any value >= k_max_job_types
@@ -381,16 +396,6 @@ private:
 
     /** @brief Destroys Dormant chunks past `dormant_chunks`, oldest first. */
     void evict_dormant_chunks_(TerrainComponent& terrain);
-
-    /**
-     * @brief Brings a Live chunk's collider in line with `collision_radius`.
-     *
-     * Crossing inward needs geometry the chunk was not built with, so it raises
-     * TerrainChunk::wants_collision and a collider-only job supplies it -- the chunk goes on
-     * drawing what it already has throughout. Crossing outward only has to let the collider go,
-     * which is a component removal and a retired shape.
-     */
-    void sync_chunk_collision_(TerrainComponent& terrain, TerrainChunk& chunk, bool wanted);
 
     /**
      * @brief Hangs a finished collider-only build on the object the chunk is already drawing.

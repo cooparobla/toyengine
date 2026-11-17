@@ -260,6 +260,26 @@ public:
      */
     void snap_to_targets();
 
+    /**
+     * @brief The basis `target_offset` is read in as of this frame's own update() -- see that
+     *        field's doc. A read of state already computed this frame, not a recomputation: the
+     *        basis is parallel-transported incrementally (`field_y_` carries a reference forward
+     *        from call to call), so a second call with its own target would integrate the
+     *        transport twice and drift it. A caller that writes `target_offset` from outside
+     *        (earlier in the same frame, or the previous one) wants this rather than reaching
+     *        into the private fields `update_orbit_()` itself maintains.
+     *
+     * @param out Receives the basis (x, y, z columns): `cross(field_y_, field_up_)`, `field_y_`,
+     *        `field_up_`. Untouched when this returns false.
+     * @return Whether a gravity field is active; false (identity, left in `out`) is the flat
+     *        world, where `target_offset` is already plain world space.
+     */
+    bool field_basis(glm::mat3& out) const {
+        if (!field_) return false;
+        out = glm::mat3(glm::cross(field_y_, field_up_), field_y_, field_up_);
+        return true;
+    }
+
 private:
     /** @brief Sentinel meaning "not set in YAML, derive from the seed transform in start()". */
     static constexpr float kUnset = -10000.0f;

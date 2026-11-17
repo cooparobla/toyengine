@@ -140,7 +140,30 @@ void FrameProfile::print_summary() const {
                     scope_name(static_cast<CpuScope>(i)), s.avg,
                     frame.avg > 0.0 ? 100.0 * s.avg / frame.avg : 0.0, s.p50, s.p95, s.max);
     }
+    if (!unattributed_.empty()) {
+        std::printf("\n[profile] cpu.scene.other by system\n");
+        std::printf("[profile]   %-22s %9s %7s\n", "system", "avg ms", "% frame");
+        std::vector<std::pair<std::string, double>> named;
+        named.reserve(unattributed_.size());
+        for (const auto& [name, u] : unattributed_) {
+            named.emplace_back(name, u.frames > 0 ? u.total_ms / static_cast<double>(u.frames) : 0.0);
+        }
+        std::sort(named.begin(), named.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        for (const auto& [name, avg] : named) {
+            std::printf("[profile]   %-22s %9.3f %6.1f%%\n", name.c_str(), avg,
+                        frame.avg > 0.0 ? 100.0 * avg / frame.avg : 0.0);
+        }
+    }
+
     std::printf("\n");
+}
+
+void FrameProfile::add_unattributed(const char* name, double ms) {
+    if (!has_frame_ || name == nullptr || current_ < kWarmupFrames) return;
+    Unattributed& u = unattributed_[name];
+    u.total_ms += ms;
+    ++u.frames;
 }
 
 void FrameProfile::try_emit_(uint64_t frame) {

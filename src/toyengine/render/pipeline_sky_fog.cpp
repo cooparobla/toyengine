@@ -90,8 +90,29 @@ void ToyRenderPipeline::record_clouds_(coopa::gfx::command::CommandBuffer& cmd, 
     passes::SkyCloudPass::Params cp;
     // Unjittered: the clouds reconstruct temporally on their own (sky_cloud_resolve.frag),
     // and a jittered ray would swim against the history it reprojects.
-    cp.view_proj = ctx.unjittered_proj * ctx.view;
-    cp.prev_view_proj = prev_view_proj_valid_ ? prev_unjittered_view_proj_ : cp.view_proj;
+    // The clouds' ray and reprojection math runs CAMERA-RELATIVE. At world coordinates in
+    // the hundreds of metres a view-projection's translation column sits where one float32
+    // ulp is ~6e-5 m, and -R^T*T sweeps those ulp boundaries in an irregular staircase as
+    // the camera translates whenever the basis is even slightly off-axis -- which a tracking
+    // orbit camera's always is. Single-pass geometry shrugs that correlated noise off, but
+    // the layer's temporal feedback loop (resolve history re-warped through these matrices
+    // every frame) accumulates it into visible jitter. With the camera at the origin the
+    // translation column is exactly zero, and the previous frame's matrix carries only the
+    // one-frame camera delta; both are rebased in double, where the large cancellation is
+    // exact.
+    {
+        const glm::dvec4 cam_h = glm::dvec4(glm::dvec3(ctx.cam_pos), 1.0);
+        glm::dmat4 vp = glm::dmat4(ctx.unjittered_proj) * glm::dmat4(ctx.view);
+        vp[3] = vp * cam_h;
+        cp.view_proj = glm::mat4(vp);
+        if (prev_view_proj_valid_) {
+            glm::dmat4 pvp = glm::dmat4(prev_unjittered_view_proj_);
+            pvp[3] = pvp * cam_h;
+            cp.prev_view_proj = glm::mat4(pvp);
+        } else {
+            cp.prev_view_proj = cp.view_proj;
+        }
+    }
     cp.camera_pos = ctx.cam_pos;
     cp.proj_y = std::abs(ctx.unjittered_proj[1][1]);
     cp.slab = glm::vec4(cs.altitude, std::max(cs.thickness, 0.1f), glm::clamp(cs.coverage, 0.0f, 1.0f),
@@ -138,6 +159,23 @@ void ToyRenderPipeline::record_clouds_(coopa::gfx::command::CommandBuffer& cmd, 
     // History is valid only if the clouds were traced last frame too.
     cp.history_valid = trace && prev_view_proj_valid_ && cloud_last_frame_ + 1 == frame_index_;
     if (trace) cloud_last_frame_ = frame_index_;
+    // The camera's translation, normalised to a 60 Hz frame and smoothed over ~0.15 s: the
+    // resolve scales its temporal blend by the parallax this implies at each pixel's own cloud
+    // distance, so a deck close to the camera trades smoothing for freshness instead of
+    // dragging a stale image. The normalisation keeps that trade frame-rate independent (a
+    // hitched frame is a long dt, not a faster camera), and the smoothing keeps a follow
+    // camera's slightly uneven per-frame steps from modulating the blend weight frame to
+    // frame. A teleport reads as a cut (history invalid), so it contributes nothing here.
+    if (cp.history_valid) {
+        const float dt = glm::clamp(cs.time - cloud_prev_time_, 1.0f / 240.0f, 1.0f / 15.0f);
+        const float rate = glm::length(ctx.cam_pos - cloud_prev_cam_) * (1.0f / 60.0f) / dt;
+        cloud_cam_rate_ += (rate - cloud_cam_rate_) * (1.0f - std::exp(-dt / 0.15f));
+    } else {
+        cloud_cam_rate_ = 0.0f;
+    }
+    cp.cam_delta = cloud_cam_rate_;
+    cloud_prev_cam_ = ctx.cam_pos;
+    cloud_prev_time_ = cs.time;
     // How much the clouds' light changed since last frame (relative): the resolve's
     // anti-flicker cap lets a real lighting change through at its own pace.
     const auto lum = [](glm::vec3 c) { return glm::dot(c, glm::vec3(0.2126f, 0.7152f, 0.0722f)); };

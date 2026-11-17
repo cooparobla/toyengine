@@ -632,7 +632,7 @@ void Engine::prepare_scene_(coopa::scene::Scene& scene, bool drain_assets) {
     // Order 90: bakes water surfaces and refreshes the buoyant-body list right before
     // Physics (100) steps, whose substep callback it drives -- see water_system.h's file doc.
     water::install_water_system(scene, &ctx_.device(), &ctx_.allocator(), &assets_)
-        ->set_settings(water_settings_for_(pipeline_->render_config().water_quality));
+        ->set_settings(water_settings_for_(pipeline_->render_config()));
     coopa::physx::system::install_physics_system(scene, scene_cfg.physics);
     // Orders 96 and 150: binds each Vehicle to its chassis body and drives the wheels inside
     // Physics' substep (96), then places the wheel visuals and fires its signals once the step
@@ -1044,7 +1044,13 @@ bool Engine::tick() {
         // The active scene's per-system split of the SceneUpdate/LateUpdate phases, as its own
         // cpu.scene.* columns (overlay scenes are not included -- their systems are the UI's).
         for (const auto& timing : scene_mgr_.get_active_scene().system_timings()) {
-            prof->add_cpu(scene_system_scope_(timing.name), timing.ms);
+            const CpuScope scope = scene_system_scope_(timing.name);
+            prof->add_cpu(scope, timing.ms);
+            // A system with no column of its own is only visible as part of the lumped
+            // scene.other total, which is no use for finding which one is expensive -- the
+            // column table is keyed by name and a project's systems are not in it. Keep the
+            // name beside the time so the summary can break that bucket down.
+            if (scope == CpuScope::SceneOther) prof->add_unattributed(timing.name, timing.ms);
         }
     }
     update_audio_(dt);

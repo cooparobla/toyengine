@@ -488,6 +488,8 @@ const std::vector<SettingsGroup>& render_settings_groups() {
 
         g.push_back(GroupBuilder(features, "Water", "WaterBody surfaces and the underwater look")
             .add(quality("water_quality", "buoyancy and ripple range, water mesh density and LOD, and shader detail"))
+            .add(F(f_float("water_detail_distance", 0.0f, 10.0f, 0.0f, 20000.0f), "Detail Distance Override",
+                   "Distance ripples and foam noise fade out at, overriding the quality tier's value; 0 uses the tier"))
             .add(startup(F(f_bool("underwater_enabled", true), "Underwater Effect",
                            "Fog, absorption and caustics when the camera is below a water surface")))
             .done());

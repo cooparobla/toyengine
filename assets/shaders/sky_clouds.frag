@@ -96,10 +96,13 @@ void main() {
         t_scene = sqrt(max(max(d2.x, d2.y), max(d2.z, d2.w))) / scale;
     }
 
+    // cf's matrices are camera-relative (SkyCloudPass): the ray starts at the origin, and
+    // cf.world_frame.xyz is the planet centre relative to the camera. cf.camera stays the
+    // ABSOLUTE position, used only against g_position above.
     vec3 ndc = vec3(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 1.0);
     vec4 world = cf.inv_view_proj * vec4(ndc, 1.0);
-    vec3 rd = normalize(world.xyz / world.w - cf.camera.xyz);
-    vec3 ro = cf.camera.xyz / scale;
+    vec3 rd = normalize(world.xyz / world.w);
+    vec3 ro = vec3(0.0);
     // The shell's geometry. With a curved world frame (`world_frame.w > 0`) it is the real
     // globe, so the deck curves to the real horizon and the ground sphere below occludes it.
     // On a flat world that ground sphere stays pinned under the camera at the atmosphere's own

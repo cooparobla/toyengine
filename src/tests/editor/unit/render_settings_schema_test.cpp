@@ -57,6 +57,7 @@ COOPA_TEST(render_tab_lists_every_engine_key_once_with_its_default) {
         {"volumetrics_quality", [](const PR& r) { return EngineDefault(r.volumetrics_quality); }},
         {"sdf_quality", [](const PR& r) { return EngineDefault(r.sdf_quality); }},
         {"water_quality", [](const PR& r) { return EngineDefault(r.water_quality); }},
+        {"water_detail_distance", [](const PR& r) { return EngineDefault(r.water_detail_distance); }},
         {"outline_enabled", [](const PR& r) { return EngineDefault(r.outline_enabled); }},
         {"xray_enabled", [](const PR& r) { return EngineDefault(r.xray_enabled); }},
         {"palette_enabled", [](const PR& r) { return EngineDefault(r.palette_enabled); }},

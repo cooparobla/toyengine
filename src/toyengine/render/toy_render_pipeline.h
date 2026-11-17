@@ -1638,6 +1638,9 @@ private:
     glm::vec4 cloud_prev_slab_{0.0f};       ///< Last frame's layer parameters (an edit lifts the anti-flicker cap too).
     glm::vec2 cloud_prev_light_{0.0f};      ///< Last frame's cloud light / zenith luminance (SkyCloudPass::Params::light_change).
     float     cloud_prev_fade_ = 1.0f;      ///< Last frame's camera fade (a change lifts the anti-flicker cap too).
+    glm::vec3 cloud_prev_cam_{0.0f};        ///< Last frame's camera position (SkyCloudPass::Params::cam_delta).
+    float cloud_prev_time_ = 0.0f;          ///< Last frame's cloud timeline, for the camera rate's dt.
+    float cloud_cam_rate_ = 0.0f;           ///< Smoothed camera translation per 60 Hz frame (SkyCloudPass::Params::cam_delta).
     uint32_t  cloud_last_frame_ = ~0u - 1;   ///< frame_index_ the clouds last ran (history valid only if it was the previous one).
     /// toy_lighting_pass_'s extra set (set 4): contact_shadow_pass_'s resolved occlusion.
     /// Declared BEFORE toy_lighting_pass_ so it outlives the pass holding it in its ExtraSets.

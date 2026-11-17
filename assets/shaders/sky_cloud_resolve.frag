@@ -27,6 +27,7 @@ layout(set = 0, binding = 2) uniform sampler2D g_normal;    // nearest
 
 const float FAR_DEPTH = 60000.0;
 const float FRESH_WEIGHT = 0.05;  // this frame's estimate vs the history, for every pixel
+const float MOTION_CAP_PX = 2.0;  // the on-screen motion past which the anti-flicker cap stops widening
 
 // Everything below averages, clamps and blends in a tonemapped space (luminance Reinhard, scaled
 // by the light's own brightness): a bright, thin silver-lining fringe whose samples swing from
@@ -59,6 +60,17 @@ void main() {
     vec4 m1 = vec4(0.0), m2 = vec4(0.0), sum = vec4(0.0);
     float n = 0.0;
     float wsum = 0.0, best_w = 0.0, depth = FAR_DEPTH;
+    // The distance the reprojection below travels: the opacity-weighted MEDIAN of the taps'
+    // distances, not the nearest tap and not their mean. The nearest tap alternates with the
+    // trace's 2x2 order, so a distance read off one steps every frame; and where the pixel sees
+    // two layers at once -- thin haze just over the camera in front of a far bank, the usual
+    // state inside a wrapping deck -- a mean lands between them, a distance neither layer is at,
+    // and the reprojection then over- or under-applies the camera's translation to both: the
+    // layer visibly overshoots while the camera moves and springs back once it stops. The
+    // weighted median follows whichever layer dominates the pixel's opacity, which is also the
+    // layer dominating its colour. Kept in the log space the channel is encoded in
+    // (sky_cloud_common.glsl); a clear tap carries no opacity and so no vote.
+    float dlog[9]; float dwt[9]; float dwsum = 0.0; int dn = 0;
     vec4 fresh = vec4(-1.0);
     for (int dy = -1; dy <= 1; ++dy) {
         for (int dx = -1; dx <= 1; ++dx) {
@@ -75,16 +87,37 @@ void main() {
             sum += v * w;
             wsum += w;
             if (w > best_w) { best_w = w; depth = cloud_depth(s.a); }
+            float dw = w * (1.0 - v.a);
+            if (dw > 1e-5) {
+                float l = log2(max(cloud_depth(s.a), 50.0));
+                int j = dn++;
+                for (; j > 0 && dlog[j - 1] > l; --j) { dlog[j] = dlog[j - 1]; dwt[j] = dwt[j - 1]; }
+                dlog[j] = l;
+                dwt[j] = dw;
+                dwsum += dw;
+            }
             if (dx == 0 && dy == 0 && traced) fresh = v;
+        }
+    }
+    // With no opacity in any tap every one of them carries FAR_DEPTH, and the nearest tap's own
+    // distance serves.
+    if (dwsum > 1e-4) {
+        float acc = 0.0;
+        for (int j = 0; j < dn; ++j) {
+            acc += dwt[j];
+            if (acc >= 0.5 * dwsum) { depth = exp2(dlog[j]); break; }
         }
     }
 
     // Reproject: this pixel's ray at the clouds' distance (cloud space -> world), where the
     // clouds were last frame.
+    // cf's matrices are camera-relative (SkyCloudPass): rays start at the origin and
+    // cf.world_frame.xyz holds the centre relative to the camera, so the large-coordinate
+    // cancellations that staircase at float precision never reach this chain.
     vec3 ndc = vec3(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 1.0);
     vec4 wp = cf.inv_view_proj * vec4(ndc, 1.0);
-    vec3 ro = cf.camera.xyz;
-    vec3 rd = normalize(wp.xyz / wp.w - ro);
+    vec3 ro = vec3(0.0);
+    vec3 rd = normalize(wp.xyz / wp.w);
     vec3 p = ro + rd * (depth * cf.look.x);
     // Where that point's cloud was LAST frame. A flat world's deck slid across the world, so
     // the history lies one drift vector away; a planet's deck TURNED, so it lies one spin step
@@ -150,17 +183,54 @@ void main() {
         // Moving, every frame's bilinear history read softens the layer a little more: lean on
         // the fresh estimate as the motion grows (TAA's usual trade, blur against noise).
         float w = mix(FRESH_WEIGHT, 0.3, clamp(motion / 6.0, 0.0, 1.0));
+        // Camera translation near the layer changes what a pixel legitimately shows -- the
+        // paths light takes through the deck, what occludes what -- faster than a far deck
+        // ever changes, and that change is invisible to `motion` (the reprojection follows
+        // the geometry; it cannot follow the appearance). Lean on the fresh estimate in
+        // proportion to the parallax rate at this pixel's OWN cloud distance: the camera's
+        // translation per frame (day_fill.w, world m) over the distance the reprojection just
+        // travelled, as region px via the pixel's angular size (history.w). Clouds a few dozen
+        // metres overhead re-render in a handful of frames instead of dragging a stale image
+        // that springs back when the camera stops; the same deck out at the horizon -- several
+        // times farther -- keeps its smoothing instead of dropping to a two-frame history,
+        // which has only a quarter-rate checkerboard of fresh rays to rebuild from and would
+        // show their four-frame-periodic noise as shimmer whenever the camera moves.
+        float plx = cf.day_fill.w / max(depth * cf.look.x, 25.0) / max(cf.history.w, 1e-6);
+        w = max(w, mix(FRESH_WEIGHT, 0.45, clamp(plx / 0.8, 0.0, 1.0)));
         result = mix(clamp(hist, mean - box, mean + box), current, w);
         // Anti-flicker: while the clouds hold still on screen, a pixel may change by at most
-        // ~0.4% of the (tonemapped) range per frame. Everything real that changes a still cloud
-        // -- the sun moving, the weather fading in, the clouds evolving -- is far slower than
-        // that (the wind's drift is already followed by the reprojection), so the cap only ever
-        // bites on noise: the sampling noise of a thin, sunlit fringe can then never show as a
-        // flicker, whatever the quality tier. On-screen motion raises the cap with it, and so
-        // does a sudden change of the light itself (lightning, the sun handing over to the moon) or
-        // of the layer's settings (an edit in the editor).
-        float rate = 0.004 * (1.0 + motion * 4.0) + cf.camera.w * 1.5;
+        // ~0.4% of the (tonemapped) range per frame. The slow changes of a still, distant deck
+        // -- the sun moving, the weather fading in, the clouds evolving -- all fit under that
+        // (the wind's drift is already followed by the reprojection), so on such a deck the cap
+        // only ever bites on noise: the sampling noise of a thin, sunlit fringe can then never
+        // show as a flicker, whatever the quality tier. On-screen motion raises the cap with it,
+        // and so does a sudden change of the light itself (lightning, the sun handing over to
+        // the moon) or of the layer's settings (an edit in the editor).
+        //
+        // Motion widens the cap only up to MOTION_CAP_PX, because past that the march's own
+        // per-frame noise is what the extra room admits: fast motion is meant to cost sharpness,
+        // which the fresh weight above already trades away, not stability. The two cases that do
+        // need the history replaced outright never reach here -- a reprojection landing off-screen
+        // takes `current` uncapped below, and the first traced frame has no history at all.
+        // The same parallax rate keeps the cap from pinning what the blend above lets move.
+        // The parallax contribution is bounded: past one region px per frame the fresh weight
+        // above is already saturated, and an unbounded term would push the cap past the whole
+        // tonemapped range (1 / tm_k) -- a cap that large is no cap at all, and the march's
+        // per-frame noise is exactly what the extra room admits.
+        float rate = 0.004 * (1.0 + min(motion, MOTION_CAP_PX) * 4.0) + cf.camera.w * 1.5 + min(plx, 1.0) * 0.15;
         vec4 cap = vec4(vec3(rate / tm_k), rate);
+        // A deck close to the camera breaks the slow-change premise above: ordinary camera
+        // translation legitimately occludes and reveals its clouds in a handful of frames, and
+        // pixels whose history is valid but no longer true (clear sky where a cloud now is, and
+        // the reverse) would crawl across that gap at the capped rate -- a band of stale sky
+        // hanging off every silhouette while the camera moves. Noise and real change separate
+        // cleanly here: noise swings the fresh taps apart (sigma grows with it, keeping the
+        // history inside the box), while a real change moves their agreed mean away from the
+        // history. So however far the history sits OUTSIDE the taps' own plausible box is
+        // evidence of real change, and the cap widens by that much, scaled to cross the
+        // remaining gap in a few frames. On a far deck the history stays inside the box and
+        // this term is zero.
+        cap += max(abs(hist - mean) - box, vec4(0.0)) * 0.35;
         result = hist + clamp(result - hist, -cap, cap);
     } else if (hv) {
         result = hist;

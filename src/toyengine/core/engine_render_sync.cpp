@@ -539,23 +539,29 @@ void Engine::restore_weather_atmosphere_() {
     weather_applied_ = false;
 }
 
-water::WaterSettings Engine::water_settings_for_(render::RenderQuality q) {
-    switch (q) {
-        case render::RenderQuality::Low:    return water::WaterSettings::from_quality(water::WaterQuality::Low);
-        case render::RenderQuality::Medium: return water::WaterSettings::from_quality(water::WaterQuality::Medium);
-        case render::RenderQuality::Ultra:  return water::WaterSettings::from_quality(water::WaterQuality::Ultra);
-        case render::RenderQuality::High:   break;
+water::WaterSettings Engine::water_settings_for_(const render::ToyRenderConfig& rc) {
+    water::WaterSettings settings;
+    switch (rc.water_quality) {
+        case render::RenderQuality::Low:    settings = water::WaterSettings::from_quality(water::WaterQuality::Low); break;
+        case render::RenderQuality::Medium: settings = water::WaterSettings::from_quality(water::WaterQuality::Medium); break;
+        case render::RenderQuality::Ultra:  settings = water::WaterSettings::from_quality(water::WaterQuality::Ultra); break;
+        case render::RenderQuality::High:   settings = water::WaterSettings::from_quality(water::WaterQuality::High); break;
     }
-    return water::WaterSettings::from_quality(water::WaterQuality::High);
+    // defaults < preset < explicit key, same rule as every *_quality tier.
+    if (rc.water_detail_distance > 0.0f) settings.detail_distance = rc.water_detail_distance;
+    return settings;
 }
 
 void Engine::sync_water_render_state_(coopa::scene::Scene& scene) {
     render::WaterFrameState state;
     auto* water = dynamic_cast<water::WaterSystem*>(scene.find_system("Water"));
     if (water) {
-        // water_quality is live: a changed tier reaches the system for its next update.
-        const render::RenderQuality q = pipeline_->render_config().water_quality;
-        if (water->settings().quality != water_settings_for_(q).quality) water->set_settings(water_settings_for_(q));
+        // water_quality (and the detail-distance override riding on it) is live: a change
+        // reaches the system for its next update.
+        const water::WaterSettings wanted = water_settings_for_(pipeline_->render_config());
+        if (water->settings().quality != wanted.quality || water->settings().detail_distance != wanted.detail_distance) {
+            water->set_settings(wanted);
+        }
         const water::WaterSettings& ws = water->settings();
         state.ripple_layers   = ws.ripple_layers;
         state.detail_distance = ws.detail_distance;

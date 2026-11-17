@@ -135,12 +135,21 @@ void SkyCloudPass::execute(coopa::gfx::command::CommandBuffer& cmd, uint32_t fra
     d.history = glm::vec4(p.drift, valid ? 1.0f : 0.0f, pix_angle);
     d.camera = glm::vec4(p.camera_pos, p.light_change);
     d.look = glm::vec4(cs, std::clamp(p.fade, 0.0f, 1.0f), p.atmosphere_lut ? 1.0f : 0.0f, p.spin_delta);
-    // The world frame's centre and radius stay in WORLD metres like `camera` above; the shaders
+    // The world frame's centre is CAMERA-RELATIVE (world metres), matching the matrices in
+    // Params -- the shaders' ray origin is the origin. The radius stays absolute; the shaders
     // divide both by the scale themselves. A flat frame leaves this zero, which is the shaders'
     // "pin a fake sphere under the camera" path -- the flat world's arithmetic, untouched.
-    d.world_frame = p.world_frame.curved() ? glm::vec4(p.world_frame.centre, p.world_frame.radius) : glm::vec4(0.0f);
+    d.world_frame = p.world_frame.curved()
+        ? glm::vec4(glm::vec3(glm::dvec3(p.world_frame.centre) - glm::dvec3(p.camera_pos)),
+                    p.world_frame.radius)
+        : glm::vec4(0.0f);
     d.spin = glm::vec4(glm::normalize(p.spin_axis), p.spin_angle);
-    d.day_fill = glm::vec4(p.day_fill, 0.0f);
+    // The camera's translation per (60 Hz-normalised) frame, in world metres. The resolve
+    // derives a parallax rate from it at each pixel's OWN cloud distance -- the same distance
+    // its reprojection travels -- so clouds close overhead re-render under a moving camera
+    // while the same layer out near the horizon, several times farther away, keeps its
+    // temporal smoothing.
+    d.day_fill = glm::vec4(p.day_fill, p.cam_delta);
     d.night_fill = glm::vec4(p.night_fill, 0.0f);
     ubos_[slot]->upload(&d, sizeof(d));
     if (!trace) { last_extent_ = glm::uvec2(0u); return; }

@@ -23,6 +23,12 @@ glm::vec3 parse_rgb(const fkyaml::node& n, const glm::vec3& fallback) {
 } // namespace
 
 void parse_water_settings(const fkyaml::node& node, WaterBody& w) {
+    // Render granularity, not look: a body wider than one tile is drawn as several child
+    // objects, each its own renderer, draw and per-frame CPU cost. A body whose extent is
+    // already the granularity the rest of the world is culled at wants one tile, and only
+    // this key can say so -- the 0 default splits at ~32 m however the body was produced.
+    read(node, "tile_size", w.tile_size);
+
     read(node, "wave_amplitude", w.waves.amplitude);
     read(node, "wave_length", w.waves.wavelength);
     read(node, "wave_steepness", w.waves.steepness);

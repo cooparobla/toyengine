@@ -50,6 +50,9 @@ layout(set = CLOUD_UBO_SET, binding = CLOUD_UBO_BINDING) uniform CloudFrame {
                           // A planet's wind ROTATES the deck; a flat world's slides the noise
                           // domain by wind.xy instead. Only one is ever live.
     vec4 day_fill;        // rgb = the sky's colour at noon: the deck's ambient on the day side.
+                          // w = the parallax rate (region px per frame): the camera's
+                          // translation over its distance to the layer's near edge. 0 on a
+                          // cut or the first frame.
     vec4 night_fill;      // rgb = its night-side ambient, already scaled by the moon. Both are
                           // zero on a flat world, where the scene's sky_zenith family is used
                           // exactly as it always was.

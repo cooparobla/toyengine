@@ -271,6 +271,16 @@ struct ToyRenderConfig {
      *  Engine maps it to toy::water::WaterSettings (toyengine/water/water_settings.h) every
      *  frame, so it is live-switchable. */
     RenderQuality water_quality       = RenderQuality::High;
+    /**
+     * Explicit override of WaterSettings::detail_distance (metres) -- the distance past which
+     * the shader drops ripples and foam noise, and rolls off toward a rougher, flatter look.
+     * <= 0 means "use water_quality's own tier value" (the default, matching every existing
+     * scene). The tier values are tuned for lake- and sea-scale bodies a few hundred metres
+     * across; a world whose water spans kilometres (an ocean seen from orbit) needs this widened
+     * explicitly rather than by raising the tier, which would also pay for finer simulation and
+     * ripple range it does not need.
+     */
+    float water_detail_distance = 0.0f;
     /** Physical sky: the sky-view table's integration steps. Not expanded here -- read by the
      *  pipeline every frame, so it switches live. */
     RenderQuality sky_quality         = RenderQuality::High;

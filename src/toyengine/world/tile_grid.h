@@ -141,13 +141,24 @@ public:
                          TileHit& hit) const = 0;
 
     /**
-     * @brief Whether every chunk needs a collider, whatever its distance.
+     * @brief Whether the chunk at `coord` should carry a collider, given the loaded region is
+     *        centred on `centre` with `radius` chunks of margin (`TerrainComponent::collision_radius`).
      *
-     * A `collision_radius` keeps colliders near the camera, which is right when the ground
-     * ahead is the only ground that matters. Where the whole terrain is in view at once,
-     * solid ground in front of you and none behind reads worse than none at all.
+     * A flat grid (a null topology) answers this with plain Chebyshev `chunk_distance(coord,
+     * centre) <= radius` -- storage coordinates ARE world layout there. This is what a layout
+     * overrides when that stops being true: planetoy's six-faced globe is one such layout, where
+     * two chunks a world apart in storage can sit either side of a seam, and `radius` chunks has
+     * to mean a real distance on the globe rather than a run of storage columns.
+     *
+     * @param params The terrain's parameters, for whatever this layout needs to locate a chunk
+     *        (planetoy reads `chunk_size` to find a chunk's own tiles).
+     * @param radius `<= 0` means every chunk wants one -- the same "no bound" `collision_radius`
+     *        itself uses, so a topology that answers `true` unconditionally (a small world, seen
+     *        whole, where solid ground in front of you and none behind would read worse than
+     *        none at all) does not need to special-case it.
      */
-    virtual bool collides_everywhere() const = 0;
+    virtual bool wants_collision_at(const TerrainParams& params, const ChunkCoord& coord,
+                                    const ChunkCoord& centre, int radius) const = 0;
 
     /**
      * @brief A bounding sphere for the whole terrain, terrain-local -- what framing it needs.

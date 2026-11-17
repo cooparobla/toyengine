@@ -990,8 +990,13 @@ public:
 
     void restore_weather_atmosphere_();
 
-    /** @brief render::RenderQuality (config.yaml's water_quality) as the water module's tier. */
-    static water::WaterSettings water_settings_for_(render::RenderQuality q);
+    /**
+     * @brief render::RenderQuality (config.yaml's water_quality) expanded into the water
+     *        module's settings, with `rc.water_detail_distance_override` applied over the tier
+     *        when positive -- the same defaults-then-explicit-key rule every *_quality tier
+     *        already follows.
+     */
+    static water::WaterSettings water_settings_for_(const render::ToyRenderConfig& rc);
 
     /**
      * @brief Hands the renderer this frame's water state: the live ripple rings (aged) and, if

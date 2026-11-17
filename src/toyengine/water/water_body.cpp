@@ -39,6 +39,7 @@ const WaveSet& WaterBody::wave_set() const {
 }
 
 void copy_water_settings(const WaterBody& from, WaterBody& to) {
+    to.tile_size = from.tile_size;
     to.waves = from.waves;
     to.wind_response = from.wind_response;
     to.flow_speed = from.flow_speed;

@@ -165,6 +165,14 @@ public:
         if (has_frame_) rows_[current_].cpu[static_cast<size_t>(s)] += ms;
     }
 
+    /// Records `ms` against a scene system that has no column of its own, so print_summary() can
+    /// break the cpu.scene.other bucket down by `system_name()`. Without this, a project whose
+    /// systems the fixed column table does not name can see only the lumped total -- which is
+    /// exactly the case the table cannot be extended for, since it is keyed by engine-side names.
+    /// Accumulated over the run rather than per frame, and warm-up frames are excluded to match
+    /// every other number in the summary.
+    void add_unattributed(const char* name, double ms);
+
     /// Records a completed frame's GPU timings (from GpuProfiler::collect).
     void set_gpu(uint64_t frame, const std::array<double, kGpuScopeCount>& scopes, double total);
 
@@ -200,6 +208,12 @@ private:
     bool          has_latest_ = false;
     std::map<uint64_t, Row> rows_;   ///< Frames still waiting for their CPU or GPU half.
     std::vector<Row>        done_;   ///< Completed frames, for the summary.
+    /// Total milliseconds and the number of frames reporting them, per unattributed system name.
+    struct Unattributed {
+        double   total_ms = 0.0;
+        uint64_t frames = 0;
+    };
+    std::map<std::string, Unattributed> unattributed_;
     uint64_t current_ = 0;
     bool     has_frame_ = false;
     std::chrono::steady_clock::time_point frame_start_{};

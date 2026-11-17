@@ -353,7 +353,13 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
     // is unresolvable wins.
     float ndv_f     = max(dot(s.normal_ws, normalize(camera.camera_pos - s.position_ws)), 1e-3);
     float footprint = view_dist / ndv_f;
-    float filtered  = max(1.0 - detail, smoothstep(0.6 * detail_distance, detail_distance, footprint));
+    // A wider onset than the ripple fade's own 0.6: the ripples merely stop adding detail, which
+    // reads fine as a binary cut, but this flips the surface's base roughness outright, and a
+    // world whose water is seen across a wide range of distances and grazing angles at once (a
+    // globe's horizon, orbit down to a shoreline) showed that as a visible seam rather than a
+    // fade. Ramping from a quarter of detail_distance instead spreads the same two endpoints
+    // (still 0.6 at the far edge, still unfiltered well inside) over a longer transition.
+    float filtered  = max(1.0 - detail, smoothstep(0.25 * detail_distance, detail_distance, footprint));
     s.roughness = mix(s.roughness, max(s.roughness, far_roughness), filtered);
 #else
     s.roughness = mix(max(s.roughness, 0.2), s.roughness, detail);

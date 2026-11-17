@@ -139,10 +139,12 @@ TerrainFieldView TerrainComponent::field_view() const {
 bool terrain_wants_collision(const TerrainComponent& terrain, const ChunkCoord& coord,
                              const ChunkCoord& centre) {
     if (!terrain.collision) return false;
+    // A real layout answers in its own geometry -- see TileGrid::wants_collision_at()'s doc for
+    // why storage-coordinate Chebyshev distance is not always "how far apart in the world".
+    if (terrain.topology != nullptr) {
+        return terrain.topology->wants_collision_at(terrain.params, coord, centre, terrain.collision_radius);
+    }
     if (terrain.collision_radius <= 0) return true;
-    // No distance bound where the whole terrain is in view at once: ground ahead of you
-    // and none behind reads worse than none at all.
-    if (terrain.topology != nullptr && terrain.topology->collides_everywhere()) return true;
     return chunk_distance(coord, centre) <= terrain.collision_radius;
 }
 

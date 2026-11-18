@@ -1,0 +1,25 @@
+# Grass tufts for the moebius_demo look: the `nature/grass_tuft` cutout, toon-banded.
+#
+# `nature/grass_tuft` is three crossed quads. Without an alpha cutout each quad renders as a
+# solid card and the grass reads as flat planes stuck in the sand, so the mask is not a
+# refinement here -- it is what makes the mesh legible at all. `cull_backfaces: false` matters
+# for the same reason: a crossed-quad tuft is seen from both sides by definition, and culling
+# backfaces deletes roughly half of every tuft depending on where the camera stands.
+#
+# The texture is greyscale (see tools/gen_grass_blade_texture.py) so `albedo` below is what
+# sets the colour. Toon-banded like the scene's other subjects: the scene sets
+# `hatch_pbr_threshold`, so an un-banded surface shades plainly and would drop its crosshatch.
+albedo: { r: 0.40, g: 0.56, b: 0.36 }
+texture_albedo: textures/foliage/grass_blade.png
+texture_alpha_mask: textures/foliage/grass_blade_mask.png
+alpha_mode: CUTOUT
+alpha_cutoff: 0.4
+cull_backfaces: false
+metallic: 0.0
+roughness: 0.92
+ao: 1.0
+toon_bands: 3
+toon_specular: off
+toon_softness: 0.15
+shader: foliage
+shader_params: [0.34, 2.2, 0.6, 0]

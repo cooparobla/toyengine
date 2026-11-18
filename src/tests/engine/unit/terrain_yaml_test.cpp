@@ -13,6 +13,7 @@
 #include <toyengine/world/terrain_yaml.h>
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 #include <glm/glm.hpp>
@@ -321,4 +322,90 @@ COOPA_TEST(heightmap_terrain_reads_chunk_budget_ms) {
     require(t != nullptr, "chunk_budget_ms: the component was added");
     expect(t->chunk_budget_ms == 5.5f, "chunk_budget_ms: the authored value reaches the component, "
                                         "not the 2.0f default");
+}
+
+/**
+ * @brief `fill_water:` in both spellings, and the default that keeps it off.
+ *
+ * Called directly for the same reason `heightmap_terrain_reads_chunk_budget_ms` above is.
+ */
+COOPA_TEST(heightmap_terrain_reads_fill_water) {
+    static coopa::asset::AssetManager assets;
+
+    const auto parse = [&](const fkyaml::node& fill) {
+        fkyaml::node node = fkyaml::node::mapping();
+        node["size"] = fkyaml::node(256);
+        node["resolution"] = fkyaml::node(33);
+        if (!fill.is_null()) node["fill_water"] = fill;
+
+        auto obj = std::make_unique<coopa::scene::SceneObject>("terrain_fill_water_test");
+        coopa::scene::SceneLoader::ParseContext ctx;
+        ctx.scene_dir = ".";
+        toy::world::parse_heightmap_terrain(node, *obj, ctx, assets);
+        return obj;
+    };
+
+    // Absent: off, and the flood in sync_field() never runs.
+    const auto none = parse(fkyaml::node());
+    auto* t0 = none->get_component<toy::world::HeightmapTerrain>();
+    require(t0 != nullptr, "fill_water: the component was added without the key");
+    expect(!t0->fill_water, "fill_water: absent leaves the one-shot flood off");
+
+    // The mapping form, which is what carries a kind.
+    fkyaml::node mapping = fkyaml::node::mapping();
+    mapping["level"] = fkyaml::node(4.5);
+    mapping["kind"] = fkyaml::node("river");
+    const auto mapped = parse(mapping);
+    auto* t1 = mapped->get_component<toy::world::HeightmapTerrain>();
+    require(t1 != nullptr, "fill_water: the component was added for the mapping form");
+    expect(t1->fill_water, "fill_water: the mapping form turns the flood on");
+    expect(t1->fill_water_level == 4.5f, "fill_water: the mapping form reads `level`");
+    expect(t1->fill_water_kind == "river", "fill_water: the mapping form reads `kind`");
+
+    // The scalar shorthand: a lake at one level.
+    const auto scalar = parse(fkyaml::node(3.25));
+    auto* t2 = scalar->get_component<toy::world::HeightmapTerrain>();
+    require(t2 != nullptr, "fill_water: the component was added for the scalar form");
+    expect(t2->fill_water, "fill_water: the scalar form turns the flood on");
+    expect(t2->fill_water_level == 3.25f, "fill_water: the scalar form reads the level");
+    expect(t2->fill_water_kind == "lake", "fill_water: the scalar form defaults to a lake");
+}
+
+/**
+ * @brief `moebius_demo`'s lake level is an altitude in the terrain's OWN height space.
+ *
+ * `fill_water.level` is local metres above the terrain object's origin, running 0..`height` --
+ * the same space as `TileCell::water_level` and `TerraData::ground_at_tile()`, and NOT a world
+ * Z. Writing the world Z the water surface ends up at puts the level under every tile's ground,
+ * which seeds nothing and floods a silent nothing: no warning, no water, a terrain that looks
+ * exactly like one with no `fill_water:` at all. This scene is the shipped worked example, so
+ * it is the one that holds the distinction down.
+ */
+COOPA_TEST(moebius_demo_fills_water_in_local_height_space) {
+    const std::string path =
+        std::string(ROOT_DIR) + "/assets/scenes/rendering/moebius_demo/scene.yaml";
+    const fkyaml::node doc = coopa::yaml::load_document(path);
+
+    const fkyaml::node obj = find_root_object(doc, "terrain");
+    require(!obj.is_null(), "moebius: the scene has a `terrain` root object");
+    const fkyaml::node t = find_component(obj, "Terrain");
+    require(!t.is_null(), "moebius: it carries a Terrain block");
+    expect(infer_terrain_mode(t) == TerrainMode::Heightmap, "moebius: the terrain is a heightmap");
+
+    require(t.contains("fill_water"), "moebius: the lake is terrain-painted water, not a WaterBody");
+    const fkyaml::node& fw = t.at("fill_water");
+    require(fw.is_mapping() && fw.contains("level"), "moebius: fill_water declares a level");
+    const double level = num_at(fw, "level");
+    const double height = num_at(t, "height");
+    require(height > 0.0, "moebius: the terrain declares a height");
+
+    expect(level > 0.0 && level < height,
+           "moebius: the lake level is inside the terrain's own 0..height space");
+
+    // The level is local, so the world Z the surface lands at is level + Transform.z. The pan
+    // sits at world z = 0 by construction, so a lake must come out strictly below it -- that is
+    // what makes it a basin rather than a sheet laid over the sand.
+    const double surface_world_z = level + static_cast<double>(position_of(obj).z);
+    expect(surface_world_z < 0.0,
+           "moebius: the lake surface lands below the prop pan at world z = 0");
 }

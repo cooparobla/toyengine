@@ -19,6 +19,7 @@
 #include <gfxcoopa/engine/data/skinned_mesh_source.h>
 #include <physxcoopa/geometry/triangle_mesh.h>
 #include <toyengine/world/terra_image.h>
+#include <toyengine/world/terrain_water.h>
 #include <toyengine/world/terra_store.h>
 #include <toyengine/world/terrain_system.h>
 #include <toyengine/world/tile_mesh_library.h>
@@ -114,6 +115,7 @@ void TerrainComponent::sync_field() {
     // A one-shot import, exactly as privileged as a mapcoopa bake and no more: only fires on a
     // field that has never been baked/imported/sculpted (needs_bake()), so a later re-parse (the
     // editor does one on every change) never clobbers whatever the field now holds.
+    const bool fresh_field = field.data() != nullptr && field.data()->needs_bake();
     if (TerraData* d = field.data(); d != nullptr && d->needs_bake() && !import_height_path.empty()) {
         if (import_height_png(import_height_path, *d)) {
             if (!import_layer0_path.empty()) import_layer_png(import_layer0_path, *d, 0);
@@ -124,6 +126,30 @@ void TerrainComponent::sync_field() {
             std::cerr << "[Terrain] '" << (owner != nullptr ? owner->name() : std::string())
                       << "': import_height_png('" << import_height_path << "') failed -- check the "
                          "path and that the terrain has a height plane (height_sub > 1)\n";
+        }
+    }
+
+    // The one-shot water fill (see TerrainComponent::fill_water), on the same never-baked field
+    // the import above fires on -- `fresh_field` is read BEFORE it, since a successful import
+    // clears the flag. Seeded from every tile already under the level rather than from one
+    // point: a desert can hold several unconnected basins, and flood_water() only spreads
+    // 4-connected from its seeds, so a single seed would fill one pan and leave the rest dry.
+    if (fresh_field && fill_water) {
+        if (TerraData* d = field.data(); d != nullptr) {
+            const TerraGeometry& fg = d->geometry();
+            std::vector<glm::ivec2> seeds;
+            for (int ty = 0; ty < fg.tiles_y; ++ty) {
+                for (int tx = 0; tx < fg.tiles_x; ++tx) {
+                    if (d->ground_at_tile({tx, ty}) < fill_water_level) seeds.push_back({tx, ty});
+                }
+            }
+            if (!seeds.empty()) {
+                const WaterKind kind = fill_water_kind == "ocean" ? WaterKind::Ocean
+                                     : fill_water_kind == "river" ? WaterKind::River
+                                                                  : WaterKind::Lake;
+                flood_water(field, seeds, fill_water_level, kind);
+                d->mark_all_dirty();
+            }
         }
     }
 }

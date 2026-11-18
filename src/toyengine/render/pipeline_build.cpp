@@ -785,7 +785,16 @@ void ToyRenderPipeline::build_post_chain_(coopa::gfx::pipeline::RenderPass& swap
         // The per-material outline mask: the G-buffer's emissive attachment, whose alpha
         // carries each material's toon code. Bound unconditionally (it is always a real,
         // rendered attachment) -- outline_mode is what decides whether it is read.
-        gbuffer_target_.g3_view_typed(), &nearest_sampler_);
+        gbuffer_target_.g3_view_typed(), &nearest_sampler_,
+        // World position (G2.rgb), for the hatch_space == surface crosshatch. Bound
+        // unconditionally like g3 above -- hatch_space is what decides whether it is read.
+        gbuffer_target_.g2_view_typed(), &nearest_sampler_,
+        // The transparent pass's coverage attachment, for outline_through_water: it is the
+        // only thing in the frame that knows a BLEND surface covers a pixel, since
+        // transparents are depth-tested but never depth-written. Created above
+        // unconditionally and cleared to 0 every frame, so binding it unconditionally (like
+        // g3/g2) is safe even on a frame that draws no transparents at all.
+        transparent_coverage_->view_typed(), &nearest_sampler_);
 
     // Debug view: replaces post_target_'s draw with a raw intermediate-buffer readout --
     // see ToyRenderConfig::debug_view / the DebugView enum for the full option list, and

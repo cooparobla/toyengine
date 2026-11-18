@@ -576,6 +576,12 @@ const std::vector<SettingsGroup>& render_settings_groups() {
             .add(F(f_enum("outline_mode", {"all", "toon"}), "Lines On",
                    "all: every edge in the frame. toon: only materials whose Outline box is ticked"))
             .add(F(f_float("outline_thickness", 1.0f, 0.05f, 0.0f, 8.0f), "Thickness", "Line width, in render pixels"))
+            .add(F(f_float("outline_crease_fade", 0.0f, 0.002f, 0.0f, 0.2f), "Crease Fade",
+                   "Drops interior fold lines as a subject recedes while keeping its silhouette, so a zoomed-out character doesn't fill in solid. 0 inks every crease at any distance"))
+            .add(F(f_float("outline_through_water", 0.0f, 0.02f, 0.0f, 1.0f), "Through Water",
+                   "How much of the line is removed from anything seen through a transparent "
+                   "surface, so submerged shapes lose their contour and only the waterline is "
+                   "drawn. 0 outlines submerged geometry like any other"))
             .add(F(listed(f_color4("outline_color", glm::vec4(0.05f, 0.04f, 0.08f, 1.0f))), "Colour", "Line colour and opacity"))
             .add(F(f_float("depth_threshold", 0.02f, 0.001f, 0.0f, 10.0f), "Depth Threshold", "Relative depth jump that counts as an edge; lower = more lines"))
             .add(F(f_float("normal_threshold", 0.75f, 0.005f, 0.0f, 2.0f), "Normal Threshold", "Change in surface direction that counts as an edge; lower = more lines"))
@@ -602,6 +608,39 @@ const std::vector<SettingsGroup>& render_settings_groups() {
         g.push_back(GroupBuilder(stylize, "Dither", "Ordered dithering before palette quantization")
             .toggle(F(f_bool("dither_enabled", true), "Dither", "Add ordered dither"))
             .add(F(f_float("dither_strength", 0.0f, 0.005f, 0.0f, 1.0f), "Strength", "How strong the dither pattern is"))
+            .done());
+
+        g.push_back(GroupBuilder(stylize, "Hatching", "Pen-and-ink crosshatch strokes, keyed to the image's own tone")
+            .toggle(F(f_bool("hatch_enabled", false), "Hatching", "Draw tonal crosshatch strokes"))
+            .add(F(f_enum("hatch_space", {"screen", "surface"}), "Stroke Space",
+                   "screen: strokes stay put on the screen -- steady under camera motion. "
+                   "surface: strokes stick to surfaces, with a distance LOD; needs world "
+                   "coordinates within a few hundred units of the origin"))
+            .add(F(f_float("hatch_strength", 0.85f, 0.01f, 0.0f, 1.0f), "Strength",
+                   "How opaque the strokes are; 0 disables them. Drawn in the Outline colour"))
+            .add(F(f_float("hatch_scale", 5.0f, 0.1f, 2.0f, 64.0f), "Spacing", "Stroke period, in render pixels"))
+            .add(F(f_float("hatch_angle_deg", 35.0f, 0.5f, -180.0f, 180.0f), "Angle",
+                   "Direction of the first stroke layer, in degrees"))
+            .add(F(f_int("hatch_layers", 2, 1, 3), "Layers",
+                   "Crossing stroke passes; each engages over a darker third of the range"))
+            .add(F(f_float("hatch_threshold", 0.45f, 0.005f, 0.0f, 1.0f), "Tone Threshold",
+                   "Brightness at and above which nothing is hatched"))
+            .add(F(f_float("hatch_pbr_threshold", 0.0f, 0.005f, 0.0f, 1.0f), "PBR Tone Threshold",
+                   "Tone Threshold for surfaces that are NOT toon-shaded, such as terrain. "
+                   "A ground lit as one smooth ramp hatches end to end under a threshold tuned "
+                   "for a banded subject; set this lower and it keeps ink only where it is "
+                   "genuinely dark, which is where shadows fall on it. 0 = use Tone Threshold "
+                   "everywhere"))
+            .add(F(f_float("hatch_softness", 0.0f, 0.01f, 0.0f, 4.0f), "Edge Softness",
+                   "Extra blur on the stroke edge, in pixels; 0 is a single pixel"))
+            .done());
+
+        g.push_back(GroupBuilder(stylize, "Paper", "The grain of the sheet the frame is drawn on, and the wobble of the pen")
+            .add(F(f_float("paper_strength", 0.0f, 0.01f, 0.0f, 1.0f), "Grain",
+                   "Fraction of ink coverage the paper's tooth perturbs; bare paper the pen never touched is unaffected"))
+            .add(F(f_float("outline_wobble", 0.0f, 0.05f, 0.0f, 8.0f), "Ink Wobble",
+                   "Displaces the ink contour by a static noise field, in render pixels; "
+                   "the line crawls under camera motion, so 0 for anything but a still"))
             .done());
 
         g.push_back(GroupBuilder(stylize, "Pixel Stability", "Keeps low-resolution renders steady under camera motion")

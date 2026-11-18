@@ -1,0 +1,11 @@
+# The cool counterpart to moebius_rock: a dusty blue-grey stone. Giraud's deserts read as
+# varied because the rock itself shifts hue from outcrop to outcrop, not because any one stone
+# is colourful -- so this stays the same value range as moebius_rock and only moves the hue,
+# giving the far monoliths a sense of distance the warm rock cannot carry on its own.
+albedo: { r: 0.52, g: 0.48, b: 0.70 }
+metallic: 0.0
+roughness: 0.9
+ao: 1.0
+toon_bands: 3
+toon_specular: off
+toon_softness: 0.15

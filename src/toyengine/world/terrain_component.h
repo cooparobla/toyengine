@@ -603,6 +603,29 @@ public:
     std::string import_layer1_path; /**< @brief Layers 4-7's splat PNG. */
 
     /**
+     * @brief One-shot water fill: every basin whose bed lies under `fill_water_level` takes
+     *        water at that level, once, on the same never-baked field the PNG import above
+     *        fires on.
+     *
+     * Water is per-tile data (TerraCell::water_kind / water_level), not a file, so until this
+     * existed the only ways to put a lake on a heightmap terrain were painting it in Terrain
+     * Mode or letting a MapGenerator bake write it -- neither of which a hand-authored,
+     * headless scene can use. A separate planar WaterBody is NOT a substitute: it is a flat
+     * sheet that knows nothing about the bed, so it is occluded wherever the terrain happens to
+     * sit above it, and it has no shoreline (see `shore_clearance` and `water_skirt_tiles`,
+     * which only apply to the terrain's own water).
+     *
+     * The level is in the terrain's own LOCAL height space -- metres above the terrain object's
+     * origin, the same space as TerraCell::water_level and TerraData::ground_at_tile(), running
+     * 0..`height`. It is NOT a world Z: a terrain offset in Z by its Transform (as a scene does
+     * to put a pan at world 0) would then silently produce no water at all, because no tile's
+     * bed compares below a world-space level.
+     */
+    bool        fill_water = false;        /**< @brief Whether fill_water_level is set at all. */
+    float       fill_water_level = 0.0f;   /**< @brief The water SURFACE, absolute metres. */
+    std::string fill_water_kind = "lake";  /**< @brief WaterKind: `lake` | `ocean` | `river`. */
+
+    /**
      * @brief Screen-space tessellation of the shared chunk patch: detail near the camera.
      */
     struct Tessellation {

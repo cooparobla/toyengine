@@ -42,6 +42,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -222,8 +223,26 @@ public:
 
     std::vector<float>& heights() { return heights_; }
     const std::vector<float>& heights() const { return heights_; }
-    float& height_at(int i, int j) { return heights_[static_cast<std::size_t>(j) * height_nx() + i]; }
-    float height_at(int i, int j) const { return heights_[static_cast<std::size_t>(j) * height_nx() + i]; }
+    /**
+     * @brief Unchecked height sample at grid index (i, j) -- `operator[]`, not `at()`.
+     *
+     * The caller must keep (i, j) inside [0, height_nx()) x [0, height_ny());
+     * height_at_clamped() below is the sibling that does it for you. The assert is the whole
+     * safety net in a dev build, and it earns its place: an out-of-range index here does not
+     * fault, it quietly reads or writes past the heights vector, and that corruption surfaces
+     * frames later as a crash in whatever unrelated system next walks the heap -- a scene walk,
+     * typically, which sends you looking for an object-lifetime bug that does not exist.
+     */
+    float& height_at(int i, int j) {
+        assert(i >= 0 && i < height_nx() && j >= 0 && j < height_ny() &&
+               "TerraData::height_at: index outside the height grid (use height_at_clamped)");
+        return heights_[static_cast<std::size_t>(j) * height_nx() + i];
+    }
+    float height_at(int i, int j) const {
+        assert(i >= 0 && i < height_nx() && j >= 0 && j < height_ny() &&
+               "TerraData::height_at: index outside the height grid (use height_at_clamped)");
+        return heights_[static_cast<std::size_t>(j) * height_nx() + i];
+    }
     float height_at_clamped(int i, int j) const {
         return height_at(std::clamp(i, 0, height_nx() - 1), std::clamp(j, 0, height_ny() - 1));
     }

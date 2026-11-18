@@ -1,0 +1,8 @@
+# Pale desert sand/ground, toon-shaded for the moebius_demo look: two bands keep the ground
+# plane's tonal range wide and simple, which is where the hatch and paper grain read cleanest.
+albedo: { r: 0.86, g: 0.78, b: 0.64 }
+metallic: 0.0
+roughness: 0.95
+ao: 1.0
+toon_bands: 2
+toon_specular: off

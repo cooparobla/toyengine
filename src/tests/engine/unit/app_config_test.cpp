@@ -373,6 +373,79 @@ COOPA_TEST(debug_view_names_parse_with_an_off_fallback) {
 }
 
 /**
+ * @brief All ten hatching/paper keys round-trip through AppConfig::load() at DISTINCT
+ *        non-default values, and parse_hatch_space() maps a recognized name to its
+ *        HatchSpace value, defaulting an unrecognized one to Screen.
+ */
+COOPA_TEST(hatch_keys_round_trip_and_hatch_space_warns_on_a_bad_value) {
+    toy::core::AppConfig config = load_config_text("test_hatch_config.yaml",
+        "render:\n"
+        "  hatch_enabled: true\n"
+        "  hatch_space: surface\n"
+        "  hatch_strength: 0.42\n"
+        "  hatch_scale: 9.0\n"
+        "  hatch_angle_deg: 61.0\n"
+        "  hatch_layers: 3\n"
+        "  hatch_threshold: 0.28\n"
+        "  hatch_softness: 1.5\n"
+        "  paper_strength: 0.11\n"
+        "  outline_wobble: 3.5\n");
+    expect(config.render.hatch_enabled == true, "AppConfig::load: hatch_enabled round-trips");
+    expect(config.render.hatch_space == "surface", "AppConfig::load: hatch_space round-trips");
+    expect(config.render.hatch_strength == 0.42f, "AppConfig::load: hatch_strength round-trips");
+    expect(config.render.hatch_scale == 9.0f, "AppConfig::load: hatch_scale round-trips");
+    expect(config.render.hatch_angle_deg == 61.0f, "AppConfig::load: hatch_angle_deg round-trips");
+    expect(config.render.hatch_layers == 3, "AppConfig::load: hatch_layers round-trips");
+    expect(config.render.hatch_threshold == 0.28f, "AppConfig::load: hatch_threshold round-trips");
+    expect(config.render.hatch_softness == 1.5f, "AppConfig::load: hatch_softness round-trips");
+    expect(config.render.paper_strength == 0.11f, "AppConfig::load: paper_strength round-trips");
+    expect(config.render.outline_wobble == 3.5f, "AppConfig::load: outline_wobble round-trips");
+
+    expect(toy::render::parse_hatch_space("screen") == toy::render::HatchSpace::Screen,
+           "parse_hatch_space: 'screen' maps to HatchSpace::Screen");
+    expect(toy::render::parse_hatch_space("surface") == toy::render::HatchSpace::Surface,
+           "parse_hatch_space: 'surface' maps to HatchSpace::Surface");
+    expect(toy::render::parse_hatch_space("nonsense") == toy::render::HatchSpace::Screen,
+           "parse_hatch_space: an unrecognized name defaults to HatchSpace::Screen");
+}
+
+COOPA_TEST(outline_crease_fade_round_trips_and_defaults_to_off) {
+    toy::core::AppConfig config = load_config_text("test_outline_crease_config.yaml",
+        "render:\n"
+        "  outline_crease_fade: 0.025\n");
+    expect(config.render.outline_crease_fade == 0.025f,
+           "AppConfig::load: outline_crease_fade round-trips");
+
+    // 0 is the "ink every crease, at any distance" value every pre-existing scene gets.
+    toy::core::AppConfig untouched = load_config_text("test_outline_crease_default.yaml",
+        "render:\n"
+        "  outline_thickness: 1.0\n");
+    expect(untouched.render.outline_crease_fade == 0.0f,
+           "AppConfig::load: outline_crease_fade defaults to 0 (no fade)");
+}
+
+COOPA_TEST(hatch_pbr_threshold_and_outline_through_water_round_trip_and_default_to_off) {
+    toy::core::AppConfig config = load_config_text("test_stylize_split_config.yaml",
+        "render:\n"
+        "  hatch_pbr_threshold: 0.22\n"
+        "  outline_through_water: 0.85\n");
+    expect(config.render.hatch_pbr_threshold == 0.22f,
+           "AppConfig::load: hatch_pbr_threshold round-trips");
+    expect(config.render.outline_through_water == 0.85f,
+           "AppConfig::load: outline_through_water round-trips");
+
+    // Both default to 0, the value that keeps every pre-existing scene rendering exactly as
+    // it did: one hatch threshold for every surface, and a contour on submerged geometry.
+    toy::core::AppConfig untouched = load_config_text("test_stylize_split_default.yaml",
+        "render:\n"
+        "  hatch_threshold: 0.45\n");
+    expect(untouched.render.hatch_pbr_threshold == 0.0f,
+           "AppConfig::load: hatch_pbr_threshold defaults to 0 (one threshold for every surface)");
+    expect(untouched.render.outline_through_water == 0.0f,
+           "AppConfig::load: outline_through_water defaults to 0 (submerged geometry is inked)");
+}
+
+/**
  * @brief Exercises the per-feature quality presets: tier strings (including the "med"
  * alias and the unknown-string fallback) expand to the preset field values, an
  * explicitly-written key overrides its preset, and a config with no quality keys

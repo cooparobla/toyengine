@@ -76,6 +76,7 @@ AppConfig AppConfig::from_node(const fkyaml::node& root) {
             read(r, "outline_enabled", config.render.outline_enabled);
             read(r, "palette_enabled", config.render.palette_enabled);
             read(r, "dither_enabled", config.render.dither_enabled);
+            read(r, "hatch_enabled", config.render.hatch_enabled);
             read(r, "camera_pixel_snap", config.render.camera_pixel_snap);
             read(r, "soft_lighting", config.render.soft_lighting);
             read(r, "ssao_enabled", config.render.ssao_enabled);
@@ -249,6 +250,8 @@ AppConfig AppConfig::from_node(const fkyaml::node& root) {
             // --- Outline ---
             read(r, "outline_mode", config.render.outline_mode);
             read(r, "outline_thickness", config.render.outline_thickness);
+            read(r, "outline_crease_fade", config.render.outline_crease_fade);
+            read(r, "outline_through_water", config.render.outline_through_water);
             if (r.contains("outline_color")) {
                 const auto& c = r.at("outline_color");
                 if (c.size() >= 3) {   // [r, g, b] or [r, g, b, a]; alpha defaults to opaque
@@ -280,6 +283,20 @@ AppConfig AppConfig::from_node(const fkyaml::node& root) {
             // --- Dither ---
             read(r, "dither_strength", config.render.dither_strength);
             read(r, "texel_aa", config.render.texel_aa);
+
+            // --- Hatching ---
+            read(r, "hatch_space", config.render.hatch_space);
+            read(r, "hatch_strength", config.render.hatch_strength);
+            read(r, "hatch_scale", config.render.hatch_scale);
+            read(r, "hatch_angle_deg", config.render.hatch_angle_deg);
+            read(r, "hatch_layers", config.render.hatch_layers);
+            read(r, "hatch_threshold", config.render.hatch_threshold);
+            read(r, "hatch_pbr_threshold", config.render.hatch_pbr_threshold);
+            read(r, "hatch_softness", config.render.hatch_softness);
+
+            // --- Paper ---
+            read(r, "paper_strength", config.render.paper_strength);
+            read(r, "outline_wobble", config.render.outline_wobble);
 
             // --- SSAO ---
             read(r, "ssao_radius", config.render.ssao_radius);

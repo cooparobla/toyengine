@@ -139,6 +139,22 @@ void parse_heightmap_terrain(const fkyaml::node& node, coopa::scene::SceneObject
     // two different wave fields would pull those apart (terrain_water_mesh.h).
     if (node.contains("water")) water::parse_water_settings(node.at("water"), t->water_look);
 
+    // WHERE the water is, as opposed to how it looks: a one-shot fill of every basin under an
+    // absolute level, for a terrain authored outside the editor. See TerrainComponent::fill_water
+    // for why a planar WaterBody is not a substitute.
+    if (node.contains("fill_water")) {
+        const fkyaml::node& fw = node.at("fill_water");
+        if (fw.is_mapping()) {
+            t->fill_water = true;
+            t->fill_water_level = get_f(fw, "level", t->fill_water_level);
+            t->fill_water_kind = get_s(fw, "kind", t->fill_water_kind);
+        } else {
+            // `fill_water: <level>` -- the common case, a lake at one level.
+            t->fill_water = true;
+            t->fill_water_level = get_f(node, "fill_water", t->fill_water_level);
+        }
+    }
+
     // The shore: how far the bed is graded under the water (grade_water_shore(), terrain_water.h)
     // and how far the surface's apron runs past the wet tiles, buried under the bank
     // (build_smooth_chunk_water(), terrain_water_mesh.h). The Tiles-mode equivalents --

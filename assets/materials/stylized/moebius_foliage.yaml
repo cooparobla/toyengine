@@ -1,0 +1,12 @@
+# Desert scrub for the moebius_demo look: a dusty sage, muted enough to sit beside the warm
+# ground without turning into a videogame green. Shares moebius_rock's toon setup (three bands,
+# no specular) so the shade side carries the crosshatch rather than competing with a highlight;
+# only the hue differs, which is the whole point -- vegetation shaded with the rock material
+# quantizes onto the palette's warm ramp and reads as more rock.
+albedo: { r: 0.34, g: 0.52, b: 0.40 }
+metallic: 0.0
+roughness: 0.95
+ao: 1.0
+toon_bands: 3
+toon_specular: off
+toon_softness: 0.15

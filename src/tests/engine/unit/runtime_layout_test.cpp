@@ -68,8 +68,25 @@ COOPA_TEST(source_run_uses_compiled_shaders_only) {
     const auto roots = l.shader_roots(fs::path(ROOT_DIR));
     const fs::path built = toy::io::RuntimeLayout::compiled_shader_dir();
     expect(!built.empty(), "the build compiles shaders into its own tree (TOY_SHADER_BUILD_DIR)");
-    expect(roots.size() == 3 && roots[0] == (built / "toyengine_shaders").string() && roots[1] == (built / "shaders").string() &&
-           roots[2] == (built / "uicoopa_shaders").string(), "from source: engine, gfxcoopa, uicoopa compiled shaders in -I order");
+    // The three compiled layers are always the LAST three, in -I order. They are not always the
+    // ONLY three: a build tree that has ever compiled a project shader also carries
+    // build/shaders/project_shaders, and shader_roots() then prepends it (see its own comment --
+    // an editor GPU test runs as a scratch project with no assets/ of its own). Asserting an
+    // exact count here passed on a fresh tree and then failed permanently from the first editor
+    // GPU test onwards, which is a property of the tree rather than of the code under test.
+    const size_t n = roots.size();
+    expect(n == 3 || n == 4,
+           "from source: the three compiled layers, plus this tree's project_shaders if it has one");
+    if (n >= 3) {
+        expect(roots[n - 3] == (built / "toyengine_shaders").string() &&
+               roots[n - 2] == (built / "shaders").string() &&
+               roots[n - 1] == (built / "uicoopa_shaders").string(),
+               "from source: engine, gfxcoopa, uicoopa compiled shaders in -I order");
+    }
+    if (n == 4) {
+        expect(roots[0] == (built / "project_shaders").string(),
+               "the only root that may precede them is this build tree's own project_shaders");
+    }
     for (const auto& r : roots) {
         expect(r.rfind((fs::path(ROOT_DIR) / "assets").string(), 0) != 0 && r.rfind(std::string(PROJ_DIR), 0) != 0,
                "no shader root is a source directory (" + r + ")");

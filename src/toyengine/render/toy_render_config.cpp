@@ -52,6 +52,14 @@ bool debug_view_is_editor_shading(DebugView view) {
     return view == DebugView::Solid || view == DebugView::Wireframe || view == DebugView::MaterialPreview;
 }
 
+HatchSpace parse_hatch_space(const std::string& value) {
+    if (value == "screen")  return HatchSpace::Screen;
+    if (value == "surface") return HatchSpace::Surface;
+    std::cerr << "[toy::render] Unknown hatch_space '" << value
+               << "', expected one of: screen | surface. Using 'screen'.\n";
+    return HatchSpace::Screen;
+}
+
 void ToyRenderConfig::apply_quality_presets() {
     // shadow_pcss_taps/contact_shadow_steps only cost anything when their own feature
     // toggle is on, so scaling them here is free for a config that leaves both off.

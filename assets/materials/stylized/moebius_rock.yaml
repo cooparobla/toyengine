@@ -1,0 +1,9 @@
+# Warm desert rock, toon-shaded for the moebius_demo look: three clean bands and no
+# specular, so the shade side carries the crosshatch rather than competing with a highlight.
+albedo: { r: 0.72, g: 0.66, b: 0.62 }
+metallic: 0.0
+roughness: 0.9
+ao: 1.0
+toon_bands: 3
+toon_specular: off
+toon_softness: 0.15

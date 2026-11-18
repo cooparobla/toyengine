@@ -1,7 +1,8 @@
 /**
  * @file stylize_pass.h
- * @brief Optional bloom + tonemap + outline + ordered dither + palette
- *        quantization overlay (the caller's stylize.frag, e.g. toyengine's).
+ * @brief Optional bloom + tonemap + crosshatch + outline + paper grain +
+ *        ordered dither + palette quantization overlay (the caller's
+ *        stylize.frag, e.g. toyengine's).
  *
  * The tonemap step is optional (PushConstants::exposure <= 0 disables it):
  * a full PBR renderer with its own tonemap/AA chain (e.g. blendy) feeds
@@ -10,9 +11,10 @@
  * step of its own (e.g. toyengine) sets exposure > 0 and feeds raw HDR
  * scene color instead.
  *
- * Reads scene color plus the G-buffer's depth and normal (for the outline
- * edge detector), a palette LUT, and (optionally) a pre-blurred bloom image --
- * see set_source_images()'s bloom_result param. Bloom itself is NOT computed
+ * Reads scene color plus the G-buffer's depth, normal and world position
+ * (for the outline edge detector and the surface-space crosshatch), a
+ * palette LUT, and (optionally) a pre-blurred bloom image -- see
+ * set_source_images()'s bloom_result param. Bloom itself is NOT computed
  * here: it's a separate BloomPass pyramid (bright-pass threshold -> multi-tap
  * downsample -> tent-filter upsample+combine), and this pass just adds its
  * finished result before the tonemap. Writes into its own target --
@@ -43,12 +45,13 @@ namespace passes {
 
 /**
  * @class StylizePass
- * @brief Composites bloom, an optional tonemap, depth/normal outlines, ordered
- *        dither and palette quantization in one fullscreen draw.
+ * @brief Composites bloom, an optional tonemap, a crosshatch, depth/normal
+ *        outlines, paper grain, ordered dither and palette quantization in
+ *        one fullscreen draw.
  *
- * Samples scene colour, the G-buffer depth and normal, a palette LUT and an
- * optional pre-blurred bloom image. Set PushConstants::exposure <= 0 when the
- * source is already tonemapped.
+ * Samples scene colour, the G-buffer depth, normal and world position, a
+ * palette LUT and an optional pre-blurred bloom image. Set
+ * PushConstants::exposure <= 0 when the source is already tonemapped.
  */
 class StylizePass {
 public:
@@ -65,7 +68,10 @@ public:
     struct PushConstants {
         glm::vec4 outline_color      = glm::vec4(0.05f, 0.04f, 0.08f, 1.0f);
         glm::vec2 inv_render_size;
-        float     outline_thickness  = 0.0f;  ///< In texels; <= 0 disables.
+        /// Line width in render texels, rounded to whole steps; <= 0 disables. One weight at
+        /// every distance -- what varies with distance is how much DETAIL is inked, via
+        /// outline_crease_fade below, not how thick the nib is.
+        float     outline_thickness  = 0.0f;
         float     depth_threshold    = 0.02f;
         float     normal_threshold   = 0.75f;
         float     dither_strength    = 0.0f;  ///< <= 0 disables.
@@ -95,9 +101,69 @@ public:
         /// binding 7 says so -- see set_source_images()'s outline_mask param. Unread when
         /// outline_thickness <= 0, like every other outline field here.
         float     outline_mode           = 0.0f;
+        /// Crosshatch ink coverage, 0..1; <= 0 disables the whole hatch stage. Inks with
+        /// outline_color.rgb -- hatching and the ink contour are the same pen, and sharing
+        /// the colour is also what keeps this block inside Vulkan's guaranteed 128-byte
+        /// maxPushConstantsSize.
+        float     hatch_strength         = 0.0f;
+        /// < 0.5 = screen-locked strokes (fixed screen frequency: no minification aliasing,
+        /// static under a static camera). >= 0.5 = world-locked, triplanar off the
+        /// world-position image at binding 8, with a log2 frequency LOD.
+        float     hatch_space            = 0.0f;
+        float     hatch_scale            = 5.0f;   ///< Stroke period in render pixels; clamped to >= 2.
+        float     hatch_angle_deg        = 35.0f;  ///< Layer 0's angle; layers 1/2 offset internally.
+        float     hatch_layers           = 2.0f;   ///< Rounded and clamped to 1..3.
+        float     hatch_threshold        = 0.45f;  ///< Display-referred luma at/above which nothing hatches.
+        float     hatch_softness         = 0.0f;   ///< Extra stroke-edge AA, in multiples of one pixel.
+        /// Strength of the paper's tooth as a fraction of ink COVERAGE (hatch + outline);
+        /// <= 0 disables it. A colour-offset grain speckles bare, un-inked paper against the
+        /// palette quantizer, which is why this modulates coverage instead.
+        float     paper_strength         = 0.0f;
+        /// Ink-contour displacement, in texels; <= 0 disables it. Makes a mathematically
+        /// exact depth/normal edge read as a stroke laid down by a hand that was not quite
+        /// following it; crawls under camera motion since the field is screen-locked.
+        float     outline_wobble         = 0.0f;
+        /// Render pixels per world unit at unit depth: 0.5 * render_height / tan(fov/2) under
+        /// perspective, render_height / (2 * orthographic_size) under orthographic. Read only
+        /// to turn a fragment's depth into the world size of one texel for
+        /// outline_crease_fade below; <= 0 disables that fade.
+        float     outline_focal_px       = 0.0f;
+        /// How much WORLD one render texel may span before interior creases stop inking, in
+        /// world units; <= 0 (the default) inks every crease at full strength, as this pass
+        /// always has. Creases hold full strength out to half this span and are gone by it.
+        /// Silhouettes are never faded -- see stylize.frag's crease_strength() for why a pen
+        /// drops interior DETAIL as a subject recedes rather than thinning its line.
+        float     outline_crease_fade    = 0.0f;
+        /// Display-referred luma at/above which a surface whose material is NOT toon-banded
+        /// stops hatching, replacing hatch_threshold for those pixels only; <= 0 (the
+        /// default) makes every surface share hatch_threshold, as this pass always has.
+        ///
+        /// Read off the same per-material code as outline_mode (binding 7's alpha, bits 0-2:
+        /// 0 means PBR shading). It exists because the two kinds of surface want the hatch
+        /// keyed differently: a toon subject is BANDED, so its hatch lands on flat steps and
+        /// reads as shading, while a smoothly-lit PBR ground is one long ramp whose whole
+        /// mid-tone sits under a threshold tuned for the subject -- which hatches all of it.
+        /// Set this well below hatch_threshold and the ground keeps its ink only where it is
+        /// genuinely dark (a cast shadow), which is what makes hatched subjects read against
+        /// a plainly-shaded ground. Background pixels are not surfaces and keep
+        /// hatch_threshold.
+        float     hatch_pbr_threshold    = 0.0f;
+        /// Fraction by which ink is suppressed on a surface seen THROUGH a nearer transparent
+        /// one, 0..1; <= 0 (the default) inks every surface regardless, as this pass always
+        /// has. 1 removes the contour entirely from anything underwater/behind glass.
+        ///
+        /// Needs binding 9 (the transparent-coverage image) to be a real view, or nothing is
+        /// suppressed. A pen draws the water's own edge, not the outline of every rock on the
+        /// bed: those are seen through a surface, and inking them puts a hard contour on top
+        /// of what should read as a submerged, softened shape.
+        float     outline_through_water  = 0.0f;
     };
-    static_assert(sizeof(PushConstants) == 76,
+    static_assert(sizeof(PushConstants) == 128,
                  "PushConstants must match stylize.frag's StylizePushConstants byte-for-byte");
+    // All 128 of Vulkan's guaranteed maxPushConstantsSize are now spent. There is no room
+    // for another field: the next one to be added has to move this block (or its tail) into
+    // a UBO first. Do not assume a device's real limit is larger -- 128 is the floor every
+    // conformant implementation guarantees, and the only number portable code may rely on.
 
     StylizePass(coopa::gfx::core::Device& device,
                      coopa::gfx::pipeline::RenderPass& target_pass,
@@ -120,7 +186,11 @@ public:
                            coopa::gfx::TextureView grading_lut = {},
                            const coopa::gfx::engine::util::Sampler* grading_sampler = nullptr,
                            coopa::gfx::TextureView outline_mask = {},
-                           const coopa::gfx::engine::util::Sampler* outline_mask_sampler = nullptr) {
+                           const coopa::gfx::engine::util::Sampler* outline_mask_sampler = nullptr,
+                           coopa::gfx::TextureView world_pos = {},
+                           const coopa::gfx::engine::util::Sampler* world_pos_sampler = nullptr,
+                           coopa::gfx::TextureView transparent_coverage = {},
+                           const coopa::gfx::engine::util::Sampler* transparent_coverage_sampler = nullptr) {
         // scene_depth/scene_normal use the nearest sampler, not linear: the outline edge
         // detector's taps need exact texel values (linear filtering would blend across the
         // very discontinuities it's looking for), and linear filtering of a D32_SFLOAT depth
@@ -158,6 +228,23 @@ public:
         // across a material boundary produces a value neither material asked for.
         stage_.set().bind_image(7, outline_mask_sampler ? outline_mask : scene_color,
                               outline_mask_sampler ? *outline_mask_sampler : nearest_sampler);
+        // world_pos: the G-buffer's world-position attachment, read only by the
+        // hatch_space == surface crosshatch (see stylize.frag's hatch_surface()). Same
+        // optional-with-harmless-fallback contract as the three above. NEAREST: a blended
+        // position across a silhouette is a point on neither surface, same reasoning as
+        // depth/normal/outline_mask.
+        stage_.set().bind_image(8, world_pos_sampler ? world_pos : scene_color,
+                              world_pos_sampler ? *world_pos_sampler : nearest_sampler);
+        // transparent_coverage: the RECIPROCAL of the camera distance of the nearest
+        // transparent surface, 0 where there is none (TransparentPass's coverage attachment
+        // -- see its file doc). Read only when outline_through_water > 0. Reciprocal rather
+        // than distance so that BlendMode::Max resolves "nearest" regardless of draw order,
+        // which is also why a 0 clear reads as "nothing here" rather than "at the camera".
+        // Same optional-with-harmless-fallback contract as bindings 4-8, and NEAREST for the
+        // same reason: a value blended across the water's edge is a distance to neither side.
+        stage_.set().bind_image(9, transparent_coverage_sampler ? transparent_coverage : scene_color,
+                              transparent_coverage_sampler ? *transparent_coverage_sampler
+                                                           : nearest_sampler);
     }
 
     void draw(coopa::gfx::command::CommandBuffer& cmd, const PushConstants& params,
@@ -166,15 +253,15 @@ public:
     }
 
 private:
-    /// @brief Eight sampled images at bindings 0..7 (scene colour, depth, normal,
-    /// palette LUT, bloom, auto-exposure, grading LUT, outline mask), plus the fragment
-    /// push constants.
+    /// @brief Nine sampled images at bindings 0..8 (scene colour, depth, normal,
+    /// palette LUT, bloom, auto-exposure, grading LUT, outline mask, world position),
+    /// plus the fragment push constants.
     static FullscreenStageDesc describe(const std::string& vert_spv, const std::string& frag_spv) {
         FullscreenStageDesc d;
         d.vert_spv = vert_spv;
         d.frag_spv = frag_spv;
         d.owned_sets.emplace_back();
-        for (uint32_t i = 0; i < 8; ++i) {
+        for (uint32_t i = 0; i < 10; ++i) {
             d.owned_sets[0].push_back({i, coopa::gfx::DescriptorType::CombinedImageSampler,
                                        coopa::gfx::ShaderStage::Fragment, 1});
         }

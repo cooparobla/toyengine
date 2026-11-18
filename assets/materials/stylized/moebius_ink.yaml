@@ -1,0 +1,8 @@
+# Pale bone/ivory, toon-shaded for the moebius_demo look: a hard highlight so curved forms
+# (the torus, the sphere) show one crisp specular pop rather than a smeared PBR lobe.
+albedo: { r: 0.92, g: 0.90, b: 0.84 }
+metallic: 0.0
+roughness: 0.6
+ao: 1.0
+toon_bands: 2
+toon_specular: hard

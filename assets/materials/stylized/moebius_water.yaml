@@ -1,0 +1,14 @@
+# The desert lake's surface for the moebius_demo look: a flat turquoise sheet rather than a
+# deep ocean. Giraud's water reads as one or two confident fills with a drawn edge, so this is
+# brighter and far less transparent than materials/transparent/water -- a clear, refractive
+# surface would show the bed through it and turn the lake into a soft gradient, which is the
+# one thing the flat-fill look cannot carry. The water system still supplies waves and foam.
+albedo: { r: 0.18, g: 0.52, b: 0.56 }
+metallic: 0.0
+roughness: 0.12
+ao: 1.0
+alpha: 0.82
+alpha_mode: BLEND
+refraction: true
+ior: 1.33
+refraction_tint: { r: 0.42, g: 0.72, b: 0.70 }

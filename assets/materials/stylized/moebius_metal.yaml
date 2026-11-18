@@ -1,0 +1,9 @@
+# Worn metal, toon-shaded for the moebius_demo look: a two-step specular (bright core plus
+# dimmer halo) and a rim light so the arch's orb reads as polished rather than flat.
+albedo: { r: 0.55, g: 0.56, b: 0.58 }
+metallic: 0.9
+roughness: 0.35
+ao: 1.0
+toon_bands: 4
+toon_specular: twostep
+toon_rim: 0.5

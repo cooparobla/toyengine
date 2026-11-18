@@ -122,6 +122,26 @@ public:
         install_builtin_systems_();
     }
 
+    /**
+     * @brief Destroys this Scene's OBJECTS before its SYSTEMS.
+     *
+     * Member order alone does not give this: members are destroyed in reverse declaration
+     * order and `systems_` is declared after `root_objects_`, so an implicit destructor frees
+     * every system first and only then runs each component's destructor. A component that
+     * deregisters from its system on the way out -- `TerrainComponent::~TerrainComponent()`
+     * calling `TerrainSystem::forget_terrain()` is the one that caught this, and it is a
+     * pattern, not a one-off -- would write into a freed system. That is a use-after-free on
+     * every scene teardown; it corrupts the heap silently, so what it actually produces is an
+     * unrelated crash in a later scene's first walk, which is where the hunt then starts.
+     *
+     * Clearing explicitly here, while every other member is still alive, is also why this must
+     * NOT be "fixed" by swapping the two declarations instead: a declaration order carries no
+     * reason with it, and the next person to tidy the member list silently reintroduces the
+     * bug. Systems may rely on nothing object-side in their own destructors (none do -- they
+     * release GPU handles, assets and job handles).
+     */
+    ~Scene() { root_objects_.clear(); }
+
     // Non-copyable, movable. Move operations re-stamp every component's
     // Component::scene back-pointer to the NEW Scene address (see
     // restamp_scene_pointers_()) — without this, a Scene moved after start()

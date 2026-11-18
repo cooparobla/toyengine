@@ -287,6 +287,7 @@ The engine repository runs on its own, with one demo scene per area in [`assets/
 | `weather_demo` | A hamlet through a fast day and changing weather: rain, fog, storms, lamps at night; a snow field to the east |
 | `fog_demo` | Global fog, local fog volumes, volumetric spot and point lights; look toward the sun |
 | `shader_demo` | The material and lighting looks side by side: per-material toon (cel) shading against its PBR reference, ringed by stations for emissive/bloom, AO, tessellation, foliage, SSR/SSGI, glass, SDFs, water, triplanar and volumetrics |
+| `moebius_demo` | A Jean "Moebius" Giraud pen-and-ink look: toon fills, ink contours and luminance-keyed crosshatching over a desert mesa, a figure, a buggy and a stone arch |
 | `ssr_demo` | Screen-space reflections (and SSGI) across mirror, glossy and rough surfaces |
 | `sky_demo` | The physical sky and a cloud layer through a full day, moon and stars |
 | `clouds_demo` | Low volumetric clouds over a village from a high camera; switch `cloud_type` to flat for toon clouds |

@@ -480,4 +480,73 @@ COOPA_TEST(preferences_and_themes_apply_at_once_and_persist) {
     }
 }
 
+/**
+ * @brief The Hatching and Paper groups the crosshatch/paper-grain stylize stage added are
+ *        reachable in the live Render tab -- same header-checkbox and search mechanism as
+ *        every other Stylize group (Outline, Palette, Dither), proven generically by
+ *        render_tab_headers_rows_and_search_write_scene_overrides above. This test closes the
+ *        one gap that one leaves: render_settings_schema_test.cpp proves the DATA (the key
+ *        exists, parses, has a matching default) but never opens the editor, so a group that
+ *        silently failed to render would still pass that test.
+ */
+COOPA_TEST(hatching_and_paper_groups_are_reachable_in_the_render_tab) {
+    EditorSession session;
+    auto& engine = session.engine;
+    auto& app = session.app;
+    auto& in = session.in;
+
+    app.set_prop_tab(PropTab::Render);
+    app.clear_test_rects();
+    tick(engine, 2);
+    expect(app.test_rect("setting_group:Hatching").has_value(), "the Render tab lists Hatching");
+    expect(app.test_rect("setting_group:Paper").has_value(), "the Render tab lists Paper");
+
+    // Hatching sits below the fold (General, then every Render Features group, before Stylize),
+    // so unlike the near-top Shadows/Bloom checks above, its unfiltered test_rect is off the
+    // visible panel -- a raw click at that logical position lands on nothing. Filtering by
+    // "hatch" is what a real user would do to find it too, and it also narrows the list to
+    // just this group, bringing its header to the top.
+    const auto filter = app.test_rect("render_settings_filter");
+    expect(filter.has_value(), "the Render tab has a search box");
+    if (filter) {
+        in.click(filter->center());
+        for (char ch : std::string("hatch")) {
+            engine.queue_input([ch](coopa::input::Input& i) { i.push_char(static_cast<uint32_t>(ch)); });
+            tick(engine, 1);
+        }
+        app.clear_test_rects();
+        tick(engine, 2);
+        expect(app.test_rect("setting_group:Hatching").has_value(), "searching 'hatch' shows the Hatching section");
+        expect(!app.test_rect("setting_group:Shadows").has_value(), "...and hides unrelated groups");
+        dump(engine, "render_settings_hatch_search");
+
+        // The header's checkbox turns hatching on, as a scene override -- the same mechanism
+        // the Shadows/Bloom checks above exercise, now that the row is actually on screen.
+        auto hatching = app.test_rect("setting_group:Hatching");
+        if (hatching) {
+            const glm::vec2 check{hatching->x + hatching->h + 6.0f, hatching->center().y};
+            in.click(check);
+            tick(engine, 2);
+            const Node* over = app.document().scene_setting("render", "hatch_enabled");
+            expect(over && over->get_value<bool>(), "the Hatching header checkbox turns hatching on (a scene override)");
+            expect(engine.render_config().hatch_enabled, "...live");
+            dump(engine, "render_settings_hatching_open");
+        }
+
+        // Clear and re-search for the Stroke Space row specifically, proving the screen/surface
+        // dropdown is a real row in the live tab and not just a schema entry.
+        for (size_t i = 0; i < std::string("hatch").size(); ++i) {
+            in.key(coopa::input::Key::Backspace);
+        }
+        for (char ch : std::string("stroke space")) {
+            engine.queue_input([ch](coopa::input::Input& i) { i.push_char(static_cast<uint32_t>(ch)); });
+            tick(engine, 1);
+        }
+        app.clear_test_rects();
+        tick(engine, 2);
+        expect(app.test_rect("setting_group:Hatching").has_value(), "searching 'stroke space' shows the Hatching section");
+        dump(engine, "render_settings_hatch_space_search");
+    }
+}
+
 } // namespace toy::editor::testing

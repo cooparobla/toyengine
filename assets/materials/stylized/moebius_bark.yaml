@@ -1,0 +1,15 @@
+# A pine trunk for the moebius_demo look: a dark warm brown, toon-banded like every other
+# subject in the scene. Two bands rather than three -- a trunk is a narrow vertical shape, and
+# a third step reads as a stripe across it rather than as shading.
+#
+# Banding is what earns a surface its crosshatch: the scene sets `hatch_pbr_threshold`, which
+# keys un-banded surfaces (the terrain) off a much lower tone cutoff so the ground shades
+# plainly. A trunk left on the stock prefab's PBR material falls under that rule and comes out
+# as smooth as the sand behind it, which is exactly what this material exists to avoid.
+albedo: { r: 0.36, g: 0.24, b: 0.19 }
+metallic: 0.0
+roughness: 0.9
+ao: 1.0
+toon_bands: 2
+toon_specular: off
+toon_softness: 0.15

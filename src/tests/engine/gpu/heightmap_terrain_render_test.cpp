@@ -125,6 +125,15 @@ COOPA_TEST(grid_edits_reach_the_image) {
     const glm::vec2 c = glm::vec2(60.0f, -20.0f) - glm::vec2(t->origin());
     toy::world::IRect r{(static_cast<int>(c.x) - 40) * sub, (static_cast<int>(c.y) - 40) * sub,
                         (static_cast<int>(c.x) + 40) * sub, (static_cast<int>(c.y) + 40) * sub};
+    // Clipped to the grid before anything indexes with it: height_at() is the UNCHECKED
+    // accessor (height_at_clamped() is its checked sibling), so a rect that runs off the edge
+    // writes outside the heights vector. That corrupted the heap rather than failing here, and
+    // surfaced later as a segfault in whatever walked the scene first that frame -- which is
+    // why this looked for a long time like a chunk-lifetime bug in an unrelated system.
+    r.x0 = std::max(r.x0, 0);
+    r.y0 = std::max(r.y0, 0);
+    r.x1 = std::min(r.x1, d.height_nx());
+    r.y1 = std::min(r.y1, d.height_ny());
     for (int j = r.y0; j < r.y1; ++j) {
         for (int i = r.x0; i < r.x1; ++i) {
             const glm::vec2 p_m(static_cast<float>(i) / static_cast<float>(sub), static_cast<float>(j) / static_cast<float>(sub));

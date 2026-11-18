@@ -120,6 +120,26 @@ DebugView parse_debug_view(const std::string& value);
 bool debug_view_is_channel(DebugView view);
 
 /**
+ * @brief Which coordinate space the stylize crosshatch's stroke sets repeat in.
+ *
+ * Screen locks strokes to a fixed screen frequency: never aliases as a surface recedes,
+ * and bit-identical frame to frame under a static camera. Surface locks strokes to the
+ * G-buffer world position, triplanar, so strokes stick to the object as the camera
+ * moves past it -- but shimmers on a scene whose world coordinates run into the
+ * hundreds or more, since the position attachment is a 16-bit float. See
+ * stylize.frag's hatch_surface() for the full account.
+ */
+enum class HatchSpace { Screen, Surface };
+
+/**
+ * @brief Parses ToyRenderConfig::hatch_space ("screen" | "surface"), warning to stderr
+ *        and returning Screen on an unrecognized value -- same convention as
+ *        parse_debug_view() above.
+ */
+HatchSpace parse_hatch_space(const std::string& value);
+
+
+/**
  * @brief The editor's viewport shading modes (Solid / Wireframe / MaterialPreview): drawn by
  *        the channel pass, but meant to be looked at, not measured -- so unlike the diagnostic
  *        channels they keep TAA's normal history blend (otherwise the sub-pixel jitter shows
@@ -149,6 +169,7 @@ struct ToyRenderConfig {
     bool xray_enabled      = false;
     bool palette_enabled   = true;  /**< Independent of palette_path, so toggling off keeps the configured path. */
     bool dither_enabled    = true;  /**< Independent of dither_strength, so toggling off keeps the configured strength. */
+    bool hatch_enabled     = false; /**< Independent of hatch_strength, so toggling off keeps the configured strength. See the Hatching block below. */
     bool camera_pixel_snap = true;  /**< Orthographic cameras only. */
     bool soft_lighting     = false; /**< true = smooth Cook-Torrance direct lighting; false = this engine's default banded/ramped cel-shaded look. */
     bool ssao_enabled      = true;
@@ -793,7 +814,47 @@ struct ToyRenderConfig {
      * it is authored in config.yaml and switched at runtime. Unknown values read as `all`.
      */
     std::string outline_mode    = "all";
-    float     outline_thickness = 1.0f;     /**< In low-resolution texels. */
+    float     outline_thickness = 1.0f;     /**< In low-resolution texels, rounded to whole steps. */
+    /**
+     * How much world one render texel may span before interior CREASES stop being inked, in
+     * world units. 0 (the default) inks every crease at any distance, as the outline always
+     * has.
+     *
+     * A pen keeps one line weight and draws LESS as a subject recedes; it does not thin its
+     * nib. Without this, a character fifteen pixels tall has a normal fold under very nearly
+     * every texel, so every one of them inks and the figure fills in solid -- the zoomed-out
+     * "black smudge". Raising this drops interior detail with distance while leaving the
+     * silhouette a crisp `outline_thickness` line, so the figure stays readable.
+     *
+     * Expressed per TEXEL rather than as a view distance so one authored value survives a
+     * change of fov, of render resolution, or of the scale a scene is built at. A rough guide:
+     * the span at distance z is `z * 2 * tan(fov/2) / render_height`, so on a 1080-tall render
+     * at 50 degrees fov, 0.02 reaches its half-strength point around 23 world units out.
+     */
+    float     outline_crease_fade = 0.0f;
+    /**
+     * How much of the ink contour is removed from a surface seen THROUGH a nearer
+     * transparent one -- underwater, behind glass -- as a fraction, 0..1. <= 0 (the default)
+     * outlines every surface regardless of what is in front of it. 1 removes the contour
+     * from submerged geometry entirely, leaving only the water's own edge drawn.
+     *
+     * A pen draws the waterline, not the outline of every rock on the bed: a submerged shape
+     * is seen through a refracting surface, and a hard contour on it reads as sitting on top
+     * of the water rather than under it. The water surface itself is unaffected -- it is the
+     * nearest surface, not one seen through anything.
+     *
+     * Decided from the transparent pass's coverage attachment (the nearest transparent
+     * surface's reciprocal camera distance per pixel), compared against the opaque depth, so
+     * it costs one texture fetch and names no specific material or water body.
+     */
+    float     outline_through_water = 0.0f;
+    /**
+     * Also the crosshatch's ink colour (see the Hatching block below): hatching and the
+     * outline are the same pen, and sharing one colour field is what keeps stylize.frag's
+     * push-constant block inside Vulkan's guaranteed 128-byte budget. So this is read
+     * whenever hatch_strength > 0 as well as whenever outline_thickness > 0 -- the one
+     * place this file's "every stylize key is independent" convention bends.
+     */
     glm::vec4 outline_color     = glm::vec4(0.05f, 0.04f, 0.08f, 1.0f);
     float     depth_threshold   = 0.02f;    /**< Relative depth step (fraction of the fragment's own view-space distance) that counts as an edge; scale-invariant, so one value works at any camera distance. */
     float     normal_threshold  = 0.75f;
@@ -827,6 +888,57 @@ struct ToyRenderConfig {
 
     // --- Dither ---
     float dither_strength = 0.0f;             /**< 0 disables ordered dithering. */
+
+    // --- Hatching (pen and ink) ---
+    /**
+     * Pen-and-ink crosshatch strokes, keyed to the image's own display-referred tone --
+     * darker regions ink progressively more and wider strokes. See hatch_enabled above
+     * and stylize.frag's hatch_coverage() for the full account. Unlike outline_mode,
+     * this is a real enum rather than a plain string: HatchSpace has exactly two values
+     * and nothing authors it dynamically the way a scene's debug_view does.
+     */
+    std::string hatch_space     = "screen";   /**< "screen" | "surface"; see parse_hatch_space(). */
+    float hatch_strength        = 0.85f;      /**< 0 disables hatching; independent of hatch_enabled. */
+    float hatch_scale           = 5.0f;       /**< Stroke period, in render pixels. Clamped to >= 2. */
+    float hatch_angle_deg       = 35.0f;      /**< Layer 0's angle; layers 1/2 are offset internally. */
+    int   hatch_layers          = 2;          /**< Crossing stroke passes, 1..3; each engages over a darker third of the range. */
+    float hatch_threshold       = 0.45f;      /**< Display-referred luma at/above which nothing hatches. */
+    float hatch_softness        = 0.0f;       /**< Extra stroke-edge AA, in multiples of one pixel. */
+    /**
+     * `hatch_threshold` for surfaces whose material is **not** toon-banded; <= 0 (the
+     * default) gives every surface the one `hatch_threshold`.
+     *
+     * The two kinds of surface want the hatch keyed differently. A toon subject is banded,
+     * so its strokes land on flat steps and read as drawn shading. A PBR ground is one long
+     * smooth ramp, and a threshold tuned for the subject puts its whole mid-tone under the
+     * cutoff -- so the entire landscape hatches and stops reading as ground at all. Setting
+     * this well below `hatch_threshold` keeps the ink on that ground only where it is
+     * genuinely dark, which in practice means shadows cast onto it.
+     *
+     * Decided from the same per-material toon code `outline_mode` reads (the G-buffer's
+     * emissive alpha, bits 0-2: 0 is PBR shading), so a material opts in by being toon-
+     * banded rather than by naming the terrain. Background pixels are not surfaces and keep
+     * `hatch_threshold` -- a hatched sky is as deliberate here as a hatched rock.
+     */
+    float hatch_pbr_threshold   = 0.0f;
+
+    // --- Paper ---
+    /**
+     * Strength of the paper's tooth as a fraction of ink COVERAGE (hatch strokes and the
+     * outline), not a colour offset -- a stroke skips where a fibre stands proud and
+     * pools in the hollow beside it, the way a nib's edge breaks up on rough paper. Bare
+     * paper the pen never touched is never perturbed by it, so this has no effect where
+     * hatch_strength and outline_thickness are both 0, and it never speckles a flat,
+     * uninked region on its way into the palette quantizer. 0 disables it.
+     */
+    float paper_strength = 0.0f;
+    /**
+     * Displaces the ink contour's whole evaluation by a static screen-space noise
+     * field, in texels, so a mathematically exact edge reads as hand-inked. 0 disables
+     * it. Crawls under camera motion (the field is screen-locked), so this defaults to
+     * 0 for anything but a still.
+     */
+    float outline_wobble = 0.0f;
 
     /**
      * Texel-AA sampling for hard-edged material textures (STARTUP-FIXED: chooses the

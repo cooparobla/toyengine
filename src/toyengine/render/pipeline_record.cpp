@@ -10,6 +10,7 @@
 
 #include <toyengine/render/toy_render_pipeline.h>
 
+#include <cmath>
 #include <limits>
 
 #include <toyengine/scene/xray_markers.h>
@@ -643,6 +644,38 @@ void ToyRenderPipeline::record_post_chain_(coopa::gfx::command::CommandBuffer& c
         // (PBRMaterial::toon_outline); anything else, including an unknown value, outlines
         // every edge as it always has.
         post_pc.outline_mode     = (config_.outline_mode == "toon") ? 1.0f : 0.0f;
+        post_pc.hatch_strength   = (config_.hatch_enabled && !raw_passthrough)
+            ? std::clamp(config_.hatch_strength, 0.0f, 1.0f) : 0.0f;
+        // Guarded on hatch_enabled so a misspelt hatch_space in a scene that never hatches
+        // doesn't warn every frame.
+        post_pc.hatch_space      = (config_.hatch_enabled &&
+            parse_hatch_space(config_.hatch_space) == HatchSpace::Surface) ? 1.0f : 0.0f;
+        post_pc.hatch_scale      = config_.hatch_scale;
+        post_pc.hatch_angle_deg  = config_.hatch_angle_deg;
+        post_pc.hatch_layers     = static_cast<float>(config_.hatch_layers);
+        post_pc.hatch_threshold  = config_.hatch_threshold;
+        post_pc.hatch_softness   = config_.hatch_softness;
+        // Gated on hatch_enabled like the rest of the block: a threshold for a stage that is
+        // not running would otherwise be the one hatch field that still reached the shader.
+        post_pc.hatch_pbr_threshold = (config_.hatch_enabled && !raw_passthrough)
+            ? std::max(config_.hatch_pbr_threshold, 0.0f) : 0.0f;
+        post_pc.paper_strength   = raw_passthrough ? 0.0f : config_.paper_strength;
+        post_pc.outline_wobble   = (config_.outline_enabled && !raw_passthrough)
+            ? config_.outline_wobble : 0.0f;
+        // Pixels per world unit at unit depth -- the crease fade's only input, so it is only
+        // worth computing when that fade is actually on.
+        post_pc.outline_crease_fade = (config_.outline_enabled && !raw_passthrough)
+            ? std::max(config_.outline_crease_fade, 0.0f) : 0.0f;
+        post_pc.outline_through_water = (config_.outline_enabled && !raw_passthrough)
+            ? std::clamp(config_.outline_through_water, 0.0f, 1.0f) : 0.0f;
+        post_pc.outline_focal_px = 0.0f;
+        if (post_pc.outline_crease_fade > 0.0f && ctx.cam) {
+            const float h = static_cast<float>(render_extent_.height);
+            post_pc.outline_focal_px =
+                (ctx.cam->type == CameraType::Perspective)
+                    ? 0.5f * h / std::tan(glm::radians(ctx.cam->fov) * 0.5f)
+                    : h / (2.0f * std::max(ctx.cam->orthographic_size, 1.0e-4f));
+        }
         stylize_pass_->draw(cmd, post_pc, render_extent_.width, render_extent_.height);
     }
     // See-through silhouettes, over the tonemapped image. AFTER stylize deliberately: an

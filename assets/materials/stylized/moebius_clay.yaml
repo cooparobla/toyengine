@@ -1,0 +1,11 @@
+# Weathered terracotta, for the boulders and the arch: the warm end of the rock range, where
+# moebius_stone_cool is the cool end and moebius_rock sits between them. Three stone hues at
+# one value range is what lets the 24-entry palette's rust/apricot band get used at all --
+# with a single rock material every outcrop lands on the same two sand entries.
+albedo: { r: 0.80, g: 0.46, b: 0.34 }
+metallic: 0.0
+roughness: 0.9
+ao: 1.0
+toon_bands: 3
+toon_specular: off
+toon_softness: 0.15

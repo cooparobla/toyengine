@@ -121,6 +121,62 @@ COOPA_TEST(pitch_and_zoom_saturate_at_their_limits) {
 }
 
 /**
+ * @brief `zoom_proportional` crosses a wide range in a usable number of notches, which a fixed
+ *        `zoom_speed` cannot: one step is a fraction of the current distance, not a length.
+ */
+COOPA_TEST(proportional_zoom_steps_by_a_fraction_of_the_distance) {
+    CameraController* cc = nullptr;
+    auto scene = make_orbit_scene(&cc, glm::vec3(0.0f, -100.0f, 0.0f));
+    cc->min_distance = 5.0f;
+    cc->max_distance = 1700.0f;   // a 340:1 range -- `zoom_speed` can serve one end of it, not both
+    cc->zoom_proportional = 0.15f;
+    scene->start();               // seed distance = 100
+
+    cc->scroll_input = -1.0f;     // one notch out
+    scene->update(1.0f / 60.0f);
+    expect(std::abs(cc->distance - 115.0f) < 0.01f,
+           "proportional zoom: a notch out is 15% further out, not a fixed 15 units");
+
+    cc->scroll_input = 1.0f;      // and back in
+    scene->update(1.0f / 60.0f);
+    expect(std::abs(cc->distance - 100.0f) < 0.01f,
+           "proportional zoom: a notch in is the exact inverse, so the zoom does not drift");
+
+    // Saturating input must not take the exponent to infinity and `distance` to a NaN.
+    cc->scroll_input = 1e6f;
+    scene->update(1.0f / 60.0f);
+    expect(cc->distance == cc->min_distance,
+           "proportional zoom: a saturating notch count clamps at min_distance");
+
+    // The whole range from there, one notch at a time: the count is what makes the rate usable,
+    // and it is ln(1700/5) / ln(1.15) ~= 42 -- the same handful of turns `zoom_speed: 2` takes
+    // over 5..90.
+    int notches = 0;
+    while (cc->distance < cc->max_distance && notches < 500) {
+        cc->scroll_input = -1.0f;
+        scene->update(1.0f / 60.0f);
+        ++notches;
+    }
+    expect(notches > 30 && notches < 55,
+           "proportional zoom: the full range is tens of notches, not hundreds");
+    expect(cc->distance == cc->max_distance, "and it does reach full zoom-out");
+}
+
+COOPA_TEST(proportional_zoom_is_inert_unless_a_scene_asks_for_it) {
+    CameraController* cc = nullptr;
+    auto scene = make_orbit_scene(&cc, glm::vec3(0.0f, -10.0f, 0.0f));
+    cc->min_distance = 1.0f;
+    cc->max_distance = 100.0f;
+    cc->zoom_speed   = 2.0f;
+    scene->start();               // seed distance = 10
+
+    cc->scroll_input = -1.0f;
+    scene->update(1.0f / 60.0f);
+    expect(std::abs(cc->distance - 12.0f) < 1e-4f,
+           "zoom_proportional at 0: the fixed zoom_speed step, exactly as before");
+}
+
+/**
  * @brief With either pitch_at_*_distance_deg set, elevation tracks the zoom linearly between
  *        min_distance and max_distance instead of the mouse/keys -- a demo's "overhead
  *        when far, ground-level when close" framing.

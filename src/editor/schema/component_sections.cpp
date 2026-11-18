@@ -328,10 +328,18 @@ void apply_component_sections(std::map<std::string, ComponentSchema>& table) {
                 .keys({"layers"}).done(),
             sec("Material", "Palette").when("mode", {"tiles"}).closed().keys({"material"}).done(),
             sec("Water", "World").when("mode", {"tiles"})
-                .says("How far the sea, lakes and rivers sit under the terrace they fill; a smooth "
-                      "terrain's shoreline is instead wherever the ground crosses the water's level -- "
-                      "see Shore for how that bed is kept a beach rather than a cliff.")
+                .says("How far the sea, lakes and rivers sit under the terrace they fill. This only "
+                      "sinks the WATER into whatever bank the tiles form; Shore, below, is what "
+                      "changes the bank's own shape.")
                 .keys({"water_inset", "river_inset"}).closed().done(),
+            sec("Shore", "World").when("mode", {"tiles"})
+                .says("Grades a terraced shoreline into a bank, a shelving bed and a beach, instead of the vertical riser the water rounding leaves. A cone walks out from the waterline carrying the ground's own rise, so ground no steeper than the Taper slopes is never touched, and a bank taller than Max Steps is left standing as the cliff it is.")
+                .keys({"shore.enabled", "shore.cut_slope_steps", "shore.cut_max_steps",
+                   "shore.cut_taper_slope_steps", "shore.fill_slope_steps", "shore.fill_max_steps",
+                   "shore.fill_taper_slope_steps", "shore.bed_slope_steps", "shore.bed_max_steps",
+                   "shore.bed_taper_slope_steps", "shore.cone_reach_tiles", "shore.jitter_steps",
+                   "shore.jitter_tiles", "shore.beach_tiles", "shore.beach_jitter_tiles",
+                   "shore.beach_rise_steps", "shore.retexture"}).closed().done(),
             sec("Shore", "World").when("mode", {"heightmap"})
                 .says("How the bed and the water's own surface meet the bank. The bed is always graded "
                       "clear of the sampling gap between height corners and tile-centred water (Shore "
@@ -437,7 +445,8 @@ void apply_component_sections(std::map<std::string, ComponentSchema>& table) {
             .says("Where the camera looks, and how far up and down it may tilt.")
             .keys({"yaw_deg", "pitch_deg", "min_pitch_deg", "max_pitch_deg"}).done(),
         sec("Input", "MouseLeft")
-            .keys({"look_button", "mouse_sensitivity", "zoom_speed", "invert_x", "invert_y", "capture_cursor"}).done(),
+            .keys({"look_button", "mouse_sensitivity", "zoom_speed", "zoom_proportional", "invert_x",
+                   "invert_y", "capture_cursor"}).done(),
         sec("Motion", "Move")
             .keys({"move_speed", "movement_smoothing", "auto_rotate_deg_per_sec", "key_orbit_speed_deg_per_sec"}).closed().done(),
         sec("Collision", "Collider").toggle("collide")

@@ -134,7 +134,15 @@ void CameraController::update_orbit_(coopa::util::Transform& t, float dt) {
         target += (right * look_input.x + up * look_input.y) * key_pan_speed * dt;
     }
     if (scroll_input != 0.0f) {
-        distance = glm::clamp(distance - scroll_input * zoom_speed, min_distance, max_distance);
+        // A proportional notch moves a fraction of where the camera already is, so it is the
+        // same gesture at either end of a range spanning orders of magnitude -- see the field's
+        // own doc for why a fixed `zoom_speed` step cannot be.
+        const float moved = zoom_proportional > 0.0f
+            ? distance * std::pow(1.0f + zoom_proportional,
+                                  -glm::clamp(scroll_input, -kMaxZoomNotchesPerFrame,
+                                              kMaxZoomNotchesPerFrame))
+            : distance - scroll_input * zoom_speed;
+        distance = glm::clamp(moved, min_distance, max_distance);
     }
 
     if (zoom_coupled_pitch) {

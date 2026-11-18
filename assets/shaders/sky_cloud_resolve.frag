@@ -7,8 +7,9 @@
 //   * every pixel blends that history toward this frame's estimate -- the fresh samples
 //     around it, gaussian-weighted -- after clamping it to the range of those samples (so a
 //     cloud that moved or changed cannot leave a ghost),
-//   * a pixel with no usable history (first frame, off-screen last frame, uncovered by
-//     geometry) takes the estimate alone.
+//   * a pixel with no usable history -- the first frame, off-screen last frame, or just
+//     uncovered by geometry, where every history tap it lands on was marched to a surface --
+//     takes the estimate alone.
 // The result is a smooth, converged layer at the full region resolution for a quarter of the
 // rays per frame: rgb = in-scattered light, a = packed transmittance + cloud distance + whether
 // the pixel's full-resolution block holds sky (sky_cloud_common.glsl). The lighting pass's
@@ -72,12 +73,31 @@ void main() {
     // (sky_cloud_common.glsl); a clear tap carries no opacity and so no vote.
     float dlog[9]; float dwt[9]; float dwsum = 0.0; int dn = 0;
     vec4 fresh = vec4(-1.0);
+    // Taps whose block does not hold sky were marched only as far as a surface, so they carry
+    // "no cloud" for a slab they never crossed. Mixing them into a sky pixel's estimate dims the
+    // sky along every silhouette AND widens the variance box below (their disagreement reads as
+    // noise), which is what lets the stale history through the cap. Taking them only when at
+    // least three taps agree with this pixel keeps the filter from running on one or two
+    // samples, where sigma would collapse to its floor and snap the history onto a single noisy
+    // tap. Below that threshold the estimate is the plain neighbourhood, as it is away from any
+    // silhouette -- where every tap agrees and this changes nothing.
+    int agree = 0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            ivec2 qq = qc + ivec2(dx, dy);
+            if (any(lessThan(qq, ivec2(0))) || any(greaterThanEqual(qq, tregion))) continue;
+            float a = texelFetch(u_trace, qq, 0).a;
+            if (a >= 0.0 && cloud_sky(a) == sky_block) ++agree;
+        }
+    }
+    bool match = agree >= 3;
     for (int dy = -1; dy <= 1; ++dy) {
         for (int dx = -1; dx <= 1; ++dx) {
             ivec2 qq = qc + ivec2(dx, dy);
             if (any(lessThan(qq, ivec2(0))) || any(greaterThanEqual(qq, tregion))) continue;
             vec4 s = texelFetch(u_trace, qq, 0);
             if (s.a < 0.0) continue;
+            if (match && cloud_sky(s.a) != sky_block) continue;
             vec4 v = to_tm(vec4(s.rgb, cloud_trans(s.a)));
             m1 += v;
             m2 += v * v;
@@ -147,7 +167,15 @@ void main() {
         hv = all(greaterThanEqual(puv, -lim)) && all(lessThanEqual(puv, 1.0 + lim));
         puv = clamp(puv, 0.5 / region, 1.0 - 0.5 / region);
         if (hv) {
-            // Bilinear over the history texels that held sky.
+            // Bilinear over the history texels whose block was on the same side of a
+            // silhouette as this one is now. A pixel the camera has just uncovered reprojects
+            // onto a texel that was marched only to the surface, so its "no cloud" is for a
+            // slab it never crossed; blended in, it would crawl out from under the edge at the
+            // capped rate below -- a band of stale sky trailing every silhouette while the
+            // camera moves. Dropping those taps renormalises onto the ones just outside the
+            // uncovered band, which are a far better history than none, and where not one
+            // survives `hw` falls below its floor and the pixel takes this frame's estimate
+            // whole.
             vec2 pp = puv * region - 0.5;
             ivec2 i0 = ivec2(floor(pp));
             vec2 f = pp - vec2(i0);
@@ -156,7 +184,7 @@ void main() {
                 ivec2 d = ivec2(k & 1, k >> 1);
                 ivec2 qq = clamp(i0 + d, ivec2(0), iregion - 1);
                 vec4 s = texelFetch(u_history, qq, 0);
-                if (s.a < 0.0) continue;
+                if (s.a < 0.0 || cloud_sky(s.a) != sky_block) continue;
                 float w = (d.x == 1 ? f.x : 1.0 - f.x) * (d.y == 1 ? f.y : 1.0 - f.y);
                 hist += to_tm(vec4(s.rgb, cloud_trans(s.a))) * w;
                 hw += w;

@@ -154,6 +154,18 @@ public:
     bool  invert_x               = false; /**< Flips yaw direction. */
     bool  invert_y               = false; /**< Flips pitch direction. */
     float zoom_speed             = 1.0f;  /**< World units per unit of scroll input. */
+
+    /**
+     * @brief Fraction of the CURRENT distance one notch of scroll crosses; 0 uses `zoom_speed`.
+     *
+     * A fixed step cannot serve a zoom range that spans orders of magnitude. Sized for the near
+     * end it takes hundreds of notches to reach the far one; sized for the far end the first
+     * notch leaves the subject entirely. A fraction is the same gesture at both: 0.15 moves 15%
+     * of the way in per notch whatever the distance, and crosses a range of ratio `r` in
+     * `ln(r) / ln(1.15)` notches -- 42 of them over 5..1700, the same count `zoom_speed: 2`
+     * gives over 5..90. `zoom_speed` is ignored while this is above 0.
+     */
+    float zoom_proportional      = 0.0f;
     float auto_rotate_deg_per_sec = 0.0f; /**< Extra constant yaw added every frame; 0 disables it. */
 
     /**
@@ -248,6 +260,18 @@ public:
     float orbit_distance() const { return mode == CameraControlMode::Orbit ? collided_distance() : 0.0f; }
 
     /**
+     * @brief The point the orbit is measured around: the tracked object's world position, else
+     *        the static `target`, either way plus `target_offset`. Meaningless in Fly mode.
+     *
+     * The companion to orbit_distance(), exposed for the same reason: a system that needs the
+     * camera's SUBJECT rather than its eye -- what to keep colliders under, what to frame a
+     * zoom range around -- would otherwise re-resolve `tracker` by name and re-apply the offset
+     * itself, which is this rig's business and not its caller's. Unsmoothed: this is where the
+     * orbit is heading, not where the eased pose has reached.
+     */
+    glm::vec3 orbit_target() const { return resolve_target_(); }
+
+    /**
      * @brief Re-seeds the APPLIED pose from the raw `distance`/`yaw_deg`/`pitch_deg` targets.
      *
      * start() ends by doing exactly this, so that frame one draws at the authored pose with no
@@ -290,6 +314,10 @@ private:
     // Reference frame rate the kMaxMovementRetention figure above was tuned against;
     // retention is raised to (dt * this) so the drag feels the same at any tick rate.
     static constexpr float kSmoothingReferenceFps = 60.0f;
+    // Ceiling on the notches one frame of scroll may feed `zoom_proportional`'s exponent. Far
+    // more than any range needs (0.15 crosses 7700:1 in 64), and enough to keep a saturating
+    // input -- a trackpad fling, a test's 1000 -- from overflowing the power to infinity.
+    static constexpr float kMaxZoomNotchesPerFrame = 64.0f;
 
     /**
      * @brief Resolves the current target point: the named `tracker` object's

@@ -14,7 +14,8 @@
 //
 // REQUIRED BEFORE INCLUDE: the CloudFrame block `cf` (sky_cloud_common.glsl with CLOUD_UBO_SET),
 // and the samplers u_weather (2D), u_shape (3D) and u_detail (3D). The caller sets g_center (the
-// planet's centre below the camera) before calling layer_height() / cloud_density().
+// planet's centre below the camera), g_radius, g_spin and g_march_origin before calling
+// layer_height() / cloud_density().
 
 // The atmosphere transmittance table's bottom radius (metres). This is a property of the
 // ATMOSPHERE MODEL, not of the world's geometry: sky_clouds.frag feeds it to sky_transmittance()
@@ -35,6 +36,15 @@ float remap(float v, float lo, float hi, float nlo, float nhi) {
 vec3  g_center;   // the planet's centre: the real one, or a fake one under the camera when flat
 float g_radius;   // the GEOMETRIC radius height 0 lies at -- ATMO_BOTTOM_R when flat
 vec4  g_spin;     // xyz = the deck's rotation axis, w = angle (rad); w == 0 and/or flat: no spin
+/// Where the march's own origin sits in the WORLD, in cloud space.
+///
+/// A march whose rays start at the camera (sky_clouds.frag, whose matrices are rebased there so
+/// that large coordinates never reach them) sets the camera's position; one whose points are
+/// already world positions (cloud_shadow_volumetric.frag) sets zero. The field is a property of
+/// the WORLD, and this is what carries a sample out of the march's own frame and into one: a
+/// domain left in a camera-relative frame would travel with the camera, sliding the whole cloud
+/// pattern across the world as the eye moves.
+vec3  g_march_origin;
 
 /// The point the cloud field is evaluated at: `p` turned backwards by the deck's rotation.
 ///
@@ -68,7 +78,8 @@ void weather_reads(vec2 xy, float lod, out vec4 m1, out vec4 m2) {
 // The weather at a (wind-shifted) position: x = local coverage 0..1 (how strongly this column
 // is a cloud), y = cloud type, z = the base's lift (fraction of the layer).
 //
-// `q` is the domain point (cloud_domain() of the sample), `planar` its flat-world projection.
+// `q` is the domain point in the field's own frame -- on a planet that frame is centred on it --
+// and `planar` is the flat-world projection.
 // On a FLAT world the map is read at `planar` exactly as it always was. On a PLANET the same
 // tiling map is folded over the sphere triplanar-wise -- three reads along the cardinal planes,
 // weighted by the sharpened radial direction. A direct xy projection cannot be used there: it
@@ -81,7 +92,7 @@ void weather_reads(vec2 xy, float lod, out vec4 m1, out vec4 m2) {
 vec3 weather_at(vec3 q, vec2 planar, float lod) {
     vec4 m1, m2;
     if (cf.world_frame.w > 0.0) {
-        vec3 n = normalize(q - g_center);
+        vec3 n = normalize(q);                // the field's frame is the planet's, so q is radial
         vec3 w = n * n;                       // already non-negative and sums to 1
         w = w * w;                            // sharpen: one plane dominates away from the diagonals
         w /= max(w.x + w.y + w.z, 1e-5);
@@ -123,9 +134,14 @@ float height_profile(float h, float type) {
 float cloud_density(vec3 p, float h, float foot, float step_len, bool detail, out bool empty) {
     empty = false;
     if (h < 0.0 || h > 1.0) return 0.0;
-    // The domain the field is read in. A flat world slides it by the wrapped wind offset, kept
-    // in double precision on the CPU so it never jumps; a planet turns it instead (cloud_domain).
-    vec3 q  = cloud_domain(p);
+    // The domain the field is read in, anchored to the world however the march itself is framed
+    // (g_march_origin). A planet reads it in its OWN centred frame -- the frame the deck turns in,
+    // and the one that leaves the field independent of where the planet was placed and of where
+    // the camera is. A flat world reads it at the absolute position, slid by the wrapped wind
+    // offset kept in double precision on the CPU so it never jumps; a planet turns it instead
+    // (cloud_domain).
+    vec3 q  = cf.world_frame.w > 0.0 ? cloud_domain(p) - g_center
+                                     : cloud_domain(p) + g_march_origin;
     vec2 xy = q.xy + cf.wind.xy;
     vec3 w = weather_at(q, xy, log2(max(foot / (WEATHER_PERIOD / 512.0), 1.0)));
     if (w.x <= 0.0) { empty = true; return 0.0; }

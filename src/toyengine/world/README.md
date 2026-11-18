@@ -55,8 +55,9 @@ non-parity list in its scene header:
   is now a meshing-time quantisation, not a second, separately-authoritative water field --
   both modes read the same `TileCell::water_level`.
 - The shallow shelf's shape differs even though which tiles are wet does not: tiles get a flat
-  terrace `water_inset` deep; the heightmap's bed is continuously graded (`grade_water_shore()`,
-  below) and falls away at whatever rate the generator's own lake/shore grading gave it.
+  terrace `water_inset` deep unless the terrain grades them (`grade_tile_shore()`, below); the
+  heightmap's bed is continuously graded (`grade_water_shore()`, below) and falls away at whatever
+  rate the generator's own lake/shore grading gave it.
 - Tiles are solid only within `collision_radius` chunks of the camera; the heightfield is one
   whole-grid collider, solid everywhere.
 - Switching back to a heightmap that evicted (see **Eviction** under Heightmap terrain below)
@@ -237,7 +238,7 @@ shore foam, refraction, caustics and buoyancy are the water system's either way:
 | | tiles | heightmap |
 |---|---|---|
 | mesh | one quad per flooded tile at its terrace, `water_inset` under the top | a grid at `level`, corners averaged per tile, with a buried apron `water_skirt_tiles` wide ([`terrain_water_mesh.h`](terrain_water_mesh.h)) |
-| shoreline | where the surface meets the bank's wall -- the tile set's shape | where the surface meets the smooth ground: the terrain's own slope is the beach, kept that way by grading the bed (`grade_water_shore()`, below) |
+| shoreline | where the surface meets the bank's wall -- the tile set's shape, and that bank's own shape if the terrain grades it (`grade_tile_shore()`, below) | where the surface meets the smooth ground: the terrain's own slope is the beach, kept that way by grading the bed (`grade_water_shore()`, below) |
 
 **Both kinds of body over a chunk keep the same wave field.** A river and the lake it runs into
 share their seam's vertices, and the vertex stage displaces each from its own body's wave
@@ -262,8 +263,21 @@ depth colour, shore foam, refraction, buoyancy and caustics are the water system
 is where that surface meets the bank -- the tile set's shape, rounded or square -- and the beds
 are ordinary ground, so they collide and the water does not. `water:` takes WaterBody keys.
 
+**The terraced shore.** `settle_water_rounding()` (above) only chooses which way a fractional
+shoreline *rounds*, and it rounds the ground's way: a dry tile beside water is raised to that
+water's terrace so no bank ever stands under the water next to it. Necessary, and it leaves the
+shoreline a vertical riser -- a steep coast or a cut river rim reads as a wall with no beach.
+[`grade_tile_shore()`](terrain_shore.h) is the answer, off unless a terrain asks for it
+(`shore.enabled`): slope cones walk out from the waterline carrying **the ground's own rise** in
+their step cost, so ground no steeper than their taper is never touched at all, and a cone stops
+where it MEETS the baked ground -- the one place it can stop without leaving a face, since
+`min(baked, cone)` is exactly `baked` there. A bank taller than its budget (`cut_max_steps`) is
+refused outright and left standing, which is what keeps a sea cliff a cliff. Like every operation
+here it takes an optional `TileGrid`, so a layout holding several regions side by side grades
+continuously across their edges. [`ShoreProfile`](terrain_params.h) is the shape it grades with.
+
 **The heightmap's shore.** A terraced world only has to choose which way a fractional shoreline
-*rounds* (`settle_water_rounding()`, above); a smooth one has to make sure the bed genuinely falls
+*rounds*; a smooth one has to make sure the bed genuinely falls
 away from the waterline, because its shoreline is simply wherever the ground crosses the level and
 the water shader's edge fade and foam band are measured in metres of depth there.
 [`grade_water_shore()`](terrain_water.h) is that: it lowers each wet tile's four corners just far

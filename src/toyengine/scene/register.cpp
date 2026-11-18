@@ -124,6 +124,7 @@ void register_scene_components() {
             read(node, "invert_x", cc->invert_x);
             read(node, "invert_y", cc->invert_y);
             read(node, "zoom_speed", cc->zoom_speed);
+            read(node, "zoom_proportional", cc->zoom_proportional);
             if (node.contains("look_button")) {
                 cc->look_button = node.at("look_button").get_value<std::string>();
             }
@@ -760,6 +761,30 @@ void register_scene_components(coopa::gfx::core::Device& device,
                 params.max_merge = node.at("max_merge").get_value<std::int32_t>();
             }
             read(node, "river_inset", params.river_inset);
+            // Shoreline grading (world/terrain_shore.h). Off unless a terrain asks: a terraced
+            // world may well want the bare terraces settle_water_rounding() leaves.
+            if (node.contains("shore") && node.at("shore").is_mapping()) {
+                const fkyaml::node& sn = node.at("shore");
+                world::ShoreProfile& sp = params.shore;
+                read(sn, "enabled", sp.enabled);
+                read(sn, "cut_slope_steps", sp.cut_slope_steps);
+                read(sn, "cut_max_steps", sp.cut_max_steps);
+                read(sn, "cut_taper_slope_steps", sp.cut_taper_slope_steps);
+                read(sn, "fill_slope_steps", sp.fill_slope_steps);
+                read(sn, "fill_max_steps", sp.fill_max_steps);
+                read(sn, "fill_taper_slope_steps", sp.fill_taper_slope_steps);
+                read(sn, "bed_slope_steps", sp.bed_slope_steps);
+                read(sn, "bed_max_steps", sp.bed_max_steps);
+                read(sn, "bed_taper_slope_steps", sp.bed_taper_slope_steps);
+                read(sn, "cone_reach_tiles", sp.cone_reach_tiles);
+                read(sn, "jitter_steps", sp.jitter_steps);
+                read(sn, "jitter_tiles", sp.jitter_tiles);
+                read(sn, "jitter_seed", sp.jitter_seed);
+                read(sn, "beach_tiles", sp.beach_tiles);
+                read(sn, "beach_jitter_tiles", sp.beach_jitter_tiles);
+                read(sn, "beach_rise_steps", sp.beach_rise_steps);
+                read(sn, "retexture", sp.retexture);
+            }
             // The water's look: WaterBody's own keys, onto the terrain's stock look.
             if (node.contains("water") && node.at("water").is_mapping()) {
                 water::parse_water_settings(node.at("water"), terrain->water_look);

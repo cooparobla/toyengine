@@ -12,7 +12,10 @@
 // A cloud texel is vec4(rgb, a): rgb = light the clouds scatter toward the camera, a packs the
 // transmittance (how much of what is behind still shows) with the distance to the clouds:
 //   a = depth code (integer, 0..4095: log2 of the distance over 50 m, 256 codes per octave)
-//       + 4096 when the texel's full-resolution block holds sky (reconstructed layer only)
+//       + 4096 when the texel's full-resolution block holds sky -- equivalently, when nothing
+//         stopped its ray short of the whole slab, since a block with no sky in it is exactly
+//         the one the march clamps at the surface (sky_clouds.frag). Carried by the trace, the
+//         reconstruction and so the history alike.
 //       + transmittance * 0.999 (the fraction)
 // a < 0 marks a texel outside the marched region (never composited). The cloud targets are
 // RGBA32F, so the fraction keeps ~11 bits beside the 13-bit integer part.
@@ -38,12 +41,16 @@ layout(set = CLOUD_UBO_SET, binding = CLOUD_UBO_BINDING) uniform CloudFrame {
     vec4 light_color;     // rgb = the light's illuminance, w = shadow steps
     vec4 trace;           // xy = this frame's traced pixel in each 2x2 block, zw = the marched region (px)
     vec4 history;         // xy = the clouds' drift this frame (world m), z = history valid, w = radians per region px
-    vec4 camera;          // xyz = camera position (world m), w = relative lighting change since last frame
+    vec4 camera;          // xyz = camera position (world m), ABSOLUTE: the view march's rays are
+                          // rebased onto it, so it is both what g_position is measured against
+                          // and where that march's origin sits in the world.
+                          // w = relative lighting change since last frame
     vec4 look;            // x = cloud scale (world m per cloud m), y = camera fade 0..1,
                           // z = 1: light_color is above the atmosphere (the physical sky's
                           //     transmittance table colours it) / 0: use it as is,
                           // w = this frame's spin step (rad), planet only
-    vec4 world_frame;     // xyz = the centre the world curves about (world m), w = its radius.
+    vec4 world_frame;     // xyz = the centre the world curves about, RELATIVE TO THE CAMERA
+                          // (world m), w = its radius.
                           // w <= 0 is a FLAT world: the march pins a fake planet under the
                           // camera as it always has, and `spin` below is unused.
     vec4 spin;            // xyz = the axis the deck turns about (unit), w = total angle (rad).

@@ -55,6 +55,12 @@ copy from `assets/scenes/terrain/terrain_demo/scene.yaml`. Parser: `src/toyengin
       height_scale: 16.0
       water_inset: 0.5          # sea / lakes sit this many steps under the terrace they fill
       river_inset: 0.2          # rivers, nearer their bank tops
+      shore:                    # optional: grade the shoreline instead of leaving a bare terrace
+        enabled: true           #   off by default; the insets above only sink the WATER into the
+                                #   bank, this changes the bank's own shape
+        cut_max_steps: 6.0      #   the tallest bank it grades at all; taller is a cliff, left alone
+        cut_taper_slope_steps: 2.0   # the steepest riser it may leave (steps per tile)
+        beach_tiles: 6.0        #   how far from water the sand band reaches
       water: { clarity: 2.5 }   # optional WaterBody look keys
       chunk_size: 32
       view_radius: 2            # chunks streamed around the main camera

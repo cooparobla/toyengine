@@ -40,6 +40,9 @@ void main() {
     g_center = vec3(cam.xy, -ATMO_BOTTOM_R);
     g_radius = ATMO_BOTTOM_R;
     g_spin   = vec4(0.0, 0.0, 1.0, 0.0);
+    // This march's points are world positions already, so the field needs no carrying back into
+    // the world -- which is what makes its domain the same one the view march reads.
+    g_march_origin = vec3(0.0);
     float r_base = ATMO_BOTTOM_R + cf.slab.x;
     vec2 dxy = xy - cam.xy;
     float z = sqrt(max(r_base * r_base - dot(dxy, dxy), 0.0)) - ATMO_BOTTOM_R;

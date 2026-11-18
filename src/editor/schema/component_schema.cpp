@@ -1208,6 +1208,10 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             f_bool("invert_y", false),
             f_float("mouse_sensitivity", 0.15f, 0.005f, 0.0f, 10.0f),
             f_float("zoom_speed", 1.0f, 0.01f, 0.0f, 100.0f),
+            with_tip(f_float("zoom_proportional", 0.0f, 0.005f, 0.0f, 1.0f),
+                     "Fraction of the current distance one scroll notch crosses; 0 uses the fixed "
+                     "zoom_speed instead. What a zoom range spanning orders of magnitude needs -- "
+                     "0.15 is 15% per notch at any distance"),
             f_bool("capture_cursor", false, true),
             with_tip(f_enum("look_button", {"", "left", "right", "middle"}),
                      "Hold this mouse button to turn the camera; empty turns continuously"),
@@ -1490,6 +1494,49 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                          "meets the bank"),
                 with_tip(f_float("river_inset", 0.2f, 0.01f, 0.0f, 0.95f),
                          "The same for rivers (steps): lower sits them higher in their channels, nearer the bank tops"),
+                // Shoreline grading (world/terrain_shore.h). The insets above only sink the WATER
+                // into whatever bank the tiles form; these change the bank's own shape.
+                with_tip(f_bool("shore.enabled", false),
+                         "Grade shorelines into banks, shelving beds and beaches instead of leaving the bare "
+                         "terrace the water rounding produces"),
+                with_tip(f_float("shore.cut_slope_steps", 0.35f, 0.01f, 0.01f, 4.0f),
+                         "Dry side: the gentlest grade, how a graded bank feathers back into flat ground "
+                         "(steps per tile)"),
+                with_tip(f_float("shore.cut_max_steps", 6.0f, 0.5f, 0.0f, 64.0f),
+                         "The most the grading may cut any tile down, and so the tallest bank it touches at all; "
+                         "a taller face is a cliff and is left standing"),
+                with_tip(f_float("shore.cut_taper_slope_steps", 2.0f, 0.1f, 0.1f, 8.0f),
+                         "Dry side: the steepest riser the graded ground may contain. Ground no steeper than this "
+                         "is never cut at all"),
+                with_tip(f_float("shore.fill_slope_steps", 0.40f, 0.01f, 0.01f, 4.0f),
+                         "Dry side: the grade a levee is filled back up at (steps per tile)"),
+                with_tip(f_float("shore.fill_max_steps", 4.0f, 0.5f, 0.0f, 64.0f),
+                         "The most material a fill may add to any tile, which is what stops it building out over "
+                         "falling ground"),
+                with_tip(f_float("shore.fill_taper_slope_steps", 2.0f, 0.1f, 0.1f, 8.0f),
+                         "Dry side: the steepest riser a fill may leave"),
+                with_tip(f_float("shore.bed_slope_steps", 0.25f, 0.01f, 0.01f, 4.0f),
+                         "Wet side: the grade a deep bed is shelved up toward its margin at"),
+                with_tip(f_float("shore.bed_max_steps", 6.0f, 0.5f, 0.0f, 64.0f),
+                         "The most a bed may be raised toward its water's surface"),
+                with_tip(f_float("shore.bed_taper_slope_steps", 3.0f, 0.1f, 0.1f, 8.0f),
+                         "Wet side: the steepest riser a bed may contain. Submerged, so it may be steeper than "
+                         "the dry pair"),
+                with_tip(f_float("shore.cone_reach_tiles", 24.0f, 1.0f, 1.0f, 256.0f),
+                         "How far a grade may run before giving up looking for the ground; a guard, not a tuning "
+                         "knob -- the ground is what normally ends it"),
+                with_tip(f_float("shore.jitter_steps", 1.0f, 0.1f, 0.0f, 4.0f),
+                         "Dither amplitude (steps): breaks a graded terrace edge into short lobes. 0 is exact"),
+                with_tip(f_float("shore.jitter_tiles", 4.0f, 0.5f, 0.5f, 64.0f),
+                         "How wide one lobe of that dither is, in tiles"),
+                with_tip(f_float("shore.beach_tiles", 6.0f, 0.5f, 0.0f, 64.0f),
+                         "How far from water the sand band reaches"),
+                with_tip(f_float("shore.beach_jitter_tiles", 3.0f, 0.5f, 0.0f, 32.0f),
+                         "How raggedly that band's edge wanders, in tiles"),
+                with_tip(f_int("shore.beach_rise_steps", 2, 0, 64),
+                         "A tile sands over only within this many steps of the water nearest it"),
+                with_tip(f_bool("shore.retexture", true),
+                         "Also set sand, bed and biome kinds; off grades the heights only"),
                 with_tip(f_int("soil_depth_steps", 3, 0, 1024), "Steps of soil under the surface before bare stone"),
                 with_tip(with_label(f_int("max_merge", 0, 0, 512), "Max merge (tiles)"),
                          "Widest merged flat run, in tiles; 0 = unlimited. A world whose surface leaves the world plane needs 1 "

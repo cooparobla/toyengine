@@ -9,7 +9,10 @@
 //
 // Output (sky_cloud_common.glsl): rgb = light the clouds scatter toward the camera, a = packed
 // transmittance + distance to the clouds (what the reconstruction reprojects by, and what the
-// composite over geometry depth-tests).
+// composite over geometry depth-tests) + whether the block holds sky, i.e. whether the ray ran
+// the whole slab rather than stopping at a surface. The reconstruction needs that: a texel cut
+// short at a mountain holds "no cloud", which is the right answer for the pixels the mountain
+// covers and the wrong one for the sky beside it.
 //
 // The layer is a spherical shell over the planet (cloud_altitude .. + cloud_thickness), so it
 // curves down to the horizon and fades into the haze with distance, marched in cloud space (world
@@ -81,14 +84,18 @@ void main() {
 
     // The farthest surface of the full-resolution block (cloud space; sky pixels: no limit).
     // The farthest, so a block on a silhouette marches the clouds behind it too; the composite
-    // over geometry depth-tests each pixel against the clouds' distance.
+    // over geometry depth-tests each pixel against the clouds' distance. Whether the block holds
+    // any sky at all travels on in the packed alpha, because it is also the answer to "did this
+    // ray run the whole slab" -- the reconstruction reads it to keep clipped texels out of the
+    // sky beside a silhouette.
     float scale = cf.look.x;
     vec4 nx = textureGather(g_normal, uv, 0);
     vec4 ny = textureGather(g_normal, uv, 1);
     vec4 nz = textureGather(g_normal, uv, 2);
     vec4 n2 = nx * nx + ny * ny + nz * nz;
+    bool sky_block = any(lessThan(n2, vec4(0.001)));
     float t_scene = 1e30;
-    if (!any(lessThan(n2, vec4(0.001)))) {
+    if (!sky_block) {
         vec4 px = textureGather(g_position, uv, 0) - cf.camera.x;
         vec4 py = textureGather(g_position, uv, 1) - cf.camera.y;
         vec4 pz = textureGather(g_position, uv, 2) - cf.camera.z;
@@ -103,15 +110,22 @@ void main() {
     vec4 world = cf.inv_view_proj * vec4(ndc, 1.0);
     vec3 rd = normalize(world.xyz / world.w);
     vec3 ro = vec3(0.0);
+    // Where this march's origin sits in the world: the ray starts at the camera, so the camera's
+    // own position is what anchors the density field to the world rather than to the eye
+    // (sky_cloud_density.glsl).
+    g_march_origin = cf.camera.xyz / scale;
     // The shell's geometry. With a curved world frame (`world_frame.w > 0`) it is the real
     // globe, so the deck curves to the real horizon and the ground sphere below occludes it.
     // On a flat world that ground sphere stays pinned under the camera at the atmosphere's own
-    // radius, which is what lets one march serve both shapes.
+    // radius, which is what lets one march serve both shapes. Its top belongs at world height 0,
+    // which from a ray origin at the camera is `g_march_origin.z` further down -- without that
+    // term the layer's altitude would be measured from the camera, so it would climb with it and
+    // `cam_r` below would read as standing on the ground however high the camera actually is.
     if (cf.world_frame.w > 0.0) {
         g_center = cf.world_frame.xyz / scale;
         g_radius = cf.world_frame.w / scale;
     } else {
-        g_center = vec3(ro.xy, -ATMO_BOTTOM_R);
+        g_center = vec3(ro.xy, -ATMO_BOTTOM_R - g_march_origin.z);
         g_radius = ATMO_BOTTOM_R;
     }
     g_spin = cf.world_frame.w > 0.0 ? vec4(normalize(cf.spin.xyz), cf.spin.w) : vec4(0.0, 0.0, 1.0, 0.0);
@@ -120,7 +134,7 @@ void main() {
     float r_in = g_radius + cf.slab.x, r_out = r_in + cf.slab.y;
     float a0, a1, b0, b1, g0, g1;
     bool hit_out = sphere_hits(ro, rd, g_center, r_out, b0, b1);
-    const vec4 CLEAR = vec4(0.0, 0.0, 0.0, cloud_pack(FAR_DEPTH, 1.0));
+    vec4 CLEAR = vec4(0.0, 0.0, 0.0, cloud_pack_sky(FAR_DEPTH, 1.0, sky_block));
     if (!hit_out || b1 <= 0.0) { out_color = CLEAR; return; }
     bool hit_in = sphere_hits(ro, rd, g_center, r_in, a0, a1);
     float cam_r = length(ro - g_center);
@@ -299,5 +313,5 @@ void main() {
     float fade = exp(-max(dist - 4000.0, 0.0) / FADE_DIST) * cf.look.y;
     scatter *= fade;
     trans = mix(1.0, trans, fade);
-    out_color = vec4(scatter, cloud_pack(dist, trans));
+    out_color = vec4(scatter, cloud_pack_sky(dist, trans, sky_block));
 }

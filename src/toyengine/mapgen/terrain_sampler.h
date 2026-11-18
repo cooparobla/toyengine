@@ -55,6 +55,7 @@
 #include <toyengine/mapgen/world_bake.h>
 #include <toyengine/world/terra_data.h>
 #include <toyengine/world/terrain_params.h>
+#include <toyengine/world/terrain_shore.h>
 #include <toyengine/world/terrain_water.h>
 #include <toyengine/world/tile_types.h>
 
@@ -457,6 +458,11 @@ public:
                               ShoreGrade{params_.shore_clearance, params_.shore_grade_depth, params_.shore_grade_band});
         } else {
             settle_water_rounding(field, IRect{0, 0, n, n});   // terrain_water.h
+            // The terraced counterpart of grade_water_shore() above, and it must follow the
+            // rounding: the fill cone grades the lip that pass leaves, and the ring it pins is
+            // what stops the cut cone lowering a waterline tile. Off unless the terrain asks
+            // (`shore.enabled`), so a world that wants its bare terraces keeps them.
+            grade_tile_shore(field, IRect{0, 0, n, n}, params_);   // terrain_shore.h
         }
     }
 

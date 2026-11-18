@@ -24,6 +24,84 @@ namespace toy {
 namespace world {
 
 /**
+ * @struct ShoreProfile
+ * @brief The slope cones `grade_tile_shore()` (terrain_shore.h) grades a Tiles shoreline with,
+ *        in whole tile steps and tiles.
+ *
+ * A cone walks out from the waterline carrying the height the shore grades to. Each step costs
+ * `(the ground's own rise between the two tiles) + a recovery slope`, clamped into
+ * `[0, *_taper_slope_steps]`, and it stops at a tile the moment it MEETS the baked ground.
+ *
+ * Carrying the ground's own rise is what keeps a cone from excavating. A cone is a ceiling
+ * (`min(baked, cone)`) or a floor, so one blind to the ground digs a flat shelf out of any slope
+ * steeper than itself and leaves the whole depth of that excavation standing as a face where it
+ * stops -- it MANUFACTURES a wall rather than failing to remove one. With the term, **ground no
+ * steeper than `*_taper_slope_steps` is never touched at all**: a cone only falls into debt where
+ * the terrain has a riser steeper than that, and repays it at the recovery slope, which runs from
+ * `*_slope_steps` at the surface to `*_taper_slope_steps` once the whole budget is spent.
+ *
+ * Meeting the ground is also the one place a cone can stop without leaving a face, since
+ * `min(baked, cone)` is exactly `baked` there. So every riser in the graded surface is either one
+ * the terrain already had or at most `*_taper_slope_steps` -- except across a `*_max_steps`
+ * refusal, where the cone declined to attack a bank taller than its budget and left it alone.
+ * That refusal is what keeps a sea cliff a cliff.
+ *
+ * Slopes are steps per tile, so their angle depends on `height_step / tile_size`. The angles
+ * quoted below are for a world where those are equal, which makes a slope a plain tangent.
+ */
+struct ShoreProfile {
+    /** @brief Grades a Tiles shoreline at all. Off leaves settle_water_rounding()'s bare terrace. */
+    bool enabled = false;
+
+    /** @brief Dry side, ceiling: the gentlest grade, how a graded bank feathers back into flat
+     *         ground once the cone has paid back its cut. 0.35 steps/tile ~= 19 deg. */
+    float cut_slope_steps = 0.35f;
+    /** @brief The most the cut may move any tile below its baked height -- its budget, and so the
+     *         tallest bank it attacks at all; past this a face is a cliff and is left standing. */
+    float cut_max_steps = 6.0f;
+    /** @brief Dry side: the steepest riser the graded surface may contain, and the slope the cone
+     *         climbs back toward the ground at once its budget is spent. 2.0 ~= 63 deg. */
+    float cut_taper_slope_steps = 2.0f;
+
+    /** @brief Dry side, floor: grades the one-tile lip settle_water_rounding() leaves. ~22 deg. */
+    float fill_slope_steps = 0.40f;
+    /** @brief The most a fill may raise a tile above its baked height -- so also the most material
+     *         it may add, which is what stops it buttressing out over falling ground. */
+    float fill_max_steps = 4.0f;
+    /** @brief Dry side, floor: 2.0 ~= 63 deg. */
+    float fill_taper_slope_steps = 2.0f;
+
+    /** @brief Wet side, floor: shelves a deep bed up toward its margin. ~14 deg. */
+    float bed_slope_steps = 0.25f;
+    /** @brief The most a bed may be raised toward its water's terrace. */
+    float bed_max_steps = 6.0f;
+    /** @brief Wet side, floor: 3.0 ~= 72 deg. Submerged, so it may be steeper than the dry pair. */
+    float bed_taper_slope_steps = 3.0f;
+
+    /**
+     * @brief How far a cone may run before it gives up looking for the ground, in tiles.
+     *
+     * A pathology guard, not a tuning knob: the ground is the real terminator, and a cone reaches
+     * this only where the terrain climbs at its own taper slope for this many tiles on end.
+     */
+    float cone_reach_tiles = 24.0f;
+
+    /** @brief Quantisation dither amplitude, in steps: softens a terrace edge into short lobes. */
+    float jitter_steps = 1.0f;
+    /** @brief The dither's lattice period, in tiles, measured on the terrain's real surface. */
+    float jitter_tiles = 4.0f;
+    std::uint32_t jitter_seed = 0x5EA5A11Du;
+
+    /** @brief How far from water the sand band reaches, before its own dither. */
+    float beach_tiles = 6.0f;
+    float beach_jitter_tiles = 3.0f;
+    /** @brief A dry tile sands over only within this many steps of the water nearest it. */
+    std::int32_t beach_rise_steps = 2;
+    /** @brief Retextures sand/bed kinds and the biome byte; false grades height only. */
+    bool retexture = true;
+};
+
+/**
  * @struct TerrainParams
  * @brief How the map's continuous world is cut into discrete tiles and chunks.
  *
@@ -111,10 +189,20 @@ struct TerrainParams {
      */
     float river_wave_scale = 0.25f;
 
+    /**
+     * @brief Tiles shoreline grading (terrain_shore.h's `grade_tile_shore()`), off by default.
+     *
+     * The terraced counterpart of the smooth-field keys below. `water_inset` / `river_inset` and
+     * the skirt's lip drop only sink the WATER into whatever bank the tiles happen to form; they
+     * cannot change the bank's own shape, so a steep coast or a cut river rim stays the vertical
+     * riser `settle_water_rounding()` left. This is what grades that riser.
+     */
+    ShoreProfile shore;
+
     // --- Heightmap shoreline (terrain_water.h's grade_water_shore(), terrain_water_mesh.cpp) ---
-    // Tiles mode gets the same result from `water_inset` / `river_inset` and the skirt's own lip
-    // drop (terrain_chunk.cpp) -- a terraced world has banks to sink the shoreline into. These are
-    // the smooth-field counterpart, unused in Tiles mode.
+    // The smooth-field counterpart of `shore` above, and unused in Tiles mode: a continuous field
+    // has no terrace to grade, since its shoreline is simply where the ground crosses the water's
+    // level, so the terrain's own slope is already the beach.
 
     /** @brief Metres a wet tile's bed is kept under its own water level (ShoreGrade::clearance). */
     float shore_clearance = 0.03f;

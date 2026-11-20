@@ -15,6 +15,11 @@
  * nearest-neighbour upscale itself, over an identical rect with identical UV math. The UI
  * source is different: it is built at the letterbox rect, so sampling it is an exact
  * texel-for-texel fetch and the UI is never resampled at all.
+ *
+ * A third source rides along for ToyRenderConfig::ui_scene_blur: the glass backdrop's already
+ * blurred copy of the same scene, cross-faded over the base before the UI goes on top. That is
+ * what makes "blur the world while the interface is open" cost one mix in a pass that was
+ * already reading both images, instead of a blur pass of its own.
  */
 
 #ifndef TOYENGINE_RENDER_PASSES_UI_COMPOSITE_PASS_H
@@ -35,9 +40,9 @@ namespace passes {
  * @class UiCompositePass
  * @brief Draws `base` into a letterboxed viewport with the UI layer composited over it.
  *
- * Both sources are sampled NEAREST and both are UNORM images holding display-referred,
- * sRGB-encoded bytes; the blend is a premultiplied "over" done in that encoded space (see
- * ui_composite.frag). The UI layer must therefore have been drawn with
+ * The base and UI sources are sampled NEAREST (the blurred one LINEAR), and all three are
+ * UNORM images holding display-referred, sRGB-encoded bytes; the blend is a premultiplied
+ * "over" done in that encoded space (see ui_composite.frag). The UI layer must therefore have been drawn with
  * `coopa::gfx::pipeline::BlendMode::AlphaOver` into an alpha-0-cleared target, which is
  * what makes its RGB premultiplied and its alpha a real coverage mask.
  */
@@ -80,14 +85,39 @@ public:
     }
 
     /**
+     * @brief Binds the blurred copy of the scene draw()'s `scene_blur` fades toward.
+     *
+     * LINEAR, unlike the two above: this image is the backdrop blur's, a fraction of the render
+     * extent, so the fetch is a genuine upscale rather than a 1:1 read. A caller with no blur
+     * pass must still bind SOMETHING here (the base image is the obvious choice) -- an unbound
+     * descriptor is undefined behaviour even when `scene_blur` is 0 and the sample is unused.
+     * Same mid-frame caveat as set_base_image().
+     */
+    void set_blur_image(coopa::gfx::TextureView view,
+                        const coopa::gfx::engine::util::Sampler& sampler) {
+        desc_set_->bind_image(2, view, sampler);
+    }
+
+    /**
      * @brief Draws into the centred destination rect; the target's own clear fills the bars.
      *
      * The viewport height is POSITIVE, and deliberately so: fullscreen.vert maps uv.y == 0
      * to NDC -1, while OffscreenTarget::begin() leaves a NEGATIVE-height viewport behind
      * (it flips Y for the 3D passes). Inheriting that one would present the whole frame
      * upside down -- the same hazard UiWorldPass::draw() documents from the other side.
+     *
+     * @param scene_blur How far the base image is faded toward set_blur_image()'s blurred copy,
+     *                   0..1 (clamped in the shader). 0 skips the mix entirely.
      */
-    void draw(coopa::gfx::command::CommandBuffer& cmd, const LetterboxRect& rect) const;
+    void draw(coopa::gfx::command::CommandBuffer& cmd, const LetterboxRect& rect,
+              float scene_blur = 0.0f) const;
+
+    /** @brief The fragment push block; `scene_blur` is draw()'s parameter. */
+    struct PushConstants {
+        float scene_blur = 0.0f;
+        float _pad[3]{};
+    };
+    static_assert(sizeof(PushConstants) == 16, "must match ui_composite.frag's Push block");
 
 private:
     std::unique_ptr<coopa::gfx::pipeline::Shader>              vert_shader_;

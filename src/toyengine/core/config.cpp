@@ -445,6 +445,7 @@ AppConfig AppConfig::from_node(const fkyaml::node& root) {
             // --- UI backdrop blur ---
             read(r, "ui_backdrop_blur_radius", config.render.ui_backdrop_blur_radius);
             read(r, "ui_backdrop_blur_downscale", config.render.ui_backdrop_blur_downscale);
+            read(r, "ui_scene_blur", config.render.ui_scene_blur);
 
             // --- Depth of field ---
             read(r, "dof_focus_mode", config.render.dof_focus_mode);

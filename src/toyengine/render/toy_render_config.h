@@ -1321,6 +1321,26 @@ struct ToyRenderConfig {
     uint32_t ui_backdrop_blur_downscale = 2;    /**< Divides render_extent_ to size the blur targets; 1..4. */
 
     /**
+     * @brief How much of the WHOLE frame is replaced by that same blurred image, 0..1 -- the
+     *        "the interface is open, so the world behind it goes soft" post effect.
+     *
+     * A cross-fade, not a varying radius: the overlay composite mixes the sharp frame with the
+     * blurred backdrop by this amount (ui_composite.frag), so 0 is the untouched frame, 1 is
+     * fully blurred at ui_backdrop_blur_radius, and anything between is a fade. Free every
+     * frame -- it is a push constant on a pass that already exists.
+     *
+     * Needs ui_backdrop_blur_enabled: the image mixed in is the backdrop blur's own result, so
+     * with that off this is clamped to 0 rather than blurring through a second pass.
+     *
+     * This field is the BASELINE. A screen asks for the same effect per frame through
+     * ImmScreen::set_scene_blur(), which Engine forwards to
+     * ToyRenderPipeline::set_ui_scene_blur_request(); the frame uses whichever is larger, so a
+     * scene can pin the world soft (a menu backdrop) without a screen, and a screen can fade it
+     * in over a scene that left this at 0.
+     */
+    float    ui_scene_blur             = 0.0f;
+
+    /**
      * Physically-based depth of field -- see gfxcoopa's DofPass. Unlike
      * tilt_shift above, this runs at RENDER resolution, on linear HDR, before
      * bloom_enabled's pyramid: the circle of confusion is a function of scene

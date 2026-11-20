@@ -530,9 +530,15 @@ void register_scene_components() {
             auto* q = obj.add_component<toy::ui::QuadrantDock>();
             read(node, "open_inventory", q->open_inventory);
             read(node, "open_character", q->open_character);
+            read(node, "open_skills", q->open_skills);
+            read(node, "open_equipment", q->open_equipment);
             read(node, "open_map", q->open_map);
             read(node, "open_quests", q->open_quests);
+            read(node, "open_bestiary", q->open_bestiary);
             read(node, "open_settings", q->open_settings);
+            read(node, "open_audio", q->open_audio);
+            read(node, "open_controls", q->open_controls);
+            read(node, "open_journal", q->open_journal);
             read(node, "minimised", q->minimised);
             read(node, "reduced_motion", q->reduced_motion);
             read(node, "reduced_transparency", q->reduced_transparency);

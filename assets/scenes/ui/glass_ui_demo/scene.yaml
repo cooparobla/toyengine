@@ -1,20 +1,25 @@
-# glass_ui_demo -- a movable four-quadrant panel workspace, glassmorphism-styled.
+# glass_ui_demo -- a two-level dock over a blurred world, glassmorphism-styled.
 #
-#  * dock         -- QuadrantDock: Inventory, Character and Quests open by default (one
-#    quadrant left free for Settings), each draggable between the four screen quadrants and
-#    growing into any adjacent one left empty (toyengine/ui/quadrant_layout.h). The dock on
-#    the right holds Home (closes every panel, or restores this default arrangement once
-#    nothing is open) and a Settings toggle.
-#  * the blocks    -- a few coloured cubes and a floor, so there is a recognisable, busy 3D
-#    world for the backdrop blur to actually soften, and something still visible in the
-#    margin outside the panel area and through the dock's partition.
-#  * camera        -- auto-orbits (`auto_rotate_deg_per_sec`), so the backdrop visibly moves
+#  * dock         -- QuadrantDock: a dock column on the right whose icons are one level deep.
+#    It opens inside the Player group (Inventory, Character and Skills, one quadrant left
+#    free), with the World group already holding Map and Quests and the System group holding
+#    Settings for when they are entered. Every panel is draggable between the four screen
+#    quadrants and grows into any adjacent one left empty (toyengine/ui/quadrant_layout.h).
+#  * the blur     -- the dock asks the renderer to fade the whole frame toward its blurred copy
+#    while the overlay is up (ToyRenderConfig::ui_scene_blur, driven through
+#    ImmScreen::set_scene_blur()), so there is no painted backdrop hiding the world: Home
+#    minimises the panels and hands the sharp scene straight back. The System group's Settings
+#    panel has the slider that scales it.
+#  * the props    -- a courtyard of blocks, balls, barrels and a torus around a plinth, lit
+#    warm from one side and cool from the other, so the world behind the glass has edges,
+#    highlights and depth to soften. A blur over a flat grey floor looks like nothing at all.
+#  * camera       -- auto-orbits (`auto_rotate_deg_per_sec`), so the backdrop visibly moves
 #    behind the glass with no mouse input needed. Mouse look is off and the cursor is NOT
 #    captured, so the pointer is free to drag panels and click the dock.
 #
 # render.ui_backdrop_blur_enabled is OFF by default engine-wide (see ToyRenderConfig) -- this
-# scene turns it on for itself, which is what makes Context::glass()/glass_panel() actually
-# blur rather than fall back to a flat fill.
+# scene turns it on for itself, which is what makes both Context::glass()/glass_panel() and the
+# full-frame ui_scene_blur fade work rather than fall back to a flat fill and no blur at all.
 #
 # Run: ./build/toyengine glass_ui_demo        (or SCENE=glass_ui_demo)
 
@@ -23,20 +28,57 @@ scene:
   settings:
     render:
       ui_backdrop_blur_enabled: true
-      ui_backdrop_blur_radius: 10.0
+      ui_backdrop_blur_radius: 12.0
   root_objects:
     - name: floor
       active: true
       components:
         - type: Transform
           position: { x: 0.0, y: 0.0, z: -0.5 }
-          scale: { x: 6.0, y: 6.0, z: 6.0 }
+          scale: { x: 9.0, y: 9.0, z: 9.0 }
         - type: MeshRenderer
           mesh_path: plane
           material:
-            albedo: { r: 0.32, g: 0.30, b: 0.36 }
+            albedo: { r: 0.30, g: 0.29, b: 0.35 }
             metallic: 0.0
-            roughness: 0.85
+            roughness: 0.80
+            ao: 1.0
+      children: []
+
+    # A low plinth under the centrepiece: the blur reads depth from overlapping silhouettes,
+    # and a stack gives it two edges where a single block gives one.
+    - name: plinth
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: -0.25 }
+          scale: { x: 2.4, y: 2.4, z: 0.5 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material:
+            albedo: { r: 0.22, g: 0.22, b: 0.27 }
+            metallic: 0.0
+            roughness: 0.65
+            ao: 1.0
+      children: []
+
+    # The centrepiece: emissive, and the brightest thing in the scene. A blur spreads a bright
+    # highlight into its neighbours, which is what makes the softening obvious at a glance.
+    - name: centre_torus
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.55 }
+          rotation: { x: 70.0, y: 0.0, z: 20.0 }
+          scale: { x: 1.1, y: 1.1, z: 1.1 }
+        - type: MeshRenderer
+          mesh_path: magic_torus
+          material:
+            albedo: { r: 0.14, g: 0.55, b: 0.52 }
+            emissive: { r: 0.12, g: 0.95, b: 0.85 }
+            emissive_strength: 2.2
+            metallic: 0.2
+            roughness: 0.35
             ao: 1.0
       children: []
 
@@ -44,7 +86,8 @@ scene:
       active: true
       components:
         - type: Transform
-          position: { x: -1.6, y: 0.5, z: 0.0 }
+          position: { x: -2.6, y: 0.4, z: 0.1 }
+          rotation: { x: 0.0, y: 0.0, z: 12.0 }
           scale: { x: 1.2, y: 1.2, z: 1.2 }
         - type: MeshRenderer
           mesh_path: cube
@@ -59,7 +102,7 @@ scene:
       active: true
       components:
         - type: Transform
-          position: { x: 0.2, y: -0.8, z: 0.3 }
+          position: { x: 0.4, y: -2.6, z: 0.3 }
           rotation: { x: 0.0, y: 0.0, z: 25.0 }
           scale: { x: 1.6, y: 1.6, z: 1.6 }
         - type: MeshRenderer
@@ -75,7 +118,7 @@ scene:
       active: true
       components:
         - type: Transform
-          position: { x: 2.0, y: 0.9, z: -0.15 }
+          position: { x: 3.0, y: 1.0, z: -0.15 }
           rotation: { x: 0.0, y: 0.0, z: -15.0 }
           scale: { x: 0.9, y: 0.9, z: 0.9 }
         - type: MeshRenderer
@@ -84,6 +127,68 @@ scene:
             albedo: { r: 0.35, g: 0.45, b: 0.85 }
             metallic: 0.1
             roughness: 0.3
+            ao: 1.0
+      children: []
+
+    # A polished ball: a sharp specular dot that becomes a soft disc under the blur.
+    - name: ball_chrome
+      active: true
+      components:
+        - type: Transform
+          position: { x: 2.1, y: -1.9, z: 0.35 }
+          scale: { x: 0.85, y: 0.85, z: 0.85 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material:
+            albedo: { r: 0.78, g: 0.78, b: 0.82 }
+            metallic: 0.9
+            roughness: 0.12
+            ao: 1.0
+      children: []
+
+    - name: ball_amber
+      active: true
+      components:
+        - type: Transform
+          position: { x: -1.5, y: -2.2, z: 0.2 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material:
+            albedo: { r: 0.92, g: 0.68, b: 0.24 }
+            metallic: 0.0
+            roughness: 0.45
+            ao: 1.0
+      children: []
+
+    - name: barrel_left
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3.1, y: -1.4, z: 0.0 }
+          scale: { x: 0.9, y: 0.9, z: 0.9 }
+        - type: MeshRenderer
+          mesh_path: barrel
+          material:
+            albedo: { r: 0.45, g: 0.33, b: 0.22 }
+            metallic: 0.0
+            roughness: 0.7
+            ao: 1.0
+      children: []
+
+    - name: barrel_right
+      active: true
+      components:
+        - type: Transform
+          position: { x: 2.6, y: 2.4, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 40.0 }
+          scale: { x: 0.75, y: 0.75, z: 0.75 }
+        - type: MeshRenderer
+          mesh_path: barrel
+          material:
+            albedo: { r: 0.40, g: 0.30, b: 0.21 }
+            metallic: 0.0
+            roughness: 0.7
             ao: 1.0
       children: []
 
@@ -97,8 +202,8 @@ scene:
       active: true
       components:
         - type: Transform
-          position: { x: 0.0, y: -7.0, z: 2.2 }
-          rotation: { x: 75.0, y: 0.0, z: 0.0 }
+          position: { x: 0.0, y: -8.5, z: 3.0 }
+          rotation: { x: 72.0, y: 0.0, z: 0.0 }
           scale: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Camera
           main: true
@@ -108,7 +213,7 @@ scene:
           far_clip_plane: 1000.0
         - type: CameraController
           mode: orbit
-          target: { x: 0.0, y: 0.0, z: 0.3 }
+          target: { x: 0.0, y: 0.0, z: 0.4 }
           follow_smoothing: 10.0
           movement_smoothing: 0.8
           # Mouse look OFF and cursor NOT captured: the pointer belongs to the dock and its
@@ -136,4 +241,28 @@ scene:
           intensity: 1.0
           cast_shadows: true
           shadow_intensity: 0.6
+      children: []
+
+    # Two coloured fills, warm on one side and cool on the other: the blurred world keeps its
+    # shape from the value difference between the two halves rather than from any one edge.
+    - name: fill_warm
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3.4, y: -3.0, z: 2.0 }
+        - type: PointLight
+          color: { r: 1.0, g: 0.62, b: 0.35 }
+          intensity: 6.0
+          range: 11.0
+      children: []
+
+    - name: fill_cool
+      active: true
+      components:
+        - type: Transform
+          position: { x: 3.6, y: 2.8, z: 2.4 }
+        - type: PointLight
+          color: { r: 0.42, g: 0.60, b: 1.0 }
+          intensity: 6.0
+          range: 11.0
       children: []

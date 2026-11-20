@@ -555,6 +555,7 @@ const std::vector<SettingsGroup>& render_settings_groups() {
             .toggle(startup(F(f_bool("ui_backdrop_blur_enabled", false), "Backdrop Blur", "Blur the frame behind glass UI panels")))
             .add(F(f_float("ui_backdrop_blur_radius", 8.0f, 0.1f, 0.0f, 64.0f), "Blur Radius", "Furthest blur tap, in render pixels"))
             .add(startup(F(f_int("ui_backdrop_blur_downscale", 2, 1, 4), "Downscale", "Backdrop resolution divisor; higher is cheaper and softer")))
+            .add(F(f_float("ui_scene_blur", 0.0f, 0.01f, 0.0f, 1.0f), "Scene Blur", "Fades the whole frame toward that blur; a screen can drive this per frame"))
             .done());
 
         g.push_back(GroupBuilder(features, "Color Grading", "A colour look-up table applied after tonemapping")

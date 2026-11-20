@@ -253,6 +253,30 @@ public:
     bool lens_blur_suppressed() const { return lens_blur_suppressed_; }
 
     /**
+     * @brief This frame's request to fade the whole frame toward its blurred copy, 0..1 --
+     *        ToyRenderConfig::ui_scene_blur's per-frame counterpart.
+     *
+     * Runtime, no rebuild, and not sticky in config: Engine sets it every frame from the screens'
+     * own requests (ImmScreen::scene_blur()), so a screen fading its overlay in fades the world
+     * soft with it and a screen that stops asking hands the sharp frame straight back. The frame
+     * uses max(config_.ui_scene_blur, this), so a scene's baseline is a floor rather than
+     * something a screen has to restate.
+     *
+     * Capped at 0 when the backdrop blur pass does not exist -- see ui_scene_blur()'s doc.
+     */
+    void set_ui_scene_blur_request(float amount) { ui_scene_blur_request_ = amount; }
+
+    /**
+     * @brief The amount record_overlay_() will actually use: max(config, request), clamped to
+     *        0..1, and 0 whenever ui_backdrop_blur_enabled was off at construction (there is no
+     *        blurred image to fade toward).
+     */
+    float ui_scene_blur() const {
+        if (!ui_backdrop_pass_) return 0.0f;
+        return std::clamp(std::max(config_.ui_scene_blur, ui_scene_blur_request_), 0.0f, 1.0f);
+    }
+
+    /**
      * @brief This frame's physics debug-draw lines -- fill it (typically from
      *        PhysicsWorld::debug_draw(), see debug_line_pass.h's file doc) between
      *        Scene::update()/late_update() and render(); drawn when config_.debug_view ==
@@ -2091,6 +2115,7 @@ private:
     coopa::job::JobEngine* jobs_ = nullptr;      // non-owning; nullptr = always serial
     std::size_t            parallel_threshold_ = 256;
     bool                   lens_blur_suppressed_ = false;   ///< see set_lens_blur_suppressed()
+    float                  ui_scene_blur_request_ = 0.0f;   ///< see set_ui_scene_blur_request()
 };
 
 } // namespace render

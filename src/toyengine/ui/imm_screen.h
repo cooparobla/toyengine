@@ -213,6 +213,23 @@ public:
     const Tunables& tune() const { return tunables_; }
 
     /**
+     * @brief How strongly this screen asks for the world behind it to be blurred, 0..1.
+     *
+     * The engine reads this from every screen in the scene once a frame, takes the largest, and
+     * hands it to the renderer (ToyRenderPipeline::set_ui_scene_blur_request(), which fades the
+     * frame toward the blurred copy the glass panes already sample). So a screen that opens with
+     * a fade sets this to its own fade progress every draw() and the world softens in step with
+     * it; one that never touches it costs nothing and changes nothing.
+     *
+     * Per frame, not sticky: update() zeroes it before each draw(), so a screen states it the
+     * way it states every other value it declares -- and one that stops drawing stops asking.
+     */
+    void set_scene_blur(float amount) { scene_blur_ = amount; }
+
+    /** @brief See set_scene_blur(). */
+    float scene_blur() const { return scene_blur_; }
+
+    /**
      * @brief Tears the screen down: nothing can call back into it after this returns.
      *
      * The canvas holds an `on_draw` callback into this screen, and for a screen-space canvas
@@ -278,6 +295,8 @@ private:
     void ensure_canvas_();
 
     coopa::ui::ImmediateCanvas* canvas_ = nullptr;
+    /// See set_scene_blur(). Written by draw(), read by the engine after late_update().
+    float scene_blur_ = 0.0f;
     /// A build has been queued with the scene but not yet flushed; stops queueing it twice.
     bool pending_ = false;
     /**

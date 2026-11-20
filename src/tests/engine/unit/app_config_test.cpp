@@ -244,7 +244,8 @@ COOPA_TEST(every_render_and_window_key_round_trips) {
             "  tilt_shift_angle: 12.0\n"
             "  ui_backdrop_blur_enabled: true\n"
             "  ui_backdrop_blur_radius: 14.0\n"
-            "  ui_backdrop_blur_downscale: 3\n");
+            "  ui_backdrop_blur_downscale: 3\n"
+            "  ui_scene_blur: 0.75\n");
 
         expect(config.render.fog_enabled == true, "AppConfig::load: fog_enabled round-trips");
         expect(config.render.fog_mode == 1, "AppConfig::load: fog_mode round-trips");
@@ -294,6 +295,7 @@ COOPA_TEST(every_render_and_window_key_round_trips) {
         expect(config.render.ui_backdrop_blur_enabled == true, "AppConfig::load: ui_backdrop_blur_enabled round-trips");
         expect(config.render.ui_backdrop_blur_radius == 14.0f, "AppConfig::load: ui_backdrop_blur_radius round-trips");
         expect(config.render.ui_backdrop_blur_downscale == 3u, "AppConfig::load: ui_backdrop_blur_downscale round-trips");
+        expect(config.render.ui_scene_blur == 0.75f, "AppConfig::load: ui_scene_blur round-trips");
     }
     {
         toy::core::AppConfig config = load_config_text("test_ssr_window_config.yaml",

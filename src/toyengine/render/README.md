@@ -37,7 +37,7 @@ changes push-constant contents is free to flip every frame.
 
 | Startup-fixed | Runtime |
 |---|---|
-| `ssr_enabled`, `ssgi_traced`, `ssao_enabled`, `transparency_enabled`, `xray_enabled`, `refraction_enabled`, `fog_enabled`, `volumetrics_enabled`, `bloom_enabled`, `dof_enabled`, `tilt_shift_enabled`, `ui_backdrop_blur_enabled`, `ui_backdrop_blur_downscale`, `auto_exposure_enabled`, `grading_lut_path`, `aa_mode`, `skinning`, `world_ui_enabled`, `screen_ui_enabled`, and every resolution/capacity field | `sdf_enabled`, `shadows_enabled`, `sdf_shadows_enabled`, `shadow_pcss_enabled`, `contact_shadows_enabled`, `volumetrics_shadows_enabled`, `grading_enabled`, `ssr_reflect_transparent`, `debug_view`, `ui_backdrop_blur_radius`, and every numeric tunable |
+| `ssr_enabled`, `ssgi_traced`, `ssao_enabled`, `transparency_enabled`, `xray_enabled`, `refraction_enabled`, `fog_enabled`, `volumetrics_enabled`, `bloom_enabled`, `dof_enabled`, `tilt_shift_enabled`, `ui_backdrop_blur_enabled`, `ui_backdrop_blur_downscale`, `auto_exposure_enabled`, `grading_lut_path`, `aa_mode`, `skinning`, `world_ui_enabled`, `screen_ui_enabled`, and every resolution/capacity field | `sdf_enabled`, `shadows_enabled`, `sdf_shadows_enabled`, `shadow_pcss_enabled`, `contact_shadows_enabled`, `volumetrics_shadows_enabled`, `grading_enabled`, `ssr_reflect_transparent`, `debug_view`, `ui_backdrop_blur_radius`, `ui_scene_blur`, and every numeric tunable |
 
 The list lives in one place, the `TOY_STARTUP_FIXED_FIELDS` X-macro at the top of
 `toy_render_pipeline.h`. `apply_live_config()` enforces the split: it restores any
@@ -194,7 +194,8 @@ three groups below.
     — reading the SAME tilt-shift-on/off source `ui_composite_pass_`'s base image does, so the
     two never disagree about which frame they show. Between the post chain and the overlay
     deliberately: a glass pane's backdrop is the frame *before* any UI, captured once per frame
-    rather than once per panel.
+    rather than once per panel. Skipped when no glass quad was emitted AND `ui_scene_blur()` is
+    0 — both consumers of the image have to want nothing for the blur to be worth skipping.
 
 **Overlay** (`record_overlay_()`):
 
@@ -234,6 +235,16 @@ view is bound as an ordinary **set-0 UI texture**, not through `ExtraSets` — a
 texture key IS the backdrop view, selected into its own batch and its own "glass" pipeline
 variant the same way a font atlas's view already selects the "text" variant (see `ui_pass.h`'s
 file doc for the full rationale and the one-line delta to move it to `ExtraSets`/set 1 later).
+
+That same blurred image has a second consumer: **`ui_scene_blur`** (0..1) fades the WHOLE frame
+toward it in `ui_composite.frag`, which is the "the interface is open, so the world behind it
+goes soft" effect. It is a push constant and a third binding on a pass that was already reading
+both images, so it costs one `mix` and no pass of its own -- and it is a cross-fade rather than a
+ramping radius for exactly that reason. The baseline is the config field; a screen asks for it per
+frame through `ImmScreen::set_scene_blur()`, which `Engine` gathers after `late_update()` into
+`ToyRenderPipeline::set_ui_scene_blur_request()`, and the frame uses whichever is larger. With
+`ui_backdrop_blur_enabled` off there is no blurred image to fade toward, so the amount is clamped
+to 0 (`ui_scene_blur()`) and binding 2 holds the base image instead.
 
 The chain:
 

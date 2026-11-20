@@ -123,6 +123,13 @@ flag needed when the engine's `ui_backdrop_blur_enabled` is off or on a world-sp
 (`button`, `slider_float`, `checkbox`, `combo`, `tab_bar`, `input_text`, `tree_node`...). Place
 with `ctx.anchor(...)` / `ctx.stretch()`.
 
+To blur the WHOLE world behind a screen rather than the rect under one pane, call
+`set_scene_blur(0..1)` from `draw()` each frame (`ImmScreen`): the engine gathers the largest
+request in the scene and the renderer cross-fades the finished frame toward its blurred copy
+(`render.ui_scene_blur`). Drive it from whatever the screen's own fade-in is, so the world goes
+soft as the interface arrives; it needs `ui_backdrop_blur_enabled` for the same reason
+`glass_panel` does, and it zeroes itself when the screen stops drawing.
+
 ### Your own icons
 
 The `Icon` set is uicoopa's shared vocabulary; a game's own glyphs belong to the game. Register

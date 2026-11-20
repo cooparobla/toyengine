@@ -826,10 +826,13 @@ void ToyRenderPipeline::record_post_chain_(coopa::gfx::command::CommandBuffer& c
 
 void ToyRenderPipeline::record_ui_backdrop_(coopa::gfx::command::CommandBuffer& cmd) {
     if (!ui_backdrop_pass_) return;
-    // Skip once the target has been written at least once and nothing gathered this frame
-    // wants it -- reading before the first write would read an UNDEFINED image, the same
-    // reason ui_world_layer_clear_ exists, so the unconditional first run below is deliberate.
-    if (ui_backdrop_primed_ && !ui_backdrop_wanted_this_frame_) return;
+    // Skip once the target has been written at least once and nothing this frame wants it --
+    // reading before the first write would read an UNDEFINED image, the same reason
+    // ui_world_layer_clear_ exists, so the unconditional first run below is deliberate.
+    // A scene blur wants it even when no glass quad was emitted: the composite samples the
+    // same image full-screen (see ui_scene_blur()), and a stale one would freeze the world
+    // behind the fade on the frame the camera moved.
+    if (ui_backdrop_primed_ && !ui_backdrop_wanted_this_frame_ && ui_scene_blur() <= 0.0f) return;
     coopa::gfx::engine::passes::SeparableBlurPass::Params params{};
     params.radius = config_.ui_backdrop_blur_radius;
     ui_backdrop_pass_->execute(cmd, params);
@@ -853,7 +856,7 @@ void ToyRenderPipeline::record_overlay_(coopa::gfx::command::CommandBuffer& cmd,
     // an overlay, not part of the upscaled scene image, so it is not quantised to the render grid. It
     // sets its own viewport and per-batch scissor.
     overlay_target_->begin(cmd, coopa::gfx::ClearColor{0.0f, 0.0f, 0.0f, 1.0f});
-    ui_composite_pass_->draw(cmd, ctx.letterbox);
+    ui_composite_pass_->draw(cmd, ctx.letterbox, ui_scene_blur());
     if (screen_ui_pass_) {
         // Where the blurred backdrop sits in overlay_target_: the letterbox rect, since that
         // is exactly where ui_composite_pass_ just put the scene it was blurred from.

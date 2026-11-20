@@ -25,12 +25,30 @@ layout(location = 0) in vec2 in_uv;
 
 layout(set = 0, binding = 0) uniform sampler2D base_sampler;  // post-processed scene
 layout(set = 0, binding = 1) uniform sampler2D ui_sampler;    // world UI layer, PREMULTIPLIED
+layout(set = 0, binding = 2) uniform sampler2D blur_sampler;  // the same scene, blurred (glass backdrop)
+
+layout(push_constant) uniform Push {
+    float scene_blur;   // 0 = the sharp frame, 1 = fully blurred
+    float _pad0;
+    float _pad1;
+    float _pad2;
+} pc;
 
 layout(location = 0) out vec4 out_color;
 
 void main() {
     vec3 base = texture(base_sampler, in_uv).rgb;
     vec4 ui   = texture(ui_sampler,   in_uv);
+
+    // "The interface is open, so the world behind it goes soft" -- a cross-fade toward the
+    // blurred copy the glass panes already sample (ToyRenderConfig::ui_scene_blur), not a
+    // second blur with a ramping radius: one mix here is free, and it reaches the same place.
+    // Both images are the same scene in the same encoded space, so mixing them needs no
+    // gamma round trip. Branched, not just mixed by 0, so the common case does not pay for
+    // the blurred fetch at all.
+    if (pc.scene_blur > 0.0) {
+        base = mix(base, texture(blur_sampler, in_uv).rgb, clamp(pc.scene_blur, 0.0, 1.0));
+    }
 
     // Premultiplied "over". The layer is premultiplied because BlendMode::AlphaOver
     // wrote `src.rgb * src.a` into an alpha-0-cleared target; mix(base, ui.rgb, ui.a)

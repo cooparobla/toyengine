@@ -321,6 +321,7 @@ COOPA_TEST(render_tab_lists_every_engine_key_once_with_its_default) {
         {"tilt_shift_angle", [](const PR& r) { return EngineDefault(r.tilt_shift_angle); }},
         {"ui_backdrop_blur_radius", [](const PR& r) { return EngineDefault(r.ui_backdrop_blur_radius); }},
         {"ui_backdrop_blur_downscale", [](const PR& r) { return EngineDefault(r.ui_backdrop_blur_downscale); }},
+        {"ui_scene_blur", [](const PR& r) { return EngineDefault(r.ui_scene_blur); }},
         {"dof_focus_mode", [](const PR& r) { return EngineDefault(r.dof_focus_mode); }},
         {"dof_focus_object", [](const PR& r) { return EngineDefault(r.dof_focus_object); }},
         {"dof_focus_smoothing", [](const PR& r) { return EngineDefault(r.dof_focus_smoothing); }},

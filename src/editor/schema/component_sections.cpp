@@ -626,6 +626,30 @@ void apply_component_sections(std::map<std::string, ComponentSchema>& table) {
             .keys({"blend", "strength", "enabled"}).done(),
     });
 
+    // One section per DOCK LEVEL, in the dock's own order: the eleven open_* keys are otherwise
+    // a wall of identical checkboxes, and which level a panel belongs to is the one thing an
+    // author has to know to read them (the first one ticked is where the dock opens).
+    layout("QuadrantDock", {
+        sec("Player Panels", "Package")
+            .says("The Player group's own four quadrants. The dock opens at the level the first "
+                  "panel ticked anywhere in this inspector belongs to.")
+            .keys({"open_inventory", "open_character", "open_skills", "open_equipment"}).done(),
+        sec("World Panels", "World")
+            .says("The World group's quadrants -- kept for when that group is entered, not shown "
+                  "beside the Player ones.")
+            .keys({"open_map", "open_quests", "open_bestiary"}).done(),
+        sec("System Panels", "Gear")
+            .says("The System group's quadrants.")
+            .keys({"open_settings", "open_audio", "open_controls"}).done(),
+        sec("Root Panels", "Home")
+            .says("Panels that sit beside the group icons rather than inside a group.")
+            .keys({"open_journal"}).done(),
+        sec("Behaviour", "Eye")
+            .says("How the overlay arrives, and the accessibility fallbacks. Reduced transparency "
+                  "also turns off the blur behind the panels, which opaque panes would hide anyway.")
+            .keys({"minimised", "reduced_motion", "reduced_transparency"}).done(),
+    });
+
     layout("EnvPulseEmitter", {
         sec("Trigger", "Play")
             .says("What fires the gust, and where it is born.")

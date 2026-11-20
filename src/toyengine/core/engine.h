@@ -1289,6 +1289,15 @@ private:
     void watch_terrain_(coopa::scene::Scene& scene);
 
     /**
+     * @brief Publishes the largest scene-blur any screen asked for this frame to the renderer.
+     *
+     * See ImmScreen::set_scene_blur() for the screen's half, and
+     * ToyRenderPipeline::set_ui_scene_blur_request() for what the renderer does with it. Called
+     * between late_update() (where a screen's draw() states its request) and render().
+     */
+    void sync_ui_scene_blur_(coopa::scene::Scene& scene);
+
+    /**
      * @brief Feeds every CanvasComponent in the scene the per-frame state it cannot get for
      *        itself: the viewport (screen-space canvases) or the camera and pointer ray
      *        (world-space ones).

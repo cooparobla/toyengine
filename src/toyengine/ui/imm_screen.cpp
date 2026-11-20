@@ -91,6 +91,10 @@ void ImmScreen::start() {
 }
 
 void ImmScreen::update(float delta_time) {
+    // Cleared before this frame's draw() restates it: a per-frame request has to go away on its
+    // own, or a screen that stops drawing (hidden, destroyed mid-frame) would leave the world
+    // blurred with nothing on screen asking for it. See set_scene_blur().
+    scene_blur_ = 0.0f;
     if (canvas_) {
         canvas_->frame_dt = delta_time;
         on_update(delta_time);

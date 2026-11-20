@@ -39,6 +39,7 @@
 #include <physxcoopa/system/vehicle_system.h>
 #include <toyengine/core/branding.h>
 #include <toyengine/io/user_settings.h>
+#include <toyengine/ui/imm_screen.h>
 #include <toyengine/ui/ui_panel.h>
 #include <toyengine/audio/audio_components.h>
 #include <sfxcoopa/sfx_yaml.h>
@@ -1052,6 +1053,7 @@ bool Engine::tick() {
             CpuTimer t(prof, CpuScope::DynamicMeshes);
             sync_particle_render_state_(scene_mgr_.get_active_scene());
         }
+        sync_ui_scene_blur_(scene_mgr_.get_active_scene());
         // Last thing before the draw, because everything above may still move the scene:
         // whatever wrote a transform after update()'s TransformResolve (350) -- a late_update()
         // write, a deferred spawn flushed at the end of late_update(), a host's scene build,
@@ -1731,6 +1733,29 @@ bool Engine::ui_wants_pointer() {
         if (ui->wants_pointer()) return true;
     }
     return false;
+}
+
+void Engine::sync_ui_scene_blur_(coopa::scene::Scene& scene) {
+    // After late_update(), where a screen's draw() ran and declared this frame's request, and
+    // before render() reads it -- so a fade reaches the renderer on the frame that drew it
+    // rather than the one after.
+    float want = 0.0f;
+    const auto gather = [&want](coopa::scene::Scene& s) {
+        // A scene that is drawn but not simulating (the editor's edit mode) never ran its
+        // screens' draw(), so nothing in it has stated a request this frame -- and an editor
+        // shows a sharp scene while editing, the same policy set_lens_blur_suppressed() is
+        // given for depth of field and tilt shift.
+        if (!s.is_simulating()) return;
+        for (toy::ui::ImmScreen* screen : s.get_components<toy::ui::ImmScreen>()) {
+            want = std::max(want, screen->scene_blur());
+        }
+    };
+    gather(scene);
+    // The overlay scenes too: a pause menu or a transition layer is a screen like any other,
+    // and it is drawn over the same frame. drive_ui_canvases_() already treats them this way.
+    if (overlay_scene_) gather(*overlay_scene_);
+    for (const OverlayLayer& l : overlay_layers_) gather(*l.scene);
+    pipeline_->set_ui_scene_blur_request(want);
 }
 
 void Engine::drive_ui_canvases_(coopa::scene::Scene& scene, const std::optional<ScreenUiPlacement>& placement) {

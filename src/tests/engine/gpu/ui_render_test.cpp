@@ -72,10 +72,13 @@ double local_contrast(const Frame& f, uint32_t x0, uint32_t y0, uint32_t x1, uin
  *         over `pane`, and ticks it to `frames`. One Engine per call -- the two-Engine,
  *         same-frame-count comparison this suite's other kitchen_sink tests already use,
  *         because the scene's own frame-indexed noise makes two captures from ONE Engine at
- *         different frame counts incomparable. */
-Frame capture_kitchen_sink(bool backdrop_blur_enabled, bool add_probe, const coopa::ui::imm::Box& pane, int frames) {
+ *         different frame counts incomparable. `scene_blur` is the full-frame fade
+ *         (ToyRenderConfig::ui_scene_blur), which needs no probe and no screen. */
+Frame capture_kitchen_sink(bool backdrop_blur_enabled, bool add_probe, const coopa::ui::imm::Box& pane, int frames,
+                           float scene_blur = 0.0f) {
     toy::core::AppConfig config = make_test_config("src/tests/fixtures/scenes/kitchen_sink/scene.yaml", 640, 360, 160, 90);
     config.render.ui_backdrop_blur_enabled = backdrop_blur_enabled;
+    config.render.ui_scene_blur = scene_blur;
     toy::core::Engine engine(std::move(config));
     if (add_probe) {
         auto obj = std::make_unique<coopa::scene::SceneObject>("glass_probe");
@@ -255,9 +258,70 @@ COOPA_TEST(glass_panel_degrades_to_a_flat_fill_when_backdrop_blur_is_disabled) {
 }
 
 /**
+ * @brief ToyRenderConfig::ui_scene_blur softens the WHOLE frame, and does it by degrees.
+ *
+ * The same signature glass_panel() is held to above, applied to every pixel instead of one
+ * rect: local contrast falls while the mean colour stays put, which is "smoothed" rather than
+ * "replaced" or "darkened". The half-strength capture is the point of the test -- a toggle
+ * would pass the first assertion on its own, and what the feature promises is a fade.
+ */
+COOPA_TEST(scene_blur_softens_the_whole_frame_by_degrees) {
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+    const coopa::ui::imm::Box none{};
+    const Frame sharp = capture_kitchen_sink(true, false, none, 10, 0.0f);
+    const Frame half  = capture_kitchen_sink(true, false, none, 10, 0.5f);
+    const Frame full  = capture_kitchen_sink(true, false, none, 10, 1.0f);
+    require(same_extent(sharp, half) && same_extent(half, full), "scene_blur: every capture shares one extent");
+
+    const double c_sharp = local_contrast(sharp, 0, 0, sharp.width, sharp.height);
+    const double c_half  = local_contrast(half, 0, 0, half.width, half.height);
+    const double c_full  = local_contrast(full, 0, 0, full.width, full.height);
+    const bool softened = expect(c_full < c_sharp * 0.6,
+        "scene_blur 1: local contrast over the whole frame drops sharply (" + std::to_string(c_full) +
+            " vs sharp " + std::to_string(c_sharp) + ")");
+    const bool faded = expect(c_half < c_sharp && c_half > c_full,
+        "scene_blur 0.5: strictly between the two, so it is a fade and not a toggle (" +
+            std::to_string(c_half) + ")");
+
+    const glm::vec3 m_sharp = band_mean(sharp, 0.0f, 1.0f, 0.0f, 1.0f);
+    const glm::vec3 m_full  = band_mean(full, 0.0f, 1.0f, 0.0f, 1.0f);
+    const double mean_delta = glm::length(glm::dvec3(m_sharp) - glm::dvec3(m_full));
+    const bool kept_colour = expect(mean_delta < 6.0,
+        "scene_blur: the frame's mean colour is unchanged -- blurred, not dimmed (delta " +
+            std::to_string(mean_delta) + ")");
+
+    if (!softened || !faded || !kept_colour) {
+        dump_frame(sharp, "scene_blur_sharp");
+        dump_frame(half, "scene_blur_half");
+        dump_frame(full, "scene_blur_full");
+    }
+}
+
+/**
+ * @brief With no backdrop blur pass there is no blurred image to fade toward, so the request is
+ *        clamped to 0 rather than fading toward whatever binding 2 happens to hold.
+ *
+ * The binding in that case is the base image itself (see pipeline_build.cpp), so a missed clamp
+ * would be invisible here -- which is exactly why the assertion is byte equality against the
+ * same scene with the request at 0, not "it still looks fine".
+ */
+COOPA_TEST(scene_blur_is_inert_when_the_backdrop_blur_pass_does_not_exist) {
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+    const coopa::ui::imm::Box none{};
+    const Frame asked   = capture_kitchen_sink(false, false, none, 10, 1.0f);
+    const Frame not_asked = capture_kitchen_sink(false, false, none, 10, 0.0f);
+    require(same_extent(asked, not_asked), "scene_blur (no pass): both captures share one extent");
+    const long long differ = count_diff(asked, not_asked, 1);
+    expect(differ == 0, "scene_blur (no pass): the frame is untouched (" + std::to_string(differ) +
+                            " px differ)");
+}
+
+/**
  * @brief The whole feature stack landing in one real scene: glass_ui_demo loads with its three
- *        default panels and its always-visible dock, the backdrop blur it turns on in its own
- *        settings reaches the screen, and the glass theme's gradient/blob colours are on it.
+ *        default Player-group panels and its always-visible dock, and what sits behind the
+ *        glass is the BLURRED WORLD rather than a painted gradient.
  *
  * Window and reference_resolution both land on 1920x1080 (ImmScreen's default, which
  * QuadrantDock does not override), so the dock's tune()'d 76px right-hand strip
@@ -284,18 +348,18 @@ COOPA_TEST(glass_ui_demo_scene_renders_its_dock_and_backdrop) {
         "glass_ui_demo: the always-visible dock strip is a flat glass pane (contrast " +
             std::to_string(dock_contrast) + ")");
 
-    // grad_violet (#8b00ff) and grad_pink (#ff1493) are saturated hues no PBR-lit cube or floor
-    // in this scene produces; finding either on screen is finding the theme's own gradient and
-    // blobs, not a lit surface. Three of the four quadrants hold a glass panel by default, so
-    // the gradient only shows through the one free quadrant (and the thin outer margin) -- a
-    // modest pixel count, not a dominant fraction of the frame.
+    // grad_violet (#8b00ff) and grad_pink (#ff1493) are saturated hues no PBR-lit prop in this
+    // scene produces, and the screen used to paint them over the whole panel area as an opaque
+    // backdrop. Now they are a 16%-alpha scrim over the blurred world, so finding a patch of
+    // either AS ITSELF means the opaque gradient is back -- this assertion is the old one
+    // inverted on purpose, and it is what fails if the backdrop ever stops being the world.
     const long long violet_px = count_near_color(f, 139, 0, 255, 60);
     const long long pink_px = count_near_color(f, 255, 20, 147, 60);
-    const bool gradient_ok = expect(violet_px + pink_px > 150,
-        "glass_ui_demo: the glass theme's gradient/blob colours are on screen (violet " +
+    const bool no_gradient = expect(violet_px + pink_px < 200,
+        "glass_ui_demo: no opaque gradient behind the glass -- the world is (violet " +
             std::to_string(violet_px) + ", pink " + std::to_string(pink_px) + ")");
 
-    if (!drew_ok || !dock_ok || !gradient_ok) dump_frame(f, "glass_ui_demo_scene");
+    if (!drew_ok || !dock_ok || !no_gradient) dump_frame(f, "glass_ui_demo_scene");
 }
 
 /**

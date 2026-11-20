@@ -1111,6 +1111,14 @@ void ToyRenderPipeline::bind_composite_inputs_() {
     // equally exact at 1:1 but would silently turn into a blur the moment the two sizes
     // drift by a pixel, which is exactly the failure this binding should not hide.
     ui_composite_pass_->set_ui_image(ui_world_target_->color_view_typed(), nearest_sampler_);
+    // ToyRenderConfig::ui_scene_blur's source. With no blur pass there is nothing blurred to
+    // fade toward, so this binds the base image instead and record_overlay_() pins the amount
+    // to 0 -- a descriptor that is never sampled still has to point at a live image.
+    ui_composite_pass_->set_blur_image(
+        ui_backdrop_pass_ ? ui_backdrop_pass_->result_view_typed()
+                          : (config_.tilt_shift_enabled ? tilt_shift_pass_->result_view_typed()
+                                                        : display_source_view_),
+        linear_sampler_);
 
     // The SAME tilt-shift-on/off choice as the composite's base image above, rebound here
     // every time this function reruns (every resize) so the two consumers of that choice

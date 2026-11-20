@@ -52,6 +52,12 @@ panel asset and needs no C++. Anything else — a HUD, a hotbar, a transport dec
   layers section has the render-side story). With the feature off, on a world-space canvas, or
   in a font-free headless test, both fall back to a flat fill with no branch required of the
   caller — `has_glass()` exists only for a screen that wants to know, not one that needs to.
+- **A screen can blur the WORLD behind it**, not just the rect under one pane:
+  `set_scene_blur(0..1)` per frame, which `Engine` gathers after `late_update()` and the renderer
+  cross-fades the whole frame by (`render/README.md`'s UI layers section). Per frame and not
+  sticky — `update()` zeroes it, so a screen that stops drawing stops asking. `QuadrantDock`
+  drives it from its own reveal, which is why opening that overlay softens the scene instead of
+  painting over it.
 
 ## What a host provides
 

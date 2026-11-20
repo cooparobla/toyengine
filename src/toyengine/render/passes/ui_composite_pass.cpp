@@ -27,6 +27,7 @@ UiCompositePass::UiCompositePass(coopa::gfx::core::Device& device,
         pipeline::DescriptorLayoutBuilder()
             .combined_sampler(0, ShaderStage::Fragment)   // base: post-processed scene
             .combined_sampler(1, ShaderStage::Fragment)   // ui: world UI layer
+            .combined_sampler(2, ShaderStage::Fragment)   // blur: the glass backdrop's blurred scene
             .build(device));
 
     desc_pool_ = std::make_unique<pipeline::DescriptorPool>(
@@ -40,17 +41,22 @@ UiCompositePass::UiCompositePass(coopa::gfx::core::Device& device,
     desc.raster.cull = CullMode::None;
     desc.depth.test  = false;
     desc.depth.write = false;
+    desc.push_constants = {{ShaderStage::Fragment, 0, sizeof(PushConstants)}};
     // No blend state: the composite is done in the shader, not by the blender, because
     // the destination is cleared black every frame and the letterbox bars must stay black.
 
     pipeline_ = std::make_unique<pipeline::Pipeline>(device, target_pass, desc);
 }
 
-void UiCompositePass::draw(coopa::gfx::command::CommandBuffer& cmd, const LetterboxRect& rect) const {
+void UiCompositePass::draw(coopa::gfx::command::CommandBuffer& cmd, const LetterboxRect& rect,
+                           float scene_blur) const {
     cmd.bind_pipeline(*pipeline_);
     cmd.set_viewport(static_cast<float>(rect.x), static_cast<float>(rect.y),
                      static_cast<float>(rect.w), static_cast<float>(rect.h));
     cmd.set_scissor(rect.x, rect.y, rect.w, rect.h);
+    PushConstants pc{};
+    pc.scene_blur = scene_blur;
+    cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
     cmd.bind_descriptor_set(*desc_set_);
     cmd.draw(3); // Fullscreen triangle
 }

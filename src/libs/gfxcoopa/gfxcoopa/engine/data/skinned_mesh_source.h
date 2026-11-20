@@ -2,29 +2,31 @@
  * @file skinned_mesh_source.h
  * @brief CPU-only bind-pose mesh + skinning data, parsed from a Blender-exported mesh YAML.
  *
- * toyengine has no GPU vertex skinning (no bone-matrix vertex attributes, no shader
- * skinning pass) -- an armature-driven mesh is instead skinned on the CPU each frame,
- * exactly the way toy::scene::ClothRenderer already re-derives a CPU-simulated cloth
- * sheet's vertices every frame and re-uploads them via Mesh::update_vertices()
- * (see cloth_renderer.h's file doc for why that pattern exists: this engine's pipeline
- * never waits per frame, so a dynamic mesh needs one buffer per frame-in-flight).
- * toy::scene::SkinnedMeshRenderer is the CPU-skinning counterpart to ClothRenderer,
- * holding one SkinnedMeshSource (the bind pose) and rewriting a dynamic Mesh from it
- * every frame using the current world matrix of each resolved bone SceneObject.
+ * This is the pure-CPU intermediate toy::scene::SkinnedMeshRenderer deforms each frame --
+ * on the CPU via its skin() path, or as the bind-pose SSBO a GPU skinning dispatch reads
+ * (see toyengine's render/passes/skinning_pass.h). It deliberately holds no GPU resources;
+ * the renderer owns the per-frame-in-flight dynamic Mesh the results land in (see
+ * cloth_renderer.h's file doc for why a dynamic mesh needs one buffer per frame in flight).
  *
- * Extends the plain mesh YAML schema (see mesh.h's file doc) with three more keys,
- * all optional and additive -- a mesh file with none of them still loads exactly as
- * a static coopa::gfx::engine::data::Mesh would via Mesh::from_node():
+ * Extends the plain mesh YAML schema (see mesh.h's file doc) with more keys, all optional
+ * and additive -- a mesh file with none of them still loads exactly as a static
+ * coopa::gfx::engine::data::Mesh would via Mesh::from_node():
  *   joints:                 [[j0,j1,j2,j3], ...]   per-source-vertex, up to 4 palette indices
  *   joint_weights:           [[w0,w1,w2,w3], ...]   per-source-vertex, parallel to joints
  *   inverse_bind_matrices:  [[16 floats], ...]      one per palette entry, COLUMN-MAJOR
  *                                                    (glm::make_mat4() order), mapping a
  *                                                    bind-pose mesh-local vertex into that
  *                                                    palette entry's own bone-local space
+ *   cloth:                                           per-source-vertex cloth paint channels
+ *     max_distance:      [m, ...]                    (see ClothChannels below; authored by the
+ *     backstop_distance: [m, ...]                     editor's Cloth Paint mode and consumed by
+ *     backstop_radius:   [m, ...]                     toyengine's character-cloth system)
+ *     anim_drive:        [0..1, ...]
  *
- * `joints`/`joint_weights` are indexed exactly like `normals`/`uvs` -- by the RAW vertex
- * index used in `vertices`, before triangulation unwelds each corner into its own Vertex
- * (see Mesh::from_node()'s identical convention for normals/uvs/tangents).
+ * `joints`/`joint_weights` and the `cloth:` arrays are indexed exactly like
+ * `normals`/`uvs` -- by the RAW vertex index used in `vertices`, before triangulation
+ * unwelds each corner into its own Vertex (see Mesh::from_node()'s identical convention
+ * for normals/uvs/tangents).
  */
 
 #ifndef GFXCOOPA_ENGINE_DATA_SKINNED_MESH_SOURCE_H
@@ -74,6 +76,41 @@ struct SkinnedMeshSource {
      * renderer then resolves each group name as a bone of its rig. Empty otherwise.
      */
     std::vector<std::string> groups;
+
+    /** @brief The file's raw `vertices:` list -- the WELDED topology, before triangulation
+     *         unwelds each corner. A consumer that needs connectivity (cloth simulation over
+     *         this mesh) builds it over these, never over `vertices`. */
+    std::vector<glm::vec3> source_positions;
+
+    /** @brief Parallel to `vertices`: the raw index in `source_positions` each unwelded corner
+     *         came from. The exact corner->welded-vertex map, carried here so no consumer ever
+     *         re-derives it by positional welding (which an epsilon can get wrong). */
+    std::vector<uint32_t> source_vertex;
+
+    /**
+     * @struct ClothChannels
+     * @brief Painted cloth-paint channels from the file's `cloth:` key, one value per RAW
+     *        vertex (parallel to `source_positions`), all metres except `anim_drive` (0..1).
+     *
+     * Semantics match coopa::physx::cloth::ClothSkinChannels, which toyengine's character-cloth
+     * system copies these into: `max_distance` is the leash around the skinned position (<= 0
+     * means fully skin-driven), the backstop pair keeps fabric off the body, `anim_drive`
+     * scales the spring pulling simulation back toward the skinned pose. `max_distance` is the
+     * presence flag; the other arrays are optional refinements.
+     */
+    struct ClothChannels {
+        std::vector<float> max_distance;      /**< Required when the key is present. */
+        std::vector<float> backstop_distance; /**< Optional. */
+        std::vector<float> backstop_radius;   /**< Optional. */
+        std::vector<float> anim_drive;        /**< Optional. */
+
+        /** @brief True when no (valid) cloth paint is present. */
+        bool empty() const { return max_distance.empty(); }
+    };
+
+    /** @brief Cloth paint; empty unless the file carries a valid `cloth:` key. Arrays whose
+     *         length does not match `source_positions` are discarded at parse. */
+    ClothChannels cloth;
 
     /**
      * @brief Parses a SkinnedMeshSource from a mesh YAML's root fkYAML node.
@@ -186,6 +223,7 @@ struct SkinnedMeshSource {
                         vert.tangent  = (vi < tangents.size())  ? tangents[vi]  : glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
                         out.vertices.push_back(vert);
                         out.indices.push_back(static_cast<uint32_t>(out.indices.size()));
+                        out.source_vertex.push_back(vi);
 
                         out.joints.push_back((vi < raw_joints.size()) ? raw_joints[vi] : glm::ivec4(-1));
                         out.weights.push_back((vi < raw_weights.size()) ? raw_weights[vi] : glm::vec4(0.0f));
@@ -229,6 +267,29 @@ struct SkinnedMeshSource {
                 float flat[16];
                 for (size_t i = 0; i < 16 && i < m.size(); ++i) flat[i] = m.at(i).get_value<float>();
                 out.inverse_bind_matrices.push_back(glm::make_mat4(flat));
+            }
+        }
+
+        out.source_positions = std::move(positions);
+
+        // Cloth paint channels, per RAW vertex. An array of the wrong length is discarded
+        // rather than misindexed; max_distance is the presence flag for the whole block.
+        if (node.contains("cloth") && node.at("cloth").is_mapping()) {
+            const fkyaml::node& cn = node.at("cloth");
+            auto read_channel = [&](const char* key, std::vector<float>& dst) {
+                if (!cn.contains(key)) return;
+                std::vector<float> values;
+                for (const auto& v : cn.at(key)) {
+                    values.push_back(v.is_integer() ? static_cast<float>(v.get_value<int64_t>())
+                                                    : v.get_value<float>());
+                }
+                if (values.size() == out.source_positions.size()) dst = std::move(values);
+            };
+            read_channel("max_distance", out.cloth.max_distance);
+            if (!out.cloth.max_distance.empty()) {
+                read_channel("backstop_distance", out.cloth.backstop_distance);
+                read_channel("backstop_radius", out.cloth.backstop_radius);
+                read_channel("anim_drive", out.cloth.anim_drive);
             }
         }
 

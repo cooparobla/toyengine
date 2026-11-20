@@ -66,10 +66,12 @@ void ViewportChromePanel::draw_viewport_header_(imm::Context& ctx, const imm::Bo
         const bool terrain = app_.terrain_panel_->in_terrain_mode_();
         const bool tiles = app_.tile_mode_panel_->in_tile_mode_();
         const bool painting_instances = app_.instance_paint_panel_->in_instance_mode_();
-        const bool vpaint = app_.paint_panel_->in_paint_mode_() && !app_.paint_panel_->in_weight_paint_(), wpaint = app_.paint_panel_->in_weight_paint_();
+        const bool wpaint = app_.paint_panel_->in_weight_paint_(), cpaint = app_.paint_panel_->in_cloth_paint_();
+        const bool vpaint = app_.paint_panel_->in_paint_mode_() && !wpaint && !cpaint;
         const bool rig_edit = app_.rig_edit_mode_(), posing = app_.in_pose_mode_();
         const std::string mode = terrain ? "Terrain Mode" : tiles ? "Tile Mode" : painting_instances ? "Instance Paint"
                                : sculpting ? "Sculpt Mode" : vpaint ? "Vertex Paint" : wpaint ? "Weight Paint"
+                               : cpaint ? "Cloth Paint"
                                : rig_edit ? "Edit Mode (Rig)" : posing ? "Pose Mode"
                                : mesh_edit ? "Edit Mode"
                                : app_.curve_pen_panel_->in_pen_mode_() ? "Pen Mode" : "Object Mode";
@@ -79,7 +81,7 @@ void ViewportChromePanel::draw_viewport_header_(imm::Context& ctx, const imm::Bo
         if (ctx.invisible_button("mode_dd", mb, &hov, &held)) ctx.open_popup("mode_menu", glm::vec2(mb.x, mb.bottom() + 2));
         ctx.fill_rounded(mb, hov ? ctx.style.button_hover : ctx.style.button);
         ctx.icon(terrain || tiles ? I::Terrain : painting_instances ? I::BrushDraw
-                 : sculpting ? I::SculptMode : vpaint ? I::VertexPaint : wpaint ? I::WeightPaint
+                 : sculpting ? I::SculptMode : vpaint ? I::VertexPaint : wpaint || cpaint ? I::WeightPaint
                  : mesh_edit || rig_edit ? I::EditMode : I::ObjectMode,
                  {mb.x + 4, mb.y + 2, bh - 4, bh - 4}, ctx.style.text);
         ctx.text_in({mb.x + bh + 2, mb.y, w - bh - 16, bh}, mode, ctx.style.text, 0.0f);
@@ -103,7 +105,7 @@ void ViewportChromePanel::draw_viewport_header_(imm::Context& ctx, const imm::Bo
         else if (painting_instances) x = app_.instance_paint_panel_->draw_instance_header_(ctx, x, hb);
         else if (tiles) x = app_.tile_mode_panel_->draw_tile_header_(ctx, x, hb);
         else if (sculpting) x = app_.sculpt_panel_->draw_sculpt_header_(ctx, x, hb);
-        else if (vpaint || wpaint) x = app_.paint_panel_->draw_paint_header_(ctx, x, hb);
+        else if (vpaint || wpaint || cpaint) x = app_.paint_panel_->draw_paint_header_(ctx, x, hb);
     }
     if (mesh_edit) {
         int sm = static_cast<int>(app_.mesh_.selection.mode);
@@ -1109,6 +1111,10 @@ void ViewportChromePanel::draw_mode_menu_items_(imm::Context& ctx) {
     if (ctx.menu_item("Sculpt Mode", "", &sc, mesh_obj && !app_.playing(), I::SculptMode)) app_.set_interaction_mode(InteractionMode::Sculpt);
     if (ctx.menu_item("Vertex Paint", "", &vp, mesh_obj && !app_.playing(), I::VertexPaint)) app_.set_interaction_mode(InteractionMode::VertexPaint);
     if (ctx.menu_item("Weight Paint", "", &wp, mesh_obj && !app_.playing(), I::WeightPaint)) app_.set_interaction_mode(InteractionMode::WeightPaint);
+    bool cp = cur == InteractionMode::ClothPaint;
+    if (ctx.menu_item("Cloth Paint", "", &cp, mesh_obj && !app_.playing(), I::WeightPaint)) app_.set_interaction_mode(InteractionMode::ClothPaint);
+    ctx.tooltip("Cloth Paint\nPaint the mesh's cloth channels (Max Distance, Backstop, Anim Drive) -- what a "
+                "CharacterCloth component simulates. Saved as the mesh's `cloth:` key.");
     // Any object: draw a Bezier path on it. Unlike the mesh modes this needs nothing of the
     // object first -- entering adds the Curve component when it has none, which is what "draw a
     // path here" means.

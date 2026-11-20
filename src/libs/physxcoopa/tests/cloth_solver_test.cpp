@@ -11,14 +11,20 @@
 #include <physxcoopa/cloth/cloth_builder.h>
 #include <physxcoopa/cloth/cloth_solver.h>
 #include <physxcoopa/components/cloth.h>
+#include <physxcoopa/physx_yaml.h>
 #include <physxcoopa/components/sphere_collider.h>
 #include <physxcoopa/components/rigidbody.h>
 #include <physxcoopa/system/physics_system.h>
+#include <coopa/asset/asset_manager.h>
 #include <coopa/scene/scene.h>
 #include <coopa/scene/scene_object.h>
 #include <coopa/scene/components/transform_component.h>
 #include <coopa/job/engine.h>
+#include <algorithm>
+#include <cmath>
+#include <iostream>
 #include <memory>
+#include <sstream>
 #include "support/cloth_fixtures.h"
 
 COOPA_TEST_SUITE("cloth_solver");
@@ -38,10 +44,13 @@ COOPA_TEST(grid_builder_topology_and_disjoint_batches) {
 
     ASSERT_TRUE(c.particles.size() == res * res);
     ASSERT_TRUE(c.columns == res && c.rows == res);
-    // (res-1)*res horizontal + the same vertical + two diagonals per cell.
+    // (res-1)*res horizontal + the same vertical, and the two diagonals per cell in their OWN
+    // list: a weave's threads and its shear are different material properties, held at different
+    // compliances (ClothParams::shear_compliance).
     const std::size_t structural = 2u * (res - 1) * res;
     const std::size_t shear = 2u * (res - 1) * (res - 1);
-    ASSERT_TRUE(c.stretch.size() == structural + shear);
+    ASSERT_TRUE(c.stretch.size() == structural);
+    ASSERT_TRUE(c.shear.size() == shear);
     ASSERT_TRUE(c.bend.size() == 2u * (res - 2) * res);
     ASSERT_TRUE(c.triangles.size() == (res - 1) * (res - 1) * 6);
 
@@ -63,6 +72,7 @@ COOPA_TEST(grid_builder_topology_and_disjoint_batches) {
         return true;
     };
     ASSERT_TRUE(batches_disjoint(c.stretch, c.stretch_batches, c.particles.size()));
+    ASSERT_TRUE(batches_disjoint(c.shear, c.shear_batches, c.particles.size()));
     ASSERT_TRUE(batches_disjoint(c.bend, c.bend_batches, c.particles.size()));
 
     // Every constraint must land in exactly one batch -- a gap would silently stop solving part
@@ -460,4 +470,545 @@ COOPA_TEST(cloth_component_binds_follows_its_anchor_and_unbinds) {
     scene.update(h);
     scene.late_update(h);
     ASSERT_TRUE(dynamic_cast<system::PhysicsSystem*>(scene.find_system("Physics"))->world().cloth_count() == 0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Skin cloth: the painted-channel stages (3b skin pins, anim drive, 5b max-distance/backstop).
+// Builder topology for the mesh path is cloth_mesh_builder_test.cpp.
+// ---------------------------------------------------------------------------------------------
+
+#include <physxcoopa/cloth/cloth_mesh_builder.h>
+
+#include <cstring>
+#include <limits>
+
+namespace {
+
+/** @brief A res x res welded patch (XY plane, z == `z`) through the MESH builder, with the given
+ *         channels. Mirrors cloth_mesh_builder_test.cpp's make_patch. */
+cloth::Cloth make_skin_patch(uint32_t res, float size, float z, cloth::ClothSkinChannels channels,
+                             cloth::ClothParams params = {}) {
+    cloth::MeshClothDesc desc;
+    const float spacing = size / static_cast<float>(res - 1);
+    for (uint32_t y = 0; y < res; ++y) {
+        for (uint32_t x = 0; x < res; ++x) {
+            desc.positions.push_back(glm::vec3(static_cast<float>(x) * spacing,
+                                               static_cast<float>(y) * spacing, z));
+        }
+    }
+    for (uint32_t y = 0; y + 1 < res; ++y) {
+        for (uint32_t x = 0; x + 1 < res; ++x) {
+            const uint32_t i00 = y * res + x, i10 = y * res + x + 1;
+            const uint32_t i01 = (y + 1) * res + x, i11 = (y + 1) * res + x + 1;
+            desc.triangles.insert(desc.triangles.end(), {i00, i10, i11});
+            desc.triangles.insert(desc.triangles.end(), {i00, i11, i01});
+        }
+    }
+    desc.channels = std::move(channels);
+    desc.params = params;
+    return cloth::make_mesh_cloth(desc);
+}
+
+constexpr float k_skin_h = 1.0f / 60.0f;
+const glm::vec3 k_skin_gravity(0.0f, 0.0f, -9.81f);
+
+} // namespace
+
+/**
+ * @brief Stage 3b and 5b: painted-zero particles track their targets exactly, and every free
+ *        particle stays inside its painted max-distance sphere -- under gravity AND while the
+ *        targets travel, which is the case that matters for clothing on a moving character.
+ */
+COOPA_TEST(skin_pins_track_targets_and_max_distance_holds) {
+    const uint32_t res = 7;
+    const std::size_t n = res * res;
+    cloth::ClothSkinChannels ch;
+    ch.max_distance.assign(n, 0.3f);
+    for (uint32_t x = 0; x < res; ++x) ch.max_distance[(res - 1) * res + x] = 0.0f;
+
+    cloth::ClothParams params;
+    params.anim_drive_compliance = 0.0f; // no drive: isolate the clamp
+    cloth::Cloth c = make_skin_patch(res, 2.0f, 2.0f, ch, params);
+    const std::vector<glm::vec3> rest = [&] {
+        std::vector<glm::vec3> r;
+        for (const cloth::ClothParticle& p : c.particles) r.push_back(p.position);
+        return r;
+    }();
+
+    cloth::ClothSolverScratch scratch;
+    const std::vector<cloth::ClothCollider> no_colliders;
+    for (int frame = 0; frame < 120; ++frame) {
+        // Targets travel +X at 1.5 m/s after half a second at rest.
+        const float t = static_cast<float>(frame) * k_skin_h;
+        const float travel = (t > 0.5f) ? (t - 0.5f) * 1.5f : 0.0f;
+        for (std::size_t i = 0; i < n; ++i) {
+            c.skin_targets.position[i] = rest[i] + glm::vec3(travel, 0.0f, 0.0f);
+        }
+        cloth::solve_cloth(c, no_colliders, k_skin_gravity, 4, 1, k_skin_h, scratch);
+    }
+
+    for (std::size_t i = 0; i < n; ++i) {
+        const float d = glm::length(c.particles[i].position - c.skin_targets.position[i]);
+        if (c.skin.max_distance[i] <= 1e-6f) {
+            ASSERT_TRUE(d < 1e-4f); // skin-driven: written outright from the target
+        } else {
+            ASSERT_TRUE(d <= 0.3f + 1e-3f); // free: leashed to the painted radius
+        }
+    }
+}
+
+/** @brief Anim drive pulls the sheet toward its targets against gravity: full drive hangs far
+ *         closer to the skinned pose than zero drive, and stiffer-than-painted never exceeds the
+ *         max-distance leash. */
+COOPA_TEST(skin_anim_drive_pulls_toward_targets) {
+    const uint32_t res = 7;
+    const std::size_t n = res * res;
+
+    auto sag = [&](float drive_gain) {
+        cloth::ClothSkinChannels ch;
+        ch.max_distance.assign(n, 1.0f); // loose leash so the drive, not the clamp, decides
+        for (uint32_t x = 0; x < res; ++x) ch.max_distance[(res - 1) * res + x] = 0.0f;
+        if (drive_gain > 0.0f) ch.anim_drive.assign(n, drive_gain);
+
+        cloth::ClothParams params;
+        params.anim_drive_compliance = 1e-4f;
+        cloth::Cloth c = make_skin_patch(res, 2.0f, 2.0f, ch, params);
+
+        cloth::ClothSolverScratch scratch;
+        const std::vector<cloth::ClothCollider> no_colliders;
+        for (int frame = 0; frame < 180; ++frame) {
+            cloth::solve_cloth(c, no_colliders, k_skin_gravity, 4, 1, k_skin_h, scratch);
+        }
+        float worst = 0.0f;
+        for (std::size_t i = 0; i < n; ++i) {
+            worst = std::max(worst,
+                             glm::length(c.particles[i].position - c.skin_targets.position[i]));
+        }
+        return worst;
+    };
+
+    const float driven = sag(1.0f);
+    const float undriven = sag(0.0f);
+    ASSERT_TRUE(driven < 0.08f);           // full drive at 1e-4 m/N holds the pose closely
+    ASSERT_TRUE(undriven > driven * 3.0f); // and that is the drive's doing, not the leash's
+}
+
+/**
+ * @brief Stage 5b backstop: with a backstop sphere tucked behind the skinned surface, gravity
+ *        cannot pull the sheet below its targets' plane; without one it sags to the leash.
+ */
+COOPA_TEST(skin_backstop_keeps_cloth_off_the_body) {
+    const uint32_t res = 7;
+    const std::size_t n = res * res;
+
+    auto lowest = [&](bool backstop) {
+        cloth::ClothSkinChannels ch;
+        ch.max_distance.assign(n, 0.5f);
+        for (uint32_t x = 0; x < res; ++x) ch.max_distance[(res - 1) * res + x] = 0.0f;
+        if (backstop) {
+            ch.backstop_distance.assign(n, 0.0f);
+            ch.backstop_radius.assign(n, 0.5f);
+        }
+        cloth::ClothParams params;
+        params.anim_drive_compliance = 0.0f;
+        cloth::Cloth c = make_skin_patch(res, 2.0f, 2.0f, ch, params);
+        if (backstop) {
+            // Skinned surface faces +Z, so the backstop sphere sits beneath each target.
+            c.skin_targets.normal.assign(n, glm::vec3(0.0f, 0.0f, 1.0f));
+        }
+
+        cloth::ClothSolverScratch scratch;
+        const std::vector<cloth::ClothCollider> no_colliders;
+        for (int frame = 0; frame < 180; ++frame) {
+            cloth::solve_cloth(c, no_colliders, k_skin_gravity, 4, 1, k_skin_h, scratch);
+        }
+        float low = std::numeric_limits<float>::max();
+        for (const cloth::ClothParticle& p : c.particles) low = std::min(low, p.position.z);
+        return low;
+    };
+
+    const float with_backstop = lowest(true);
+    const float without = lowest(false);
+    ASSERT_TRUE(with_backstop > 2.0f - 5e-3f); // held at the targets' z == 2 plane
+    ASSERT_TRUE(without < 2.0f - 0.2f);        // control: gravity really was pulling
+}
+
+/** @brief Serial and job-parallel solves of a skin cloth -- channels, drive, backstop, moving
+ *         targets -- produce bit-identical particle state, extending the determinism contract to
+ *         the new stages. */
+COOPA_TEST(skin_solve_is_deterministic_serial_and_parallel) {
+    const uint32_t res = 13;
+    const std::size_t n = res * res;
+
+    auto run = [&](coopa::job::JobEngine* jobs) {
+        cloth::ClothSkinChannels ch;
+        ch.max_distance.assign(n, 0.4f);
+        for (uint32_t x = 0; x < res; ++x) ch.max_distance[(res - 1) * res + x] = 0.0f;
+        ch.anim_drive.assign(n, 0.5f);
+        ch.backstop_distance.assign(n, 0.02f);
+        ch.backstop_radius.assign(n, 0.3f);
+
+        cloth::Cloth c = make_skin_patch(res, 2.0f, 2.0f, ch);
+        c.skin_targets.normal.assign(n, glm::vec3(0.0f, 0.0f, 1.0f));
+        const std::vector<glm::vec3> rest = c.skin_targets.position;
+
+        cloth::ClothSolverScratch scratch;
+        const std::vector<cloth::ClothCollider> no_colliders;
+        for (int frame = 0; frame < 90; ++frame) {
+            const float travel = static_cast<float>(frame) * k_skin_h * 1.2f;
+            for (std::size_t i = 0; i < n; ++i) {
+                c.skin_targets.position[i] = rest[i] + glm::vec3(travel, 0.3f * travel, 0.0f);
+            }
+            if (jobs) {
+                auto dispatch = [jobs](std::size_t count, auto&& fn) {
+                    if (count == 0) return;
+                    jobs->parallel_for_blocking(
+                        count, 0, [&fn](std::size_t b, std::size_t e) { fn(b, e); }, 0,
+                        coopa::job::Priority::Normal, coopa::job::Priority::Normal);
+                };
+                cloth::solve_cloth(c, no_colliders, k_skin_gravity, 4, 1, k_skin_h, scratch,
+                                   dispatch);
+            } else {
+                cloth::solve_cloth(c, no_colliders, k_skin_gravity, 4, 1, k_skin_h, scratch);
+            }
+        }
+        return c.particles;
+    };
+
+    const std::vector<cloth::ClothParticle> serial = run(nullptr);
+    coopa::job::JobEngine jobs(4);
+    const std::vector<cloth::ClothParticle> parallel = run(&jobs);
+    ASSERT_TRUE(serial.size() == parallel.size());
+    ASSERT_TRUE(std::memcmp(serial.data(), parallel.data(),
+                            serial.size() * sizeof(cloth::ClothParticle)) == 0);
+}
+
+/**
+ * @brief An authored compliance describes a FABRIC, not a mass: the same bend compliance hangs a
+ *        1 kg sheet and a 10 kg sheet of the same size into the same shape.
+ *
+ * This is the property `project_distance()` folds the constraint's inverse mass in for, and the
+ * one the whole documented compliance scale rests on. Without it a compliance in m/N is measured
+ * against `1/m`, which for a 1.6 g cloth particle is ~1250 -- so every value small enough to read
+ * as "stiff" comes out rigid, a sheet cannot crease, and an inextensible sheet that cannot crease
+ * cannot drape over anything convex at all.
+ *
+ * Shape, not sag: a heavier sheet under the same gravity reaches the same hanging shape (gravity
+ * scales with mass too), so the two pinned sheets must agree closely. The guard against the test
+ * passing vacuously is the second half -- a compliance that is NOT mass-normalised would make the
+ * 10x sheet visibly stiffer, which is what the loose bound would catch.
+ */
+COOPA_TEST(bend_compliance_describes_the_fabric_not_the_mass) {
+    auto hang = [](float total_mass) {
+        cloth::ClothParams params;
+        params.bend_compliance = 5e-3f;
+        params.air_drag = 0.0f;
+        params.air_lift = 0.0f;
+        cloth::GridClothDesc desc;
+        desc.columns = desc.rows = 9;
+        desc.width = desc.height = 1.0f;
+        desc.center = glm::vec3(0.0f, 0.0f, 2.0f);
+        desc.total_mass = total_mass;
+        desc.params = params;
+        cloth::Cloth c = cloth::make_grid_cloth(desc);
+        // Pin one edge; the rest folds down over it.
+        for (uint32_t x = 0; x < desc.columns; ++x) {
+            c.particles[x].inv_mass = 0.0f;
+            cloth::ClothAnchor a;
+            a.particle = x;
+            a.world_position = c.particles[x].position;
+            a.prev_world_position = a.world_position;
+            c.anchors.push_back(a);
+        }
+        cloth::ClothSolverScratch scratch;
+        const std::vector<cloth::ClothCollider> none;
+        for (int frame = 0; frame < 240; ++frame) {
+            cloth::solve_cloth(c, none, glm::vec3(0.0f, 0.0f, -9.81f), 4, 1, 1.0f / 60.0f, scratch);
+        }
+        return c;
+    };
+
+    const cloth::Cloth light = hang(1.0f);
+    const cloth::Cloth heavy = hang(10.0f);
+    float worst = 0.0f;
+    for (std::size_t i = 0; i < light.particles.size(); ++i) {
+        worst = std::max(worst, glm::length(light.particles[i].position - heavy.particles[i].position));
+    }
+    // 1 cm over a 1 m sheet. Against a raw (non-normalised) compliance the 10x sheet's constraints
+    // are 10x softer relative to it and the two settle centimetres apart.
+    ASSERT_TRUE(worst < 0.01f);
+}
+
+/**
+ * @brief A weave gives way by SHEARING, not by its threads changing length.
+ *
+ * The distinction is the whole reason shear has a compliance of its own. A flat sheet cannot be
+ * laid on a sphere isometrically, so conforming to one means losing circumference somewhere, and
+ * where it is lost decides what the result looks like. Lost to shear -- warp and weft scissoring
+ * toward each other -- every thread keeps its length and the sheet folds onto the ball. Lost to
+ * the threads themselves, the sheet SHRINKS onto it: measured at 12% mean thread compression on
+ * the ball demo, with the hem riding up above the equator and the ball showing underneath.
+ *
+ * Measured on the constraint lengths directly, so it cannot be confused with a collision or a
+ * leash doing the work.
+ */
+COOPA_TEST(a_weave_shears_rather_than_changing_thread_length) {
+    cloth::ClothParams params;
+    params.stretch_compliance = 0.0f;
+    params.bend_compliance = 5e-3f;
+    cloth::Cloth c = make_test_sheet(9, glm::vec3(0.0f, 0.0f, 2.0f), params);
+    // Pin the four corners and let the middle fall: the sheet goes into tension radially and
+    // has to give way in the hoop direction around the sag.
+    for (const uint32_t i : {0u, 8u, 72u, 80u}) {
+        c.particles[i].inv_mass = 0.0f;
+        cloth::ClothAnchor a;
+        a.particle = i;
+        a.world_position = c.particles[i].position;
+        a.prev_world_position = a.world_position;
+        c.anchors.push_back(a);
+    }
+    cloth::ClothSolverScratch scratch;
+    const std::vector<cloth::ClothCollider> none;
+    for (int frame = 0; frame < 240; ++frame) {
+        cloth::solve_cloth(c, none, glm::vec3(0.0f, 0.0f, -9.81f), 4, 1, 1.0f / 60.0f, scratch);
+    }
+
+    auto strain_range = [&](const std::vector<cloth::ClothConstraint>& list) {
+        glm::vec2 range(0.0f);
+        for (const cloth::ClothConstraint& k : list) {
+            const float e = glm::length(c.particles[k.a].position - c.particles[k.b].position) /
+                                k.rest_length - 1.0f;
+            range.x = std::max(range.x, e);
+            range.y = std::min(range.y, e);
+        }
+        return range;
+    };
+    const glm::vec2 thread = strain_range(c.stretch);
+    const glm::vec2 diagonal = strain_range(c.shear);
+    std::cout << "    thread " << thread.x << " / " << thread.y << "   diagonal " << diagonal.x
+              << " / " << diagonal.y << "\n";
+
+    // The threads hold. The few percent of stretch that remains is not compliance -- stretch
+    // compliance is 0 here -- but small-substep XPBD's convergence at one iteration per substep.
+    ASSERT_TRUE(thread.x < 0.05f);
+    // And they do NOT shorten, which is the failure this exists for.
+    ASSERT_TRUE(thread.y > -0.01f);
+    // The give is in the shear, by an order of magnitude.
+    ASSERT_TRUE(std::abs(diagonal.y) > std::abs(thread.y) * 10.0f);
+}
+
+/**
+ * @brief A collider that starts moving nudges the cloth lying on it; it does not launch it.
+ *
+ * The failure this pins down is specific to position-based dynamics and invisible to every
+ * interpenetration check there is. Velocity at stage 8 is `(p - prev) / hs`, so a correction is
+ * read back as motion -- which is only meaningful if the correction itself was. Hand the solver
+ * one displacement for the whole frame and hold the shape at the FAR END of it for every substep,
+ * and a sphere travelling 4 m/s arrives 6.7 cm inside the sheet on substep one; projecting that
+ * out inside a 1/240 s substep reports 16 m/s of cloth, and the sheet is thrown off the body it
+ * was resting on. Measured on the ball demo before this: 13.7 m/s on the first frame the ball
+ * moved, with the sheet's coverage of the ball down from 91% to 10% within two seconds.
+ *
+ * Both halves are asserted, because only the comparison shows the test has teeth: the swept
+ * collider must stay near its own speed, and the teleported one must not.
+ */
+COOPA_TEST(a_moving_collider_arrives_instead_of_teleporting) {
+    collision::Shape sphere = collision::Shape::make_sphere(1.0f);
+
+    // A small sheet dropped onto the crown of a sphere at the origin, left to settle.
+    auto settled = [&]() {
+        cloth::ClothParams params;
+        params.bend_compliance = 5e-3f;
+        params.air_drag = 0.0f;
+        params.air_lift = 0.0f;
+        cloth::GridClothDesc desc;
+        desc.columns = desc.rows = 9;
+        desc.width = desc.height = 1.0f;
+        desc.center = glm::vec3(0.0f, 0.0f, 1.15f);
+        desc.params = params;
+        cloth::Cloth c = cloth::make_grid_cloth(desc);
+
+        cloth::ClothCollider still;
+        still.shape = &sphere;
+        still.bounds = collision::world_bounds(sphere, glm::vec3(0.0f), still.orientation);
+        const std::vector<cloth::ClothCollider> colliders{still};
+        cloth::ClothSolverScratch scratch;
+        for (int frame = 0; frame < 180; ++frame) {
+            cloth::solve_cloth(c, colliders, glm::vec3(0.0f, 0.0f, -9.81f), 4, 1, 1.0f / 60.0f,
+                               scratch);
+        }
+        return c;
+    };
+
+    // One frame of a 4 m/s sideways move, described two ways.
+    const float dt = 1.0f / 60.0f;
+    const glm::vec3 step(4.0f * dt, 0.0f, 0.0f);
+    auto drive = [&](cloth::Cloth c, bool swept) {
+        cloth::ClothSolverScratch scratch;
+        glm::vec3 centre(0.0f);
+        float peak = 0.0f;
+        for (int frame = 0; frame < 10; ++frame) {
+            centre += step;
+            cloth::ClothCollider collider;
+            collider.shape = &sphere;
+            // Swept: the pose at the top of the step plus the displacement across it. Teleported:
+            // the end pose alone, which is what PhysicsWorld used to hand over.
+            collider.position = swept ? centre - step : centre;
+            collider.sweep = swept ? step : glm::vec3(0.0f);
+            collider.linear_velocity = step / dt;
+            collider.bounds = collision::world_bounds(sphere, centre - step, collider.orientation);
+            const geometry::AABB end = collision::world_bounds(sphere, centre, collider.orientation);
+            collider.bounds.min = glm::min(collider.bounds.min, end.min);
+            collider.bounds.max = glm::max(collider.bounds.max, end.max);
+            const std::vector<cloth::ClothCollider> colliders{collider};
+            cloth::solve_cloth(c, colliders, glm::vec3(0.0f, 0.0f, -9.81f), 4, 1, dt, scratch);
+            peak = std::max(peak, cloth::max_particle_speed(c));
+        }
+        return peak;
+    };
+
+    const cloth::Cloth rest = settled();
+    ASSERT_TRUE(cloth::max_particle_speed(rest) < 0.05f);   // it really did settle first
+
+    const float arriving = drive(rest, true);
+    const float teleporting = drive(rest, false);
+    std::cout << "    swept " << arriving << " m/s   teleported " << teleporting
+              << " m/s   (sphere doing 4)\n";
+
+    // Twice the sphere's own speed: fabric a sphere slides under genuinely moves, and the loose
+    // edges flick, but it stays the same order as the thing pushing it.
+    ASSERT_TRUE(arriving < 8.0f);
+    // And the comparison is the point -- without the sweep the same frame is several times worse.
+    ASSERT_TRUE(teleporting > arriving * 2.0f);
+}
+
+/**
+ * @brief A long frame buys more substeps, and never a longer one.
+ *
+ * `cloth::frame_substeps()` is the whole claim, and it is worth a test of its own because both
+ * failures it sits between are silent. Nothing in the solver notices a 15.6 ms substep -- it simply
+ * stops holding the margins the collision stage is sized against, and the sheet slides off the body
+ * it was draped over (measured on the ball demo at a 0.25 s frame: upper-cap coverage 81% -> 43%).
+ * And nothing notices a TRUNCATED frame either, which was the first attempt at a fix and is worse:
+ * the anchors still carry a whole frame of motion, so completing a 1 m anchor move inside a 0.067 s
+ * solve read back as 47.5 m/s and tore the sheet off entirely. Both numbers come from
+ * `cloth_probe_test.cpp` swept over `CLOTH_PROBE_DT`.
+ */
+COOPA_TEST(a_long_frame_buys_more_substeps_not_longer_ones) {
+    const float internal_h = (1.0f / 60.0f) / 4.0f;   // the shipped default: 1/240 s
+
+    // The common case, unchanged: one substep per 1/240 s of frame, exactly as the plain clamp gave.
+    ASSERT_TRUE(cloth::frame_substeps(1.0f / 60.0f, internal_h) == 4u);
+    ASSERT_TRUE(cloth::frame_substeps(1.0f / 30.0f, internal_h) == 8u);
+    ASSERT_TRUE(cloth::frame_substeps(1.0f / 15.0f, internal_h) == 16u);
+    ASSERT_TRUE(cloth::frame_substeps(1.0f / 144.0f, internal_h) == 2u);
+    // Never zero, however short the frame -- a 1000 fps host still steps the cloth.
+    ASSERT_TRUE(cloth::frame_substeps(0.001f, internal_h) == 1u);
+
+    // The invariant that matters: across every frame length step() can hand over, the substep stays
+    // at or under the authored one. This is what failed before, from 1/15 s upward.
+    for (const float dt : {1.0f / 300.0f, 1.0f / 60.0f, 1.0f / 15.0f, 0.1f, 0.2f,
+                           util::k_max_frame_time}) {
+        const float hs = dt / static_cast<float>(cloth::frame_substeps(dt, internal_h));
+        ASSERT_TRUE(hs <= internal_h + 1e-6f);
+    }
+
+    // And what that buys downstream: a collider doing 4 m/s cannot advance further than the
+    // standoff in one substep, at any frame length. The stretched substep broke exactly this.
+    cloth::ClothParams defaults;
+    const float worst_hs = util::k_max_frame_time /
+                           static_cast<float>(cloth::frame_substeps(util::k_max_frame_time, internal_h));
+    std::cout << "    worst-case substep " << worst_hs * 1000.0f << " ms over "
+              << cloth::frame_substeps(util::k_max_frame_time, internal_h)
+              << " substeps; a 4 m/s collider advances " << 4.0f * worst_hs * 100.0f
+              << " cm against a " << defaults.thickness * 100.0f << " cm standoff\n";
+    ASSERT_TRUE(4.0f * worst_hs < defaults.thickness);
+
+    // The absolute ceiling still binds, so a pathological cloth_substeps cannot ask for unbounded
+    // work -- it just reverts to a stretched substep, which is the lesser of the two evils there.
+    ASSERT_TRUE(cloth::frame_substeps(util::k_max_frame_time, 1e-5f) == util::k_max_cloth_substeps);
+}
+
+COOPA_TEST(every_cloth_tunable_survives_the_yaml_round_trip) {
+    using namespace coopa::scene;
+    coopa::asset::AssetManager assets;
+    register_physics_components(assets);
+    // SceneLoader's parser table is process-global: unregister even when a check below ends the
+    // test early, so no later test in this process inherits it.
+    struct ParserReset {
+        ~ParserReset() { SceneLoader::clear_component_parsers(); }
+    } reset_parsers;
+
+    std::istringstream iss(
+        "scene:\n"
+        "  scene_name: ClothKeyTest\n"
+        "  root_objects:\n"
+        "    - name: sheet\n"
+        "      components:\n"
+        "        - { type: Transform, position: { x: 0, y: 0, z: 2 } }\n"
+        "        - type: Cloth\n"
+        "          resolution: { x: 7, y: 5 }\n"
+        "          size: { x: 3.0, y: 2.0 }\n"
+        "          mass: 2.5\n"
+        "          shear: false\n"
+        "          stretch_compliance: 1.0e-4\n"
+        "          shear_compliance: 2.0e-3\n"
+        "          compression_compliance: 3.0e-3\n"
+        "          bend_compliance: 4.0e-3\n"
+        "          damping: 0.11\n"
+        "          thickness: 0.07\n"
+        "          friction: 0.33\n"
+        "          gravity_scale: 0.5\n"
+        "          max_velocity: 42.0\n"
+        "          external_acceleration: { x: 1.0, y: 2.0, z: 3.0 }\n"
+        "          wind: { x: 0.5, y: 0.25, z: 0.125 }\n"
+        "          wind_turbulence: 0.6\n"
+        "          weather_wind: 0.4\n"
+        "          air_drag: 0.08\n"
+        "          air_lift: 0.09\n"
+        "          collide_surface: false\n"
+        "          self_collision: true\n"
+        "          self_distance: 0.04\n"
+        "          tether_scale: 1.05\n"
+        "          substeps: 6\n"
+        "          iterations: 3\n"
+        "          sleep_threshold: 0.02\n"
+        "          sleep_time: 1.5\n");
+    fkyaml::node root = fkyaml::node::deserialize(iss);
+    Scene scene = SceneLoader::load_from_node(root, "");
+
+    auto* cc = scene.find_object("sheet")->get_component<components::ClothComponent>();
+    ASSERT_TRUE(cc != nullptr);
+    ASSERT_TRUE(cc->columns == 7 && cc->rows == 5);
+    ASSERT_NEAR(cc->width, 3.0f, 1e-6f);
+    ASSERT_NEAR(cc->height, 2.0f, 1e-6f);
+    ASSERT_NEAR(cc->mass, 2.5f, 1e-6f);
+    ASSERT_TRUE(cc->shear == false);
+    ASSERT_NEAR(cc->weather_wind, 0.4f, 1e-6f);
+
+    const cloth::ClothParams& p = cc->params;
+    ASSERT_NEAR(p.stretch_compliance, 1.0e-4f, 1e-9f);
+    ASSERT_NEAR(p.shear_compliance, 2.0e-3f, 1e-9f);
+    ASSERT_NEAR(p.compression_compliance, 3.0e-3f, 1e-9f);
+    ASSERT_NEAR(p.bend_compliance, 4.0e-3f, 1e-9f);
+    ASSERT_NEAR(p.damping, 0.11f, 1e-6f);
+    ASSERT_NEAR(p.thickness, 0.07f, 1e-6f);
+    ASSERT_NEAR(p.friction, 0.33f, 1e-6f);
+    ASSERT_NEAR(p.gravity_scale, 0.5f, 1e-6f);
+    ASSERT_NEAR(p.max_velocity, 42.0f, 1e-6f);
+    ASSERT_NEAR(p.external_acceleration.x, 1.0f, 1e-6f);
+    ASSERT_NEAR(p.external_acceleration.z, 3.0f, 1e-6f);
+    ASSERT_NEAR(p.wind.x, 0.5f, 1e-6f);
+    ASSERT_NEAR(p.wind.z, 0.125f, 1e-6f);
+    ASSERT_NEAR(p.wind_turbulence, 0.6f, 1e-6f);
+    ASSERT_NEAR(p.air_drag, 0.08f, 1e-6f);
+    ASSERT_NEAR(p.air_lift, 0.09f, 1e-6f);
+    ASSERT_TRUE(p.collide_surface == false);   // default true, so a parsed false proves the key
+    ASSERT_TRUE(p.self_collision == true);
+    ASSERT_NEAR(p.self_distance, 0.04f, 1e-6f);
+    ASSERT_NEAR(p.tether_scale, 1.05f, 1e-6f);
+    ASSERT_TRUE(p.substeps == 6u);
+    ASSERT_TRUE(p.iterations == 3u);
+    ASSERT_NEAR(p.sleep_threshold, 0.02f, 1e-6f);
+    ASSERT_NEAR(p.sleep_time, 1.5f, 1e-6f);
 }

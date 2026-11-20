@@ -8,6 +8,7 @@
 #include "editor/app/editor_app.h"
 #include "editor/app/ui/instance_paint.h"
 #include "editor/app/ui/weights.h"
+#include "editor/mesh/cloth_paint.h"
 
 namespace toy {
 namespace editor {
@@ -20,17 +21,29 @@ bool PaintPanel::in_weight_paint_() const {
     return app_.mesh_mode_target_() && app_.mode_ == InteractionMode::WeightPaint;
 }
 
+bool PaintPanel::in_cloth_paint_() const {
+    return app_.mesh_mode_target_() && app_.mode_ == InteractionMode::ClothPaint;
+}
+
 bool PaintPanel::in_brush_mode_() const {
     return app_.in_sculpt_mode_() || in_paint_mode_() || app_.terrain_panel_->in_terrain_mode_() ||
            app_.tile_mode_panel_->in_tile_mode_() || app_.instance_paint_panel_->in_instance_mode_();
 }
 
 PaintSettings& PaintPanel::paint_settings_() {
-    return app_.mode_ == InteractionMode::WeightPaint ? app_.wpaint_ : app_.vpaint_;
+    return app_.mode_ == InteractionMode::WeightPaint ? app_.wpaint_
+           : app_.mode_ == InteractionMode::ClothPaint ? app_.cpaint_
+                                                       : app_.vpaint_;
 }
 
 PaintPreview::Show PaintPanel::paint_show_() const {
-    return {app_.mode_ == InteractionMode::WeightPaint, app_.active_group_};
+    PaintPreview::Show show{app_.mode_ == InteractionMode::WeightPaint, app_.active_group_};
+    if (app_.mode_ == InteractionMode::ClothPaint) {
+        show.cloth = true;
+        show.cloth_channel = static_cast<uint32_t>(app_.active_cloth_channel_);
+        show.cloth_scale = app_.cloth_display_max_[app_.active_cloth_channel_ & 3];
+    }
+    return show;
 }
 
 PaintSettings& PaintPanel::vertex_paint_settings() {
@@ -152,7 +165,9 @@ void PaintPanel::paint_frame_() {
     }
     app_.scene_uploaded_revision_ = app_.mesh_.geometry_revision;   // the preview shows it; no re-export
     const PaintPreview::Show show = paint_show_();
-    if (app_.paint_pos_ != app_.mesh_.position_revision || show.weights != app_.paint_shown_.weights || show.group != app_.paint_shown_.group) {
+    if (app_.paint_pos_ != app_.mesh_.position_revision || show.weights != app_.paint_shown_.weights || show.group != app_.paint_shown_.group ||
+        show.cloth != app_.paint_shown_.cloth || show.cloth_channel != app_.paint_shown_.cloth_channel ||
+        show.cloth_scale != app_.paint_shown_.cloth_scale) {
         app_.paint_preview_.update(app_.mesh_.mesh, app_.sculpt_cache_, show, app_.engine_.frame_slot());
         app_.paint_pos_ = app_.mesh_.position_revision;
         app_.paint_shown_ = show;
@@ -191,12 +206,16 @@ void PaintPanel::paint_dab_at_(const ViewProj& vp, glm::vec2 px, std::vector<uin
     sd.view_dir = d.view_dir;
     sd.radius = d.radius;
     const bool weights = app_.mode_ == InteractionMode::WeightPaint;
+    const bool cloth = app_.mode_ == InteractionMode::ClothPaint;
     const uint32_t group = weights ? paint_group_(app_.mesh_.mesh) : 0u;
+    const ClothChannel channel = static_cast<ClothChannel>(app_.active_cloth_channel_ & 3);
+    const float cloth_value = app_.cloth_paint_value_[app_.active_cloth_channel_ & 3];
     for_each_symmetric(sd, mirror_images(s.symmetry, app_.mesh_world_()), [&](const SculptDab& md) {
         PaintDab pd = d;
         pd.center = md.center;
         pd.view_dir = md.view_dir;
-        if (weights) weight_paint_dab(app_.mesh_.mesh, app_.sculpt_cache_, app_.sculpt_grid_, s, group, pd, changed);
+        if (cloth) cloth_paint_dab(app_.mesh_.mesh, app_.sculpt_cache_, app_.sculpt_grid_, s, channel, cloth_value, pd, changed);
+        else if (weights) weight_paint_dab(app_.mesh_.mesh, app_.sculpt_cache_, app_.sculpt_grid_, s, group, pd, changed);
         else vertex_paint_dab(app_.mesh_.mesh, app_.sculpt_cache_, app_.sculpt_grid_, s, pd, changed);
     });
 }
@@ -237,8 +256,10 @@ void PaintPanel::continue_paint_stroke_(const ViewProj& vp, glm::vec2 px) {
 void PaintPanel::end_paint_stroke_() {
     if (!app_.paint_stroke_.active) return;
     app_.paint_stroke_.active = false;
-    const bool weights = app_.mode_ == InteractionMode::WeightPaint;
-    app_.mesh_.end_live(std::string(weights ? "Weight Paint " : "Vertex Paint ") + paint_tool_name(app_.paint_stroke_.tool));
+    const char* kind = app_.mode_ == InteractionMode::WeightPaint  ? "Weight Paint "
+                       : app_.mode_ == InteractionMode::ClothPaint ? "Cloth Paint "
+                                                                   : "Vertex Paint ";
+    app_.mesh_.end_live(std::string(kind) + paint_tool_name(app_.paint_stroke_.tool));
     app_.paint_geom_ = app_.mesh_.geometry_revision;   // no topology change: the cache is still right
 }
 
@@ -257,6 +278,9 @@ void PaintPanel::paint_sample_(const ViewProj& vp, glm::vec2 px) {
     if (!best) return;
     if (app_.mode_ == InteractionMode::WeightPaint) {
         app_.wpaint_.weight = app_.mesh_.mesh.groups.empty() ? 0.0f : app_.mesh_.mesh.weight(best->v, std::min<uint32_t>(app_.active_group_, static_cast<uint32_t>(app_.mesh_.mesh.groups.size() - 1)));
+    } else if (app_.mode_ == InteractionMode::ClothPaint) {
+        app_.cloth_paint_value_[app_.active_cloth_channel_ & 3] = cloth_channel_value(
+            app_.mesh_.mesh, static_cast<ClothChannel>(app_.active_cloth_channel_ & 3), best->v);
     } else {
         app_.vpaint_.color = app_.mesh_.mesh.has_colors ? best->color : glm::vec4(1.0f);
     }
@@ -266,6 +290,10 @@ void PaintPanel::paint_fill_all_() {
     if (app_.mode_ == InteractionMode::WeightPaint) {
         const float w = app_.wpaint_.weight;
         app_.mesh_.edit("Set Weight", [&](EditMesh& m, MeshSelection&) { assign_weight(m, paint_group_(m), w); });
+    } else if (app_.mode_ == InteractionMode::ClothPaint) {
+        const ClothChannel ch = static_cast<ClothChannel>(app_.active_cloth_channel_ & 3);
+        const float v = app_.cloth_paint_value_[app_.active_cloth_channel_ & 3];
+        app_.mesh_.edit("Set Cloth Channel", [&](EditMesh& m, MeshSelection&) { fill_cloth_channel(m, ch, v); });
     } else {
         const glm::vec4 c = app_.vpaint_.color;
         app_.mesh_.edit("Set Vertex Colors", [&](EditMesh& m, MeshSelection&) { fill_vertex_colors(m, c); });
@@ -324,7 +352,16 @@ float PaintPanel::draw_paint_header_(imm::Context& ctx, float x, const imm::Box&
     const float bh = hb.h - 6;
     PaintSettings& s = paint_settings_();
     auto label = [&](const char* t) { ui::tool_header_label(ctx, hb, x, t); };
-    if (app_.mode_ == InteractionMode::VertexPaint) {
+    if (app_.mode_ == InteractionMode::ClothPaint) {
+        const int ch = app_.active_cloth_channel_ & 3;
+        label(cloth_channel_name(static_cast<ClothChannel>(ch)));
+        const float limit = cloth_channel_limit(static_cast<ClothChannel>(ch));
+        ctx.drag_float_box("cp_value", {x, hb.y + 3, 62, bh}, &app_.cloth_paint_value_[ch],
+                           limit > 1.5f ? 0.005f : 0.002f, 0.0f, limit,
+                           limit > 1.5f ? "%.3f m" : "%.2f");
+        ctx.tooltip("Value\nWhat the brush lays down in the active cloth channel (S samples it)");
+        x += 68;
+    } else if (app_.mode_ == InteractionMode::VertexPaint) {
         // Primary and secondary swatches (X swaps): click opens the colour picker.
         auto swatch = [&](const char* id, glm::vec4& c, const char* tip) {
             const imm::Box b{x, hb.y + 3, bh * 1.4f, bh};
@@ -382,6 +419,55 @@ void PaintPanel::draw_paint_toolbar_(imm::Context& ctx, const imm::Box& r) {
 
 void PaintPanel::draw_paint_menu_(imm::Context& ctx) {
     using I = imm::Icon;
+    if (app_.mode_ == InteractionMode::ClothPaint) {
+        if (!ctx.begin_menu("Cloth")) return;
+        const bool any = app_.mesh_.mesh.has_cloth();
+        const ClothChannel ch = static_cast<ClothChannel>(app_.active_cloth_channel_ & 3);
+        if (ctx.menu_item("Set Value", "Shift K", nullptr, true, I::WeightPaint)) paint_fill_all_();
+        ctx.tooltip("Set Value\nThe brush value on every vertex of the active channel");
+        if (ctx.menu_item("Smooth", "", nullptr, any)) {
+            app_.mesh_.edit("Smooth Cloth Channel", [this, ch](EditMesh& m, MeshSelection&) {
+                smooth_cloth_channel(m, app_.sculpt_cache_, ch, 0.5f, 1);
+            });
+        }
+        ctx.tooltip("Smooth\nBlur the active channel toward each vertex's neighbours");
+        if (ctx.begin_menu("Gradient", true)) {
+            // The garment shortcut: pinned at the top of the mesh, free at the bottom (or the
+            // reverse) along the mesh's local Z -- repaint details with the brush after.
+            glm::vec3 lo, hi;
+            app_.mesh_.mesh.bounds(lo, hi);
+            if (ctx.menu_item("Top Pinned, Hem Free")) {
+                const float v = app_.cloth_paint_value_[app_.active_cloth_channel_ & 3];
+                app_.mesh_.edit("Cloth Gradient", [ch, lo, hi, v](EditMesh& m, MeshSelection&) {
+                    gradient_cloth_channel(m, ch, glm::vec3(0, 0, hi.z), glm::vec3(0, 0, lo.z), 0.0f, v);
+                });
+            }
+            if (ctx.menu_item("Hem Pinned, Top Free")) {
+                const float v = app_.cloth_paint_value_[app_.active_cloth_channel_ & 3];
+                app_.mesh_.edit("Cloth Gradient", [ch, lo, hi, v](EditMesh& m, MeshSelection&) {
+                    gradient_cloth_channel(m, ch, glm::vec3(0, 0, lo.z), glm::vec3(0, 0, hi.z), 0.0f, v);
+                });
+            }
+            ctx.end_menu();
+        }
+        if (ctx.begin_menu("Mirror", any)) {
+            static const char* kAxes[] = {"X", "Y", "Z"};
+            for (int a = 0; a < 3; ++a) {
+                if (ctx.menu_item(kAxes[a])) {
+                    app_.mesh_.edit(std::string("Mirror Cloth Channel ") + kAxes[a],
+                                    [ch, a](EditMesh& m, MeshSelection&) { mirror_cloth_channel(m, ch, a); });
+                }
+            }
+            ctx.end_menu();
+        }
+        ctx.menu_separator();
+        if (ctx.menu_item("Remove Cloth Paint", "", nullptr, any, I::Trash)) {
+            app_.mesh_.edit("Remove Cloth Paint", [](EditMesh& m, MeshSelection&) { clear_cloth_channels(m); });
+        }
+        ctx.tooltip("Remove Cloth Paint\nDelete every cloth channel; the mesh stops simulating as cloth");
+        ctx.end_menu();
+        return;
+    }
     if (app_.mode_ == InteractionMode::VertexPaint) {
         if (!ctx.begin_menu("Paint")) return;
         if (ctx.menu_item("Set Vertex Colors", "Shift K", nullptr, true, I::VertexPaint)) paint_fill_all_();
@@ -502,14 +588,15 @@ void PaintPanel::draw_paint_tool_panel_(imm::Context& ctx) {
     using I = imm::Icon;
     PaintSettings& s = paint_settings_();
     const bool weights = app_.mode_ == InteractionMode::WeightPaint;
-    if (ctx.collapsing_header("Brush", true, nullptr, weights ? I::WeightPaint : I::VertexPaint)) {
+    const bool cloth = app_.mode_ == InteractionMode::ClothPaint;
+    if (ctx.collapsing_header("Brush", true, nullptr, weights || cloth ? I::WeightPaint : I::VertexPaint)) {
         int t = static_cast<int>(s.tool);
         if (ctx.combo("Tool", &t, {"Draw", "Blur", "Average"})) s.tool = static_cast<PaintTool>(t);
         int b = static_cast<int>(s.blend);
-        if (weights) {
+        if (weights || cloth) {
             if (b > 2) b = 0;
             if (ctx.combo("Blend", &b, {"Mix", "Add", "Subtract"})) s.blend = static_cast<PaintBlend>(b);
-            ctx.slider_float("Weight", &s.weight, 0.0f, 1.0f, "%.2f");
+            if (weights) ctx.slider_float("Weight", &s.weight, 0.0f, 1.0f, "%.2f");
         } else {
             if (ctx.combo("Blend", &b, {"Mix", "Add", "Subtract", "Multiply", "Lighten", "Darken"})) s.blend = static_cast<PaintBlend>(b);
             ctx.color_edit("Color", &s.color.x, true);
@@ -526,7 +613,30 @@ void PaintPanel::draw_paint_tool_panel_(imm::Context& ctx) {
         }
         app_.sculpt_panel_->draw_symmetry_panel_(ctx, s.symmetry);
     }
-    if (weights) {
+    if (cloth) {
+        if (ctx.collapsing_header("Cloth Channels", true, nullptr, I::WeightPaint)) {
+            ctx.label_dim(app_.mesh_.mesh.has_cloth()
+                              ? "Saved as the mesh's `cloth:` key; the CharacterCloth component reads it."
+                              : "No cloth paint yet: the first stroke adds the channels.");
+            const EditMesh& mesh = app_.mesh_.mesh;
+            for (int c = 0; c < 4; ++c) {
+                const ClothChannel ch = static_cast<ClothChannel>(c);
+                const bool painted = cloth_channel_data(mesh, ch) != nullptr;
+                const std::string row = std::string(cloth_channel_name(ch)) + (painted ? "" : "  (unpainted)");
+                if (ctx.selectable(row + "##cloth_ch" + std::to_string(c), c == app_.active_cloth_channel_,
+                                   0.0f, I::WeightPaint)) {
+                    app_.active_cloth_channel_ = c;
+                }
+            }
+            const int ch = app_.active_cloth_channel_ & 3;
+            const float limit = cloth_channel_limit(static_cast<ClothChannel>(ch));
+            ctx.drag_float("Value", &app_.cloth_paint_value_[ch], limit > 1.5f ? 0.005f : 0.002f,
+                           0.0f, limit);
+            ctx.tooltip("Value\nWhat the brush lays down in this channel (metres, except Anim Drive's 0..1)");
+            ctx.drag_float("Display Max", &app_.cloth_display_max_[ch], 0.005f, 0.01f, 10.0f);
+            ctx.tooltip("Display Max\nThe value the heatmap shows as red -- display only, never painted");
+        }
+    } else if (weights) {
         draw_vertex_groups_panel_(ctx);
         app_.weights_panel_->draw_auto_weights_panel_(ctx);
     } else if (ctx.collapsing_header("Color Attribute", true, nullptr, I::VertexPaint)) {

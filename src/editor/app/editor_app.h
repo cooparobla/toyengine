@@ -447,6 +447,11 @@ public:
     SculptSettings& sculpt_settings();
     PaintSettings& vertex_paint_settings();
     PaintSettings& weight_paint_settings();
+    PaintSettings& cloth_paint_settings();
+    /** @brief Cloth Paint's active channel (a ClothChannel index) and its brush value. */
+    int active_cloth_channel() const { return active_cloth_channel_; }
+    void set_active_cloth_channel(int ch) { active_cloth_channel_ = ch & 3; }
+    float& cloth_paint_value(int ch) { return cloth_paint_value_[ch & 3]; }
 
     void set_tile_mode(bool on);
     TileBrushSettings& tile_brush();
@@ -1639,6 +1644,11 @@ private:
     SculptResize paint_resize_;
     uint32_t active_group_ = 0;
     float edit_assign_weight_ = 1.0f;
+    // Cloth Paint (shares the machinery above; mesh/cloth_paint.h holds the ops).
+    PaintSettings cpaint_;
+    int active_cloth_channel_ = 0;                              ///< ClothChannel, as an index.
+    float cloth_paint_value_[4] = {0.1f, 0.02f, 0.1f, 1.0f};    ///< Brush value per channel.
+    float cloth_display_max_[4] = {0.5f, 0.1f, 0.2f, 1.0f};     ///< Heatmap red point per channel.
     AutoWeightSettings auto_weights_;   ///< Bind to Rig / Auto Weights settings (ui/weights.h).
     std::map<ObjectId, std::string> paint_saved_shader_;   ///< Surface shaders swapped for editor_paint
     // Animation Timeline (ui/timeline.h).

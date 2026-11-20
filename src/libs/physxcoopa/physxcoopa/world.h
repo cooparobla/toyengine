@@ -619,6 +619,40 @@ public:
         }
     }
 
+    /**
+     * @brief Appends a ClothCollider snapshot for every rigid shape overlapping `query`, from
+     *        both broadphase trees, honouring the layer matrix.
+     *
+     * The shared collider-gather for every particle-vs-rigid solver: step_cloths_() and
+     * step_strands_() use it internally, and an external skin-cloth system (which solves after
+     * the rig is posed, outside this world's step) calls it directly. Safe to call between
+     * steps: AABBTree::query() keeps its traversal stack in thread_local storage and mutates
+     * nothing, and the snapshots use each body's live pose rather than its (possibly fat/stale)
+     * proxy bounds -- see step_cloths_()'s doc. The returned `shape` pointers alias this world's
+     * storage and are invalidated by any shape add/remove, so gather and solve within one frame.
+     *
+     * @param query      World AABB to gather against, already expanded by thickness/travel margins.
+     * @param layer      The cloth's collision layer, tested through the world's LayerMatrix.
+     * @param out        Appended with one snapshot per overlapping shape (not cleared first).
+     * @param any_moving Optional; set true when any gathered shape's owner is a non-static body
+     *                   with linear or angular velocity -- the "kinematic platform slid under a
+     *                   settled sheet" wake signal. Never set false, so callers can accumulate.
+     * @param dt         The step the cloth is about to take, in seconds. Each snapshot's pose is
+     *                   wound BACK by its body's velocity over this, so the pair (position,
+     *                   sweep) spans the step and solve_cloth() can advance the collider across
+     *                   its substeps instead of teleporting it to the end. Pass 0 for a snapshot
+     *                   of the current pose alone.
+     */
+    void gather_cloth_colliders(const geometry::AABB& query, uint32_t layer,
+                                std::vector<cloth::ClothCollider>& out,
+                                bool* any_moving = nullptr, float dt = 0.0f) const {
+        auto gather = [&](void* user_data) {
+            add_cloth_collider_(user_data_to_index_(user_data), query, layer, out, any_moving, dt);
+        };
+        static_tree_.query(query, gather);
+        dynamic_tree_.query(query, gather);
+    }
+
     // --- Hair strands ---------------------------------------------------------------------
     // The same shape as the cloth API above, and for the same reasons: a groom is a persistent,
     // independently-created object with no 1:1 relationship to any body, and it is one-way
@@ -1694,6 +1728,63 @@ private:
     }
 
     /**
+     * @brief Shared body of gather_cloth_colliders(): snapshots shape slot `slot` into `out` if
+     *        it is alive, enabled, non-trigger, layer-compatible and overlapping `query`. See
+     *        gather_cloth_colliders()'s doc for the staleness and wake-signal contracts.
+     */
+    void add_cloth_collider_(uint32_t slot, const geometry::AABB& query, uint32_t layer,
+                             std::vector<cloth::ClothCollider>& out, bool* any_moving,
+                             float dt) const {
+        if (slot >= shapes_.size() || !shape_alive_[slot]) return;
+        const collision::Shape& shape = shapes_[slot];
+        if (!shape.enabled || shape.is_trigger) return;
+        if (!layer_matrix_.should_collide(layer, shape.layer)) return;
+
+        const dynamics::BodyId owner = shape_owner_[slot];
+        if (!is_valid(owner)) return;
+        const dynamics::Body& body = bodies_[owner.index];
+
+        // Where the body WAS at the top of this step, and where it is now. A body's pose here is
+        // already the one this frame draws, so the sweep is reconstructed backwards from its
+        // velocity -- which for a kinematic body is exactly the Transform delta a script wrote
+        // (PhysicsSystem::sync_transforms_in_) and for a dynamic one is what it was integrated
+        // with. A static body has neither, so this is bit-identical to the un-swept case for it.
+        const glm::vec3 sweep = body.linear_velocity * dt;
+        const glm::vec3 spin = body.angular_velocity * dt;
+        const float spin_angle = glm::length(spin);
+        const glm::quat back_spin =
+            spin_angle > util::k_epsilon
+                ? glm::angleAxis(-spin_angle, spin / spin_angle)
+                : glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+
+        cloth::ClothCollider collider;
+        collider.shape = &shape;
+        collider.position = body.position - sweep;
+        collider.sweep = sweep;
+        collider.orientation = glm::normalize(back_spin * body.orientation);
+        collider.end_orientation = body.orientation;
+        collider.linear_velocity = body.linear_velocity;
+        collider.angular_velocity = body.angular_velocity;
+        // Over BOTH poses, as ClothCollider::bounds requires for the cheap reject.
+        collider.bounds = collision::world_bounds(shape, collider.position, collider.orientation);
+        const geometry::AABB end_bounds =
+            collision::world_bounds(shape, body.position, body.orientation);
+        collider.bounds.min = glm::min(collider.bounds.min, end_bounds.min);
+        collider.bounds.max = glm::max(collider.bounds.max, end_bounds.max);
+        if (!collider.bounds.overlaps(query)) return;
+        out.push_back(collider);
+
+        // A kinematic platform sliding under a settled sheet must wake it. Same rule
+        // dynamics::wake_if_kinematic_moving() applies to rigid bodies, and for the same
+        // reason -- a spinner has near-zero linear velocity but is very much moving.
+        if (any_moving && body.type != dynamics::BodyType::Static &&
+            (glm::dot(body.linear_velocity, body.linear_velocity) > util::k_epsilon ||
+             glm::dot(body.angular_velocity, body.angular_velocity) > util::k_epsilon)) {
+            *any_moving = true;
+        }
+    }
+
+    /**
      * @brief Advances every alive cloth by one FRAME step, called once per step() after the rigid
      *        substep loop.
      *
@@ -1753,8 +1844,7 @@ private:
         const float internal_h = std::max(
             config_.fixed_dt / static_cast<float>(std::max(1u, config_.cloth_substeps)),
             util::k_epsilon); // a zero fixed_dt would divide by zero below, not merely misbehave
-        const uint32_t frame_substeps = std::clamp<uint32_t>(
-            static_cast<uint32_t>(std::lround(dt / internal_h)), 1u, util::k_max_cloth_substeps);
+        const uint32_t frame_substeps = cloth::frame_substeps(dt, internal_h);
 
         for (uint32_t ci = 0; ci < cloths_.size(); ++ci) {
             if (!cloth_alive_[ci]) continue;
@@ -1778,43 +1868,12 @@ private:
             const geometry::AABB query =
                 c.bounds.expand(c.params.thickness + travel + config_.aabb_margin);
 
-            // No collider sweep is fed here (ClothCollider::sweep stays zero). The cloth is solved
-            // once per frame against the poses that frame draws, so there are no in-between drawn
-            // poses for a sweep to cover -- see this function's doc.
+            // Each snapshot spans the frame: wound back to the pose at the top of it, carrying
+            // the displacement to the pose it is drawn at. solve_cloth() walks that across its
+            // substeps, so a body driven at 4 m/s advances 1.7 cm per substep into the sheet
+            // rather than arriving 6.7 cm inside it on the first one -- see ClothCollider::sweep.
             bool collider_moving = false;
-            auto gather = [&](void* user_data) {
-                const uint32_t slot = user_data_to_index_(user_data);
-                if (slot >= shapes_.size() || !shape_alive_[slot]) return;
-                const collision::Shape& shape = shapes_[slot];
-                if (!shape.enabled || shape.is_trigger) return;
-                if (!layer_matrix_.should_collide(c.params.layer, shape.layer)) return;
-
-                const dynamics::BodyId owner = shape_owner_[slot];
-                if (!is_valid(owner)) return;
-                const dynamics::Body& body = bodies_[owner.index];
-
-                cloth::ClothCollider collider;
-                collider.shape = &shape;
-                collider.position = body.position;
-                collider.orientation = body.orientation;
-                collider.bounds = collision::world_bounds(shape, body.position, body.orientation);
-
-                collider.end_orientation = body.orientation;
-
-                if (!collider.bounds.overlaps(query)) return;
-                cloth_colliders_.push_back(collider);
-
-                // A kinematic platform sliding under a settled sheet must wake it. Same rule
-                // dynamics::wake_if_kinematic_moving() applies to rigid bodies, and for the same
-                // reason -- a spinner has near-zero linear velocity but is very much moving.
-                if (body.type != dynamics::BodyType::Static &&
-                    (glm::dot(body.linear_velocity, body.linear_velocity) > util::k_epsilon ||
-                     glm::dot(body.angular_velocity, body.angular_velocity) > util::k_epsilon)) {
-                    collider_moving = true;
-                }
-            };
-            static_tree_.query(query, gather);
-            dynamic_tree_.query(query, gather);
+            gather_cloth_colliders(query, c.params.layer, cloth_colliders_, &collider_moving, dt);
 
             // --- Sleep gate ---
             if (anchor_moved || collider_moving) {
@@ -1852,7 +1911,8 @@ private:
      * The structure mirrors step_cloths_() exactly -- resolve the driven roots, gather candidate
      * colliders from both broadphase trees, gate on sleep, solve -- because hair makes the same
      * three choices cloth does: one-way coupling, the frame clock rather than the substep grid,
-     * and no collider sweep (there is no un-solved drawn frame for a sweep to cover).
+     * and colliders snapshotted across the step so solve_strands() sees them arrive rather than
+     * teleport (ClothCollider::sweep).
      *
      * Roots are driven from OUTSIDE -- hair::set_strand_roots(), called by the engine from the
      * scalp's transform -- rather than from a body, because a groom follows a mesh, not a
@@ -1862,8 +1922,7 @@ private:
         const float internal_h = std::max(
             config_.fixed_dt / static_cast<float>(std::max(1u, config_.cloth_substeps)),
             util::k_epsilon);
-        const uint32_t frame_substeps = std::clamp<uint32_t>(
-            static_cast<uint32_t>(std::lround(dt / internal_h)), 1u, util::k_max_cloth_substeps);
+        const uint32_t frame_substeps = cloth::frame_substeps(dt, internal_h);
 
         for (uint32_t si = 0; si < strand_sets_.size(); ++si) {
             if (!strand_alive_[si]) continue;
@@ -1883,45 +1942,19 @@ private:
                 set.bounds.expand(set.params.thickness + travel + config_.aabb_margin);
 
             bool collider_moving = false;
-            auto add_shape = [&](uint32_t slot) {
-                if (slot >= shapes_.size() || !shape_alive_[slot]) return;
-                const collision::Shape& shape = shapes_[slot];
-                if (!shape.enabled || shape.is_trigger) return;
-                if (!layer_matrix_.should_collide(set.params.layer, shape.layer)) return;
-
-                const dynamics::BodyId owner = shape_owner_[slot];
-                if (!is_valid(owner)) return;
-                const dynamics::Body& body = bodies_[owner.index];
-
-                cloth::ClothCollider collider;
-                collider.shape = &shape;
-                collider.position = body.position;
-                collider.orientation = body.orientation;
-                collider.end_orientation = body.orientation;
-                collider.bounds = collision::world_bounds(shape, body.position, body.orientation);
-                if (!collider.bounds.overlaps(query)) return;
-                cloth_colliders_.push_back(collider);
-
-                // A spinning head has near-zero linear velocity and is very much moving, so the
-                // wake test reads both -- the same rule cloth and rigid sleep both apply.
-                if (body.type != dynamics::BodyType::Static &&
-                    (glm::dot(body.linear_velocity, body.linear_velocity) > util::k_epsilon ||
-                     glm::dot(body.angular_velocity, body.angular_velocity) > util::k_epsilon)) {
-                    collider_moving = true;
-                }
-            };
-
             if (set.collide_bodies.empty()) {
-                auto gather = [&](void* user_data) { add_shape(user_data_to_index_(user_data)); };
-                static_tree_.query(query, gather);
-                dynamic_tree_.query(query, gather);
+                gather_cloth_colliders(query, set.params.layer, cloth_colliders_,
+                                       &collider_moving, dt);
             } else {
                 // An explicit allowlist: skip the broadphase entirely and build colliders straight
                 // from the named bodies, so cost is proportional to what the groom was told to
                 // avoid rather than to whatever happens to be nearby.
                 for (const dynamics::BodyId id : set.collide_bodies) {
                     if (!is_valid(id)) continue;
-                    for (const uint32_t slot : shapes_of(id)) add_shape(slot);
+                    for (const uint32_t slot : shapes_of(id)) {
+                        add_cloth_collider_(slot, query, set.params.layer, cloth_colliders_,
+                                            &collider_moving, dt);
+                    }
                 }
             }
 

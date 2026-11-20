@@ -50,9 +50,13 @@ public:
     // Modes
     // =================================================================================
 
-    static bool is_paint_mode_(InteractionMode m) { return m == InteractionMode::VertexPaint || m == InteractionMode::WeightPaint; }
+    static bool is_paint_mode_(InteractionMode m) {
+        return m == InteractionMode::VertexPaint || m == InteractionMode::WeightPaint ||
+               m == InteractionMode::ClothPaint;
+    }
     bool in_paint_mode_() const;
     bool in_weight_paint_() const;
+    bool in_cloth_paint_() const;
     /** @brief Sculpt or a paint mode: brush strokes, no selection or transforms. */
     bool in_brush_mode_() const;
 

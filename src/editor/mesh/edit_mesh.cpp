@@ -12,6 +12,10 @@ bool EditMesh::operator==(const EditMesh& o) const {
     if (has_colors != o.has_colors || groups != o.groups || weights != o.weights) return false;
     if (has_normals != o.has_normals || has_tangents != o.has_tangents) return false;
     if (joints != o.joints || joint_weights != o.joint_weights) return false;
+    if (cloth_max_distance != o.cloth_max_distance) return false;
+    if (cloth_backstop_distance != o.cloth_backstop_distance) return false;
+    if (cloth_backstop_radius != o.cloth_backstop_radius) return false;
+    if (cloth_anim_drive != o.cloth_anim_drive) return false;
     for (size_t i = 0; i < faces.size(); ++i) {
         const auto& a = faces[i];
         const auto& b = o.faces[i];
@@ -28,6 +32,9 @@ void EditMesh::sync_vertex_data() {
     if (!weights.empty() || !groups.empty()) weights.resize(positions.size());
     if (!joints.empty()) joints.resize(positions.size(), glm::ivec4(-1));
     if (!joint_weights.empty()) joint_weights.resize(positions.size(), glm::vec4(0.0f));
+    for (auto* ch : cloth_channels()) {
+        if (!ch->empty()) ch->resize(positions.size(), 0.0f);
+    }
 }
 
 uint32_t EditMesh::add_vertex_mix(const glm::vec3& p, const std::vector<std::pair<uint32_t, float>>& sources) {
@@ -47,6 +54,17 @@ uint32_t EditMesh::add_vertex_mix(const glm::vec3& p, const std::vector<std::pai
             }
         }
         weights.push_back(std::move(mixed));
+    }
+    // Cloth channels blend linearly, like weights.
+    for (auto* ch : cloth_channels()) {
+        if (ch->empty()) continue;
+        float mixed = 0.0f;
+        if (total > 0.0f) {
+            for (const auto& [v, k] : sources) {
+                if (v < nv && k > 0.0f) mixed += (*ch)[v] * k / total;
+            }
+        }
+        ch->push_back(mixed);
     }
     // The palette can't be blended index-wise: take the strongest source's.
     uint32_t best = sources.empty() ? 0u : sources.front().first;
@@ -165,11 +183,13 @@ void EditMesh::compact() {
     std::vector<std::vector<VertexWeight>> kept_w;
     std::vector<glm::ivec4> kept_j;
     std::vector<glm::vec4> kept_jw;
+    std::vector<uint32_t> old_of_new;
     for (auto& f : faces) {
         for (auto& c : f.corners) {
             if (remap[c.v] < 0) {
                 remap[c.v] = static_cast<int64_t>(kept.size());
                 kept.push_back(positions[c.v]);
+                old_of_new.push_back(c.v);
                 if (!weights.empty()) kept_w.push_back(weights[c.v]);
                 if (!joints.empty()) kept_j.push_back(joints[c.v]);
                 if (!joint_weights.empty()) kept_jw.push_back(joint_weights[c.v]);
@@ -181,6 +201,12 @@ void EditMesh::compact() {
     if (!weights.empty()) weights = std::move(kept_w);
     if (!joints.empty()) joints = std::move(kept_j);
     if (!joint_weights.empty()) joint_weights = std::move(kept_jw);
+    for (auto* ch : cloth_channels()) {
+        if (ch->empty()) continue;
+        std::vector<float> kept_c(old_of_new.size());
+        for (size_t i = 0; i < old_of_new.size(); ++i) kept_c[i] = (*ch)[old_of_new[i]];
+        *ch = std::move(kept_c);
+    }
 }
 
 void EditMesh::cleanup_faces() {
@@ -344,6 +370,25 @@ EditMesh mesh_from_node(const Node& node, float weld_eps) {
             if (i < raw_jw.size()) m.joint_weights[v] = raw_jw[i];
         }
     }
+    // Cloth paint channels, per raw vertex like weights; first corner of a welded vertex wins.
+    // A wrongly sized array is discarded, never misindexed; max_distance gates the whole block.
+    if (node.contains("cloth") && node.at("cloth").is_mapping()) {
+        const Node& cn = node.at("cloth");
+        auto read_channel = [&](const char* key, std::vector<float>& dst) {
+            if (!cn.contains(key) || !cn.at(key).is_sequence()) return;
+            std::vector<float> raw;
+            for (const auto& v : cn.at(key).as_seq()) raw.push_back(as_float(v));
+            if (raw.size() != raw_pos.size()) return;
+            dst.assign(m.positions.size(), 0.0f);
+            for (size_t i = raw.size(); i-- > 0;) dst[raw_to_weld[i]] = raw[i];
+        };
+        read_channel("max_distance", m.cloth_max_distance);
+        if (m.has_cloth()) {
+            read_channel("backstop_distance", m.cloth_backstop_distance);
+            read_channel("backstop_radius", m.cloth_backstop_radius);
+            read_channel("anim_drive", m.cloth_anim_drive);
+        }
+    }
     if (node.contains("material_slots")) {
         for (const auto& sn : node.at("material_slots").as_seq()) m.slots.push_back(sn.get_value<std::string>());
     }
@@ -456,6 +501,7 @@ Node mesh_to_node(const EditMesh& m) {
     Node out = Node::mapping();
     Node verts = Node::sequence(), norms = Node::sequence(), uvs = Node::sequence(), faces = Node::sequence();
     Node colors = Node::sequence(), weights = Node::sequence(), joints = Node::sequence(), jweights = Node::sequence();
+    Node cloth_md = Node::sequence(), cloth_bd = Node::sequence(), cloth_br = Node::sequence(), cloth_ad = Node::sequence();
     const auto cn = m.corner_normals();
     // Dedup identical (vertex, normal, uv, colour) corners so files stay small; the engine welds anyway.
     std::map<std::tuple<uint32_t, int, int, int, int, int, std::tuple<int, int, int, int>>, int64_t> seen;
@@ -496,6 +542,16 @@ Node mesh_to_node(const EditMesh& m) {
                     }
                 }
                 weights.as_seq().push_back(w);
+                if (m.has_cloth()) {
+                    for (auto [ch, seq] : {std::make_pair(&m.cloth_max_distance, &cloth_md),
+                                           std::make_pair(&m.cloth_backstop_distance, &cloth_bd),
+                                           std::make_pair(&m.cloth_backstop_radius, &cloth_br),
+                                           std::make_pair(&m.cloth_anim_drive, &cloth_ad)}) {
+                        if (!ch->empty()) {
+                            seq->as_seq().push_back(make_float(c.v < ch->size() ? (*ch)[c.v] : 0.0f));
+                        }
+                    }
+                }
                 if (!m.joints.empty()) {
                     const glm::ivec4 j = c.v < m.joints.size() ? m.joints[c.v] : glm::ivec4(-1);
                     Node js = Node::sequence();
@@ -529,6 +585,14 @@ Node mesh_to_node(const EditMesh& m) {
     if (m.has_tangents) out["tangents"] = tangents;
     if (!m.joints.empty()) out["joints"] = joints;
     if (!m.joint_weights.empty()) out["joint_weights"] = jweights;
+    if (m.has_cloth()) {
+        Node cloth = Node::mapping();
+        cloth["max_distance"] = cloth_md;
+        if (!m.cloth_backstop_distance.empty()) cloth["backstop_distance"] = cloth_bd;
+        if (!m.cloth_backstop_radius.empty()) cloth["backstop_radius"] = cloth_br;
+        if (!m.cloth_anim_drive.empty()) cloth["anim_drive"] = cloth_ad;
+        out["cloth"] = cloth;
+    }
     // Material slots (submeshes): written when named, or when any face uses a slot past 0.
     bool any_slot = false;
     for (const auto& f : m.faces) any_slot |= f.slot != 0;

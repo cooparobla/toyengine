@@ -258,6 +258,11 @@ public:
         time_.update();
     }
 
+    /// @brief Discards wall time spent outside the frame loop, so the next poll() does not bill a
+    ///        synchronous stall (a scene build, a blocking asset drain) to the simulation as one
+    ///        long frame. See coopa::util::Time::resync().
+    void resync_clock() { time_.resync(); }
+
     float    delta_time() const  { return time_.delta_time(); }
     double   elapsed() const     { return time_.elapsed(); }
     uint64_t frame_index() const { return time_.frame_count(); }

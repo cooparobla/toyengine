@@ -227,6 +227,33 @@ public:
      */
     const std::vector<Vertex>& skinned_vertices() const;
 
+    /**
+     * @brief Refreshes the palette from the rig's CURRENT pose and returns it (resolving bones
+     *        on first use once the source has loaded).
+     *
+     * The single palette producer shared by upload() and by consumers that need this frame's
+     * skin matrices BEFORE the upload window -- toy::cloth::ClothMeshSystem skins its cloth
+     * targets with it at update order 346. Refreshing is cheap (one matrix product per bone)
+     * and idempotent, so upload() recomputing it later the same frame changes nothing.
+     */
+    const std::vector<glm::mat4>& updated_skin_matrices();
+
+    /**
+     * @brief CPU-skins every vertex NOW, against the freshly refreshed palette, and returns
+     *        them (object space).
+     *
+     * Unlike skinned_vertices() -- which lazily re-skins only when the GPU path marked the
+     * cached copy stale -- this always re-skins, so a caller blending against this frame's
+     * pose (ClothMeshSystem::upload()) never reads last frame's vertices.
+     */
+    const std::vector<Vertex>& skin_now();
+
+    /** @brief The compute path's static bind-pose SSBO, null on the CPU path. Shared with the
+     *         cloth deform pass, whose kernel reads the same BindVertex layout. */
+    coopa::gfx::memory::Buffer* gpu_bind_pose() { return gpu_ ? &gpu_->bind_pose : nullptr; }
+    /** @brief The compute path's per-slot palette ring, null on the CPU path. */
+    coopa::gfx::memory::StorageBufferRing* gpu_palette() { return gpu_ ? &gpu_->palette : nullptr; }
+
 private:
     /**
      * @brief Allocates the dynamic GPU mesh from the loaded source's bind pose and binds it

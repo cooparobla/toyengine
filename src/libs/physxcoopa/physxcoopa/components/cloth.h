@@ -72,7 +72,7 @@ struct ClothAnchorSpec {
  *   resolution: { x: 25, y: 25 }
  *   size: { x: 4.0, y: 4.0 }
  *   mass: 1.0
- *   bend_compliance: 0.00005
+ *   bend_compliance: 0.005
  *   damping: 0.08
  *   thickness: 0.03
  *   friction: 0.5

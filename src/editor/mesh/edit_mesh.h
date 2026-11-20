@@ -103,8 +103,29 @@ struct EditMesh {
     /// (empty, or parallel to `positions`).
     std::vector<glm::ivec4> joints;
     std::vector<glm::vec4>  joint_weights;
+    /// Cloth paint channels (the file's `cloth:` key), per WELDED vertex like `weights` -- each
+    /// array empty or parallel to `positions`. Deliberately NOT vertex groups: a group on a
+    /// skinned mesh is swept into the derived bone palette (see SkinnedMeshSource::groups), which
+    /// a cloth channel must never be. `cloth_max_distance` is the presence flag for the set.
+    std::vector<float> cloth_max_distance;
+    std::vector<float> cloth_backstop_distance;
+    std::vector<float> cloth_backstop_radius;
+    std::vector<float> cloth_anim_drive;
     /// Keys carried through import -> export untouched (lods, cull_screen_size, bones, ...).
     Node passthrough = Node::mapping();
+
+    /** @brief Whether the mesh carries cloth paint. */
+    bool has_cloth() const { return !cloth_max_distance.empty(); }
+
+    /** @brief The four cloth channel arrays, in ClothChannel order (paint ops iterate these). */
+    std::array<std::vector<float>*, 4> cloth_channels() {
+        return {&cloth_max_distance, &cloth_backstop_distance, &cloth_backstop_radius,
+                &cloth_anim_drive};
+    }
+    std::array<const std::vector<float>*, 4> cloth_channels() const {
+        return {&cloth_max_distance, &cloth_backstop_distance, &cloth_backstop_radius,
+                &cloth_anim_drive};
+    }
 
     bool operator==(const EditMesh& o) const;
 
@@ -192,7 +213,7 @@ void resolve_welded_duplicates(const EditMesh& m, Face& f);
 /// Keys mesh_to_node() writes itself from the EditMesh (everything else is passthrough).
 inline const std::vector<std::string> k_regenerated_keys = {
     "vertices", "normals", "uvs", "tangents", "colors", "weights", "joints", "joint_weights",
-    "faces", "material_slots", "face_materials"};
+    "cloth", "faces", "material_slots", "face_materials"};
 
 /**
  * @brief Builds an EditMesh from a mesh document. Corner positions equal within `weld_eps`

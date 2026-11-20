@@ -7,6 +7,18 @@
 
 namespace toy {
 namespace editor {
+namespace {
+
+/** @brief Appends every descendant id of `n`, depth-first in document order. */
+void collect_children_(const Node& n, std::vector<ObjectId>& out) {
+    if (!n.contains("children") || !n.at("children").is_sequence()) return;
+    for (const auto& c : n.at("children").as_seq()) {
+        if (const ObjectId id = SceneDocument::id_of(c)) out.push_back(id);
+        collect_children_(c, out);
+    }
+}
+
+}  // namespace
 
 void OutlinerPanel::draw_outliner_(imm::Context& ctx, const imm::Box& area) {
     using I = imm::Icon;
@@ -25,6 +37,15 @@ void OutlinerPanel::draw_outliner_(imm::Context& ctx, const imm::Box& area) {
     if (ctx.icon_button("outliner_new", I::Plus, "Add Object\nShift A in the viewport (object assets too)", false,
                         hb.h - 6, imm::Context::kAll, imm::Box{hb.right() - hb.h + 2, hb.y + 3, hb.h - 6, hb.h - 6})) {
         app_.open_add_menu_ = true;   // declared by the viewport (draw_viewport_popups_)
+    }
+    // The button is up before a row is drawn: any drag across the eye (or monitor) column is
+    // over, and the one undo entry its rows merged into is closed. Ending it here rather than
+    // after the rows is what keeps a stale column from catching a later press that began
+    // somewhere else entirely.
+    if (drag_column_ != ToggleColumn::None && !ctx.mouse_down()) {
+        drag_column_ = ToggleColumn::None;
+        drag_painted_.clear();
+        app_.doc_.end_merge();
     }
     const imm::Box body{area.x, hb.bottom(), area.w, area.h - hb.h};
     ctx.begin_region("outliner", body, true);
@@ -157,17 +178,7 @@ void OutlinerPanel::draw_outliner_row_(imm::Context& ctx, ObjectId id, bool flat
     const imm::Box eye{r.rect.right() - s * 2 - 6, r.rect.y + 1, s, s};
     const imm::Box mon{r.rect.right() - s - 4, r.rect.y + 1, s, s};
     app_.eye_rects_[id] = eye;
-    if (ctx.icon_button("eye", hidden ? I::EyeClosed : I::Eye,
-                        isolated ? "Hidden by Isolation\nEdit / Sculpt Mode is showing only the edited object (header toggle)"
-                                 : "Hide in Viewport\nH hides, Alt H reveals (editor only, not saved)",
-                        false, s, imm::Context::kAll, eye) && !isolated) {
-        if (hidden) { app_.hidden_.erase(id); if (auto* live = app_.sync_.live(id)) live->set_active(active); }
-        else app_.hide_({id});
-    }
-    if (ctx.icon_button("mon", active ? I::Monitor : I::MonitorOff, "Enabled in Game\nThe object's `active` flag, saved with the scene",
-                        false, s, imm::Context::kAll, mon) && !app_.playing()) {
-        app_.apply_(app_.doc_.set_object_key(id, "active", Node(!active), active ? "Disable Object" : "Enable Object"));
-    }
+    draw_row_toggles_(ctx, id, eye, mon, hidden, isolated, active);
     if (ctx.begin_popup("outliner_row_ctx", 240)) {
         draw_object_context_menu_(ctx, app_.context_target_);
         ctx.end_popup();
@@ -194,6 +205,88 @@ void OutlinerPanel::draw_outliner_row_(imm::Context& ctx, ObjectId id, bool flat
         ctx.tree_pop();
     }
     ctx.pop_id();
+}
+
+void OutlinerPanel::draw_row_toggles_(imm::Context& ctx, ObjectId id, const imm::Box& eye, const imm::Box& mon,
+                                     bool hidden, bool isolated, bool active) {
+    using I = imm::Icon;
+    const bool shift = has(ctx.input().mods, Mods::Shift);
+    // A press claims the column and sets this row; every frame after, the row the pointer is
+    // over takes the same state. The pointer is over at most one row, so one test serves both.
+    auto press_in = [&](const imm::Box& b) { return ctx.mouse_pressed() && ctx.is_hovered(b); };
+    auto painting = [&](const imm::Box& b, ToggleColumn col) {
+        return drag_column_ == col && ctx.mouse_down() && !drag_painted_.count(id) &&
+               b.contains(ctx.input().mouse) && ctx.current_clip().contains(ctx.input().mouse);
+    };
+    auto begin_drag = [&](ToggleColumn col, bool value) {
+        drag_column_ = col;
+        drag_value_ = value;
+        drag_children_ = shift;   // the whole gesture follows the modifier held at press
+        drag_painted_.clear();
+    };
+    if (!isolated) {
+        if (press_in(eye)) begin_drag(ToggleColumn::Eye, !hidden);
+        if (painting(eye, ToggleColumn::Eye)) {
+            set_rows_hidden_(row_subtree_(id, drag_children_), drag_value_);
+            drag_painted_.insert(id);
+        }
+    }
+    if (!app_.playing()) {
+        if (press_in(mon)) begin_drag(ToggleColumn::Monitor, !active);
+        if (painting(mon, ToggleColumn::Monitor)) {
+            set_rows_active_(row_subtree_(id, drag_children_), drag_value_);
+            drag_painted_.insert(id);
+        }
+    }
+    // The buttons are drawn for their hover, tooltip and keyboard activation; the pointer was
+    // handled above, so a click's release -- which is what they report -- is already spent.
+    const bool by_mouse = ctx.mouse_pressed() || ctx.mouse_released();
+    if (ctx.icon_button("eye", hidden ? I::EyeClosed : I::Eye,
+                        isolated ? "Hidden by Isolation\nEdit / Sculpt Mode is showing only the edited object (header toggle)"
+                                 : "Hide in Viewport\nShift includes its children; drag down the column to copy. "
+                                   "H hides, Alt H reveals (editor only, not saved)",
+                        false, eye.h, imm::Context::kAll, eye) && !isolated && !by_mouse) {
+        set_rows_hidden_(row_subtree_(id, shift), !hidden);
+    }
+    if (ctx.icon_button("mon", active ? I::Monitor : I::MonitorOff,
+                        "Enabled in Game\nThe object's `active` flag, saved with the scene. Shift includes its "
+                        "children; drag down the column to copy",
+                        false, mon.h, imm::Context::kAll, mon) && !app_.playing() && !by_mouse) {
+        set_rows_active_(row_subtree_(id, shift), !active);
+        app_.doc_.end_merge();
+    }
+}
+
+std::vector<ObjectId> OutlinerPanel::row_subtree_(ObjectId id, bool with_children) const {
+    std::vector<ObjectId> out{id};
+    const Node* o = with_children ? app_.doc_.find(id) : nullptr;
+    if (o) collect_children_(*o, out);
+    return out;
+}
+
+void OutlinerPanel::set_rows_hidden_(const std::vector<ObjectId>& ids, bool hide) {
+    std::vector<ObjectId> mine;
+    for (ObjectId id : ids) if (!app_.isolated_.count(id)) mine.push_back(id);   // isolation owns the rest
+    if (hide) { app_.hide_(mine); return; }
+    for (ObjectId id : mine) {
+        app_.hidden_.erase(id);
+        const Node* n = app_.doc_.find(id);
+        // Back to what the document says: revealing an object does not enable a disabled one.
+        if (auto* live = app_.sync_.live(id)) {
+            live->set_active(n ? get_bool(app_.instances_panel_->effective_(*n), "active", true) : true);
+        }
+    }
+}
+
+void OutlinerPanel::set_rows_active_(const std::vector<ObjectId>& ids, bool value) {
+    app_.apply_(app_.doc_.edit(value ? "Enable Object" : "Disable Object", [&](Node&) -> Change {
+        ObjectId top = 0;
+        for (ObjectId id : ids) {
+            if (Node* o = app_.doc_.find(id)) { (*o)["active"] = Node(value); if (!top) top = id; }
+        }
+        // Rebuilding the topmost row rebuilds its subtree with it (SceneSync::rebuild_object_).
+        return top ? Change{ChangeScope::Object, top} : Change{};
+    }, "outliner_active"));
 }
 
 void OutlinerPanel::draw_object_context_menu_(imm::Context& ctx, ObjectId target) {

@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include "../mesh/cloth_paint.h"
 #include "../mesh/edit_mesh.h"
 #include "../mesh/paint.h"
 #include "../mesh/sculpt.h"
@@ -30,10 +31,14 @@ class PaintPreview {
 public:
     using GpuMesh = coopa::gfx::engine::data::Mesh;
 
-    /** @brief What the preview shows: the colour attribute, or one vertex group's weights. */
+    /** @brief What the preview shows: the colour attribute, one vertex group's weights, or one
+     *         cloth channel (heatmapped over [0, cloth_scale]). */
     struct Show {
         bool weights = false;
         uint32_t group = 0;
+        bool cloth = false;
+        uint32_t cloth_channel = 0;  ///< ClothChannel, as an index.
+        float cloth_scale = 1.0f;    ///< The value the heatmap shows as red.
     };
 
     /** @brief Builds the render arrays and GPU buffers for `m` (throws on GPU failure). */

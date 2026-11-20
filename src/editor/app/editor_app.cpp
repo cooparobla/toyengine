@@ -106,6 +106,18 @@ EditorApp::EditorApp(core::Engine& engine, Project project, const fs::path& scen
     register_inspector_section("Hair.guides", [this](imm::Context& ctx, SectionContext& sc) {
         return curve_pen_panel_->draw_hair_guides_(ctx, sc);
     });
+    // The way into Cloth Paint from the component that consumes the paint, mirroring the
+    // terrain inspector's "Edit Terrain" button.
+    register_inspector_section("CharacterCloth.paint", [this](imm::Context& ctx, SectionContext& sc) {
+        EditResult out;
+        if (ctx.button("Paint Cloth Channels", -1, sc.object_id != 0 && !playing(), imm::Icon::WeightPaint)) {
+            set_interaction_mode(InteractionMode::ClothPaint);
+        }
+        ctx.tooltip("Cloth Paint\nPaint Max Distance, Backstop and Anim Drive on the garment mesh "
+                    "(saved as the mesh's `cloth:` key; 0 Max Distance rides the skinning, more "
+                    "simulates). Tab leaves and saves.");
+        return out;
+    });
     register_inspector_section("TileTerrain", [this](imm::Context& ctx, SectionContext& sc) {
         return tile_terrain_panel_->draw_tile_terrain_panel_(ctx, sc.object_id, sc.comp, sc.env);
     });
@@ -217,7 +229,7 @@ EditorApp::~EditorApp() {
     // The drawers below close over this app; the registry outlives it (one editor is built
     // and torn down per test), so they go with it.
     for (const char* id : {"ParticleSystem", "TileTerrain", "Terrain", "HeightmapTerrain.edit",
-                           "InstancePainter.edit", "Hair.guides"}) {
+                           "InstancePainter.edit", "Hair.guides", "CharacterCloth.paint"}) {
         unregister_inspector_section(id);
     }
     engine_.wait_idle();
@@ -289,6 +301,7 @@ const std::vector<std::string>& EditorApp::tile_set_assets() { return tile_terra
 SculptSettings& EditorApp::sculpt_settings() { return sculpt_panel_->sculpt_settings(); }
 PaintSettings& EditorApp::vertex_paint_settings() { return paint_panel_->vertex_paint_settings(); }
 PaintSettings& EditorApp::weight_paint_settings() { return paint_panel_->weight_paint_settings(); }
+PaintSettings& EditorApp::cloth_paint_settings() { return cpaint_; }
 
 void EditorApp::set_tile_mode(bool on) { tile_mode_panel_->set_tile_mode(on); }
 TileBrushSettings& EditorApp::tile_brush() { return tile_mode_panel_->tile_brush(); }
@@ -4204,7 +4217,8 @@ bool EditorApp::enter_mesh_mode_(InteractionMode mode) {
     scene_uploaded_revision_ = 0;
     if (isolate_in_edit_) isolate_(id);
     paint_panel_->mode_begin_(mode_);
-    static const char* kModeNames[] = {"Object", "Edit", "Sculpt", "Vertex Paint", "Weight Paint"};
+    static const char* kModeNames[] = {"Object", "Edit",     "Sculpt", "Vertex Paint", "Weight Paint",
+                                       "Pose",   "Pen Mode", "Rig Edit", "Cloth Paint"};
     log_info(std::string(kModeNames[static_cast<int>(mode)]) + " mode: " + project_.relative(path) +
              " (Tab to leave, Ctrl+S saves it)");
     return true;

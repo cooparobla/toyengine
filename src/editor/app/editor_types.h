@@ -61,8 +61,9 @@ enum class AssetType { None = 0, Scene, Object, Mesh, Material, Texture, UI, The
 /** @brief Blender's interaction modes for a mesh object (the viewport header's mode dropdown).
  *         RigEdit authors a toy::rig::Rig's REST skeleton (a RigDocument); Pose poses its
  *         pose buffer -- the same split Blender draws between Edit Mode and Pose Mode on an
- *         armature. */
-enum class InteractionMode { Object = 0, Edit, Sculpt, VertexPaint, WeightPaint, Pose, Pen, RigEdit };
+ *         armature. ClothPaint paints the mesh's cloth channels (the `cloth:` key) the way
+ *         WeightPaint paints vertex groups -- appended last so the earlier values stay stable. */
+enum class InteractionMode { Object = 0, Edit, Sculpt, VertexPaint, WeightPaint, Pose, Pen, RigEdit, ClothPaint };
 /** @brief Viewport shading, Blender's four buttons. */
 enum class Shading { Wireframe = 0, Solid = 1, MaterialPreview = 2, Full = 3 };
 

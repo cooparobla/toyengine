@@ -215,7 +215,9 @@ next to an object to see its child objects and its components.
 - Type in **Filter** at the top to list only the objects whose names contain the text.
 - Click **+** at the top right to open the **Add** menu.
 - The eye icon on each row hides the object in the viewport while you work. The screen icon
-  next to it switches the object off in the game.
+  next to it switches the object off in the game. **Shift** includes the object's children, and
+  dragging down a column sets every row the pointer crosses -- see
+  [Scenes and objects](scenes-and-objects.md#hide-or-switch-off-an-object).
 - Click a component row to open it in Properties.
 
 Selecting, renaming and parenting objects are covered in

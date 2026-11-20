@@ -62,6 +62,7 @@
 #include <toyengine/curve/curve.h>
 #include <toyengine/procgraph/procedural_graph.h>
 #include <toyengine/procgraph/procedural_graph_system.h>
+#include <toyengine/cloth/cloth_mesh_system.h>
 #include <toyengine/hair/hair_system.h>
 #include <toyengine/procgraph/nodes.h>
 #include <toyengine/instance/instance_painter.h>
@@ -720,6 +721,11 @@ void Engine::prepare_scene_(coopa::scene::Scene& scene, bool drain_assets) {
     // Order 345: carries every BoneAttachment along its bone, after the Rig poses it rides are
     // resolved and before TransformResolve (350) -- see toyengine/rig/bone_attachment_system.h.
     toy::rig::install_bone_attachment_system(scene);
+    // Order 346: character cloth (CharacterCloth), after the frame's rig pose is final and
+    // before TransformResolve -- NOT inside the physics step at 100, where this frame's pose
+    // does not exist yet. See toyengine/cloth/cloth_mesh_system.h for the full ordering
+    // argument (zero-frame lag against the animation, read-only broadphase access).
+    toy::cloth::install_cloth_mesh_system(scene);
     // Project modules last, so a project's own systems install after every built-in one -- and
     // so a project REPLACING a built-in can remove_system() it, which is only safe here: the
     // scene has not ticked, so no system holds state and nothing is left orphaned. See
@@ -739,6 +745,20 @@ void Engine::prepare_scene_(coopa::scene::Scene& scene, bool drain_assets) {
 
     scene.set_simulating(!edit_mode_);
     apply_cursor_capture_();
+
+    // Building a scene is not a frame, and must not be charged to the next one. Everything above --
+    // wait_idle(), the system installs, a synchronous drain of every mesh and texture -- is wall
+    // time spent outside the loop, and without this it lands in the next poll()'s delta: the engine
+    // then hands every system a frame of up to util::k_max_frame_time and the scene's first
+    // simulated instant is a quarter-second lurch.
+    //
+    // This is also the main thing that made the editor and a standalone run disagree. A game calls
+    // this from the Engine constructor, before the first tick, so the stall is never measured. The
+    // editor calls it from EditorApp::play(), inside a deferred callback that runs AFTER that
+    // frame's clock sample -- so the identical scene got one 0.25 s frame in one host and never in
+    // the other. On `assets/scenes/physics/cloth_demo` that single frame was enough to leave the
+    // sheet off the ball (see coopa::physx::cloth::frame_substeps()).
+    ctx_.resync_clock();
 }
 
 Engine::~Engine() {
@@ -1134,6 +1154,11 @@ void Engine::rebuild_pipeline(const render::ToyRenderConfig& cfg) {
     sync_overlay_layers_();
     pipeline_->set_display_region(region);
     if (scene_mgr_.has_scene()) pipeline_->validate_material_shaders(scene_mgr_.get_active_scene());
+    // Reconstructing every render target is not a frame either -- same reason as prepare_scene_().
+    // This is the editor's other long stall: a render setting that is startup-fixed queues a
+    // rebuild, so dragging one in Render Settings while a scene plays would otherwise hand the
+    // simulation a frame the length of a pipeline construction.
+    ctx_.resync_clock();
 }
 
 void Engine::restart_renderer() {
@@ -1632,8 +1657,19 @@ void Engine::upload_dynamic_meshes_(coopa::scene::Scene& scene) {
     // the top of this frame's command buffer; otherwise it CPU-skins and uploads.
     render::passes::SkinningPass* gpu_skin = pipeline_ ? pipeline_->skinning_pass() : nullptr;
     if (gpu_skin) gpu_skin->begin_frame();
+    // A SkinnedMeshRenderer with a live CharacterCloth sibling is deformed by the cloth system
+    // below instead (skinning blended with the simulation) -- its own upload must not also run,
+    // or the two would fight over the same frame slot's vertex buffer.
+    auto* cloth_mesh = dynamic_cast<cloth::ClothMeshSystem*>(scene.find_system("ClothMesh"));
+    render::passes::ClothDeformPass* cloth_deform =
+        pipeline_ ? pipeline_->cloth_deform_pass() : nullptr;
+    if (cloth_deform) cloth_deform->begin_frame();
     for (scene::SkinnedMeshRenderer* smr : scene.get_components<scene::SkinnedMeshRenderer>()) {
+        if (cloth_mesh && cloth_mesh->claims(*smr)) continue;
         smr->upload(ctx_.current_frame(), gpu_skin);
+    }
+    if (cloth_mesh) {
+        cloth_mesh->upload(scene, ctx_.current_frame(), cloth_deform, &ctx_.allocator());
     }
     // Simulated grooms, same contract again: their render strands follow the solver's guides, and
     // this is the only window where the in-flight slot is known. A groom that is not simulated is

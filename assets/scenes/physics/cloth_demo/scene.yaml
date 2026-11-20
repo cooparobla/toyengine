@@ -99,11 +99,16 @@ scene:
           resolution: { x: 25, y: 25 }
           size: { x: 4.0, y: 4.0 }
           mass: 1.0
-          # 0 stretch compliance = inextensible, which XPBD is perfectly stable at. Bending is
-          # where the fabric's character lives: 5e-5 creases and folds over the ball like a
-          # mid-weight cotton sheet, 1e-6 would read as leather, 1e-3 as silk.
+          # Inextensible THREADS (0), with the weave free to scissor and to crease (the defaults,
+          # shear 5e-3 and bend 5e-3). That trio is what makes a sheet drape rather than stand
+          # off: wrapping a ball needs 36% less circumference at the equator than a flat sheet
+          # has, and a weave that can neither shear nor fold has nowhere to put the excess -- it
+          # settles as a taut cone with 60 cm of air under it, measured. What it must NOT be
+          # allowed to do is lose that length out of the threads themselves
+          # (compression_compliance, 0 by default): that is not buckling, it is shrinking, and the
+          # sheet ends up wrapped tight around the ball with the hem above the equator.
           stretch_compliance: 0.0
-          bend_compliance: 0.00005
+          bend_compliance: 0.005
           damping: 0.08
           # Held 3 cm off the collider surface: the sheet is a zero-thickness triangle mesh, so
           # without a standoff its rendered surface z-fights the ball's.
@@ -155,6 +160,25 @@ scene:
           max_distance: 40.0
           min_pitch_deg: -5.0
           max_pitch_deg: 80.0
+      children: []
+
+    # A convex-hull collider under the sheet's left edge: the one collider shape cloth
+    # supports that no other demo exercises (project_particle's ConvexHull branch).
+    - name: wedge
+      active: true
+      components:
+        - type: Transform
+          position: { x: -1.9, y: 0.6, z: 0.5 }
+          rotation: { x: 0.0, y: 0.0, z: 20.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material:
+            albedo: { r: 0.30, g: 0.42, b: 0.52 }
+            metallic: 0.0
+            roughness: 0.7
+        - type: ConvexCollider
+          hull_mesh: primitives/cube_hull
       children: []
 
     - name: sun

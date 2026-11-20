@@ -57,6 +57,27 @@ public:
     }
 
     /**
+     * @brief Moves the clock's reference point to now WITHOUT producing a delta, so the next
+     *        update() measures from here.
+     *
+     * For work a host does outside the frame loop and must not bill to the simulation: a
+     * synchronous scene build, a blocking asset drain, a loading screen. Without it that whole
+     * stall lands in the next update()'s delta and is handed to every system as though it were one
+     * long frame -- which is not merely cosmetic. A frame-clocked simulation has no accumulator to
+     * bank the excess in, so it either simulates a quarter second in one step or leaves its
+     * externally-driven parts behind; see coopa::physx::cloth::frame_substeps() for the measurement.
+     *
+     * This is also what keeps two HOSTS comparable. A game builds its scene before the first tick
+     * and never sees the stall; an editor builds one on pressing Play, in the middle of a running
+     * loop, and would otherwise simulate the same scene differently for the first frame. Resyncing
+     * makes the build invisible to both.
+     *
+     * Leaves delta_time() reading whatever it last measured, and does not advance frame_count() --
+     * this is not a frame, it is the absence of one.
+     */
+    void resync() { last_ = Clock::now(); }
+
+    /**
      * @brief Returns the time in seconds since the last update() call.
      * @return Delta time in seconds.
      */

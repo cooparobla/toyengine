@@ -205,7 +205,10 @@ inline void solve_strands(StrandSet& set, const std::vector<cloth::ClothCollider
         for (uint32_t it = 0; it < iters; ++it) {
             for (const cloth::ConstraintBatch& batch : set.stretch_batches) {
                 for (uint32_t ci = batch.begin; ci < batch.end; ++ci) {
-                    cloth::detail::project_distance(set.particles, set.stretch[ci], alpha);
+                    // The same compliance both ways: a hair segment is a rod, not a woven sheet,
+                    // so it resists being squashed exactly as it resists being pulled -- there is
+                    // no hoop of excess material to gather (see ClothParams::compression_compliance).
+                    cloth::detail::project_distance(set.particles, set.stretch[ci], alpha, alpha);
                 }
             }
         }

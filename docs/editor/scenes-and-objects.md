@@ -111,6 +111,10 @@ Each Hierarchy row has two icons, which are also on the **Object** tab under **V
 | Eye | **Show in Viewport** | Hides the object while you work. Not saved, and doesn't affect the game. |
 | Screen | **Enabled in Game** | Switches the object off when the game runs. Saved with the scene. The row is greyed out. |
 
+Clicking an icon acts on that one object. Hold **Shift** while you click to include its child
+objects as well. To set a run of rows in one go, press on the first row's icon and drag down the
+column: every eye -- or every screen -- the pointer crosses takes the state you just set.
+
 Keys for the eye, with the mouse over the viewport or the Hierarchy: **H** hides the selection
 and **Alt+H** shows everything again. In the viewport, **Shift+H** hides everything except the
 selection.

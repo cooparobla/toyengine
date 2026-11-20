@@ -27,14 +27,19 @@ inline constexpr float k_default_fixed_dt = 1.0f / 60.0f;
 /** @brief Accumulator input clamp -- caps a single frame's contribution to the substep loop. */
 inline constexpr float k_max_frame_time = 0.25f;
 
-/** @brief Hard cap on the XPBD substeps one cloth frame step may run.
+/** @brief Absolute ceiling on the XPBD substeps one cloth frame step may run.
  *
- *  PhysicsWorld::step_cloths_() sizes its substep count to hold the INTERNAL substep length
- *  constant as the frame dt varies (see its doc), so a long hitch would otherwise ask for
- *  arbitrarily many. Past this cap the internal substep simply grows with the hitch -- the same
- *  trade PhysicsConfig::max_substeps makes for the rigid loop, and for the same reason: a frame
- *  that is already late must not be made later by the catch-up work. */
-inline constexpr uint32_t k_max_cloth_substeps = 16;
+ *  A backstop, not the working limit. cloth::frame_substeps() derives the real cap from
+ *  `k_max_frame_time / internal_h` -- enough to cover the longest frame step() will ever pass on
+ *  without stretching a substep, which is 60 at the default 1/240 s. This exists only so a
+ *  pathological PhysicsConfig::cloth_substeps cannot ask for an unbounded count.
+ *
+ *  It is NOT the trade PhysicsConfig::max_substeps makes for the rigid loop, and the earlier value
+ *  of 16 was wrong for assuming it was. max_substeps drops TIME, banking the remainder in the
+ *  accumulator; a count cap reached before the frame is covered lengthens each SUBSTEP instead,
+ *  which degrades the integration rather than losing a little of it. See cloth::frame_substeps()
+ *  for the measurement that distinguishes them -- and for why cloth cannot drop time either. */
+inline constexpr uint32_t k_max_cloth_substeps = 64;
 
 /**
  * @brief Normalizes a vector, returning a zero vector instead of NaN when the input is

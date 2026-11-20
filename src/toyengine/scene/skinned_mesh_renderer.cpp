@@ -207,6 +207,21 @@ const std::vector<SkinnedMeshRenderer::Vertex>& SkinnedMeshRenderer::skinned_ver
     return vertices_;
 }
 
+const std::vector<glm::mat4>& SkinnedMeshRenderer::updated_skin_matrices() {
+    if (bone_indices_.empty() && source_.is_loaded()) resolve_bones_(*source_);
+    update_palette_();
+    return skin_matrices_;
+}
+
+const std::vector<SkinnedMeshRenderer::Vertex>& SkinnedMeshRenderer::skin_now() {
+    if (source_.is_loaded()) {
+        updated_skin_matrices();
+        skin(*source_, skin_matrices_, vertices_, preserve_volume_);
+        cpu_vertices_dirty_ = false;
+    }
+    return vertices_;
+}
+
 bool SkinnedMeshRenderer::ensure_mesh_(toy::render::passes::SkinningPass* gpu) {
     if (!source_.is_loaded() || !renderer_) return false;
     const SkinnedMeshSource& src = *source_;

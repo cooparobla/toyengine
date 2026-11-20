@@ -490,6 +490,7 @@ bool ToyRenderPipeline::render(coopa::gfx::presentation::Renderer& renderer, coo
             if (gpu_profiler_) gpu_profiler_->begin_frame(cmd, frame_slot, profile_->current_frame());
             // GPU skinning first: every pass below (shadows, G-buffer...) draws its output.
             if (skinning_pass_) skinning_pass_->record(cmd);
+            if (cloth_deform_pass_) cloth_deform_pass_->record(cmd);
             gpu_mark_(cmd, GpuScope::Skinning);
             record_scene_(cmd, ctx, meshes, sdf_draws);
             frame_meshes_ = &meshes;

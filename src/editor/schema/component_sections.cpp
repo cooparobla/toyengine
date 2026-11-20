@@ -173,6 +173,53 @@ void apply_component_sections(std::map<std::string, ComponentSchema>& table) {
             .keys({"density", "max_depth"}).closed().done(),
     });
 
+    layout("Cloth", {
+        sec("Sheet", "Mesh")
+            .says("The procedural grid: its resolution, size and mass bind when the component is "
+                  "added -- re-add it after changing them. Everything below is live.")
+            .keys({"resolution", "size", "mass", "shear"}).done(),
+        sec("Material", "Physics")
+            .says("How the fabric behaves: 0 stretch compliance is inextensible; bend compliance "
+                  "is the fold stiffness (5e-5 is mid-weight cloth, 1e-3 silk, 1e-6 leather).")
+            .keys({"stretch_compliance", "shear_compliance", "compression_compliance", "bend_compliance", "damping", "tether_scale"}).done(),
+        sec("Collision", "Collider")
+            .says("The sheet is held `thickness` off every collider its layer meets.")
+            .keys({"thickness", "friction", "self_collision", "layer"}).done(),
+        sec("Wind", "World")
+            .says("The authored wind, the weather's wind here, and how much the air grips the "
+                  "surface (drag parachutes, lift flutters).")
+            .keys({"wind", "wind_turbulence", "weather_wind", "air_drag", "air_lift", "gravity_scale"})
+            .closed().done(),
+        sec("Anchors", "Link")
+            .says("Pin the particles near each point to an object, so the sheet hangs from it. "
+                  "Binds when the component is added.")
+            .keys({"anchors"}).done(),
+    });
+
+    layout("CharacterCloth", {
+        sec("Paint", "WeightPaint")
+            .says("Which vertices simulate, and how far, is painted on the sibling "
+                  "SkinnedMeshRenderer's mesh.")
+            .custom("CharacterCloth.paint").done(),
+        sec("Fabric", "Physics")
+            .says("How the garment behaves: 0 stretch compliance is inextensible; bend "
+                  "compliance is the fold stiffness; mass per area rebuilds the simulation.")
+            .keys({"mass_per_area", "stretch_compliance", "shear_compliance", "compression_compliance", "bend_compliance", "damping", "enabled"}).done(),
+        sec("Skinning Follow", "ObjectMode")
+            .says("How the painted channels act: the anim drive spring's stiffness, and global "
+                  "dials on the painted leash and the render blend's seam.")
+            .keys({"anim_drive_compliance", "max_distance_scale", "max_distance_blend"}).done(),
+        sec("Collision", "Collider")
+            .says("Every rig bone gets a collider by default, so the whole body keeps the fabric "
+                  "out; the list below corrects individual bones (radius 0 drops one).")
+            .keys({"auto_colliders", "collider_scale", "thickness", "friction", "self_collision",
+                   "collide_world", "layer", "bone_colliders"}).done(),
+        sec("Wind", "World")
+            .says("The authored wind, the weather's wind here, and the aerodynamic grip.")
+            .keys({"wind", "wind_turbulence", "weather_wind", "air_drag", "air_lift"})
+            .closed().done(),
+    });
+
     layout("Hair", {
         sec("Strands", "Mesh")
             .says("What one hair is made of. Ribbons are flat strips for dense fine hair; tubes "

@@ -14,6 +14,7 @@
 #include <physxcoopa/world.h>
 #include <toyengine/weather/weather_system.h>
 #include <toyengine/weather/wind.h>
+#include <toyengine/cloth/character_cloth.h>
 #include <toyengine/hair/hair.h>
 
 namespace toy {
@@ -60,6 +61,18 @@ void WindSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameCo
             wind += env::wind_at(env_, at) * cc->weather_wind;
         }
         cloth->params.wind = wind;
+    }
+
+    // Character cloth: the same push as hair -- ClothMeshSystem adds this onto the authored
+    // params.wind when it hands the solver its tunables.
+    for (toy::cloth::CharacterCloth* cc : scene.get_components<toy::cloth::CharacterCloth>()) {
+        glm::vec3 wind(0.0f);
+        if (live && cc->weather_wind != 0.0f && cc->owner != nullptr) {
+            const auto* tc = cc->owner->get_transform();
+            const glm::vec3 at = tc ? glm::vec3(tc->transform().get_world_matrix()[3]) : glm::vec3(0.0f);
+            wind = env::wind_at(env_, at) * cc->weather_wind;
+        }
+        cc->wind = wind;
     }
 
     // Hair: the same field, written onto the component (pushed in, never pulled) for HairSystem

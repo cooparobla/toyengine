@@ -150,6 +150,7 @@
 #include <toyengine/render/passes/sky_cloud_pass.h>
 #include <toyengine/render/passes/cloud_overlay_pass.h>
 #include <toyengine/render/passes/cloud_shadow_pass.h>
+#include <toyengine/render/passes/cloth_deform_pass.h>
 #include <toyengine/render/passes/skinning_pass.h>
 #include <toyengine/render/surface_world.h>
 #include <toyengine/render/terrain_gpu.h>
@@ -402,6 +403,9 @@ public:
     /** @brief The GPU skinning pre-pass (render.skinning: gpu with compute), else null --
      *         SkinnedMeshRenderer::upload() then skins on the CPU. */
     passes::SkinningPass* skinning_pass() { return skinning_pass_.get(); }
+    /** @brief The character-cloth deform pre-pass, under the same gate as skinning_pass(),
+     *         else null -- ClothMeshSystem::upload() then blends on the CPU. */
+    passes::ClothDeformPass* cloth_deform_pass() { return cloth_deform_pass_.get(); }
     /** @brief True when this frame draws the physical sky. */
     bool physical_sky_active() const { return config_.sky_model == "physical" && sky_state_.active; }
     /** @brief The physical sky's LUT pass (tests: how often its tables were re-rendered). */
@@ -1660,6 +1664,7 @@ private:
     /// before the extra set below, which binds their images.
     std::unique_ptr<passes::SkyAtmospherePass>                   sky_atmosphere_pass_;
     std::unique_ptr<passes::SkinningPass>                        skinning_pass_;   ///< null: CPU skinning
+    std::unique_ptr<passes::ClothDeformPass>                     cloth_deform_pass_; ///< same gate as skinning
     std::unique_ptr<passes::SkyCloudPass>                        sky_cloud_pass_;
     std::unique_ptr<passes::CloudOverlayPass>                    cloud_overlay_pass_;   ///< the cloud layer over geometry
     CloudFrameState                                              cloud_state_;          // set_cloud_state(), per frame

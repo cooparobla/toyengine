@@ -1868,6 +1868,97 @@ std::map<std::string, ComponentSchema>& schema_table_() {
         // resolved under `rig:` (default: the nearest Animator up the hierarchy).
         add({"SkinnedMeshRenderer", "Rendering", {f_asset("mesh_path", "meshes", ".yaml", true, true, "", true), f_string("rig", ""),
                                                    f_bool("preserve_volume", false)}});
+        // physxcoopa's grid cloth: a procedural sheet pinned to rigid bodies, drawn by the
+        // sibling ClothRenderer. Resolution/size/mass/anchors bind at CREATION only -- edits to
+        // them need the component re-added; the solver tunables are live.
+        add({"Cloth", "Physics", {
+            with_tip(f_vec2("resolution", glm::vec2(21.0f, 21.0f), 1.0f), "Particles across (binds at creation)"),
+            with_tip(f_vec2("size", glm::vec2(2.0f, 2.0f), 0.01f), "Sheet extent, metres (binds at creation)"),
+            with_tip(f_float("mass", 1.0f, 0.01f, 0.001f, 1000.0f), "Whole-sheet mass, kg (binds at creation)"),
+            f_bool("shear", true),
+            with_tip(f_float("stretch_compliance", 0.0f, 1e-6f, 0.0f, 1.0f),
+                     "In-plane give under TENSION; 0 is inextensible"),
+            with_tip(f_float("shear_compliance", 5e-3f, 1e-4f, 0.0f, 1.0f),
+                     "How readily the weave scissors; this is what lets a sheet drape"),
+            with_tip(f_float("compression_compliance", 0.0f, 1e-4f, 0.0f, 1.0f),
+                     "Give along the threads themselves; above 0 the sheet shrink-wraps"),
+            with_tip(f_float("bend_compliance", 5e-3f, 1e-4f, 0.0f, 1.0f),
+                     "How readily the sheet creases; below ~1e-3 it stops draping"),
+            f_float("damping", 0.05f, 0.005f, 0.0f, 10.0f),
+            f_float("thickness", 0.03f, 0.001f, 0.0f, 1.0f),
+            f_float("friction", 0.5f, 0.01f, 0.0f, 1.0f),
+            f_float("gravity_scale", 1.0f, 0.01f, -10.0f, 10.0f),
+            f_vec3("wind", glm::vec3(0.0f), 0.05f),
+            f_float("wind_turbulence", 0.0f, 0.01f, 0.0f, 100.0f),
+            with_tip(f_float("weather_wind", 1.0f, 0.01f, 0.0f, 10.0f), "Multiplier on the weather's wind here"),
+            f_float("air_drag", 0.02f, 0.001f, 0.0f, 10.0f),
+            f_float("air_lift", 0.02f, 0.001f, 0.0f, 10.0f),
+            with_tip(f_bool("collide_surface", true),
+                     "Collide the triangle SURFACE, not only its corners -- off shows the collider "
+                     "through the sheet, on costs ~3x the collision stage"),
+            with_tip(f_bool("self_collision", false), "The sheet cannot pass through itself (the costly stage)"),
+            f_float("tether_scale", 1.02f, 0.001f, 1.0f, 10.0f),
+            f_int("layer", 0, 0, 31),
+            with_tip(collapsed_items(with_item_noun(f_items("anchors", {
+                f_string("object", ""),
+                f_vec3("point", glm::vec3(0.0f), 0.005f),
+                f_float("radius", 0.25f, 0.005f, 0.0f, 10.0f),
+            }), "Anchor")), "Pin the particles within radius of point (the object's local frame) to it (binds at creation)"),
+        }});
+        // Draws the sibling Cloth: no keys of its own (the sibling MeshRenderer, authored with
+        // no mesh_path, carries the material).
+        add({"ClothRenderer", "Rendering", {}});
+        // toyengine/cloth/: the sibling SkinnedMeshRenderer's garment simulated by its painted
+        // cloth channels (the mesh's `cloth:` key -- Cloth Paint mode authors it).
+        add({"CharacterCloth", "Physics", {
+            with_tip(f_float("mass_per_area", 0.2f, 0.005f, 0.001f, 100.0f), "Areal density, kg/m^2 (rebuilds)"),
+            with_tip(f_float("stretch_compliance", 0.0f, 1e-6f, 0.0f, 1.0f),
+                     "In-plane give under TENSION; 0 is inextensible"),
+            with_tip(f_float("shear_compliance", 5e-3f, 1e-4f, 0.0f, 1.0f),
+                     "How readily the weave scissors; this is what lets a sheet drape"),
+            with_tip(f_float("compression_compliance", 0.0f, 1e-4f, 0.0f, 1.0f),
+                     "Give along the threads themselves; above 0 the sheet shrink-wraps"),
+            with_tip(f_float("bend_compliance", 5e-3f, 1e-4f, 0.0f, 1.0f),
+                     "How readily the sheet creases; below ~1e-3 it stops draping"),
+            f_float("damping", 0.05f, 0.005f, 0.0f, 10.0f),
+            f_float("thickness", 0.03f, 0.001f, 0.0f, 1.0f),
+            f_float("friction", 0.5f, 0.01f, 0.0f, 1.0f),
+            with_tip(f_float("anim_drive_compliance", 1e-3f, 1e-5f, 0.0f, 1.0f),
+                     "Inverse stiffness of the painted Anim Drive spring toward the skinned pose"),
+            with_tip(f_float("max_distance_scale", 1.0f, 0.01f, 0.0f, 10.0f),
+                     "Whole-garment multiplier on the painted Max Distance"),
+            with_tip(f_float("max_distance_blend", 0.0f, 0.001f, 0.0f, 1.0f),
+                     "Metres of painted Max Distance over which skinning fades into simulation"),
+            f_vec3("wind", glm::vec3(0.0f), 0.05f),
+            f_float("wind_turbulence", 0.0f, 0.01f, 0.0f, 100.0f),
+            with_tip(f_float("weather_wind", 1.0f, 0.01f, 0.0f, 10.0f), "Multiplier on the weather's wind here"),
+            f_float("air_drag", 0.02f, 0.001f, 0.0f, 10.0f),
+            f_float("air_lift", 0.02f, 0.001f, 0.0f, 10.0f),
+            with_tip(f_bool("collide_surface", true),
+                     "Collide the triangle SURFACE, not only its corners -- off shows the collider "
+                     "through the garment, on costs ~3x the collision stage"),
+            with_tip(f_bool("self_collision", false), "The garment cannot pass through itself (the costly stage)"),
+            with_tip(f_bool("collide_world", true), "Collide with the physics world's shapes (bone colliders always apply)"),
+            with_tip(f_bool("auto_colliders", true),
+                     "Fit a collider to EVERY rig bone, from the rig's own bone lengths -- so an elbow "
+                     "nobody listed cannot go through the garment. bone_colliders then correct individual bones"),
+            with_tip(f_float("collider_scale", 1.0f, 0.01f, 0.0f, 5.0f),
+                     "Multiplier on every AUTO collider's radius: the garment's standoff from the body"),
+            f_int("layer", 0, 0, 31),
+            f_bool("enabled", true),
+            with_tip(collapsed_items(with_item_noun(f_items("bone_colliders", {
+                f_string("bone", ""),
+                f_enum("shape", {"capsule", "sphere", "box"}),
+                f_float("radius", 0.1f, 0.005f, 0.0f, 10.0f),
+                f_float("half_height", 0.1f, 0.005f, 0.0f, 10.0f),
+                f_int_enum("axis", {"X", "Y (bone)", "Z"}, 1),
+                f_vec3("size", glm::vec3(0.1f), 0.005f),
+                f_vec3("offset", glm::vec3(0.0f), 0.005f),
+                f_vec3("rotation", glm::vec3(0.0f), 0.5f),
+            }), "Collider")), "Primitives riding rig bones that keep the garment off the body. A capsule along the bone "
+                     "axis is centred ON the bone (half_height = half the bone); other shapes sit at its head. "
+                     "Corrections to the auto fit, by bone name; radius 0 drops one. Rotation in degrees; rebuilds"),
+        }});
         apply_component_sections(t);
         return t;
     }();

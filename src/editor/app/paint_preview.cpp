@@ -44,8 +44,14 @@ void PaintPreview::fill_(const EditMesh& m, const SculptCache& cache, Show show)
         const float l = glm::length(n);
         verts_[i].normal = l > 1e-12f ? n / l : glm::vec3(0, 0, 1);
         glm::vec3 col(1.0f);
-        if (show.weights) col = weight_heatmap(m.weight(c.v, show.group));
-        else if (m.has_colors) col = glm::vec3(c.color);
+        if (show.cloth) {
+            col = weight_heatmap(cloth_channel_value(m, static_cast<ClothChannel>(show.cloth_channel & 3), c.v) /
+                                 std::max(show.cloth_scale, 1e-6f));
+        } else if (show.weights) {
+            col = weight_heatmap(m.weight(c.v, show.group));
+        } else if (m.has_colors) {
+            col = glm::vec3(c.color);
+        }
         verts_[i].uv = glm::vec2(col.r, col.g);
         verts_[i].tangent = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f + col.b);
     }

@@ -20,9 +20,12 @@
  *      either a tiny timestep or iteration counts far past the 16 velocity_iterations the rigid
  *      solver budgets. XPBD projects positions directly and is unconditionally stable at any
  *      stiffness, including infinite (compliance == 0).
- *   2. Resolution independence. XPBD's compliance is a physical material parameter (inverse
- *      stiffness, m/N), so a 15x15 and a 45x45 sheet authored with the same compliance hang the
- *      same way. A raw spring constant does not survive a resolution change.
+ *   2. Resolution independence. XPBD's compliance is a material parameter rather than a spring
+ *      constant, so a 15x15 and a 45x45 sheet authored with the same compliance hang the same
+ *      way -- but only once the constraint's own inverse mass is divided back out of it, which
+ *      is why every compliance here is per unit mass (see ClothParams::bend_compliance). A raw
+ *      spring constant does not survive a resolution change, and neither does a raw m/N
+ *      compliance, since halving the spacing quarters the particle mass.
  *   3. It is what the reference implementation does. Unity's Cloth is NvCloth, which is PBD.
  *
  * The cost is that cloth does not push rigid bodies back (one-way coupling) -- also exactly what
@@ -160,20 +163,132 @@ struct ClothAnchor {
 };
 
 /**
+ * @struct ClothSkinChannels
+ * @brief Per-particle painted channels for cloth driven by a skinned mesh ("character cloth").
+ *
+ * All arrays are either empty or sized to Cloth::particles. An all-empty struct (the grid-cloth
+ * case) disables every skin stage in the solver outright -- see Cloth::skin. Field semantics
+ * track Unreal's cloth paint channels, so values copied from an Unreal asset behave recognisably:
+ *
+ *   - `max_distance` is the radius (metres) of a sphere around the particle's skinned target
+ *     position that the simulated particle may move within. A value at or below epsilon means
+ *     the particle is fully skin-driven: the builder gives it inv_mass == 0 and the solver
+ *     writes its position from the target each substep, exactly like an anchored particle.
+ *   - `backstop_distance`/`backstop_radius` place a sphere of radius `backstop_radius` at
+ *     `target - normal * (backstop_distance + backstop_radius)` that the particle is pushed out
+ *     of -- a cheap stand-in for the body under the clothing, keeping fabric off the skin
+ *     without a collider for every limb. A zero radius disables the backstop for that particle.
+ *   - `anim_drive` in [0, 1] scales ClothParams::anim_drive_compliance: 0 disables the drive
+ *     spring, 1 pulls at full authored stiffness toward the skinned pose.
+ */
+struct ClothSkinChannels {
+    std::vector<float> max_distance;      /**< Allowed travel from the skinned target, metres. */
+    std::vector<float> backstop_distance; /**< Backstop sphere surface offset behind the skin, metres. */
+    std::vector<float> backstop_radius;   /**< Backstop sphere radius, metres; 0 disables. */
+    std::vector<float> anim_drive;        /**< Painted gain on ClothParams::anim_drive_compliance, 0..1. */
+
+    /** @brief True when no channel data is present; every skin solve stage is skipped. */
+    bool empty() const { return max_distance.empty(); }
+};
+
+/**
+ * @struct ClothSkinTargets
+ * @brief This frame's skinned pose targets, written by the caller before each solve.
+ *
+ * The caller (toyengine's cloth system) skins the cloth's rest positions by the rig's current
+ * pose and stores the result here, exactly as ClothAnchor::world_position is resolved outside
+ * the solver -- which is what keeps cloth_solver.h free of any rig or scene dependency. The
+ * solver lerps from the `prev_*` arrays across its substeps for the same no-whip-crack reason
+ * anchors do, and advances them to the current values at the end of each solve.
+ *
+ * `position`/`prev_position` must be sized to Cloth::particles whenever Cloth::skin is
+ * non-empty. The normal arrays are only read when a particle has a positive backstop radius and
+ * may be left empty when no backstop is painted.
+ */
+struct ClothSkinTargets {
+    std::vector<glm::vec3> position;      /**< Skinned target per particle, world space. */
+    std::vector<glm::vec3> prev_position; /**< Last solve's targets; the substep lerp's start. */
+    std::vector<glm::vec3> normal;        /**< Skinned surface normal per particle, world space, unit. */
+    std::vector<glm::vec3> prev_normal;   /**< Last solve's normals. */
+};
+
+/**
  * @struct ClothParams
  * @brief Per-cloth tunables. Field names and defaults track Unity's Cloth component where an
  *        equivalent exists, so a value copied from a Unity inspector behaves recognisably here.
  */
 struct ClothParams {
-    /** @brief Stretch compliance in m/N -- inverse stiffness. 0 is fully inextensible and is the
-     *         right default: XPBD is stable at zero compliance, unlike a spring at infinite k.
-     *         Raise toward 1e-4 for a stretchy knit. */
+    /** @brief Stretch compliance -- inverse stiffness, per unit mass (see bend_compliance for the
+     *         units and the scale). 0 is fully inextensible and is the right default: XPBD is
+     *         stable at zero compliance, unlike a spring at infinite k. Raise toward 1e-4 for a
+     *         stretchy knit. */
     float stretch_compliance = 0.0f;
 
-    /** @brief Bend compliance in m/N. Non-zero by default because a perfectly rigid bend makes a
-     *         sheet behave like sheet metal -- it will not crease or fold over a sphere. 5e-5
-     *         reads as a mid-weight fabric; 1e-3 is silk, 1e-6 is leather. */
-    float bend_compliance = 5e-5f;
+    /**
+     * @brief How readily the weave SCISSORS -- warp and weft rotating toward each other without
+     *        either one changing length. The "trellis effect", and the main way real cloth
+     *        conforms to a curved surface.
+     *
+     * Soft by default, and it has to be: wrapping a sphere needs 36% less circumference at the
+     * equator than a flat disc has, a flat sheet cannot be laid on a sphere isometrically at all
+     * (Gauss), and the material has to lose that circumference SOMEWHERE. A woven fabric loses it
+     * by shearing and by folding, both of which leave every thread the length it was. Hold shear
+     * rigid along with stretch and the sheet has nowhere to put the excess: it settles as a taut
+     * cone standing off the collider, which on the ball demo was 0.6 m of air under a sheet that
+     * should have been lying on it.
+     *
+     * Read on bend_compliance's per-unit-mass scale. Applies to a grid cloth's DIAGONAL
+     * constraints (make_grid_cloth's `shear`); a mesh cloth has no separate shear degree of
+     * freedom, its triangle edges being the whole in-plane story.
+     */
+    float shear_compliance = 5e-3f;
+
+    /**
+     * @brief In-plane compliance while a THREAD is shorter than its rest length -- how far the
+     *        weave may be squashed along its own fibres. 0 (the default) means it may not.
+     *
+     * Cloth carries almost no compressive load and the temptation is to make this free, so the
+     * fabric can "buckle". It cannot: a distance constraint that shortens does not buckle, it
+     * SHRINKS, and the length is gone. Left free, a sheet conforms to a ball by shrink-wrapping
+     * onto it -- measured at 12% mean thread compression on the ball demo, with the hem riding up
+     * above the equator and the ball showing underneath. The excess circumference belongs in
+     * `shear_compliance` and in folds, both of which preserve thread length. Raise this only for a
+     * material that genuinely crushes (foam rubber, a quilted pad), and expect it to creep.
+     */
+    float compression_compliance = 0.0f;
+
+    /**
+     * @brief Bend compliance: how readily the sheet creases. Non-zero by default because a
+     *        perfectly rigid bend makes a sheet behave like sheet metal -- it will not crease, and
+     *        an inextensible sheet that cannot crease cannot wrap a sphere at all.
+     *
+     * **Per unit mass**, which is what makes the scale below mean anything. A raw compliance in
+     * m/N is measured against the constraint's inverse mass, and a cloth particle is not a
+     * kilogram: a 25x25 sheet weighing 1 kg puts 1.6 g on each, so w = 1/m is ~1250 and any
+     * compliance small enough to read as "stiff" in m/N makes the constraint rigid to four
+     * decimal places. Folding the inverse mass in here (project_distance()) removes it from the
+     * answer entirely: the fraction of a constraint violation left standing after one iteration
+     * is `alpha / (1 + alpha)` with `alpha = compliance / h^2`, for ANY particle mass and ANY
+     * resolution -- so the same number describes the same fabric on a 15x15 banner and a 45x45
+     * skirt, which is the resolution independence this file's header claims.
+     *
+     * The unit is therefore s^2 rather than m/N -- a compliance divided by a mass. Think of its
+     * square root as the time the constraint takes to relax.
+     *
+     * The ladder below is measured, not estimated: it is how much of the ball demo's upper
+     * hemisphere a 4 m sheet ends up lying against, everything else held at this file's
+     * defaults. Bending is what a sheet has to give up to fold, so it is the single parameter
+     * that decides whether cloth drapes at all, and the useful band is narrow -- above 5e-3 the
+     * sheet has no bending resistance left to remove.
+     *
+     *   | compliance | lies on the ball | reads as         |
+     *   |------------|------------------|------------------|
+     *   | 5e-5       | 26%              | stiff card       |
+     *   | 5e-4       | 52%              | leather          |
+     *   | 5e-3       | 86%              | mid-weight cloth |
+     *   | 5e-2       | 88%              | silk             |
+     */
+    float bend_compliance = 5e-3f;
 
     /** @brief Velocity damping, applied implicitly as v *= 1/(1 + damping*h) -- the same form
      *         dynamics::integrate_forces() uses for Body::linear_drag, and for the same reason:
@@ -219,6 +334,16 @@ struct ClothParams {
      *         sheet slip sideways and flutter instead of dropping straight. */
     float air_lift = 0.02f;
 
+    /** @brief Collides the triangle SURFACE, not only the particles, via ClothSurfaceSample.
+     *
+     *  On by default: without it a draped sheet shows the collider through its own triangles
+     *  wherever a chord sags further than `thickness` (see ClothSurfaceSample), which is the
+     *  single most visible cloth artefact there is. Costs one extra collider query per unique
+     *  edge and per triangle -- roughly 3x the collision stage, still far cheaper than the
+     *  subdivision that would otherwise be needed. Turn off for a sheet that never meets a
+     *  convex collider, or to measure what it is buying. */
+    bool collide_surface = true;
+
     /** @brief Enables particle-vs-particle separation so the sheet cannot pass through itself.
      *         Off by default: it is the single most expensive stage (a spatial hash rebuild plus
      *         a 27-cell scan per particle per substep) and a sheet draped over a convex body
@@ -234,6 +359,21 @@ struct ClothParams {
      *         1.02 allows 2% stretch so the sheet still reads as fabric while its far corners
      *         stay put. Raise to disable tethers in practice, or clear Cloth::tethers outright. */
     float tether_scale = 1.02f;
+
+    /** @brief Anim-drive compliance -- the inverse stiffness of the per-particle spring pulling a
+     *         skin-driven cloth back toward its skinned pose, before the painted
+     *         ClothSkinChannels::anim_drive gain divides it. Per unit mass and read on exactly
+     *         the scale bend_compliance documents, for the same reason: against a 2 g garment
+     *         particle a raw m/N compliance this small is a hard pin, and a skirt welded to its
+     *         skinned pose is a rigid bell that ignores the legs swinging inside it. Smaller is
+     *         stiffer; 0 would pin outright, so the painted gain (not this) is the per-vertex
+     *         on/off. Only read when Cloth::skin carries an anim_drive channel. */
+    float anim_drive_compliance = 1e-3f;
+
+    /** @brief Uniform multiplier on the painted ClothSkinChannels::max_distance values -- a
+     *         whole-garment "looseness" dial that avoids repainting. Only read when Cloth::skin
+     *         is present. */
+    float max_distance_scale = 1.0f;
 
     /** @brief Cloth substeps per physics substep; 0 inherits PhysicsConfig::cloth_substeps. */
     uint32_t substeps = 0;
@@ -253,6 +393,27 @@ struct ClothParams {
      *         LayerMatrix -- the same matrix rigid pairs use, so one scene-level setting governs
      *         both. */
     uint32_t layer = 0;
+};
+
+/**
+ * @struct ClothSurfaceSample
+ * @brief A point ON the cloth's surface, between particles, that collides in its own right.
+ *
+ * Collision projects PARTICLES, which are points -- so a sheet whose every particle sits exactly
+ * at the standoff still draws triangles whose interiors chord across a convex collider and dip
+ * below its surface. The ball bleeding through a draped sheet is that chord, not a solver bug:
+ * for a chord of length `c` on a sphere of radius `R` the midpoint sags `R - sqrt(R^2 - c^2/4)`,
+ * which a 25x25 sheet stretched over a 1 m ball puts at ~8 mm -- most of a 30 mm thickness, and
+ * all of it once the sheet stretches.
+ *
+ * A surface sample is the fix NvCloth calls a "virtual particle": a barycentric point on a
+ * triangle that is projected out of colliders like a particle, with its correction distributed
+ * back to the three real particles by weight. The cloth then holds its SURFACE off a collider
+ * rather than just its vertices, at a fraction of the cost of subdividing the sheet.
+ */
+struct ClothSurfaceSample {
+    uint32_t a = 0, b = 0, c = 0;             /**< The triangle's particles. */
+    float wa = 0.0f, wb = 0.0f, wc = 0.0f;    /**< Barycentric weights; sum to 1. */
 };
 
 /**
@@ -283,12 +444,31 @@ struct ConstraintBatch {
  */
 struct Cloth {
     std::vector<ClothParticle> particles;  /**< Point masses, row-major for a grid sheet. */
-    std::vector<ClothConstraint> stretch;  /**< Structural (and optionally shear) edges. */
+    std::vector<ClothConstraint> stretch;  /**< Structural edges: the warp and weft threads. */
+    /** @brief Diagonal edges, held at ClothParams::shear_compliance rather than the threads'.
+     *         Separate because they are a different material property: a weave scissors long
+     *         before a thread stretches, and conflating the two leaves a sheet unable to drape.
+     *         Empty for a mesh cloth, which has no shear degree of freedom of its own. */
+    std::vector<ClothConstraint> shear;
     std::vector<ClothConstraint> bend;     /**< Two-apart edges resisting curvature. */
     std::vector<ConstraintBatch> stretch_batches; /**< Disjoint ranges over `stretch`. */
+    std::vector<ConstraintBatch> shear_batches;   /**< Disjoint ranges over `shear`. */
     std::vector<ConstraintBatch> bend_batches;    /**< Disjoint ranges over `bend`. */
     std::vector<ClothTether> tethers;      /**< Long-range max-distance constraints. */
     std::vector<ClothAnchor> anchors;      /**< Particles pinned to rigid bodies. */
+
+    /** @brief Points on the surface between particles that collide too; see ClothSurfaceSample.
+     *         Empty leaves collision particle-only. */
+    std::vector<ClothSurfaceSample> surface_samples;
+    /** @brief Disjoint ranges over `surface_samples`, same contract as ConstraintBatch. */
+    std::vector<ConstraintBatch> surface_batches;
+
+    /** @brief Painted skin channels; empty (the grid case) disables every skin solve stage. */
+    ClothSkinChannels skin;
+
+    /** @brief Per-frame skinned pose targets; caller-written before each solve when `skin` is
+     *         present. See ClothSkinTargets. */
+    ClothSkinTargets skin_targets;
 
     /** @brief Triangle index list (3 indices per triangle) over `particles`.
      *

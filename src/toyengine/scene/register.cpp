@@ -35,6 +35,7 @@
 #include <toyengine/scene/damageable.h>
 #include <toyengine/scene/destructible.h>
 #include <toyengine/scene/sliceable.h>
+#include <toyengine/cloth/character_cloth.h>
 #include <toyengine/hair/hair.h>
 #include <toyengine/scene/skinned_mesh_renderer.h>
 #include <toyengine/scene/terrain_digger.h>
@@ -1072,11 +1073,11 @@ void register_scene_components(coopa::gfx::core::Device& device,
             }
         });
 
-    // CPU-skins a bind-pose mesh against animated bone SceneObjects every frame -- see
-    // skinned_mesh_renderer.h's file doc for why toyengine does this on the CPU rather than
-    // via GPU vertex skinning. `mesh_path` is resolved and load-kicked off here (like
-    // register_render_components()'s "MeshRenderer" parser resolves its own), since only the
-    // parser has ctx.scene_dir; `bones:` name SceneObject paths in the mesh's joint-index order.
+    // Skins a bind-pose mesh against a Rig's pose every frame (GPU compute pre-pass by default,
+    // CPU fallback -- see skinned_mesh_renderer.h's file doc). `mesh_path` is resolved and
+    // load-kicked off here (like register_render_components()'s "MeshRenderer" parser resolves
+    // its own), since only the parser has ctx.scene_dir; `bones:` name rig bones in the mesh's
+    // joint-index order.
     SceneLoader::register_component_parser("SkinnedMeshRenderer",
         [&device, &allocator, &assets, frames_in_flight](
             const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext& ctx) {
@@ -1098,6 +1099,60 @@ void register_scene_components(coopa::gfx::core::Device& device,
             }
             if (node.contains("rig")) smr->set_rig(node.at("rig").get_value<std::string>());
             if (node.contains("preserve_volume")) smr->set_preserve_volume(node.at("preserve_volume").get_value<bool>());
+        });
+
+    // Turns the sibling SkinnedMeshRenderer's garment into an XPBD cloth, driven by the mesh's
+    // painted `cloth:` channels -- see toyengine/cloth/character_cloth.h. The solver tunables
+    // reuse the grid Cloth component's flat key spellings, so a value moves between the two
+    // without renaming.
+    SceneLoader::register_component_parser("CharacterCloth",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* cc = obj.add_component<toy::cloth::CharacterCloth>();
+            read(node, "mass_per_area", cc->mass_per_area);
+            read(node, "stretch_compliance", cc->params.stretch_compliance);
+            read(node, "shear_compliance", cc->params.shear_compliance);
+            read(node, "compression_compliance", cc->params.compression_compliance);
+            read(node, "bend_compliance", cc->params.bend_compliance);
+            read(node, "damping", cc->params.damping);
+            read(node, "thickness", cc->params.thickness);
+            read(node, "friction", cc->params.friction);
+            read(node, "gravity_scale", cc->params.gravity_scale);
+            read(node, "max_velocity", cc->params.max_velocity);
+            if (node.contains("wind")) cc->params.wind = parse_vec3(node.at("wind"), cc->params.wind);
+            read(node, "wind_turbulence", cc->params.wind_turbulence);
+            read(node, "air_drag", cc->params.air_drag);
+            read(node, "air_lift", cc->params.air_lift);
+            read(node, "collide_surface", cc->params.collide_surface);
+            read(node, "self_collision", cc->params.self_collision);
+            read(node, "self_distance", cc->params.self_distance);
+            read(node, "tether_scale", cc->params.tether_scale);
+            read(node, "anim_drive_compliance", cc->params.anim_drive_compliance);
+            read(node, "max_distance_scale", cc->params.max_distance_scale);
+            read(node, "substeps", cc->params.substeps);
+            read(node, "iterations", cc->params.iterations);
+            read(node, "sleep_threshold", cc->params.sleep_threshold);
+            read(node, "sleep_time", cc->params.sleep_time);
+            read(node, "layer", cc->params.layer);
+            read(node, "max_distance_blend", cc->max_distance_blend);
+            read(node, "weather_wind", cc->weather_wind);
+            read(node, "collide_world", cc->collide_world);
+            read(node, "auto_colliders", cc->auto_colliders);
+            read(node, "collider_scale", cc->collider_scale);
+            read(node, "enabled", cc->enabled);
+            if (node.contains("bone_colliders") && node.at("bone_colliders").is_sequence()) {
+                for (const auto& bn : node.at("bone_colliders")) {
+                    toy::cloth::BoneColliderSpec spec;
+                    read(bn, "bone", spec.bone);
+                    read(bn, "shape", spec.shape);
+                    read(bn, "radius", spec.radius);
+                    read(bn, "half_height", spec.half_height);
+                    read(bn, "axis", spec.axis);
+                    if (bn.contains("size")) spec.size = parse_vec3(bn.at("size"), spec.size);
+                    if (bn.contains("offset")) spec.offset = parse_vec3(bn.at("offset"), spec.offset);
+                    if (bn.contains("rotation")) spec.rotation = parse_vec3(bn.at("rotation"), spec.rotation);
+                    if (!spec.bone.empty()) cc->bone_colliders.push_back(std::move(spec));
+                }
+            }
         });
 }
 

@@ -42,6 +42,99 @@ namespace physx {
 namespace cloth {
 
 /**
+ * @brief Builds the cloth's surface collision samples: one at the midpoint of every unique
+ *        triangle edge, one at every triangle's centroid.
+ *
+ * Those two families cover where a flat triangle sags furthest below a convex surface -- across
+ * its edges, and across its middle. See ClothSurfaceSample for why a particle-only collision
+ * stage leaves a visible gap at all.
+ *
+ * Samples are greedily coloured into ConstraintBatches whose particle sets are disjoint, so the
+ * collision stage can dispatch them with the same bit-identical guarantee the constraint batches
+ * carry. Deterministic: edges are visited in sorted canonical order and the smallest free colour
+ * always wins. Replaces any previously built samples; a cloth with no triangles gets none.
+ *
+ * @param c Cloth to modify; reads `triangles`, writes `surface_samples` / `surface_batches`.
+ */
+inline void build_surface_samples(Cloth& c) {
+    c.surface_samples.clear();
+    c.surface_batches.clear();
+    if (c.triangles.empty() || c.particles.empty()) return;
+
+    const uint32_t n = static_cast<uint32_t>(c.particles.size());
+    std::vector<std::pair<uint64_t, uint32_t>> edges;   // (packed edge key, opposite vertex)
+    edges.reserve(c.triangles.size());
+    auto key_of = [](uint32_t a, uint32_t b) {
+        const uint64_t lo = std::min(a, b), hi = std::max(a, b);
+        return (lo << 32) | hi;
+    };
+    for (std::size_t t = 0; t + 2 < c.triangles.size(); t += 3) {
+        const uint32_t v[3] = {c.triangles[t], c.triangles[t + 1], c.triangles[t + 2]};
+        if (v[0] >= n || v[1] >= n || v[2] >= n) continue;
+        for (int e = 0; e < 3; ++e) {
+            edges.push_back({key_of(v[e], v[(e + 1) % 3]), v[(e + 2) % 3]});
+        }
+        // The triangle's own middle.
+        ClothSurfaceSample s;
+        s.a = v[0]; s.b = v[1]; s.c = v[2];
+        s.wa = s.wb = s.wc = 1.0f / 3.0f;
+        c.surface_samples.push_back(s);
+    }
+    std::sort(edges.begin(), edges.end());
+    for (std::size_t i = 0; i < edges.size();) {
+        std::size_t run = i + 1;
+        while (run < edges.size() && edges[run].first == edges[i].first) ++run;
+        ClothSurfaceSample s;
+        s.a = static_cast<uint32_t>(edges[i].first >> 32);
+        s.b = static_cast<uint32_t>(edges[i].first & 0xFFFFFFFFu);
+        s.c = s.a;             // a two-particle sample: the third weight is zero
+        s.wa = s.wb = 0.5f;
+        s.wc = 0.0f;
+        c.surface_samples.push_back(s);
+        i = run;
+    }
+
+    // Greedy colouring: no two samples in a batch may share a particle, so a batch is
+    // order-independent and safe to dispatch.
+    std::vector<std::vector<uint64_t>> used(n);
+    std::vector<uint32_t> colour_of(c.surface_samples.size());
+    uint32_t colour_count = 0;
+    auto test = [](const std::vector<uint64_t>& bits, uint32_t colour) {
+        const uint32_t word = colour >> 6;
+        return word < bits.size() && ((bits[word] >> (colour & 63u)) & 1u) != 0u;
+    };
+    auto set = [](std::vector<uint64_t>& bits, uint32_t colour) {
+        const uint32_t word = colour >> 6;
+        if (word >= bits.size()) bits.resize(word + 1, 0u);
+        bits[word] |= uint64_t{1} << (colour & 63u);
+    };
+    for (std::size_t i = 0; i < c.surface_samples.size(); ++i) {
+        const ClothSurfaceSample& s = c.surface_samples[i];
+        uint32_t colour = 0;
+        while (test(used[s.a], colour) || test(used[s.b], colour) || test(used[s.c], colour)) ++colour;
+        colour_of[i] = colour;
+        set(used[s.a], colour);
+        set(used[s.b], colour);
+        set(used[s.c], colour);
+        colour_count = std::max(colour_count, colour + 1);
+    }
+    std::vector<uint32_t> counts(colour_count + 1, 0u);
+    for (const uint32_t colour : colour_of) ++counts[colour];
+    uint32_t running = 0;
+    for (uint32_t colour = 0; colour < colour_count; ++colour) {
+        const uint32_t begin = running;
+        running += counts[colour];
+        counts[colour] = begin;
+        if (running > begin) c.surface_batches.push_back(ConstraintBatch{begin, running});
+    }
+    std::vector<ClothSurfaceSample> sorted(c.surface_samples.size());
+    for (std::size_t i = 0; i < c.surface_samples.size(); ++i) {
+        sorted[counts[colour_of[i]]++] = c.surface_samples[i];
+    }
+    c.surface_samples = std::move(sorted);
+}
+
+/**
  * @struct GridClothDesc
  * @brief Authoring description of a rectangular cloth sheet.
  *
@@ -146,28 +239,30 @@ inline Cloth make_grid_cloth(const GridClothDesc& desc) {
         close_batch(c.stretch, c.stretch_batches, begin);
     }
 
-    // --- Shear: both diagonals, each split by column parity.
+    // --- Shear: both diagonals, each split by column parity, into their OWN list. They are a
+    // different material property from the threads above -- a weave scissors long before a thread
+    // stretches -- and solve_cloth() holds them at ClothParams::shear_compliance.
     // Column parity alone is sufficient for disjointness here: a "\" constraint at (x,y) touches
     // (x,y) and (x+1,y+1), so two constraints of the same column parity can only share a particle
     // if x1 == x2 + 1 -- impossible when x1 and x2 have the same parity. Same argument for "/".
     if (desc.shear) {
         for (uint32_t parity = 0; parity < 2; ++parity) {
-            const uint32_t begin = static_cast<uint32_t>(c.stretch.size());
+            const uint32_t begin = static_cast<uint32_t>(c.shear.size());
             for (uint32_t y = 0; y + 1 < rows; ++y) {
                 for (uint32_t x = parity; x + 1 < cols; x += 2) {
-                    emit(c.stretch, index_of(x, y), index_of(x + 1, y + 1));
+                    emit(c.shear, index_of(x, y), index_of(x + 1, y + 1));
                 }
             }
-            close_batch(c.stretch, c.stretch_batches, begin);
+            close_batch(c.shear, c.shear_batches, begin);
         }
         for (uint32_t parity = 0; parity < 2; ++parity) {
-            const uint32_t begin = static_cast<uint32_t>(c.stretch.size());
+            const uint32_t begin = static_cast<uint32_t>(c.shear.size());
             for (uint32_t y = 0; y + 1 < rows; ++y) {
                 for (uint32_t x = parity; x + 1 < cols; x += 2) {
-                    emit(c.stretch, index_of(x + 1, y), index_of(x, y + 1));
+                    emit(c.shear, index_of(x + 1, y), index_of(x, y + 1));
                 }
             }
-            close_batch(c.stretch, c.stretch_batches, begin);
+            close_batch(c.shear, c.shear_batches, begin);
         }
     }
 
@@ -213,6 +308,8 @@ inline Cloth make_grid_cloth(const GridClothDesc& desc) {
     if (c.params.self_distance <= 0.0f) {
         c.params.self_distance = 0.6f * std::min(dx, dy);
     }
+
+    if (c.params.collide_surface) build_surface_samples(c);
 
     c.bounds = compute_bounds(c);
     return c;
@@ -291,32 +388,30 @@ inline uint32_t pin_static(Cloth& c, const glm::vec3& world_point, float radius)
     return pinned;
 }
 
+namespace detail {
+
 /**
- * @brief Derives one tether per free particle from the current anchors.
- *
- * Runs Dijkstra over the stretch graph from every anchored particle at once (all anchors seeded
- * at distance 0), so each particle ends up tethered to its geodesically nearest anchor at its
- * rest-pose path length. Geodesic, not Euclidean: a particle hanging round the far side of a
- * sphere is Euclidean-close to the anchor but can legitimately be a long way from it along the
- * fabric, and a Euclidean tether would yank it through the body.
- *
- * Replaces any previously built tethers. Call after all pin_to_body()/pin_static() calls; a
- * cloth with no anchors gets no tethers.
- *
- * @param c Cloth to modify.
+ * @brief Shared tether derivation: Dijkstra over the stretch graph from every seed particle at
+ *        once, emitting one tether per reachable free particle. See build_tethers() for the
+ *        geodesic-vs-Euclidean rationale; this helper exists so both seeding policies (anchored
+ *        particles, skin-pinned particles) share one implementation.
  */
-inline void build_tethers(Cloth& c) {
+inline void build_tethers_from_seeds(Cloth& c, const std::vector<uint32_t>& seeds) {
     c.tethers.clear();
-    if (c.anchors.empty() || c.particles.empty()) return;
+    if (seeds.empty() || c.particles.empty()) return;
 
     const std::size_t n = c.particles.size();
 
-    // Adjacency over the stretch graph only -- bend edges span two cells and would report a
-    // geodesic shorter than the fabric actually allows.
+    // Adjacency over the in-plane graph -- threads and diagonals, but NOT bend edges, which span
+    // two cells and would report a geodesic shorter than the fabric actually allows. The
+    // diagonals belong here even though they are solved separately: a geodesic across the fabric
+    // runs through a cell, and routing it around two sides instead over-reports the distance.
     std::vector<std::vector<uint32_t>> adjacency(n);
-    for (const ClothConstraint& k : c.stretch) {
-        adjacency[k.a].push_back(k.b);
-        adjacency[k.b].push_back(k.a);
+    for (const std::vector<ClothConstraint>* list : {&c.stretch, &c.shear}) {
+        for (const ClothConstraint& k : *list) {
+            adjacency[k.a].push_back(k.b);
+            adjacency[k.b].push_back(k.a);
+        }
     }
 
     const float inf = std::numeric_limits<float>::max();
@@ -325,10 +420,11 @@ inline void build_tethers(Cloth& c) {
 
     using Entry = std::pair<float, uint32_t>; // (distance, particle)
     std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> frontier;
-    for (const ClothAnchor& a : c.anchors) {
-        dist[a.particle] = 0.0f;
-        source[a.particle] = a.particle;
-        frontier.push({0.0f, a.particle});
+    for (const uint32_t seed : seeds) {
+        if (seed >= n) continue;
+        dist[seed] = 0.0f;
+        source[seed] = seed;
+        frontier.push({0.0f, seed});
     }
 
     while (!frontier.empty()) {
@@ -347,14 +443,56 @@ inline void build_tethers(Cloth& c) {
 
     const float scale = std::max(1.0f, c.params.tether_scale);
     for (uint32_t i = 0; i < n; ++i) {
-        if (c.particles[i].inv_mass == 0.0f) continue; // anchors tether nothing
-        if (dist[i] >= inf) continue;                  // disconnected island, no reachable anchor
+        if (c.particles[i].inv_mass == 0.0f) continue; // pinned particles tether nothing
+        if (dist[i] >= inf) continue;                  // disconnected island, no reachable seed
         ClothTether t;
         t.particle = i;
         t.anchor = source[i];
         t.max_length = dist[i] * scale;
         c.tethers.push_back(t);
     }
+}
+
+} // namespace detail
+
+/**
+ * @brief Derives one tether per free particle from the current anchors.
+ *
+ * Runs Dijkstra over the stretch graph from every anchored particle at once (all anchors seeded
+ * at distance 0), so each particle ends up tethered to its geodesically nearest anchor at its
+ * rest-pose path length. Geodesic, not Euclidean: a particle hanging round the far side of a
+ * sphere is Euclidean-close to the anchor but can legitimately be a long way from it along the
+ * fabric, and a Euclidean tether would yank it through the body.
+ *
+ * Replaces any previously built tethers. Call after all pin_to_body()/pin_static() calls; a
+ * cloth with no anchors gets no tethers.
+ *
+ * @param c Cloth to modify.
+ */
+inline void build_tethers(Cloth& c) {
+    std::vector<uint32_t> seeds;
+    seeds.reserve(c.anchors.size());
+    for (const ClothAnchor& a : c.anchors) seeds.push_back(a.particle);
+    detail::build_tethers_from_seeds(c, seeds);
+}
+
+/**
+ * @brief Derives one tether per free particle from every pinned particle (inv_mass == 0).
+ *
+ * The seeding policy for skin-driven cloth, where the fixed points are painted
+ * (ClothSkinChannels::max_distance <= eps) rather than anchored to bodies: a shirt's free hem is
+ * tethered to its geodesically nearest skin-pinned particle, capping how far it can swing from
+ * the garment even when constraint iterations are too few to propagate the pull. Same Dijkstra
+ * as build_tethers(); only the seeds differ. Replaces any previously built tethers.
+ *
+ * @param c Cloth to modify.
+ */
+inline void build_tethers_from_pinned(Cloth& c) {
+    std::vector<uint32_t> seeds;
+    for (uint32_t i = 0; i < c.particles.size(); ++i) {
+        if (c.particles[i].inv_mass == 0.0f) seeds.push_back(i);
+    }
+    detail::build_tethers_from_seeds(c, seeds);
 }
 
 } // namespace cloth

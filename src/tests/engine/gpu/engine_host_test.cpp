@@ -9,6 +9,7 @@
 #include <coopa/testing/test.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <string>
@@ -24,6 +25,7 @@
 #include <coopa/scene/scene_loader.h>
 #include <coopa/yaml/document.h>
 #include <physxcoopa/system/physics_system.h>
+#include <physxcoopa/util/math.h>
 #include <toyengine/water/water_body.h>
 #include <toyengine/water/water_system.h>
 
@@ -317,4 +319,68 @@ COOPA_TEST(display_region_moves_the_image_and_viewport_rays) {
     expect(engine.world_to_window(origin + dir * 10.0f, px) &&
            glm::distance(px, glm::vec2(box.x + box.w * 0.5f, box.y + box.h * 0.5f)) < 1.0f,
            "world_to_window() inverts viewport_ray()");
+}
+
+/**
+ * @brief Building a scene is not charged to the simulation clock -- in either host.
+ *
+ * This is the editor/standalone parity seam, and it was the cause of the one cloth failure that
+ * reproduced only under the editor. Both hosts route every system's `dt` through
+ * `Engine::frame_dt_()`, so pinning `FIXED_DT` already makes them identical for a test. What
+ * `FIXED_DT` cannot equalise is a real wall-clock stall, and the two hosts take it at different
+ * times: a game builds its scene inside the `Engine` constructor, before the loop exists, while the
+ * editor builds one from `EditorApp::play()` -- a deferred callback that runs AFTER that frame's
+ * clock sample. The build time (a `wait_idle()`, every system installed, a synchronous drain of
+ * every mesh and texture) therefore landed in the NEXT frame's delta in the editor and nowhere at
+ * all in the game. Clamped to `util::k_max_frame_time`, that is a 0.25 s first frame, which is
+ * enough to leave `cloth_demo`'s sheet off its ball (see `coopa::physx::cloth::frame_substeps()`).
+ *
+ * `prepare_scene_()` and `rebuild_pipeline()` now resync the frame clock on the way out, so the
+ * stall is invisible to both. Asserted with the REAL clock -- `FIXED_DT` would hide the very thing
+ * under test -- and against the engine's own construction time, so the bound is derived rather than
+ * a guessed number of milliseconds.
+ */
+COOPA_TEST(a_scene_build_is_not_billed_to_the_first_simulated_frame) {
+    ScopedEnv fixed_dt("FIXED_DT", "");   // unparsable -> off, i.e. the real wall clock
+    ScopedEnv no_input("NO_INPUT", "1");
+    const std::string path = std::string(ROOT_DIR) + "/assets/scenes/physics/physics_demo/scene.yaml";
+
+    const auto before_ctor = std::chrono::steady_clock::now();
+    toy::core::Engine engine(make_test_config(path, 320, 180, 160, 90));
+    const float ctor_seconds =
+        std::chrono::duration<float>(std::chrono::steady_clock::now() - before_ctor).count();
+
+    // The first tick after construction. Without the resync its delta is the whole constructor --
+    // device, pipeline, scene load, asset drain -- which is the better part of a second.
+    tick_frames(engine, 1);
+    const float first = engine.delta_time();
+    std::cout << "         Engine construction " << ctor_seconds * 1000.0f
+              << " ms; first simulated frame " << first * 1000.0f << " ms\n";
+    require(ctor_seconds > 0.05f, "the constructor really did take measurable time (" +
+                                      std::to_string(ctor_seconds) + " s)");
+    expect(first < ctor_seconds * 0.5f,
+           "the first frame's dt is not the constructor's duration (" +
+               std::to_string(first * 1000.0f) + " ms of a " +
+               std::to_string(ctor_seconds * 1000.0f) + " ms build)");
+    expect(first < coopa::physx::util::k_max_frame_time,
+           "and it is nowhere near the frame clamp (" + std::to_string(first * 1000.0f) + " ms)");
+
+    // Now the editor's path: a scene pushed mid-loop. Same guarantee, and this is the one that
+    // actually regressed -- push_scene() goes through the same prepare_scene_().
+    tick_frames(engine, 3);
+    const auto before_push = std::chrono::steady_clock::now();
+    coopa::scene::Scene& play = engine.push_scene(
+        coopa::scene::SceneLoader::load_from_node(coopa::yaml::load_document(path), path),
+        /*simulating=*/true);
+    const float push_seconds =
+        std::chrono::duration<float>(std::chrono::steady_clock::now() - before_push).count();
+    tick_frames(engine, 1);
+    const float after_push = engine.delta_time();
+    std::cout << "         push_scene " << push_seconds * 1000.0f << " ms; next frame "
+              << after_push * 1000.0f << " ms\n";
+    expect(after_push < push_seconds + 0.016f,
+           "a scene pushed mid-loop does not hand the next frame its build time (" +
+               std::to_string(after_push * 1000.0f) + " ms after a " +
+               std::to_string(push_seconds * 1000.0f) + " ms push)");
+    engine.remove_scene(&play);
 }

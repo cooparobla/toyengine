@@ -56,20 +56,49 @@ struct ClothCollider {
     glm::quat orientation{1.0f, 0.0f, 0.0f, 0.0f}; /**< Owning body's world orientation. */
 
     /**
-     * @brief World-space displacement the cloth must stay clear of, beyond `position`.
+     * @brief World-space displacement the collider crosses during the step, beyond `position`.
      *
-     * **The engine leaves this at zero, by design.** A sweep covers poses a collider would be
-     * drawn at between two cloth solves; PhysicsWorld::step_cloths_() runs once per FRAME, against
-     * the poses that same frame draws (see its doc), so there are no such poses to cover. The
-     * projection support below -- exact for a sphere (a swept sphere IS a capsule), self-contained
-     * and unit-tested -- is for a caller driving cloth::project_particle() directly against poses
-     * of its own choosing.
+     * `position` is therefore the pose at the START of the step and `position + sweep` the pose
+     * the frame draws. Every caller that knows its colliders moved must fill this, and both of
+     * this engine's do: PhysicsWorld::step_cloths_() from each body's velocity, and toyengine's
+     * ClothMeshSystem from the rig's bone poses at the previous solve.
+     *
+     * It is load-bearing twice over. The obvious one is tunnelling -- a shin travels several
+     * centimetres per frame and a particle would otherwise pass straight through it. The less
+     * obvious one is that solve_cloth() advances the pose across its SUBSTEPS from this, instead
+     * of holding the shape at the far end of the displacement for all of them; without that, a
+     * body moving 4 m/s arrives 6.7 cm inside the sheet on substep one and the positional
+     * correction that removes it is read back as 16 m/s of cloth (see stage 7).
+     *
+     * Projection is exact for a sphere (a swept sphere IS a capsule); a box or capsule is probed
+     * at both poses, END LAST (see project_particle()). A TriangleMesh is never swept.
      */
     glm::vec3 sweep{0.0f};
 
     /** @brief Orientation at the end of `sweep`, for shapes whose rotation changes their extent.
      *         Ignored for spheres (rotationally symmetric) and meshes (never swept). */
     glm::quat end_orientation{1.0f, 0.0f, 0.0f, 0.0f};
+
+    /**
+     * @brief The owning body's velocity, so a contact can be resolved in the surface's frame.
+     *
+     * Friction opposes RELATIVE sliding, and the inelastic normal clamp kills the velocity a
+     * contact approaches at -- both of which are nonsense measured in the world frame against a
+     * moving body. A sheet lying on a ball driven at 4 m/s has 4 m/s of world velocity and zero
+     * relative to the ball; braking it toward world-zero is a 2.4 m/s-per-substep tangential
+     * force scrubbing the fabric off the back of the ball, which is exactly what it did.
+     *
+     * Angular velocity is carried separately because the surface velocity at a contact is
+     * `linear + cross(angular, p - position)` -- a spinning drum drags cloth around it even
+     * though its centre never moves.
+     */
+    glm::vec3 linear_velocity{0.0f};
+    glm::vec3 angular_velocity{0.0f}; /**< Radians/second about `position`. */
+
+    /** @brief Surface velocity at world point `p`, for friction and the normal clamp. */
+    glm::vec3 velocity_at(const glm::vec3& p) const {
+        return linear_velocity + glm::cross(angular_velocity, p - position);
+    }
 
     geometry::AABB bounds;                   /**< World AABB over BOTH poses, for the cheap reject. */
 
@@ -191,7 +220,22 @@ inline bool project_at_pose_(const collision::Shape& s, const glm::vec3& pose_po
                 local_target = glm::clamp(local, -he, he);
                 const glm::vec3 delta = local - local_target;
                 const float len = glm::length(delta);
-                if (len >= thickness) return false;
+                // The tolerance is load-bearing, and it is about COST rather than correctness.
+                // This branch's placement is written in world space (`box.center + ax*x + ...`)
+                // and re-measured in box space (three dot products with the axes), and that round
+                // trip is not exact: a particle left sitting at the standoff comes back as
+                // `thickness * (1 - 3e-7)`, a bare `>=` calls it a hit, and the correction it then
+                // applies is ~3e-9 m. Harmless on its own -- but solve_cloth()'s re-sweep breaks
+                // out only when a pass corrects NOTHING, so every particle resting on a box
+                // consumed all k_collider_passes passes, every substep, forever. A flag lying on
+                // a box collider paid 4x the collision stage for 3 nanometres.
+                //
+                // Measured by cloth_collision/projection_is_idempotent_so_the_collider_re_sweep_
+                // breaks_out, which is the only reason this was visible at all: it has no
+                // behavioural tell, since the sheet is in exactly the right place either way.
+                // The sphere and capsule branches are already exact here, their test being radial
+                // against `radius + thickness` rather than a clamp-and-subtract.
+                if (len >= thickness - util::k_epsilon) return false;
                 local_normal = (len > util::k_epsilon) ? delta / len : glm::vec3(0.0f, 0.0f, 1.0f);
                 depth_out = thickness - len;
                 local_target = local_target + local_normal * thickness;
@@ -279,6 +323,14 @@ inline bool project_at_pose_(const collision::Shape& s, const glm::vec3& pose_po
             query.max = local_p + glm::vec3(local_thickness);
 
             float best_d2 = local_thickness * local_thickness;
+            // A particle already held AT the standoff must come back as "nothing to correct", or
+            // solve_cloth()'s re-sweep never breaks out of its k_collider_passes loop -- the same
+            // cost-only bug the Box branch's rejection tolerance documents, and this is the branch
+            // heightmap terrain uses, so a sheet resting on terrain was the worst case for it.
+            // Compared against squared distances, hence the shrunk radius rather than an epsilon
+            // on the comparison.
+            const float contact_limit = std::max(0.0f, local_thickness - util::k_epsilon);
+            const float contact_d2 = contact_limit * contact_limit;
             glm::vec3 best_point(0.0f);
             glm::vec3 best_delta(0.0f);
             uint32_t best_tri = 0;
@@ -302,7 +354,8 @@ inline bool project_at_pose_(const collision::Shape& s, const glm::vec3& pose_po
                 // existing behaviour for that case untouched.
                 if (glm::dot(delta, s.mesh->triangle_normal(tri)) >= 0.0f) any_front = true;
 
-                if (d2 > best_d2) return;
+                // `>= contact_d2` is the idempotence guard above; `> best_d2` keeps the nearest.
+                if (d2 >= contact_d2 || d2 > best_d2) return;
                 best_d2 = d2;
                 best_point = closest;
                 best_delta = delta;
@@ -346,6 +399,12 @@ inline bool project_at_pose_(const collision::Shape& s, const glm::vec3& pose_po
             glm::vec3 point;
             float pen = 0.0f;
             if (!collision::hull_vs_sphere(posed, probe, normal_out, pen, point)) return false;
+            // A probe sphere exactly TANGENT to the hull is a touch, not a penetration, and
+            // hull_vs_sphere() reports it as a hit with `pen` at zero. Returning true for it would
+            // stop solve_cloth()'s re-sweep from ever breaking out -- the same cost-only trap the
+            // Box and TriangleMesh branches carry a tolerance for. Cheaper to express here than
+            // there, since this branch is handed the penetration directly.
+            if (pen <= util::k_epsilon) return false;
             // Same convention as every other branch here: final position = (point on the actual
             // shape's surface) + normal * thickness.
             p = point + normal_out * thickness;
@@ -365,10 +424,18 @@ inline bool project_at_pose_(const collision::Shape& s, const glm::vec3& pose_po
  * Dispatch:
  *   - **Sphere**, and anything not moving: one call to project_at_pose_(). A swept sphere is a
  *     capsule, which that function models exactly, so nothing extra is needed.
- *   - **Box / Capsule while moving**: projected against the start AND end pose, keeping whichever
- *     correction is deeper. The exact swept volume of a rotating box is a hull no closest-point
+ *   - **Box / Capsule while moving**: projected against the start pose and then against the end
+ *     pose, in that order. The exact swept volume of a rotating box is a hull no closest-point
  *     routine here can express, and two samples bound it closely enough for a sub-frame
  *     displacement -- a sheet does not resolve the difference.
+ *
+ *     **The end pose must be projected LAST, not merely preferred when it is deeper.** The end
+ *     pose is the one the frame draws, so it is the only one whose surface the result has to be
+ *     outside of; resolving a deeper start-pose overlap and stopping there leaves the particle
+ *     clear of where a limb WAS and inside where it now is. On a fast swinging limb that reads as
+ *     cloth intermittently sinking into the leg, only on the frames of peak speed. Chaining the
+ *     two instead keeps the swept volume's push (the start pose moves the particle ahead of the
+ *     limb) while making the drawn pose authoritative.
  *   - **TriangleMesh**: never swept (non-convex mesh colliders are static-only in this engine), so
  *     it falls through the single-call path with whatever sweep it was given ignored.
  *
@@ -397,25 +464,24 @@ inline bool project_particle(const ClothCollider& collider, float thickness,
                                          thickness, p, normal_out, depth_out, motion_start);
     }
 
-    // Probe both poses on copies, so the loser never perturbs the particle.
-    glm::vec3 p_start = p, n_start(0.0f);
+    glm::vec3 moved = p, n_start(0.0f);
     float d_start = 0.0f;
     const bool hit_start = detail::project_at_pose_(s, collider.position, collider.orientation,
-                                                    glm::vec3(0.0f), thickness, p_start, n_start,
+                                                    glm::vec3(0.0f), thickness, moved, n_start,
                                                     d_start, motion_start);
 
-    glm::vec3 p_end = p, n_end(0.0f);
+    glm::vec3 n_end(0.0f);
     float d_end = 0.0f;
     const bool hit_end = detail::project_at_pose_(s, collider.position + collider.sweep,
                                                   collider.end_orientation, glm::vec3(0.0f),
-                                                  thickness, p_end, n_end, d_end, motion_start);
+                                                  thickness, moved, n_end, d_end, motion_start);
 
     if (!hit_start && !hit_end) return false;
-    if (hit_end && (!hit_start || d_end > d_start)) {
-        p = p_end;  normal_out = n_end;  depth_out = d_end;
-    } else {
-        p = p_start;  normal_out = n_start;  depth_out = d_start;
-    }
+    p = moved;
+    // The end pose's contact describes the surface the particle now rests on, so friction and
+    // the caller's barycentric redistribution follow it whenever it applied.
+    normal_out = hit_end ? n_end : n_start;
+    depth_out = hit_end ? d_end : d_start;
     return true;
 }
 

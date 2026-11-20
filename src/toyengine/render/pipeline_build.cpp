@@ -282,9 +282,13 @@ void ToyRenderPipeline::build_lighting_passes_() {
     // other consumer of that library -- is untouched.
     // The physical sky's tables and cloud layer (render sky_model / clouds). Always
     // constructed and bound below, so both switch live; nothing records while they are off.
-    // GPU skinning (render.skinning). Startup-fixed; the CPU path needs nothing here.
+    // GPU skinning (render.skinning). Startup-fixed; the CPU path needs nothing here. The
+    // character-cloth deform pass rides the same gate -- it is skinning with a cloth blend on
+    // top, and a device without compute falls back to the CPU blend the same way.
     if (config_.skinning == "gpu" && device_.supports_compute()) {
         skinning_pass_ = std::make_unique<passes::SkinningPass>(device_, config_.shaders("skin.comp"));
+        cloth_deform_pass_ =
+            std::make_unique<passes::ClothDeformPass>(device_, config_.shaders("cloth_deform.comp"));
     }
     sky_atmosphere_pass_ = std::make_unique<passes::SkyAtmospherePass>(
         device_, allocator_, config_.shaders("fullscreen.vert"), config_.shaders("sky_transmittance.frag"),

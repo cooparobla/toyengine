@@ -147,6 +147,14 @@ class Mesh:
             `perpendicular_tangents()` makes them.
         colors (list): Optional per-vertex colours; written as `colors: []` when omitted, as
             every committed mesh has it.
+        groups (list): Optional per-vertex vertex-group weights, each a `{name: weight}` dict
+            (the file's `weights:`). A skinned mesh binds to its rig by these NAMES. Omitted
+            writes the empty placeholder every committed mesh has.
+        cloth (dict): Optional cloth-paint channels for a garment simulated by a
+            `CharacterCloth` component, as `{channel: [value per vertex]}` over
+            `max_distance` (metres; 0 means fully skin-driven), `backstop_distance`,
+            `backstop_radius` and `anim_drive` (0..1). `max_distance` is required when any
+            channel is given -- the engine reads it as the block's presence flag.
 
     Raises:
         ValueError: If `uvs` or an explicit `normals`/`tangents` is not one entry per vertex,
@@ -154,17 +162,35 @@ class Mesh:
             otherwise -- the loader reads past the end of an array or shades from garbage.
     """
 
-    def __init__(self, verts, faces, uvs, normals=None, tangents=None, colors=None):
+    #: The cloth channels `cloth:` may carry, in the order they are written.
+    CLOTH_CHANNELS = ("max_distance", "backstop_distance", "backstop_radius", "anim_drive")
+
+    def __init__(self, verts, faces, uvs, normals=None, tangents=None, colors=None,
+                 groups=None, cloth=None):
         self.verts = [list(v) for v in verts]
         self.faces = [list(f) for f in faces]
         self.uvs = [list(u) for u in uvs]
         self.normals = [list(n) for n in normals] if normals is not None else None
         self.tangents = [list(t) for t in tangents] if tangents is not None else None
         self.colors = [list(c) for c in colors] if colors is not None else None
+        self.groups = [dict(g) for g in groups] if groups is not None else None
+        self.cloth = {k: [float(x) for x in v] for k, v in cloth.items()} if cloth else None
 
         count = len(self.verts)
+        if self.cloth is not None:
+            unknown = sorted(set(self.cloth) - set(self.CLOTH_CHANNELS))
+            if unknown:
+                raise ValueError(
+                    f"unknown cloth channel(s) {unknown}; the engine parses only "
+                    f"{list(self.CLOTH_CHANNELS)} and silently ignores anything else")
+            if "max_distance" not in self.cloth:
+                raise ValueError(
+                    "cloth needs max_distance: the engine reads it as the presence flag for the "
+                    "whole block, so the other channels alone would be dropped")
         for label, array in (("uvs", self.uvs), ("normals", self.normals),
-                             ("tangents", self.tangents), ("colors", self.colors)):
+                             ("tangents", self.tangents), ("colors", self.colors),
+                             ("groups", self.groups),
+                             *((f"cloth.{k}", v) for k, v in (self.cloth or {}).items())):
             if array is not None and len(array) != count:
                 raise ValueError(
                     f"{label} has {len(array)} entries for {count} vertices; the mesh arrays "
@@ -209,9 +235,20 @@ class Mesh:
             lines.append("colors:")
             lines += [f"  - {vec(c)}" for c in self.colors]
         lines.append("weights:")
-        lines += ["  - {  }" for _ in self.verts]
+        if self.groups is None:
+            lines += ["  - {  }" for _ in self.verts]
+        else:
+            lines += ["  - {" + ", ".join(f"{n}: {fmt(w)}" for n, w in g.items()) + "}"
+                      for g in self.groups]
         lines.append("tangents:")
         lines += [f"  - {vec(t)}" for t in tangents]
+        if self.cloth is not None:
+            lines.append("cloth:")
+            for channel in self.CLOTH_CHANNELS:
+                values = self.cloth.get(channel)
+                if values is None:
+                    continue
+                lines.append(f"  {channel}: [" + ", ".join(fmt(v) for v in values) + "]")
         return "\n".join(lines) + "\n"
 
     def write(self, project, name, fmt=fmt_num):

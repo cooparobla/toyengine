@@ -400,6 +400,8 @@ inline void register_physics_components(coopa::asset::AssetManager& assets,
 
             cloth::ClothParams& p = cc->params;
             if (node.contains("stretch_compliance")) p.stretch_compliance = node.at("stretch_compliance").get_value<float>();
+            if (node.contains("shear_compliance")) p.shear_compliance = node.at("shear_compliance").get_value<float>();
+            if (node.contains("compression_compliance")) p.compression_compliance = node.at("compression_compliance").get_value<float>();
             if (node.contains("bend_compliance")) p.bend_compliance = node.at("bend_compliance").get_value<float>();
             if (node.contains("damping")) p.damping = node.at("damping").get_value<float>();
             if (node.contains("thickness")) p.thickness = node.at("thickness").get_value<float>();
@@ -412,6 +414,7 @@ inline void register_physics_components(coopa::asset::AssetManager& assets,
             if (node.contains("weather_wind")) cc->weather_wind = node.at("weather_wind").get_value<float>();
             if (node.contains("air_drag")) p.air_drag = node.at("air_drag").get_value<float>();
             if (node.contains("air_lift")) p.air_lift = node.at("air_lift").get_value<float>();
+            if (node.contains("collide_surface")) p.collide_surface = node.at("collide_surface").get_value<bool>();
             if (node.contains("self_collision")) p.self_collision = node.at("self_collision").get_value<bool>();
             if (node.contains("self_distance")) p.self_distance = node.at("self_distance").get_value<float>();
             if (node.contains("tether_scale")) p.tether_scale = node.at("tether_scale").get_value<float>();

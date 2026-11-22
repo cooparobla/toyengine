@@ -54,7 +54,12 @@ KINDS = [
     ("salt", (238, 236, 226), 0.82),
     ("road", (150, 128, 100), 0.95),
 ]
-"""One entry per toy::world::TileKind, IN ENUM ORDER. See this module's docstring."""
+"""One entry per toy::world::TileKind, IN ENUM ORDER. See this module's docstring.
+
+The base colours are mirrored in C++ by ``tile_kind_base_colors()`` in
+``src/toyengine/world/tile_types.h``, for code that has to agree with a tile's colour without
+sampling the atlas. **Move one and move the other.**
+"""
 
 OUTPUT_DIR = pathlib.Path(__file__).resolve().parent.parent / "assets" / "textures" / "terrain"
 """Where the generated PNGs are written; resolved relative to this repo, not the caller's cwd."""

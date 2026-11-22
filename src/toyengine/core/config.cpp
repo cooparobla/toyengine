@@ -74,6 +74,7 @@ AppConfig AppConfig::from_node(const fkyaml::node& root) {
 
             // An explicit key still wins over the preset, same rule as every *_quality tier.
             read(r, "water_detail_distance", config.render.water_detail_distance);
+            read(r, "water_open_variation", config.render.water_open_variation);
 
             // --- Feature toggles ---
             read(r, "outline_enabled", config.render.outline_enabled);
@@ -422,6 +423,7 @@ AppConfig AppConfig::from_node(const fkyaml::node& root) {
             read(r, "volumetrics_max_opacity", config.render.volumetrics_max_opacity);
             read(r, "volumetrics_sun_anisotropy", config.render.volumetrics_sun_anisotropy);
             read(r, "volumetrics_shadows_enabled", config.render.volumetrics_shadows_enabled);
+            read(r, "volumetrics_clip_to_transparent", config.render.volumetrics_clip_to_transparent);
             read(r, "volumetrics_light_scatter", config.render.volumetrics_light_scatter);
             read(r, "volumetrics_max_scatter_lights", config.render.volumetrics_max_scatter_lights);
 

@@ -138,13 +138,20 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
     std::vector<std::uint8_t> full(static_cast<std::size_t>(qn) * static_cast<std::size_t>(qn), 0);
 
     // A styled chunk runs ~20 triangles a tile on a flat plateau; one up-front reservation saves
-    // the regrowth. A cliff now costs a flat `soil_depth_steps + 1` wall bands a tile (vertical
-    // merging below), not one band a height step, so the per-edge allowance is a small constant
-    // rather than a function of height -- still only an estimate, not the exact size
-    // append_styled() itself must never be called with (that regression is documented at its own
-    // reserve-less loop).
+    // the regrowth. A cliff costs a flat few wall bands a tile (vertical merging below), not one
+    // band a height step, so the per-edge allowance is a small constant rather than a function of
+    // height -- still only an estimate, not the exact size append_styled() itself must never be
+    // called with (that regression is documented at its own reserve-less loop).
+    //
+    // The constant is genuinely constant, which `soil_depth_steps + 1` is not. `wall_kind()`
+    // gives a wall exactly two kinds -- `side_kind` over the soil, Stone below it -- so a run
+    // breaks on kind at most once however many STEPS the soil is deep, and the cap tier is the
+    // third. A terrain with a fine `height_step` states the same soil depth in ten times the
+    // steps, and reserving against that asked for ~900k vertices a chunk: harmless as a count,
+    // tens of megabytes per chunk build in flight, and tens of gigabytes of peak RSS across a
+    // world streamed in at once.
     const std::size_t tiles = static_cast<std::size_t>(params.chunk_size) * static_cast<std::size_t>(params.chunk_size);
-    const std::size_t wall_bands = static_cast<std::size_t>(std::max(1, params.soil_depth_steps + 1));
+    const std::size_t wall_bands = static_cast<std::size_t>(std::clamp(params.soil_depth_steps + 1, 1, 4));
     out.vertices.reserve(tiles * (48 + 8 * wall_bands));
     out.indices.reserve(tiles * (64 + 12 * wall_bands));
 

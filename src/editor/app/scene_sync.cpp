@@ -12,7 +12,7 @@ coopa::scene::Scene* SceneSync::rebuild(core::Engine& engine, const SceneDocumen
     try {
         coopa::scene::Scene scene = coopa::scene::SceneLoader::load_from_node(doc.node(), path);
         remove_observer_();
-        scene_ = &engine.set_scene(std::move(scene), doc.scene_settings());
+        scene_ = &engine.set_scene(std::move(scene), doc.scene_settings(), path);
     } catch (const std::exception& e) {
         remove_observer_();
         last_error = e.what();

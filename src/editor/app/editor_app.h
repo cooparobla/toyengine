@@ -282,10 +282,34 @@ public:
     const fs::path& active_asset_path() const { return active_path_; }
     Shading shading() const { return shading_; }
     bool playing() const { return play_scene_ != nullptr; }
+
+    /**
+     * @brief Whether the viewport is showing the running game and nothing of the editor.
+     *
+     * Play mode is a preview of the game as it will look, so the editor's own furniture over the
+     * viewport -- the toolbar, the nav gizmo, the sidebar, the last-operator panel, the grid, the
+     * transform gizmo, selection outlines, the 3D cursor and the view/document labels -- is not
+     * drawn while this is true, and comes back the frame Stop clears `play_scene_`. Explicit
+     * debug toggles (colliders, the stats overlay) are someone asking to see something and stay.
+     *
+     * Mesh edit is the exception: editing a mesh while the game runs is still editing, and its
+     * tools have to stay on screen.
+     *
+     * @param mesh_edit Whether the viewport is in mesh edit mode this frame.
+     * @return True when the editor's viewport chrome should be suppressed.
+     */
+    bool game_view(bool mesh_edit) const { return playing() && !mesh_edit; }
     /** @brief The play scene is covered by the loading screen and not yet revealed/playable. */
     bool loading() const { return play_scene_ != nullptr && engine_.is_loading(); }
     /** @brief Selection outlines the viewport overlay drew last frame (tests / diagnostics). */
     int selection_outlines_drawn() const { return selection_outlines_drawn_; }
+    /**
+     * @brief Pieces of the editor's own viewport furniture drawn last frame.
+     *
+     * The toolbar, the nav gizmo, the sidebar and the last-operator panel. Zero while
+     * `game_view()` holds, which is what makes "play shows the game alone" checkable.
+     */
+    int viewport_chrome_drawn() const { return viewport_chrome_drawn_; }
     /// @brief Scene Curves the overlay drew last frame. A curve is an overlay, so the Overlays
     ///        and Gizmos toggles take it down with the rest of them.
     int scene_curves_drawn() const { return scene_curves_drawn_; }
@@ -1713,6 +1737,7 @@ private:
     bool open_add_menu_ = false;
     float outliner_h_ = 260;
     int selection_outlines_drawn_ = 0;
+    int viewport_chrome_drawn_ = 0;   /**< See viewport_chrome_drawn(). */
     int scene_curves_drawn_ = 0;
     mutable int baked_outlines_drawn_ = 0;
     std::string outliner_filter_, add_component_filter_, browser_dir_;

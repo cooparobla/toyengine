@@ -271,6 +271,15 @@ Rendering:
   surface turns rougher instead. That is the filtered look of the detail it skips, so
   far water reads as a broad sheen rather than sparkle. Rings are only looped over within the
   ripple range.
+- **The residual waves go out with them, and something else comes in.** The waves the mesh left
+  behind are shaded per pixel (see the tessellation note above), and that holds only while they
+  still span pixels and still read as waves. A wave sum is four sinusoids, so a surface drawn
+  across kilometres at once -- an ocean on a `local_frame` body, seen from high up -- comes out
+  as a regular weave over every pixel of it rather than as water. A `local_frame` surface
+  therefore drops the residual on the same ramp it drops the ripples, and
+  `water_open_variation` (render config) puts back what IS visible at that range: slow swings of
+  roughness and depth colour over a few hundred metres, from a 3D noise over the world position,
+  so there is no plane projection to seam along. 0 switches it off; flat bodies never had it.
 
 **Threading.** CPU water work runs on the frame's libcoopa `JobEngine` wherever it splits into
 independent items, through one hook: `WaterSystem::parallel_()` builds a `ParallelFor`

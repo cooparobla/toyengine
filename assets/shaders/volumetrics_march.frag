@@ -27,6 +27,13 @@ layout(location = 0) out vec4 out_scatter_t;   // rgb = in-scatter, a = transmit
 // to recover the depth each low-res sample was marched to.
 layout(set = 0, binding = 0) uniform sampler2D g_normal_metallic;
 layout(set = 0, binding = 1) uniform sampler2D g_position_roughness;
+// TransparentPass's coverage attachment: the reciprocal of the nearest transparent
+// surface's camera distance, 0 where nothing transparent covers the pixel. Transparents
+// depth-TEST but never depth-WRITE and never touch the G-buffer, so on a pixel they cover
+// with no opaque geometry behind them the two samplers above still describe empty sky.
+// Without this the march would integrate straight past such a surface -- see vol_ray_end().
+// cloud_composite.frag reads the same attachment for the same reason.
+layout(set = 0, binding = 2) uniform sampler2D u_transparent_coverage;
 
 #include <gfx/volumetrics_ubo.glsl>
 
@@ -73,7 +80,17 @@ void main() {
     vec4 world    = u_vol.inv_view_proj * vec4(ndc, 1.0);
     vec3 view_dir = normalize(world.xyz / world.w - A);
 
-    float d_geo   = is_sky ? 1e6 : distance(A, texture(g_position_roughness, in_uv).rgb);
+    // Where there is no opaque geometry, a transparent surface covering this pixel still
+    // ends the ray: a sea seen against open sky is a surface the in-scatter belongs BEHIND,
+    // and marching past it paints the whole shell crossing over water that is already fully
+    // opaque. counts.w is 0 when the coverage attachment does not hold this frame's data
+    // (no transparent pass ran, or the device has no independent blend), which falls back to
+    // the sky distance exactly as before.
+    float d_geo = distance(A, texture(g_position_roughness, in_uv).rgb);
+    if (is_sky) {
+        float coverage = u_vol.counts.w > 0.5 ? texture(u_transparent_coverage, in_uv).r : 0.0;
+        d_geo = coverage > 0.0 ? 1.0 / coverage : 1e6;
+    }
     float ray_end = min(d_geo, max(u_vol.march_params.y, 0.0));
 
     int steps = int(u_vol.march_params.x);

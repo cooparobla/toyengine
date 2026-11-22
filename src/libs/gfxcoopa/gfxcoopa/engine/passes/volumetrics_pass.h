@@ -93,12 +93,15 @@ public:
      */
     void set_source_images(coopa::gfx::TextureView scene_color, coopa::gfx::TextureView g_normal,
                            coopa::gfx::TextureView g_position,
+                           coopa::gfx::TextureView transparent_coverage,
                            const coopa::gfx::engine::util::Sampler& linear_sampler) {
         march_.set(0).bind_image(0, g_normal, nearest_sampler_);
         march_.set(0).bind_image(1, g_position, nearest_sampler_);
+        march_.set(0).bind_image(2, transparent_coverage, nearest_sampler_);
         composite_.set(0).bind_image(0, scene_color, linear_sampler);
         composite_.set(0).bind_image(1, g_normal, nearest_sampler_);
         composite_.set(0).bind_image(2, g_position, nearest_sampler_);
+        composite_.set(0).bind_image(4, transparent_coverage, nearest_sampler_);
     }
 
     /**
@@ -167,7 +170,9 @@ public:
     }
 
 private:
-    /// @brief Set 0: G-buffer normal/position. Set 1: the volumetrics UBO.
+    /// @brief Set 0: G-buffer normal/position, plus the transparent-coverage attachment at
+    ///        binding 2 (the ray also ends on a transparent surface the G-buffer cannot
+    ///        describe, since transparents never depth-write). Set 1: the volumetrics UBO.
     ///        Set 2: directional map + local-light shadow atlas (see set_shadow_images), and
     ///        an app's cloud shadow map at binding 4 (set_cloud_shadow_image).
     static FullscreenStageDesc describe_march(const std::string& vert_spv, const std::string& frag_spv) {
@@ -178,7 +183,8 @@ private:
         d.frag_spv = frag_spv;
         d.owned_sets = {
             {{0, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
-             {1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},
+             {1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
+             {2, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},
             {{0, DescriptorType::UniformBuffer, ShaderStage::Fragment, 1}},
             {{0, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
              {1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
@@ -187,7 +193,9 @@ private:
         return d;
     }
 
-    /// @brief Set 0: scene colour, G-buffer normal/position, march result.
+    /// @brief Set 0: scene colour, G-buffer normal/position, march result, and the
+    ///        transparent-coverage attachment at binding 4 (vol_ray_depth() must clip the
+    ///        upsample's depth test exactly as the march clipped its ray).
     ///        Set 1: the volumetrics UBO.
     static FullscreenStageDesc describe_composite(const std::string& vert_spv, const std::string& frag_spv) {
         using coopa::gfx::DescriptorType;
@@ -199,7 +207,8 @@ private:
             {{0, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
              {1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
              {2, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
-             {3, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},
+             {3, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
+             {4, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},
             {{0, DescriptorType::UniformBuffer, ShaderStage::Fragment, 1}},
         };
         return d;

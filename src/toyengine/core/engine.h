@@ -239,8 +239,12 @@ public:
      *        SceneLoader::load_from_node()) and sets it up exactly as load_scene() does.
      * @param settings The scene document's `scene.settings` (its config overrides -- see
      *                 AppConfig::with_scene_settings()); null for none.
+     * @param source_path The file the scene was built FROM, when there is one. Recorded for
+     *                 scene_path(), so a system that resolves a file beside the scene finds the
+     *                 same one it would have under load_scene(). Empty for a scene with no file.
      */
-    coopa::scene::Scene& set_scene(coopa::scene::Scene&& scene, const fkyaml::node& settings = fkyaml::node());
+    coopa::scene::Scene& set_scene(coopa::scene::Scene&& scene, const fkyaml::node& settings = fkyaml::node(),
+                                   const std::string& source_path = {});
 
     /**
      * @brief Adds an already-built scene alongside the current ones and makes it active,
@@ -251,7 +255,8 @@ public:
      * underneath and comes back untouched when the added scene is removed.
      */
     coopa::scene::Scene& push_scene(coopa::scene::Scene&& scene, bool simulating,
-                                    const fkyaml::node& settings = fkyaml::node());
+                                    const fkyaml::node& settings = fkyaml::node(),
+                                    const std::string& source_path = {});
 
     /** @brief Destroys a scene added by push_scene() (or any managed scene). */
     void remove_scene(coopa::scene::Scene* scene);
@@ -291,8 +296,12 @@ public:
     save::SaveSystem& saves() { return saves_; }
 
     /**
-     * @brief The file a managed scene was loaded from (resolved, as load_scene() /
-     *        load_scene_async() opened it); "" for one built in memory (set_scene, push_scene).
+     * @brief The file a managed scene came from (resolved, as load_scene() / load_scene_async()
+     *        opened it).
+     *
+     * `set_scene()` and `push_scene()` record whatever `source_path` they were given -- the
+     * editor passes its document's path, so an edited scene answers the same file the game would.
+     * "" means there is genuinely no file: a scene assembled in memory, as a test builds one.
      */
     std::string scene_path(const coopa::scene::Scene& scene) const;
 

@@ -313,10 +313,10 @@ public:
                     const glm::dvec3 f(water.flow.x, water.flow.y, water.flow.z);
                     out.flow = flow_octant(f.x, f.y);
                 }
-                // The bed graded by depth, as the terraced bake does -- its thresholds are in
-                // steps of a one-metre world, so a metre of depth stands in for a step here.
+                // The bed graded by depth, exactly as the terraced bake does: both measure it
+                // in metres.
                 const float depth = std::max(0.0f, out.water_surface - out.ground);
-                out.top = bed_kind_for(water.kind, static_cast<std::int32_t>(depth));
+                out.top = bed_kind_for(water.kind, depth);
             }
         }
         return out;
@@ -380,7 +380,8 @@ private:
                 r.flow = flow_octant(glm::dot(f, across), glm::dot(f, along));
                 r.flow_authored = 1;   // mapcoopa's own flow, not a fallback to derive over later
             }
-            top = bed_kind_for(water.kind, level_steps - r.steps);
+            top = bed_kind_for(water.kind,
+                               static_cast<float>(level_steps - r.steps) * params_.height_step);
         }
         r.set_top_kind(top);
         r.set_side_kind(side_kind_for(top));
@@ -527,20 +528,22 @@ public:
      * zone keeps sand, below the wave base the fines settle out as silt, and the open floor is
      * scoured back to rock. A lake has no surf to speak of, so it is muddy from its margin in.
      *
-     * Depth is in tile steps, so the grading follows the world's own vertical scale rather than
-     * a height in metres that a scene's `height_scale` would make meaningless.
+     * Depth is METRES, not the terraced world's steps. A step is only a depth on a terrain whose
+     * `height_step` happens to be one metre: halve the quantum and "two steps down" is a metre
+     * of water, which would put the scoured floor a hand's breadth off the beach. The shipped
+     * figures are the same ones a one-metre world always had.
      *
      * @param kind What kind of water stands over the tile; a river keeps its gravel bed.
-     * @param depth_steps Steps from the water's terrace down to the bed, at least 1.
+     * @param depth_m Metres from the water's surface down to the bed.
      * @return The surface to texture the bed's top face with.
      */
-    static TileKind bed_kind_for(coopa::maps::WaterKind kind, std::int32_t depth_steps) {
+    static TileKind bed_kind_for(coopa::maps::WaterKind kind, float depth_m) {
         if (kind == coopa::maps::WaterKind::River) return TileKind::Sand;
         if (kind == coopa::maps::WaterKind::Lake) {
-            return depth_steps <= 1 ? TileKind::Sand : TileKind::Clay;
+            return depth_m <= k_bed_lake_margin_m ? TileKind::Sand : TileKind::Clay;
         }
-        if (depth_steps <= k_bed_surf_steps) return TileKind::Sand;
-        if (depth_steps <= k_bed_silt_steps) return TileKind::Clay;
+        if (depth_m <= k_bed_surf_m) return TileKind::Sand;
+        if (depth_m <= k_bed_silt_m) return TileKind::Clay;
         return TileKind::Stone;
     }
 
@@ -553,10 +556,12 @@ private:
     /** @brief Half-width rivers are sampled at, at the least, in tiles: a 4-connected run of tiles. */
     static constexpr double k_river_min_half_tiles = 0.75;
 
-    /** @brief Depth, in steps, to which a sea floor is still sand -- the surf zone. */
-    static constexpr std::int32_t k_bed_surf_steps = 2;
-    /** @brief Depth, in steps, to which a sea floor is silt; past it, scoured rock. */
-    static constexpr std::int32_t k_bed_silt_steps = 5;
+    /** @brief Depth, in metres, to which a lake is still sandy -- its margin. */
+    static constexpr float k_bed_lake_margin_m = 1.0f;
+    /** @brief Depth, in metres, to which a sea floor is still sand -- the surf zone. */
+    static constexpr float k_bed_surf_m = 2.0f;
+    /** @brief Depth, in metres, to which a sea floor is silt; past it, scoured rock. */
+    static constexpr float k_bed_silt_m = 5.0f;
 
     /** @brief Bucket edge in grid units. One grid unit is the nominal site spacing. */
     static constexpr double k_bucket_size = 1.0;

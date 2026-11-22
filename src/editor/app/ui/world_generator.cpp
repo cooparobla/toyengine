@@ -91,6 +91,15 @@ const std::vector<Row>& rows() {
                  polar_extent_north),
         WGEN_ROW(3, "Polar South", "Fraction of the map at the south edge that is frozen.", false, 0.0, 0.5,
                  polar_extent_south),
+        WGEN_ROW(3, "Beach Height (m)", "How far above the water sand may climb. A beach ends where the ground "
+                 "rises out of this, so flat shelves grow broad sand and cliffs none. 0 removes beaches.", false,
+                 0.0, 40.0, beach_height_m),
+        WGEN_ROW(3, "Beach Variation", "How much that height wanders along a coast. 0 gives every shore the same "
+                 "budget; raised, some bays carry deep sand and some headlands none at all.", false, 0.0, 1.0,
+                 beach_height_variation),
+        WGEN_ROW(3, "Beach Contrast", "How sharply sandy coast separates from bare. Higher spends less of the "
+                 "coast at the average and more of it at one extreme or the other.", false, 1.0, 6.0,
+                 beach_height_contrast),
         // Water & rivers
         WGEN_ROW(4, "Rivers", "River sources to attempt; fewer appear where the land refuses them.", true, 0, 200, river_count),
         WGEN_ROW(4, "Min River Length", "Cells a watercourse must run before it counts as a river.", true, 2, 30,

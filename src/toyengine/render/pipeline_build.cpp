@@ -670,7 +670,8 @@ void ToyRenderPipeline::build_post_chain_(coopa::gfx::pipeline::RenderPass* swap
             device_, allocator_, fd, volumetrics_target_.render_pass_object(),
             volumetrics_data_.buffer());
         froxel_volumetrics_pass_->set_source_images(pre_volumetrics_view, gbuffer_target_.g1_view_typed(),
-                                                    gbuffer_target_.g2_view_typed(), linear_sampler_);
+                                                    gbuffer_target_.g2_view_typed(),
+                                                    transparent_coverage_->view_typed(), linear_sampler_);
         froxel_volumetrics_pass_->set_shadow_images(shadow_target_.dir_shadow_view_typed(),
                                                     local_shadow_atlas_->view_typed(), shadow_sampler_);
         froxel_volumetrics_pass_->set_cloud_shadow_image(cloud_shadow_pass_->view(), cloud_shadow_pass_->sampler());
@@ -682,7 +683,8 @@ void ToyRenderPipeline::build_post_chain_(coopa::gfx::pipeline::RenderPass* swap
         config_.shaders("volumetrics_march.frag"),
         config_.shaders("volumetrics_composite.frag"));
     volumetrics_pass_->set_source_images(pre_volumetrics_view, gbuffer_target_.g1_view_typed(),
-                                  gbuffer_target_.g2_view_typed(), linear_sampler_);
+                                  gbuffer_target_.g2_view_typed(),
+                                  transparent_coverage_->view_typed(), linear_sampler_);
     volumetrics_pass_->set_march_result(volumetrics_march_target_.color_view_typed());
     // Shadow maps for the march's in-scatter terms (light shafts) -- same images and
     // compare sampler shadow_set_ binds for the lighting pass, bound once here under

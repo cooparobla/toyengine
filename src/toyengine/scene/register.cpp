@@ -824,6 +824,7 @@ void register_scene_components(coopa::gfx::core::Device& device,
                 read(sn, "enabled", sp.enabled);
                 read(sn, "cut_slope_steps", sp.cut_slope_steps);
                 read(sn, "cut_max_steps", sp.cut_max_steps);
+                read(sn, "cut_recovery_steps", sp.cut_recovery_steps);
                 read(sn, "cut_taper_slope_steps", sp.cut_taper_slope_steps);
                 read(sn, "fill_slope_steps", sp.fill_slope_steps);
                 read(sn, "fill_max_steps", sp.fill_max_steps);
@@ -831,14 +832,22 @@ void register_scene_components(coopa::gfx::core::Device& device,
                 read(sn, "bed_slope_steps", sp.bed_slope_steps);
                 read(sn, "bed_max_steps", sp.bed_max_steps);
                 read(sn, "bed_taper_slope_steps", sp.bed_taper_slope_steps);
+                read(sn, "bed_min_depth_steps", sp.bed_min_depth_steps);
                 read(sn, "cone_reach_tiles", sp.cone_reach_tiles);
+                read(sn, "talus_slope_steps", sp.talus_slope_steps);
+                read(sn, "talus_band_tiles", sp.talus_band_tiles);
+                read(sn, "talus_max_passes", sp.talus_max_passes);
                 read(sn, "jitter_steps", sp.jitter_steps);
                 read(sn, "jitter_tiles", sp.jitter_tiles);
                 read(sn, "jitter_seed", sp.jitter_seed);
                 read(sn, "beach_tiles", sp.beach_tiles);
                 read(sn, "beach_jitter_tiles", sp.beach_jitter_tiles);
                 read(sn, "beach_rise_steps", sp.beach_rise_steps);
+                read(sn, "beach_variation", sp.beach_variation);
+                read(sn, "beach_variation_tiles", sp.beach_variation_tiles);
+                read(sn, "beach_variation_seed", sp.beach_variation_seed);
                 read(sn, "retexture", sp.retexture);
+                read(sn, "beach_repair_only", sp.beach_repair_only);
             }
             // The water's look: WaterBody's own keys, onto the terrain's stock look.
             if (node.contains("water") && node.at("water").is_mapping()) {
@@ -879,16 +888,9 @@ void register_scene_components(coopa::gfx::core::Device& device,
             // material with no `texture_albedo` (a freshly added TileTerrain, say) gets the stock
             // one rather than drawing the whole world white. A material asset reference is
             // taken as written.
-            {
-                fkyaml::node material = node.contains("material") ? node.at("material") : fkyaml::node::mapping();
-                if (material.is_mapping() && !material.contains("texture_albedo")) {
-                    material["texture_albedo"] = fkyaml::node(std::string("textures/terrain_atlas.png"));
-                    if (!material.contains("texture_metallic_roughness")) {
-                        material["texture_metallic_roughness"] = fkyaml::node(std::string("textures/terrain_atlas_mr.png"));
-                    }
-                }
-                coopa::gfx::engine::components::parse_material_value_(material, terrain->material, assets, ctx);
-            }
+            world::apply_tile_material(*terrain,
+                                       node.contains("material") ? node.at("material") : fkyaml::node::mapping(),
+                                       assets, ctx);
 
             // --- The stored data ---
             // `tiles:` names the terrain's .terra file, scene-relative, default terrain/<object>.terra
@@ -917,62 +919,13 @@ void register_scene_components(coopa::gfx::core::Device& device,
             // A tile set is an object asset whose children are the pieces, each found by its NAME
             // (tile_piece_name()) and taken from that child's MeshRenderer mesh_path; a piece with
             // no child falls back like a missing file (TileMeshLibrary::finish_styles()).
-            using coopa::gfx::engine::data::SkinnedMeshSource;
-            auto load_piece = [&assets, &ctx](const std::string& key) {
-                return assets.load_async<SkinnedMeshSource>("meshes/" + key + ".yaml", ctx.base_dir());
-            };
-            // Adds one style (a distinct tile set) and kicks off its pieces' loads; returns its index.
-            // `value` is a tile-set object path, or -- the old `styles:` form -- a mesh prefix the
-            // pieces load from (meshes/<prefix>_<piece>.yaml).
+            // Both through world/terrain_yaml.h, so a terrain assembled in code resolves its
+            // tile sets exactly as one parsed from a scene does.
             auto add_style = [&](const std::string& name, const std::string& value) {
-                world::TerrainComponent::StyleEntry entry;
-                entry.name   = name;
-                entry.prefix = value;
-                const std::size_t index = terrain->styles.size();
-                if (value.rfind("objects/", 0) == 0) {
-                    std::string rel = value;
-                    if (rel.size() < 5 || rel.compare(rel.size() - 5, 5, ".yaml") != 0) rel += ".yaml";
-                    try {
-                        const fkyaml::node doc =
-                            coopa::yaml::load_document(assets.source().resolve(rel, ctx.base_dir()));
-                        const fkyaml::node& obj = doc.at("object");
-                        if (obj.contains("round_kind_corners")) {
-                            entry.round_kind_corners = obj.at("round_kind_corners").get_value<bool>();
-                        }
-                        if (obj.contains("children") && obj.at("children").is_sequence()) {
-                            for (const auto& child : obj.at("children")) {
-                                if (!child.contains("name") || !child.contains("components")) continue;
-                                const std::string child_name = child.at("name").get_value<std::string>();
-                                for (std::size_t p = 0; p < world::k_tile_piece_count; ++p) {
-                                    const auto piece = static_cast<world::TilePiece>(p);
-                                    if (child_name != world::tile_piece_name(piece)) continue;
-                                    for (const auto& comp : child.at("components")) {
-                                        if (!comp.contains("type") || !comp.contains("mesh_path") ||
-                                            comp.at("type").get_value<std::string>() != "MeshRenderer") continue;
-                                        terrain->set_style_piece_source(
-                                            index, piece, load_piece(comp.at("mesh_path").get_value<std::string>()));
-                                    }
-                                }
-                            }
-                        }
-                    } catch (const std::exception& e) {
-                        std::cerr << "[TileTerrain] tile set '" << value << "' could not be read: " << e.what() << "\n";
-                    }
-                } else {
-                    for (std::size_t p = 0; p < world::k_tile_piece_count; ++p) {
-                        const auto piece = static_cast<world::TilePiece>(p);
-                        terrain->set_style_piece_source(index, piece,
-                                                        load_piece(value + "_" + world::tile_piece_name(piece)));
-                    }
-                }
-                terrain->styles.push_back(std::move(entry));
-                return static_cast<int>(index);
+                return world::add_terrain_tile_set(*terrain, assets, ctx.base_dir(), name, value);
             };
             auto style_named = [terrain](const std::string& name) {
-                for (std::size_t i = 0; i < terrain->styles.size(); ++i) {
-                    if (terrain->styles[i].name == name) return static_cast<int>(i);
-                }
-                return -1;
+                return world::terrain_style_named(*terrain, name);
             };
 
             if (node.contains("styles") && node.at("styles").is_mapping() && !node.contains("tile_set")) {

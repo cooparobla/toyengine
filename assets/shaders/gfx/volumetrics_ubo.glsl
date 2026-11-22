@@ -36,7 +36,9 @@ layout(set = 1, binding = 0) uniform VolumetricsUBO {
     vec4 march_params;   // x = step count, y = max distance, z = max opacity, w = sun anisotropy
     vec4 time_params;    // x = elapsed time, y = delta time, z = frame index
     vec4 counts;         // x = active volume count, y = scatter light count,
-                         // z = light-scatter strength (0 skips the light loop)
+                         // z = light-scatter strength (0 skips the light loop),
+                         // w = 1 when the transparent-coverage attachment holds this frame's
+                         //     data (a ray may end on a transparent surface; 0 = ignore it)
     Volume volumes[8];
     mat4 dir_light_space_matrix;   // world -> cascade 0's shadow clip; the sun term reads
                                    // dir_cascade_matrix below instead, but the field holds

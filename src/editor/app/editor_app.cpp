@@ -836,7 +836,7 @@ void EditorApp::play() {
         try {
             engine_.assets().reload_changed();   // clip files the Timeline wrote since they were loaded
             coopa::scene::Scene scene = coopa::scene::SceneLoader::load_from_node(doc_.node(), anchor);
-            play_scene_ = &engine_.push_scene(std::move(scene), true, doc_.scene_settings());
+            play_scene_ = &engine_.push_scene(std::move(scene), true, doc_.scene_settings(), anchor);
             engine_.set_edit_mode(false);
             play_scene_->set_simulating(true);
             // The editor builds the scene straight from the open document rather than loading it
@@ -2437,10 +2437,23 @@ void EditorApp::draw_viewport_(imm::Context& ctx, const imm::Box& area, bool mes
         ctx.text_in(b, h, ctx.style.text);
     }
     // Furniture last, so it draws over the overlays (its rects were excluded from input).
-    mesh_tools_panel_->draw_last_op_panel_(ctx, viewport_box_);
-    if (show_toolbar_ && !viewport_chrome_panel_->preview_only_view_()) viewport_chrome_panel_->draw_toolbar_(ctx, mesh_edit);
-    if (show_overlays_ || true) viewport_chrome_panel_->draw_nav_gizmo_(ctx);
-    if (show_sidebar_) viewport_chrome_panel_->draw_sidebar_(ctx, mesh_edit);
+    // None of it in play: the viewport shows the game alone (game_view()), and all of it is
+    // back the frame Stop clears play_scene_.
+    viewport_chrome_drawn_ = 0;
+    if (!game_view(mesh_edit)) {
+        mesh_tools_panel_->draw_last_op_panel_(ctx, viewport_box_);
+        ++viewport_chrome_drawn_;
+        if (show_toolbar_ && !viewport_chrome_panel_->preview_only_view_()) {
+            viewport_chrome_panel_->draw_toolbar_(ctx, mesh_edit);
+            ++viewport_chrome_drawn_;
+        }
+        viewport_chrome_panel_->draw_nav_gizmo_(ctx);
+        ++viewport_chrome_drawn_;
+        if (show_sidebar_) {
+            viewport_chrome_panel_->draw_sidebar_(ctx, mesh_edit);
+            ++viewport_chrome_drawn_;
+        }
+    }
     ctx.pop_clip();
     draw_viewport_popups_(ctx, mesh_edit);
     // Asset drops into the viewport.
@@ -4948,7 +4961,7 @@ void EditorApp::draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, c
         mesh_tools_panel_->draw_mesh_tool_overlay_(ctx, *vp);
     }
     // 3D cursor (scene).
-    if (!asset_view_() && show_overlays_ && show_cursor3d_) {
+    if (!asset_view_() && show_overlays_ && show_cursor3d_ && !game_view(mesh_edit)) {
         if (auto c = vp->project(cursor3d_)) {
             for (int i = 0; i < 8; ++i) {
                 const float a0 = 6.2831853f * i / 8.0f, a1 = 6.2831853f * (i + 1) / 8.0f;
@@ -4968,7 +4981,7 @@ void EditorApp::draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, c
         gizmo_.free_color = et_.viewport.gizmo_free;
         if (gizmo_target_(mesh_edit, pivot, basis)) gizmo_.draw(ctx, *vp, pivot, basis);
     }
-    viewport_chrome_panel_->draw_overlay_text_(ctx, *vp);
+    viewport_chrome_panel_->draw_overlay_text_(ctx, *vp, mesh_edit);
     // Mode banner.
     if (mesh_edit && !asset_view_()) {
         const std::string t = "Edit Mode  -  " + mesh_.name + (mesh_.dirty() ? " *" : "");

@@ -327,6 +327,8 @@ inline fkyaml::node config_to_node(const MapConfig& config) {
     node["erosion"] = config.erosion;
     node["erosion_iterations"] = config.erosion_iterations;
     node["beach_height_m"] = config.beach_height_m;
+    node["beach_height_variation"] = config.beach_height_variation;
+    node["beach_height_contrast"] = config.beach_height_contrast;
     node["biome_dither"] = config.biome_dither;
     node["biome_river_boundary"] = config.biome_river_boundary;
     node["terrain_roughness"] = config.terrain_roughness;
@@ -369,6 +371,7 @@ inline fkyaml::node config_to_node(const MapConfig& config) {
     }
     node["noise_hills"] = detail::noise_to_node(config.noise_hills);
     node["noise_biome"] = detail::noise_to_node(config.noise_biome);
+    node["noise_beach"] = detail::noise_to_node(config.noise_beach);
     node["noise_ridge"] = detail::noise_to_node(config.noise_ridge);
     node["noise_plateau"] = detail::noise_to_node(config.noise_plateau);
     node["noise_warp"] = detail::noise_to_node(config.noise_warp);
@@ -496,6 +499,10 @@ inline void apply_config_node(const fkyaml::node& node, MapConfig& config) {
     config.erosion_iterations =
         detail::read_or(node, "erosion_iterations", config.erosion_iterations);
     config.beach_height_m = detail::read_or(node, "beach_height_m", config.beach_height_m);
+    config.beach_height_variation =
+        detail::read_or(node, "beach_height_variation", config.beach_height_variation);
+    config.beach_height_contrast =
+        detail::read_or(node, "beach_height_contrast", config.beach_height_contrast);
     config.biome_dither = detail::read_or(node, "biome_dither", config.biome_dither);
     config.biome_river_boundary =
         detail::read_or(node, "biome_river_boundary", config.biome_river_boundary);
@@ -553,6 +560,7 @@ inline void apply_config_node(const fkyaml::node& node, MapConfig& config) {
     }
     detail::noise_from_node(node, "noise_hills", config.noise_hills);
     detail::noise_from_node(node, "noise_biome", config.noise_biome);
+    detail::noise_from_node(node, "noise_beach", config.noise_beach);
     detail::noise_from_node(node, "noise_ridge", config.noise_ridge);
     detail::noise_from_node(node, "noise_plateau", config.noise_plateau);
     detail::noise_from_node(node, "noise_warp", config.noise_warp);

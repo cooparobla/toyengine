@@ -46,6 +46,9 @@ bool ViewportChromePanel::preview_only_view_() const {
 }
 
 bool ViewportChromePanel::over_viewport_chrome_(glm::vec2 p, bool mesh_edit) const {
+    // Nothing of it is drawn in play (EditorApp::game_view()), so nothing of it claims the
+    // pointer either -- an invisible toolbar rect swallowing a click reads as a dead viewport.
+    if (app_.game_view(mesh_edit)) return false;
     if (app_.show_toolbar_ && !preview_only_view_() && toolbar_rect_(mesh_edit).contains(p)) return true;
     const imm::Box g = nav_gizmo_rect_();
     if (glm::distance(p, glm::vec2(g.x + 55, g.y + 55)) < 52.0f) return true;
@@ -753,21 +756,34 @@ void ViewportChromePanel::shadow_text_(imm::Context& ctx, glm::vec2 p, const std
     ctx.draw_text(p, s, c);
 }
 
-void ViewportChromePanel::draw_overlay_text_(imm::Context& ctx, const ViewProj& vp) {
-    const float x = app_.viewport_box_.x + (app_.show_toolbar_ ? ui::k_tool_size + 22 : 10);
-    const float y0 = app_.viewport_box_.y + 8;
-    shadow_text_(ctx, {x, y0}, view_name_(), app_.et_.viewport.overlay_text);
+void ViewportChromePanel::draw_overlay_text_(imm::Context& ctx, const ViewProj& vp, bool mesh_edit) {
     (void)vp;
-    std::string ctxline = "(1) " + app_.doc_.scene_name();
-    if (app_.asset_view_() || app_.active_type_ == AssetType::Object) {
-        ctxline = "(" + std::string(app_.assets_panel_->asset_type_info_(app_.active_type_).singular) + ") " + app_.properties_panel_->active_asset_label_();
-        if (app_.active_type_ == AssetType::Object && app_.doc_.primary() && app_.doc_.find(app_.doc_.primary())) ctxline += " | " + get_string(*app_.doc_.find(app_.doc_.primary()), "name");
+    // Which view this is and which document is open are the EDITOR's labels, so play mode drops
+    // them with the rest of the chrome. What it keeps is the run's own state -- PLAYING or
+    // PAUSED -- and the stats overlay, which is only ever on because someone asked for it.
+    // The lines stack from the top, so dropping the first two moves the rest up rather than
+    // leaving a gap where they were.
+    const bool game_view = app_.game_view(mesh_edit);
+    const float x = app_.viewport_box_.x + (app_.show_toolbar_ && !game_view ? ui::k_tool_size + 22 : 10);
+    float y = app_.viewport_box_.y + 8;
+    if (!game_view) {
+        shadow_text_(ctx, {x, y}, view_name_(), app_.et_.viewport.overlay_text);
+        y += 16.0f;
+        std::string ctxline = "(1) " + app_.doc_.scene_name();
+        if (app_.asset_view_() || app_.active_type_ == AssetType::Object) {
+            ctxline = "(" + std::string(app_.assets_panel_->asset_type_info_(app_.active_type_).singular) + ") " + app_.properties_panel_->active_asset_label_();
+            if (app_.active_type_ == AssetType::Object && app_.doc_.primary() && app_.doc_.find(app_.doc_.primary())) ctxline += " | " + get_string(*app_.doc_.find(app_.doc_.primary()), "name");
+        }
+        else if (app_.doc_.primary() && app_.doc_.find(app_.doc_.primary())) ctxline += " | " + get_string(*app_.doc_.find(app_.doc_.primary()), "name");
+        shadow_text_(ctx, {x, y}, ctxline, imm::with_alpha(app_.et_.viewport.overlay_text, app_.et_.viewport.overlay_text.a * 0.9f));
+        y += 16.0f;
     }
-    else if (app_.doc_.primary() && app_.doc_.find(app_.doc_.primary())) ctxline += " | " + get_string(*app_.doc_.find(app_.doc_.primary()), "name");
-    shadow_text_(ctx, {x, y0 + 16}, ctxline, imm::with_alpha(app_.et_.viewport.overlay_text, app_.et_.viewport.overlay_text.a * 0.9f));
-    if (app_.playing()) shadow_text_(ctx, {x, y0 + 32}, app_.play_scene_ && !app_.play_scene_->is_simulating() ? "PAUSED" : "PLAYING",
-                                ctx.style.object_active);
-    if (app_.show_overlays_ && app_.show_stats_overlay_) shadow_text_(ctx, {x, y0 + (app_.playing() ? 48.0f : 32.0f)}, app_.statusbar_panel_->scene_stats_(), app_.et_.viewport.overlay_text);
+    if (app_.playing()) {
+        shadow_text_(ctx, {x, y}, app_.play_scene_ && !app_.play_scene_->is_simulating() ? "PAUSED" : "PLAYING",
+                     ctx.style.object_active);
+        y += 16.0f;
+    }
+    if (app_.show_overlays_ && app_.show_stats_overlay_) shadow_text_(ctx, {x, y}, app_.statusbar_panel_->scene_stats_(), app_.et_.viewport.overlay_text);
 }
 
 namespace {

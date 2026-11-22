@@ -120,7 +120,10 @@ struct alignas(16) VolumetricsUBO {
                                                  y = delta time, z = frame index (dither shift). w unused. */
     glm::vec4 counts        = glm::vec4(0.0f); /**< x = active volume count, y = active scatter light
                                                  count, z = light-scatter strength (0 disables the
-                                                 scatter-light loop entirely). w unused. */
+                                                 scatter-light loop entirely), w = 1 when the
+                                                 transparent-coverage attachment holds this frame's
+                                                 data, so a march ray may end on a transparent
+                                                 surface the G-buffer does not describe. */
     VolumeGPU volumes[MAX_VOLUMES];            /**< Only the first counts.x are read. */
 
     // Shadowing for the march's in-scatter terms. Appended after `volumes` so no

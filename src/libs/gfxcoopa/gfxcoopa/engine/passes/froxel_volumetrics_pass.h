@@ -125,12 +125,17 @@ public:
     uint32_t grid_height() const { return grid_h_; }
     uint32_t slices()      const { return slices_; }
 
-    /// Scene colour + G-buffer for the apply stage. Call ONCE, at construction time.
+    /// Scene colour + G-buffer for the apply stage, plus the transparent-coverage attachment
+    /// its vol_ray_depth() needs: transparents never depth-write, so on a pixel one covers
+    /// with no opaque geometry behind it the G-buffer still reads as empty sky.
+    /// Call ONCE, at construction time.
     void set_source_images(TextureView scene_color, TextureView g_normal, TextureView g_position,
+                           TextureView transparent_coverage,
                            const util::Sampler& linear_sampler) {
         apply_->set(0).bind_image(0, scene_color, linear_sampler);
         apply_->set(0).bind_image(1, g_normal, nearest_sampler_);
         apply_->set(0).bind_image(2, g_position, nearest_sampler_);
+        apply_->set(0).bind_image(4, transparent_coverage, nearest_sampler_);
     }
 
     /// Directional map + local-light (point/spot) shadow atlas (compare sampler), for both
@@ -229,7 +234,8 @@ private:
             {{0, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
              {1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
              {2, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
-             {3, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},
+             {3, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
+             {4, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},
             {{0, DescriptorType::UniformBuffer, ShaderStage::Fragment, 1}},
         };
         return d;

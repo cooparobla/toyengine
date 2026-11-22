@@ -62,7 +62,8 @@ public:
      */
     BiomeField(const MapGraph& graph, const MapConfig& config)
         : graph_(graph), config_(config), rings_(TerrainSurface::water_rings(graph)),
-          dither_(config.noise_biome), banks_(graph.centers.size()) {
+          dither_(config.noise_biome), beach_(config.noise_beach),
+          banks_(graph.centers.size()) {
         // Every edge a river runs along separates two banks. Indexed per cell once, because
         // `at()` asks the question per sample and a map has far fewer river edges than a
         // bake has tiles.
@@ -169,11 +170,28 @@ public:
         const double level = water_level > 0.0 ? water_level : config_.sea_level;
         sample.relief_m =
             height_to_meters(config_, std::max(0.0, water.ground - level));
-        sample.beach_height_m = config_.beach_height_m;
+        sample.beach_height_m = beach_height_at_(p);
         return sample;
     }
 
 private:
+    /**
+     * @brief The beach height budget at a point: `beach_height_m` varied by the beach field.
+     *
+     * Returns the configured budget unchanged when `beach_height_variation` is zero, which is
+     * every map that has not asked for the field. Otherwise the noise is stretched about its
+     * midpoint by `beach_height_contrast` and clamped, so the budget spends most of its range
+     * near one end or the other instead of hovering at the average -- see the two config keys.
+     */
+    double beach_height_at_(const MapPoint& p) const {
+        const double variation = std::clamp(config_.beach_height_variation, 0.0, 1.0);
+        if (variation <= 0.0) return config_.beach_height_m;
+        const double contrast = std::max(1.0, config_.beach_height_contrast);
+        const double noise = static_cast<double>(graph_.noise_at(beach_, p));  // about [-1, 1]
+        const double f = std::clamp(0.5 + 0.5 * contrast * noise, 0.0, 1.0);
+        return config_.beach_height_m * ((1.0 - variation) + 2.0 * variation * f);
+    }
+
     double ring_of_(CenterId id) const {
         const std::size_t index = static_cast<std::size_t>(id);
         return index < rings_.size() ? static_cast<double>(rings_[index]) : 4.0;
@@ -198,6 +216,7 @@ private:
     /** @brief Per cell, rings of cells out from the nearest sea or lake cell, capped at 4. */
     std::vector<std::uint8_t> rings_;
     Noise dither_;
+    Noise beach_;  /**< @brief The field `beach_height_at_()` varies the beach budget over. */
     /** @brief Per cell, the cells a watercourse separates it from. Short: a cell has ~6 edges. */
     std::vector<std::vector<CenterId>> banks_;
 };

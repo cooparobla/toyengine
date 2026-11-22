@@ -91,7 +91,7 @@ public:
     /** @brief Viewport text with Blender's soft drop shadow, legible over any render. */
     void shadow_text_(imm::Context& ctx, glm::vec2 p, const std::string& s, const glm::vec4& c) const;
 
-    void draw_overlay_text_(imm::Context& ctx, const ViewProj& vp);
+    void draw_overlay_text_(imm::Context& ctx, const ViewProj& vp, bool mesh_edit);
 
     /** @brief Blender's glyphs for a non-mesh object: camera frustum, light symbols, empty axes. */
     /**

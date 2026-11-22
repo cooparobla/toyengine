@@ -38,7 +38,8 @@ namespace world {
  * stops -- it MANUFACTURES a wall rather than failing to remove one. With the term, **ground no
  * steeper than `*_taper_slope_steps` is never touched at all**: a cone only falls into debt where
  * the terrain has a riser steeper than that, and repays it at the recovery slope, which runs from
- * `*_slope_steps` at the surface to `*_taper_slope_steps` once the whole budget is spent.
+ * `*_slope_steps` at the surface to `*_taper_slope_steps` once the cut is `cut_recovery_steps`
+ * deep (`*_max_steps` deep for the fill and the bed, which have no separate ramp).
  *
  * Meeting the ground is also the one place a cone can stop without leaving a face, since
  * `min(baked, cone)` is exactly `baked` there. So every riser in the graded surface is either one
@@ -56,18 +57,56 @@ struct ShoreProfile {
     /** @brief Dry side, ceiling: the gentlest grade, how a graded bank feathers back into flat
      *         ground once the cone has paid back its cut. 0.35 steps/tile ~= 19 deg. */
     float cut_slope_steps = 0.35f;
-    /** @brief The most the cut may move any tile below its baked height -- its budget, and so the
-     *         tallest bank it attacks at all; past this a face is a cliff and is left standing. */
+    /**
+     * @brief The most the cut may move any tile below its baked height -- its budget, and so the
+     *        tallest bank it attacks at all; past this a face is a cliff and is left standing.
+     *
+     * **Raising this to grade tall banks does not work, and the failure is in the architecture
+     * rather than in the number.** A cone that stops anywhere other than at the ground leaves a
+     * face as tall as whatever it had already cut, so the budget is simultaneously the tallest
+     * bank attacked and the tallest face manufactured. Measured on the 6.29 M-tile globe, worst
+     * face the grading adds: 6 steps at this value, 24 at `24`, and **74** with the refusal
+     * removed entirely (the cone then runs to `cone_reach_tiles` and truncates there instead).
+     * Breaking a tall riser into a walkable drop needs a mass-conserving relaxation over the
+     * baked heights, not a wider cone.
+     */
     float cut_max_steps = 6.0f;
+    /**
+     * @brief How deep a cut has to be before the cone recovers at the full taper slope, in steps.
+     *
+     * Separate from `cut_max_steps` on purpose. The recovery slope ramps from `cut_slope_steps` at
+     * the surface to `cut_taper_slope_steps` at this depth, so this alone sets how a bank of a
+     * given height feathers back into flat ground; the budget only sets which banks are attacked.
+     * Folding the two together means raising the budget to reach a tall bank silently flattens
+     * every short one as well, because each would then sit a smaller fraction of the way up the
+     * ramp. Also the Dijkstra's monotonicity constant: the taper is capped at
+     * `cut_slope_steps + this / sqrt(2)`.
+     */
+    float cut_recovery_steps = 6.0f;
     /** @brief Dry side: the steepest riser the graded surface may contain, and the slope the cone
      *         climbs back toward the ground at once its budget is spent. 2.0 ~= 63 deg. */
     float cut_taper_slope_steps = 2.0f;
 
     /** @brief Dry side, floor: grades the one-tile lip settle_water_rounding() leaves. ~22 deg. */
     float fill_slope_steps = 0.40f;
-    /** @brief The most a fill may raise a tile above its baked height -- so also the most material
-     *         it may add, which is what stops it buttressing out over falling ground. */
-    float fill_max_steps = 4.0f;
+    /**
+     * @brief The most a fill may raise a tile above its baked height -- so also the most material
+     *        it may add, and the tallest drop below a bank it can grade out.
+     *
+     * This is what answers a PERCHED water body: a river or lake standing above the ground
+     * outside it. Its waterline tiles are pinned at the water's terrace by the water invariant,
+     * so neither the cut nor the mass-conserving talus relaxation may take material from them --
+     * the only way to soften that outer bank is to raise the ground below it, which is this.
+     * At 4 it could not reach: measured on the 6.29 M-tile globe, the max dry riser two tiles
+     * from water stayed at **24 steps** however the talus was tuned (24 at repose 3.0, still 24
+     * at 1.5 -- the giveaway that the repose angle was not what bound it), and fell to **6** --
+     * matching every other distance -- once this could span the drop.
+     *
+     * The cone follows the ground (`follow_ground`), so it still cannot buttress out into thin
+     * air over falling ground; the old cap was belt-and-braces from before the cone carried that
+     * term.
+     */
+    float fill_max_steps = 24.0f;
     /** @brief Dry side, floor: 2.0 ~= 63 deg. */
     float fill_taper_slope_steps = 2.0f;
 
@@ -75,6 +114,23 @@ struct ShoreProfile {
     float bed_slope_steps = 0.25f;
     /** @brief The most a bed may be raised toward its water's terrace. */
     float bed_max_steps = 6.0f;
+    /**
+     * @brief Least depth a bed is left at under its own water's terrace, in steps.
+     *
+     * One step is enough for water that sits on a single terrace. Where a river STEPS DOWN,
+     * though, the chunk mesher hands a corner shared by two flooded tiles the MEAN of their
+     * surface heights (`corner_z()`, terrain_chunk.cpp -- deliberately, so two chunks agree on a
+     * shared border), which puts the surface about half the terrace drop below the upstream
+     * terrace. A bed only one step down then stands proud of its own water and the surface cuts
+     * visibly through the bank at every step. So the real floor is this OR half the largest
+     * terrace fall to a wet neighbour, whichever is deeper, and this is only the flat-water case.
+     *
+     * Not capped: a river falling many terraces between adjacent tiles is a waterfall, and this
+     * will cut a correspondingly deep pool under it. That is untested against a real waterfall --
+     * the measured worlds step rivers down a terrace at a time -- so cap it here if one ever
+     * turns up excavated.
+     */
+    std::int32_t bed_min_depth_steps = 1;
     /** @brief Wet side, floor: 3.0 ~= 72 deg. Submerged, so it may be steeper than the dry pair. */
     float bed_taper_slope_steps = 3.0f;
 
@@ -85,6 +141,38 @@ struct ShoreProfile {
      * this only where the terrain climbs at its own taper slope for this many tiles on end.
      */
     float cone_reach_tiles = 24.0f;
+
+    /**
+     * @brief Angle of repose for the talus relaxation, in steps per tile; 0 disables it.
+     *
+     * The cones grade a bank they can afford to finish and leave anything taller standing (see
+     * `cut_max_steps`). This is what breaks what they leave: a mass-conserving relaxation that
+     * repeatedly moves material from the high side of any over-steep pair of dry tiles to the low
+     * side until no riser exceeds this slope. Conserving mass is the whole point -- a transfer
+     * only ever REDUCES the riser it acts on, so unlike a cone it cannot manufacture a face
+     * taller than the one it removed, at any setting.
+     *
+     * 1.5 ~= 56 deg. 3.0 was tried first and is too steep to read as a slope: on 1 m tiles it
+     * quantises into a run of 5-6 step risers, which from the ground is a wall again however
+     * correct the number is. Judge this one in the probe, not in the riser table -- both values
+     * satisfy "no riser over the repose", and only one of them looks like a bank.
+     */
+    float talus_slope_steps = 1.5f;
+    /**
+     * @brief How far from water the talus relaxation reaches, in tiles.
+     *
+     * Deliberately a band rather than the whole world: the vertical faces worth breaking are the
+     * ones the water rounding and the cones leave at a shoreline, and relaxing inland terrain
+     * would reshape every mountain and plateau in the scene for no stated reason.
+     */
+    float talus_band_tiles = 24.0f;
+    /**
+     * @brief Iteration cap for the relaxation; it normally stops earlier, when nothing moves.
+     *
+     * A guard, not a tuning knob. Reaching it leaves risers steeper than the repose slope rather
+     * than anything invalid, since every pass is individually mass-conserving.
+     */
+    std::int32_t talus_max_passes = 64;
 
     /** @brief Quantisation dither amplitude, in steps: softens a terrace edge into short lobes. */
     float jitter_steps = 1.0f;
@@ -97,8 +185,58 @@ struct ShoreProfile {
     float beach_jitter_tiles = 3.0f;
     /** @brief A dry tile sands over only within this many steps of the water nearest it. */
     std::int32_t beach_rise_steps = 2;
+
+    /**
+     * @brief How much the sand band's width wanders along a coast, as a fraction of it.
+     *        0 (the default) is one uniform band everywhere; 0.6 runs it from 0.4x to 1.6x.
+     *
+     * Without this a shoreline is the same width of sand from end to end, which reads as a
+     * drawn outline rather than as beaches: a real coast is broad bays separated by stretches
+     * with barely any sand at all. The scale multiplies BOTH limits on the band -- how far from
+     * the water it may reach and how far above the water it may climb (`beach_rise_steps`) --
+     * because on anything but dead-flat ground it is the rise that bounds the width, and
+     * widening the reach alone would do nothing on a sloping shore.
+     *
+     * The variation is a smooth field, not the lattice dither `jitter_steps` uses: a bay should
+     * open and close over its length, where an abrupt change of width would cut a straight edge
+     * across the sand.
+     */
+    float beach_variation = 0.0f;
+    /**
+     * @brief How long a stretch of coast shares a width, in tiles -- the variation's period.
+     *
+     * Short periods read as a ragged edge (which `beach_jitter_tiles` already provides); this
+     * wants to be the scale of a bay, tens of tiles rather than a handful.
+     */
+    float beach_variation_tiles = 64.0f;
+    /** @brief Seed for that field; change it to re-roll which coasts are sandy. */
+    std::uint32_t beach_variation_seed = 0xB3ACE5u;
     /** @brief Retextures sand/bed kinds and the biome byte; false grades height only. */
     bool retexture = true;
+    /**
+     * @brief Restricts the sand band to ground this pass itself moved.
+     *
+     * The band above decides where sand goes from a tile's distance to water and how far it
+     * stands above it. That is the only answer available for a hand-authored terrain, but it is
+     * the WRONG one for a terrain baked from a map that already classified its own shores:
+     * mapcoopa's `Biome::Beach` is drawn where the ground stays within `beach_height_m` of the
+     * water, which varies with the slope and so ends where the land climbs away -- broad across
+     * a shelf, absent along a cliff. Drawn on top of that, a fixed tile-count band does not add
+     * variety, it installs a FLOOR: measured on a baked globe it lifted the quietest quarter of
+     * the coastline from 0.1 to 1.2 tiles of sand per tile of waterline while leaving the
+     * broadest tenth where it already was. Every bare headland came out with the same stripe.
+     *
+     * Set true and the band only sands tiles whose height this pass changed -- the cut, fill and
+     * talus passes run after the map classified the ground, so a bank they cut down to the
+     * waterline is the one case the classifier could not have seen. Everywhere else the map's
+     * answer stands, and the biome byte keeps agreeing with it.
+     *
+     * **River banks are exempt, and have to be.** A map classifies a shore from the cells that
+     * hold water, and a river runs along the EDGE between two cells rather than filling one, so
+     * no cell beside it is ever a water cell and its banks fall outside the classification
+     * entirely. The band is the only thing that sands them either way, so it still draws there.
+     */
+    bool beach_repair_only = false;
 };
 
 /**

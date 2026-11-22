@@ -460,6 +460,7 @@ const std::vector<SettingsGroup>& render_settings_groups() {
             .add(tier(F(f_int("volumetrics_step_count", 48, 1, 512), "Steps", "March steps -- the main cost and what sharpens shafts"), "Volumetrics"))
             .sub("Lighting")
             .add(F(f_bool("volumetrics_shadows_enabled", true), "Sun Shadows", "Shadow the sun's light in volumes -- what makes light shafts"))
+            .add(F(f_bool("volumetrics_clip_to_transparent", false), "Clip To Transparent", "Stop a volume's in-scatter at water or glass drawn over open sky"))
             .add(F(f_float("volumetrics_sun_anisotropy", 0.6f, 0.01f, -0.99f, 0.99f), "Sun Scatter Direction",
                    "0 = light scatters evenly, near 1 = mostly forward (bright looking toward the sun)"))
             .add(F(f_float("volumetrics_light_scatter", 1.0f, 0.01f, 0.0f, 16.0f), "Light Scatter", "Point / spot light glow in volumes; 0 skips lights entirely"))
@@ -490,6 +491,8 @@ const std::vector<SettingsGroup>& render_settings_groups() {
             .add(quality("water_quality", "buoyancy and ripple range, water mesh density and LOD, and shader detail"))
             .add(F(f_float("water_detail_distance", 0.0f, 10.0f, 0.0f, 20000.0f), "Detail Distance Override",
                    "Distance ripples and foam noise fade out at, overriding the quality tier's value; 0 uses the tier"))
+            .add(F(f_float("water_open_variation", 1.0f, 0.05f, 0.0f, 2.0f), "Open Water Variation",
+                   "Large-scale variation over water seen from too far for its waves to resolve; 0 off"))
             .add(startup(F(f_bool("underwater_enabled", true), "Underwater Effect",
                            "Fog, absorption and caustics when the camera is below a water surface")))
             .done());

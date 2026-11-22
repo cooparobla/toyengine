@@ -5,6 +5,8 @@
  * selection outline belongs to the editor, not the game.
  */
 
+#include <string>
+
 #include <coopa/testing/test.h>
 
 #include <gfxcoopa/util/image_readback.h>
@@ -60,6 +62,41 @@ COOPA_TEST(play_takes_input_on_click_and_hides_the_selection_outline) {
     tick(engine, 2);
     expect(app.document().is_selected(mesh) && app.selection_outlines_drawn() == 1,
            "the selection is kept and outlined again after Stop");
+}
+
+/**
+ * @brief Play shows the game alone: the editor's own furniture over the viewport is not drawn,
+ *        and every piece of it is back the frame Stop ends the run.
+ *
+ * The toolbar, the nav gizmo, the sidebar and the last-operator panel are counted together
+ * (EditorApp::viewport_chrome_drawn()); the grid and the gizmo have their own branches and the
+ * selection outline is covered by the test above. Nothing is toggled off on the way through, so
+ * what comes back has to be exactly what was there before.
+ */
+COOPA_TEST(play_hides_the_editors_viewport_furniture_and_stop_brings_it_back) {
+    using coopa::input::Key;
+    EditorSession session({.fixed_dt = "0"});
+    auto& engine = session.engine;
+    auto& app = session.app;
+
+    tick(engine, 2);
+    const int chrome = app.viewport_chrome_drawn();
+    coopa::test::require(chrome > 0, "the editor draws viewport furniture before Play");
+    expect(!app.game_view(false), "not a game view in edit mode");
+
+    app.play();
+    tick(engine, 3);
+    coopa::test::require(app.playing(), "playing");
+    expect(app.game_view(false), "play is a game view");
+    expect(app.viewport_chrome_drawn() == 0,
+           "no viewport furniture while playing (" + std::to_string(app.viewport_chrome_drawn()) + ")");
+
+    app.stop();
+    tick(engine, 2);
+    expect(!app.playing() && !app.game_view(false), "stopped");
+    expect(app.viewport_chrome_drawn() == chrome,
+           "every piece of furniture is back after Stop (" + std::to_string(app.viewport_chrome_drawn()) +
+               " of " + std::to_string(chrome) + ")");
 }
 
 /** @brief Pause freezes the simulation and Step advances exactly one frame; also the Blender

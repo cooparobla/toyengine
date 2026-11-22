@@ -60,7 +60,18 @@ copy from `assets/scenes/terrain/terrain_demo/scene.yaml`. Parser: `src/toyengin
                                 #   bank, this changes the bank's own shape
         cut_max_steps: 6.0      #   the tallest bank it grades at all; taller is a cliff, left alone
         cut_taper_slope_steps: 2.0   # the steepest riser it may leave (steps per tile)
-        beach_tiles: 6.0        #   how far from water the sand band reaches
+        beach_tiles: 6.0        #   how far from water this pass's own sand band reaches
+        beach_variation: 0.6    #   how much that width wanders along a coast: 0 (the default) is
+                                #   one uniform band, which reads as an outline drawn round the
+                                #   land; 0.6 gives broad bays between barer stretches
+        beach_variation_tiles: 64    # how long a stretch shares a width -- the scale of a bay
+        beach_repair_only: false     # true for a terrain GENERATED FROM A MAP. mapcoopa already
+                                #   classifies its shores (Biome::Beach, bounded by the slope via
+                                #   the generator's beach_height_m), and this pass's tile-count
+                                #   band drawn over that does not add to it -- it gives every bare
+                                #   headland the same stripe. True restricts the band to ground
+                                #   this pass itself moved. Leave false for a hand-authored
+                                #   terrain: there the band is the only source of beaches.
       water: { clarity: 2.5 }   # optional WaterBody look keys
       chunk_size: 32
       view_radius: 2            # chunks streamed around the main camera

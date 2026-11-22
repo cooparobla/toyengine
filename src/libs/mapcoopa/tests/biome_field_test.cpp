@@ -244,3 +244,51 @@ COOPA_TEST(flat_shores_grow_beaches) {
     }
     ASSERT_TRUE(beaches > 0);
 }
+
+
+/**
+ * @brief `beach_height_variation` turns the budget into a field: it takes the sand off some
+ *        shores entirely and carries it well above the uniform height on others.
+ *
+ * Without it a coast's only source of variety is the slope it climbs, which on gently shelving
+ * ground is nearly the same everywhere -- so every landmass comes out ringed by a band of much
+ * the same depth. This asserts the two things the field is for, against the very same map and
+ * the very same points, with only the one key between the two readings: shores that lose their
+ * beach although they are low enough to keep it, and beaches that reach past the height a
+ * uniform budget would have cut them off at.
+ */
+COOPA_TEST(a_varied_beach_budget_bares_some_shores_and_deepens_others) {
+    FieldFixture& uniform = shared_fields();
+    MapConfig varied_config = world_config();
+    varied_config.beach_height_variation = 1.0;
+    FieldFixture varied(shared_world(), varied_config);
+    ASSERT_TRUE(uniform.config.beach_height_variation == 0.0);
+
+    const auto sandy = [](Biome b) { return b == Biome::Beach || b == Biome::Mangrove; };
+
+    std::size_t shore_points = 0, bared = 0, deepened = 0;
+    for (const MapCenter& center : uniform.graph.centers) {
+        if (!center.coast) continue;
+        for (const CenterId n : center.neighbors) {
+            const MapCenter& sea = uniform.graph.centers[static_cast<std::size_t>(n)];
+            if (!sea.ocean) continue;
+            const MapPoint mid = uniform.graph.on_surface(
+                MapPoint{0.5 * (center.point.x + sea.point.x),
+                         0.5 * (center.point.y + sea.point.y),
+                         0.5 * (center.point.z + sea.point.z)});
+            const WaterSample water = uniform.water.at(center, mid);
+            if (water.wet()) continue;
+            ++shore_points;
+            const bool was = sandy(uniform.biomes.at(center, mid, water));
+            const bool now = sandy(varied.biomes.at(center, mid, water));
+            const double relief =
+                height_to_meters(uniform.config, water.ground - uniform.config.sea_level);
+            if (was && !now) ++bared;
+            if (now && relief > uniform.config.beach_height_m) ++deepened;
+        }
+    }
+    ASSERT_TRUE(shore_points > 0);
+    // Both directions, or the field is only shaving the band rather than redrawing it.
+    ASSERT_TRUE(bared > 0);
+    ASSERT_TRUE(deepened > 0);
+}

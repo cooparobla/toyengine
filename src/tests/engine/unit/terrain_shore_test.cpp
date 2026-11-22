@@ -257,6 +257,83 @@ COOPA_TEST(a_bed_is_shelved_up_toward_its_margin) {
     expect(tiles_under_their_banks(f) == 0, "and the bed never rose above its own water");
 }
 
+/**
+ * @brief A long straight coast, so the only thing that can make the sand band vary along it is
+ *        `beach_variation` -- and with it at 0 the band is the same width end to end.
+ */
+namespace {
+/** @brief Width of the sand run at row `y`, walking inland from the water at x = 0. */
+std::int32_t sand_width_(const Fixture& f, std::int32_t y) {
+    std::int32_t n = 0;
+    for (std::int32_t x = 1; x < f.w; ++x) {
+        if (f.at(x, y).top_kind() != TileKind::Sand) break;
+        ++n;
+    }
+    return n;
+}
+
+/** @brief A flat coast `h` rows long: `kind` down the x = 0 column, grass at its level inland. */
+Fixture flat_coast_of_(std::int32_t w, std::int32_t h, WaterKind kind) {
+    Fixture f(w, h);
+    for (std::int32_t y = 0; y < h; ++y) {
+        f.set_wet(0, y, 39, 40.0f, kind);
+        for (std::int32_t x = 1; x < w; ++x) f.set_dry(x, y, 40, TileKind::Grass);
+    }
+    return f;
+}
+
+/** @brief The same, against a lake -- the shape every beach test below a map would see. */
+Fixture flat_coast_(std::int32_t w, std::int32_t h) {
+    return flat_coast_of_(w, h, WaterKind::Lake);
+}
+} // namespace
+
+COOPA_TEST(a_uniform_profile_gives_one_width_of_sand_the_whole_way_along) {
+    Fixture f = flat_coast_(32, 192);
+    f.params.shore.beach_variation = 0.0f;
+    f.grade();
+    const std::int32_t first = sand_width_(f, 0);
+    expect(first > 0, "a flat shore sands over at all (" + std::to_string(first) + ")");
+    bool same = true;
+    for (std::int32_t y = 1; y < f.h; ++y) same &= sand_width_(f, y) == first;
+    expect(same, "and with no variation every row is the same width");
+}
+
+COOPA_TEST(beach_variation_makes_some_stretches_broad_and_others_bare) {
+    Fixture f = flat_coast_(32, 192);
+    f.params.shore.beach_variation = 0.6f;
+    f.params.shore.beach_variation_tiles = 32.0f;
+    f.grade();
+
+    std::int32_t lo = 1 << 20, hi = 0;
+    for (std::int32_t y = 0; y < f.h; ++y) {
+        const std::int32_t n = sand_width_(f, y);
+        lo = std::min(lo, n);
+        hi = std::max(hi, n);
+    }
+    // The uniform band is beach_tiles + beach_jitter_tiles = 9 tiles; 0.6 of variation runs the
+    // scale over [0.4, 1.6], so the widest stretches must beat the narrowest by a clear margin.
+    expect(hi > lo + 2, "the band's width varies along the coast (" + std::to_string(lo) + ".." +
+                            std::to_string(hi) + " tiles)");
+    expect(hi > 9, "the broadest bays are wider than the uniform band (" + std::to_string(hi) + ")");
+    expect(lo < 9, "and the barest stretches are narrower (" + std::to_string(lo) + ")");
+}
+
+COOPA_TEST(the_variation_is_smooth_rather_than_stepping_between_stretches) {
+    Fixture f = flat_coast_(32, 192);
+    f.params.shore.beach_variation = 0.6f;
+    f.params.shore.beach_variation_tiles = 32.0f;
+    f.grade();
+    // A hard lattice would cut the band at a cell boundary -- a straight edge across the sand.
+    // Blended, the width walks: no single row may jump by more than a tile or two against its
+    // neighbour, over a period thirty-two tiles long.
+    std::int32_t worst = 0;
+    for (std::int32_t y = 1; y < f.h; ++y) {
+        worst = std::max(worst, std::abs(sand_width_(f, y) - sand_width_(f, y - 1)));
+    }
+    expect(worst <= 2, "the width walks rather than stepping (worst jump " + std::to_string(worst) + ")");
+}
+
 COOPA_TEST(a_low_soft_shore_sands_over_but_a_high_one_does_not) {
     Fixture f(32, 8);
     for (std::int32_t y = 0; y < f.h; ++y) {
@@ -271,4 +348,44 @@ COOPA_TEST(a_low_soft_shore_sands_over_but_a_high_one_does_not) {
     expect(f.at(1, 4).top_kind() == TileKind::Sand, "low grass right beside the water sands over");
     expect(f.at(5, 4).top_kind() == TileKind::Snow, "snow well above the water never does");
     expect(f.at(f.w - 1, 4).top_kind() == TileKind::Grass, "and grass outside the band stays grass");
+}
+
+
+/**
+ * @brief `beach_repair_only` leaves ground this pass did not move to whatever classified it.
+ *
+ * A dead-flat shore at the water's own level gives every cone nothing to do, so the pass moves
+ * no tile on it -- and a terrain baked from a map has already had its beaches drawn there by the
+ * map. Restricted, the band adds nothing; unrestricted it sands the same ground regardless,
+ * which over a classified coast is the floor that flattens it.
+ */
+COOPA_TEST(beach_repair_only_leaves_ground_the_pass_did_not_move_alone) {
+    Fixture restricted = flat_coast_(32, 32);
+    restricted.params.shore.beach_repair_only = true;
+    restricted.grade();
+    std::int32_t widest = 0;
+    for (std::int32_t y = 0; y < restricted.h; ++y) {
+        widest = std::max(widest, sand_width_(restricted, y));
+    }
+    expect(widest == 0, "a shore the pass never touched keeps the classification it came with (" +
+                            std::to_string(widest) + " tiles of sand)");
+
+    Fixture drawn = flat_coast_(32, 32);
+    drawn.grade();
+    expect(sand_width_(drawn, 0) > 0, "and the same shore DOES sand over with the band unrestricted");
+}
+
+/**
+ * @brief A river bank sands over even when the band is restricted to repaired ground.
+ *
+ * A map classifies a shore from the cells that hold water, and a river runs along the edge
+ * between two cells rather than filling one -- so no cell beside it is ever a water cell and its
+ * banks are never classified. The band is the only thing that sands them, restricted or not.
+ */
+COOPA_TEST(a_river_bank_sands_over_even_when_the_band_is_restricted) {
+    Fixture f = flat_coast_of_(32, 32, WaterKind::River);
+    f.params.shore.beach_repair_only = true;
+    f.grade();
+    expect(sand_width_(f, 0) > 0, "the river's bank still gets its sand (" +
+                                      std::to_string(sand_width_(f, 0)) + " tiles)");
 }

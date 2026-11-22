@@ -52,7 +52,7 @@ eleven go through `write_asset`, which puts the file in the right place and emit
 way, leaving the document's shape to the caller. Promoting one to a builder is worth doing when
 its key order starts mattering.
 
-## Two things it deliberately will not do
+## Three things it deliberately will not do
 
 **It does not validate component keys.** There is no reflection in the engine -- every key is
 parsed by hand in C++ -- so a misspelled key, or one belonging to a component that was renamed,
@@ -60,6 +60,13 @@ is **silently ignored** at load. This package cannot see that. The authority on 
 is [`.claude/skills/create-scene/reference/components.md`](../.claude/skills/create-scene/reference/components.md);
 `Obj`'s convenience methods spell the common ones correctly by construction, and
 `Obj.component()` passes anything through.
+
+**It does not bake generated worlds.** A `.terra` is mapcoopa's generator and
+[`TerrainSampler`](../src/toyengine/mapgen/terrain_sampler.h) writing millions of tiles, and both
+are C++. The offline entry point is [`world/terra_bake.h`](../src/toyengine/world/terra_bake.h)'s
+`bake_terra()` -- no window, no device, no `Engine` -- which a project wraps in an executable of
+its own. This package writes the YAML and PNG the engine *reads*; a baked world is the engine's
+own output.
 
 **It does not create a new project's starter assets.** `assets/config.yaml`, the first scene and
 the base meshes come from the editor's own `--new-project`, which a project's `.toyenv.sh` runs

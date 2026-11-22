@@ -270,6 +270,36 @@ inline const char* const* tile_kind_names() {
     return names;
 }
 
+/**
+ * @brief Every kind's base colour, 0..1, in TileKind order.
+ *
+ * The same figures `tools/gen_terrain_atlas.py` bakes into `textures/terrain/terrain_atlas.png`,
+ * which is what a chunk's shader actually samples -- these are for code that has to agree with a
+ * tile's colour WITHOUT sampling the atlas: a map, a minimap, a low-detail stand-in drawn before
+ * the chunks exist. **If one table moves, the other has to move with it**; the generator's
+ * `KINDS` list is the authority and carries the same note.
+ *
+ * The shader varies each by +/-50% procedurally (`terrain_styled.glsl`), so a colour here is the
+ * surface's mean rather than any particular texel of it.
+ */
+inline const glm::vec3* tile_kind_base_colors() {
+    static const glm::vec3 colors[k_tile_kind_count] = {
+        {118.0f / 255.0f, 184.0f / 255.0f,  76.0f / 255.0f},   // grass
+        {158.0f / 255.0f, 110.0f / 255.0f,  72.0f / 255.0f},   // dirt
+        {138.0f / 255.0f, 140.0f / 255.0f, 150.0f / 255.0f},   // stone
+        {236.0f / 255.0f, 222.0f / 255.0f, 170.0f / 255.0f},   // sand
+        {244.0f / 255.0f, 247.0f / 255.0f, 252.0f / 255.0f},   // snow
+        {112.0f / 255.0f, 108.0f / 255.0f, 116.0f / 255.0f},   // rock
+        { 78.0f / 255.0f, 150.0f / 255.0f, 205.0f / 255.0f},   // water
+        {182.0f / 255.0f, 224.0f / 255.0f, 240.0f / 255.0f},   // ice
+        {112.0f / 255.0f, 160.0f / 255.0f,  84.0f / 255.0f},   // moss
+        {190.0f / 255.0f, 138.0f / 255.0f,  96.0f / 255.0f},   // clay
+        { 96.0f / 255.0f,  90.0f / 255.0f,  88.0f / 255.0f},   // ash
+        {238.0f / 255.0f, 236.0f / 255.0f, 226.0f / 255.0f},   // salt
+        {150.0f / 255.0f, 128.0f / 255.0f, 100.0f / 255.0f}};  // road
+    return colors;
+}
+
 /** @brief The lower-case name of one kind, as scene YAML spells it. */
 inline const char* tile_kind_name(TileKind kind) {
     const std::size_t i = static_cast<std::size_t>(kind);

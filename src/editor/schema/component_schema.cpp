@@ -1505,12 +1505,15 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                 with_tip(f_float("shore.cut_max_steps", 6.0f, 0.5f, 0.0f, 64.0f),
                          "The most the grading may cut any tile down, and so the tallest bank it touches at all; "
                          "a taller face is a cliff and is left standing"),
+                with_tip(f_float("shore.cut_recovery_steps", 6.0f, 0.5f, 0.5f, 64.0f),
+                         "How deep a cut has to be before it feathers out at the full taper slope. Sets how a "
+                         "bank of a given height blends back into flat ground, independently of the budget"),
                 with_tip(f_float("shore.cut_taper_slope_steps", 2.0f, 0.1f, 0.1f, 8.0f),
                          "Dry side: the steepest riser the graded ground may contain. Ground no steeper than this "
                          "is never cut at all"),
                 with_tip(f_float("shore.fill_slope_steps", 0.40f, 0.01f, 0.01f, 4.0f),
                          "Dry side: the grade a levee is filled back up at (steps per tile)"),
-                with_tip(f_float("shore.fill_max_steps", 4.0f, 0.5f, 0.0f, 64.0f),
+                with_tip(f_float("shore.fill_max_steps", 24.0f, 0.5f, 0.0f, 64.0f),
                          "The most material a fill may add to any tile, which is what stops it building out over "
                          "falling ground"),
                 with_tip(f_float("shore.fill_taper_slope_steps", 2.0f, 0.1f, 0.1f, 8.0f),
@@ -1525,7 +1528,17 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                 with_tip(f_float("shore.cone_reach_tiles", 24.0f, 1.0f, 1.0f, 256.0f),
                          "How far a grade may run before giving up looking for the ground; a guard, not a tuning "
                          "knob -- the ground is what normally ends it"),
-                with_tip(f_float("shore.jitter_steps", 1.0f, 0.1f, 0.0f, 4.0f),
+                with_tip(f_int("shore.bed_min_depth_steps", 1, 1, 16),
+                         "Least depth a bed is left at under its own water. Raised automatically where a river "
+                         "steps down, so the meshed surface cannot cut through the bed"),
+                with_tip(f_float("shore.talus_slope_steps", 1.5f, 0.1f, 0.0f, 16.0f),
+                         "Angle of repose, in steps per tile, that tall faces near water are relaxed down to; "
+                         "0 disables. Moves material rather than carving, so it cannot create a new wall"),
+                with_tip(f_float("shore.talus_band_tiles", 24.0f, 1.0f, 0.0f, 128.0f),
+                         "How far from water the relaxation reaches. Inland terrain past this is left alone"),
+                with_tip(f_int("shore.talus_max_passes", 32, 1, 256),
+                         "Iteration cap for the relaxation; it normally stops earlier, when nothing moves"),
+                                with_tip(f_float("shore.jitter_steps", 1.0f, 0.1f, 0.0f, 4.0f),
                          "Dither amplitude (steps): breaks a graded terrace edge into short lobes. 0 is exact"),
                 with_tip(f_float("shore.jitter_tiles", 4.0f, 0.5f, 0.5f, 64.0f),
                          "How wide one lobe of that dither is, in tiles"),
@@ -1535,8 +1548,17 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                          "How raggedly that band's edge wanders, in tiles"),
                 with_tip(f_int("shore.beach_rise_steps", 2, 0, 64),
                          "A tile sands over only within this many steps of the water nearest it"),
+                with_tip(f_float("shore.beach_variation", 0.0f, 0.05f, 0.0f, 1.0f),
+                         "How much the sand band's width wanders along a coast: 0 one uniform "
+                         "band, 0.6 broad bays between stretches with barely any sand"),
+                with_tip(f_float("shore.beach_variation_tiles", 64.0f, 4.0f, 4.0f, 512.0f),
+                         "How long a stretch of coast shares a width -- the scale of a bay"),
                 with_tip(f_bool("shore.retexture", true),
                          "Also set sand, bed and biome kinds; off grades the heights only"),
+                with_tip(f_bool("shore.beach_repair_only", false),
+                         "Sand only ground this pass moved, leaving the map's own beaches alone. "
+                         "On for a terrain generated from a map, which already classified its "
+                         "shores; off for a hand-authored one, which has no other source"),
                 with_tip(f_int("soil_depth_steps", 3, 0, 1024), "Steps of soil under the surface before bare stone"),
                 with_tip(with_label(f_int("max_merge", 0, 0, 512), "Max merge (tiles)"),
                          "Widest merged flat run, in tiles; 0 = unlimited. A world whose surface leaves the world plane needs 1 "

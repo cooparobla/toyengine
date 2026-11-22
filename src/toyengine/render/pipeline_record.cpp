@@ -437,6 +437,8 @@ void ToyRenderPipeline::record_scene_(coopa::gfx::command::CommandBuffer& cmd, c
     // transparent_coverage_ holds this frame's coverage only if the transparent pass actually
     // ran; otherwise the overlay must fall back to the opaque geometry alone.
     record_cloud_overlay_(cmd, ctx, coverage_valid);
+    // The volumetrics passes need the same fact, but they run in record_post_chain_().
+    transparent_coverage_valid_ = coverage_valid;
 }
 
 void ToyRenderPipeline::record_post_chain_(coopa::gfx::command::CommandBuffer& cmd, const FrameContext& ctx) {
@@ -468,6 +470,17 @@ void ToyRenderPipeline::record_post_chain_(coopa::gfx::command::CommandBuffer& c
     // Local volumes. After fog, so wisps layer over fogged geometry, and before DOF and
     // bloom, so they defocus with everything else and sun-lit ones glow. Gated on the same
     // startup-fixed flag its source view was chosen from.
+    // Whether the coverage attachment is readable is only known once the transparent pass has
+    // been recorded, which happened after update_volumetrics_data_() filled this buffer. The
+    // UBO is single-buffered and host-written, and nothing has sampled it yet this frame (the
+    // volumetrics draws below are its only readers), so patching the flag in here is enough.
+    // Gated on volumetrics_clip_to_transparent (off by default -- see its doc).
+    if (config_.volumetrics_enabled) {
+        volumetrics_data_.data().counts.w =
+            (config_.volumetrics_clip_to_transparent && transparent_coverage_valid_) ? 1.0f : 0.0f;
+        volumetrics_data_.upload();
+    }
+
     if (config_.volumetrics_enabled && froxel_volumetrics_pass_) {
         froxel_volumetrics_pass_->record_grid(cmd, static_cast<uint32_t>(frame_index_ & 1u));
         volumetrics_target_.begin(cmd);
@@ -1464,7 +1477,10 @@ void ToyRenderPipeline::fill_forward_globals_(ForwardGlobals& g) const {
     // The same submerged fact UnderwaterPass is driven by. A curved world's water surface is a sphere,
     // so the shader cannot decide "the camera is below this fragment" from world Z the way flat
     // water does -- it reads this instead (see water_surface.glsl's underside branch).
-    g.water_view = glm::vec4(water_state_.underwater ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+    // y: how strongly open water varies over hundreds of metres (render water_open_variation),
+    // which only a local-frame body reads -- see water_surface.glsl's far-footprint block.
+    g.water_view = glm::vec4(water_state_.underwater ? 1.0f : 0.0f,
+                             std::max(config_.water_open_variation, 0.0f), 0.0f, 0.0f);
 }
 
 passes::ParticlePass::PushConstants ToyRenderPipeline::particle_push_constants_(const ParticleDrawBatch& b) const {

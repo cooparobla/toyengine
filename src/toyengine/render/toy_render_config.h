@@ -281,6 +281,19 @@ struct ToyRenderConfig {
      * ripple range it does not need.
      */
     float water_detail_distance = 0.0f;
+    /**
+     * How strongly open water varies over hundreds of metres, for a body seen from far enough
+     * that its own waves no longer resolve. 0 off, 1 the tuned strength.
+     *
+     * Past `water_detail_distance` a surface has no detail left to draw and stands in for it with
+     * a flat roughness, which is honest for a lake read across a valley and wrong for an ocean
+     * read across a world: a sea is not uniform at that scale, and drawn uniform it reads as a
+     * painted sheet. This puts the large structure back -- slow swings of roughness and depth
+     * colour, the scale of a current or a weather system -- without any of the per-wave detail
+     * that would only alias there. Only local-frame water (`water_local_frame`) carries it; a
+     * flat body's surface is unchanged at any distance.
+     */
+    float water_open_variation = 1.0f;
     /** Physical sky: the sky-view table's integration steps. Not expanded here -- read by the
      *  pipeline every frame, so it switches live. */
     RenderQuality sky_quality         = RenderQuality::High;
@@ -1144,6 +1157,23 @@ struct ToyRenderConfig {
      * sample along, so god rays are a volumetrics feature, not a fog one.
      */
     bool  volumetrics_shadows_enabled = true;
+    /**
+     * End a march ray on the nearest TRANSPARENT surface when no opaque geometry lies
+     * behind it, instead of running the ray to `volumetrics_max_distance`.
+     *
+     * Transparents are depth-TESTED but never depth-written and never touch the G-buffer,
+     * so on a pixel one covers with nothing opaque behind it the march still reads "sky"
+     * and integrates the volume's full crossing on top of a surface that is already drawn --
+     * and already opaque. `TransparentPass`'s coverage attachment is the missing distance
+     * (`cloud_composite.frag` reads it for the same reason); this binds it to the march and
+     * both composite paths.
+     *
+     * Off by default: it only moves pixels where a transparent surface covers a sky pixel
+     * inside a volume, so most worlds never see it, and leaving the default alone keeps
+     * every existing scene rendering exactly as it did. A world whose water is routinely
+     * seen against open sky wants it on.
+     */
+    bool  volumetrics_clip_to_transparent = false;
     /**
      * Strength of point/spot light in-scatter into local volumes (the closest
      * MAX_SCATTER_LIGHTS lights are fed to the march each frame); 0 skips the

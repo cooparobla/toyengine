@@ -1861,8 +1861,14 @@ private:
     /// TransparentPass's coverage attachment: the nearest transparent surface per pixel, as a
     /// reciprocal camera distance (0 = none). Written by every BLEND draw, sampled by
     /// cloud_overlay_pass_ so the cloud layer can be ordered against water that covers open
-    /// sky. Allocated once -- render_extent_ never changes.
+    /// sky, and by the volumetrics march/composite so a local volume's in-scatter stops at
+    /// that same surface. Allocated once -- render_extent_ never changes.
     std::unique_ptr<coopa::gfx::memory::Image> transparent_coverage_;
+    /// Whether transparent_coverage_ holds THIS frame's data. Decided in record_scene_()
+    /// (the transparent pass ran, and the device has independent blend), consumed in
+    /// record_post_chain_(), which runs later in the same frame -- hence a member rather
+    /// than a parameter. Reaches the volumetrics shaders as VolumetricsUBO::counts.w.
+    bool transparent_coverage_valid_ = false;
 
     // --- SSR/SSGI: always constructed; render() checks config_.ssr_enabled per frame ---
     std::unique_ptr<coopa::gfx::engine::passes::HiZPass>           hiz_pass_;

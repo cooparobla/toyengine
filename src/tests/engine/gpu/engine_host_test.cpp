@@ -26,6 +26,7 @@
 #include <physxcoopa/system/physics_system.h>
 #include <toyengine/water/water_body.h>
 #include <toyengine/water/water_system.h>
+#include <uicoopa/immediate/imm_canvas.h>
 
 #include "engine/support/checks.h"
 #include "engine/support/render_fixture.h"
@@ -274,6 +275,47 @@ COOPA_TEST(pushed_play_scene_leaves_the_edit_scene_untouched) {
     expect(&engine.scene() == edit_scene, "removing the pushed scene and reactivating restores the edit scene");
     tick_frames(engine, 2);
     expect(glm::distance(object_position(*edit_scene, "bounce_clay"), start) < 1e-5f, "the restored edit scene is untouched");
+}
+
+/**
+ * @brief A layer added back is gathered empty, not with the UI it emitted before it was removed.
+ *
+ * add_overlay_layer() is called from wherever a host starts a transition -- the editor does it
+ * from its post-late-update hook, after drive_ui_canvases_() has already run for the frame -- so
+ * a layer can go from unregistered to gathered without being driven in between. Its canvases
+ * still hold what they emitted before the layer was last removed, and the views named there can
+ * be dead: the UI pass's white view seeds every solid-colour quad and is replaced whenever the
+ * pipeline is rebuilt. Registering a destroyed view and drawing through it is a GPU fault.
+ */
+COOPA_TEST(a_re_added_overlay_layer_is_gathered_empty) {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::Engine engine(make_test_config("src/tests/fixtures/scenes/kitchen_sink/scene.yaml", 320, 180, 160, 90));
+
+    coopa::scene::Scene layer("OverlayProbe");
+    coopa::ui::ImmediateCanvas* imm = coopa::ui::build_immediate_canvas(layer, "OverlayProbe", 0);
+    imm->on_draw = [](coopa::ui::imm::Context& ctx) { ctx.fill(ctx.stretch(), glm::vec4(1.0f)); };
+    // build_immediate_canvas() puts the ImmediateCanvas on a child of the CanvasComponent's
+    // object; the DrawList everything lands in belongs to the canvas.
+    coopa::ui::CanvasComponent* canvas = layer.find_first_component<coopa::ui::CanvasComponent>();
+    coopa::test::require(canvas != nullptr, "the probe layer has a canvas");
+
+    engine.add_overlay_layer(&layer, 50, /*in_display_rect=*/true);
+    tick_frames(engine, 3);
+    coopa::test::require(!canvas->draw_list().batches().empty(), "the layer emits UI while registered");
+
+    engine.remove_overlay_layer(&layer);
+    tick_frames(engine, 3);
+    expect(!canvas->draw_list().batches().empty(),
+           "a removed layer is no longer driven, so what it emitted is still in its DrawList");
+
+    engine.add_overlay_layer(&layer, 50, /*in_display_rect=*/true);
+    expect(canvas->draw_list().batches().empty(),
+           "adding it back drops that frozen DrawList rather than handing it to the gather");
+
+    tick_frames(engine, 3);
+    expect(!canvas->draw_list().batches().empty(), "and the next frames drive it normally again");
+    engine.remove_overlay_layer(&layer);
 }
 
 /** @brief A display region moves the image without changing a single low-res pixel, and rays go through it. */

@@ -1342,6 +1342,40 @@ struct MapConfig {
      */
     double beach_height_m = 6.0;
     /**
+     * @brief How much `beach_height_m` wanders from one stretch of coast to the next, as a
+     *        fraction of it.
+     *
+     * Zero gives every coast the same budget, so the only thing that varies a beach's width is
+     * the slope it has to climb -- which on gently shelving ground is nearly the same
+     * everywhere, and reads as one band of sand drawn round every landmass. Raised, the budget
+     * is itself a field: a stretch drawn near the bottom grows no beach however flat it is,
+     * which is what a rocky headland is, and one drawn near the top carries sand well inland.
+     * 1.0 lets the budget reach both 0 and twice `beach_height_m`.
+     *
+     * Varies the budget, never the rule -- a beach still ends where the ground climbs out of
+     * it, so the band's edge still follows the terrain rather than the field.
+     */
+    double beach_height_variation = 0.0;
+    /**
+     * @brief How sharply that field separates sandy coast from bare; 1 leaves it as drawn.
+     *
+     * Fractal noise is concentrated about its mean, so a field used raw hands almost every
+     * coast very nearly the average budget -- the uniform band the variation exists to break.
+     * This stretches the field about its midpoint before clamping, which moves the mass to the
+     * two ends: most coast is then distinctly sandy or distinctly bare, with the transitions
+     * short rather than covering the whole range.
+     */
+    double beach_height_contrast = 2.5;
+    /**
+     * @brief The field the beach budget varies over.
+     *
+     * Coast-scale, like `noise_biome` is cell-scale: a frequency near 0.3 gives features a few
+     * grid units across, so one bay is sandy and the next headland is not. Frequencies are in
+     * grid units and `derived_config()` does not rescale them, so this means the same thing at
+     * any `grid_size`.
+     */
+    NoiseConfig noise_beach{5471, 0.3};
+    /**
      * @brief Amplitude of the noise added to moisture and temperature by the
      *        per-point biome query, in field units.
      *

@@ -16,6 +16,8 @@
 
 #include <fkYAML/node.hpp>
 
+#include <coopa/scene/scene_loader.h>
+
 #include <toyengine/world/terrain_types.h>
 
 namespace coopa {
@@ -41,6 +43,73 @@ class TerrainComponent;
  * Note that `layers:` is NOT a signal: both modes have it.
  */
 TerrainMode infer_terrain_mode(const fkyaml::node& node);
+
+/**
+ * @brief Loads one tile set onto a terrain as a style, and returns that style's index.
+ *
+ * A tile set is an object asset whose children are the pieces, each found by its NAME
+ * (`tile_piece_name()`) and taken from that child's `MeshRenderer`'s `mesh_path`; the set's own
+ * `round_kind_corners` comes with it. The older spelling -- a bare mesh prefix, pieces at
+ * `meshes/<prefix>_<piece>.yaml` -- is taken when `value` does not start with `objects/`.
+ *
+ * The piece loads are asynchronous: `TerrainComponent::poll_tile_sets()` is what waits for them
+ * and bakes the library, and a terrain whose styles are empty never becomes `is_ready()` and so
+ * builds no chunks at all. That is why a terrain assembled in code rather than parsed from a
+ * scene has to come through here too -- setting `tile_set` alone loads nothing.
+ *
+ * @param terrain  The terrain to add the style to; its `styles` grows by one.
+ * @param assets   Asset manager the pieces load through.
+ * @param base_dir Directory relative paths resolve against (a scene's own folder, or empty).
+ * @param name     What to call the style in log lines -- the set's path, or a legacy style name.
+ * @param value    The tile-set object path, or a legacy mesh prefix.
+ * @return The new style's index.
+ */
+int add_terrain_tile_set(TerrainComponent& terrain, coopa::asset::AssetManager& assets,
+                         const std::string& base_dir, const std::string& name,
+                         const std::string& value);
+
+/**
+ * @brief The index of the style already added under `name`, or -1.
+ *
+ * @param terrain The terrain to search.
+ * @param name    The style name given to `add_terrain_tile_set()`.
+ * @return The index, or -1 when no style carries that name.
+ */
+int terrain_style_named(const TerrainComponent& terrain, const std::string& name);
+
+/**
+ * @brief Gives a tile terrain its material, defaulting the surface palette atlas in.
+ *
+ * The chunks' shader reads each surface kind's colour from `textures/terrain_atlas.png`, so a
+ * material that names no albedo map draws the whole world white -- which is what a freshly added
+ * `TileTerrain`, or one built in code, would otherwise get. `authored` is the scene's own
+ * `material:` value and may be an empty mapping; a material ASSET reference (a string, or a
+ * mapping with `base:`) is taken as written and nothing is stamped over it.
+ *
+ * Goes through the same parser every other textured material in the engine uses, so the atlas
+ * gets the sRGB colour-space declaration and the async load path with it.
+ *
+ * @param terrain  The terrain whose `material` is written.
+ * @param authored The scene's `material:` node, or an empty mapping.
+ * @param assets   Asset manager the textures load through.
+ * @param ctx      Parse context for resolving relative paths; a default-constructed one resolves
+ *                 against the project's asset roots, which is what a code-built terrain wants.
+ */
+void apply_tile_material(TerrainComponent& terrain, const fkyaml::node& authored,
+                         coopa::asset::AssetManager& assets,
+                         const coopa::scene::SceneLoader::ParseContext& ctx);
+
+/**
+ * @brief The stock tile material, for a terrain assembled in code rather than parsed.
+ *
+ * `apply_tile_material()` with nothing authored.
+ *
+ * @param terrain  The terrain whose `material` is written.
+ * @param assets   Asset manager the textures load through.
+ * @param base_dir Directory relative paths resolve against; empty uses the asset roots.
+ */
+void apply_default_tile_material(TerrainComponent& terrain, coopa::asset::AssetManager& assets,
+                                 const std::string& base_dir = {});
 
 /**
  * @brief Extra keys a project adds to a terrain, applied after the engine has parsed its own.

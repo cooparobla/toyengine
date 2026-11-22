@@ -65,6 +65,27 @@ non-parity list in its scene header:
 - A terrain's first activation bakes once, lazily, per session -- one frame of stale history
   (TAA ghosting) plus the bake time, on tiles and heightmap alike.
 
+### Baking a world offline
+
+[`terra_bake.h`](terra_bake.h)'s `bake_terra()` is the same work a terrain with no stored tiles
+does the first time it loads -- a `MapGenerator`, a `TerrainSampler` and a `TerraData` -- lifted
+out of the scene so a command-line tool can do it. A map config and a `TerrainParams` in, a
+`.terra` out. **Nothing in it touches the GPU**: no window, no device, no shaders, no `Engine`, so
+it runs in a build step or on a machine with no graphics at all.
+
+It is worth doing whenever the generation never varies: a large world costs a player seconds at
+every load for a result that is the same every time, and the stored file loads in a fraction of
+it. A grid that is not one flat square bakes through
+[`mapgen/world_bake.h`](../mapgen/world_bake.h)'s hook exactly as it does at runtime -- install
+the hook first and the same code shapes the file; with no hook installed the flat walk is what
+happens, which is the only shape this engine has.
+
+**The file does not store the grid it was baked at**, and a terrain reads one at whatever shape
+its own params say with no check. So the caller owns the agreement: bake with the `TerrainParams`
+the terrain will later carry, or get a world with bands of missing ground and nothing in the log.
+`TerraBakeResult::tiles_x`/`tiles_y` is what was actually written -- compare it. planetoy's
+`bin/bake` is a worked example of a project driving this over a whole scene.
+
 ### What generates a world is not here
 
 Map generation lives in [`toyengine/mapgen`](../mapgen/README.md). A `MapGenerator` component
@@ -775,6 +796,18 @@ terrain pays one null compare for:
 
 `nullptr` throughout **is** the flat world, as `WorldFrame::radius <= 0` is -- so there is no
 `FlatChunkShaper` to pay for.
+
+**A project that builds a terrain in code rather than parsing one needs two more calls**, both in
+[`terrain_yaml.h`](terrain_yaml.h), because setting the component's fields is not enough and
+neither failure says anything:
+
+| Call | Without it |
+|---|---|
+| `add_terrain_tile_set()` | `tile_set` is only a name. Nothing loads, `poll_tile_sets()` finds no piece, `is_ready()` never turns true, and the terrain bakes a whole world and then builds **zero chunks**. |
+| `apply_tile_material()` / `apply_default_tile_material()` | the material has no albedo map, and the chunk shader reads every tile kind's colour from `textures/terrain_atlas.png` -- so every chunk draws **white**. |
+
+Both are what the scene parser itself calls, so a terrain assembled in code and one read from
+YAML cannot drift apart.
 
 The planetary implementation lives in **planetoy**, its own project on its own engine branch --
 planetoy's globe is cube-sphere tiles on six faces, with a derived atmosphere, horizon culling,

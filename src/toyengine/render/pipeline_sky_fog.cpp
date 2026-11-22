@@ -489,6 +489,9 @@ void ToyRenderPipeline::update_volumetrics_data_(coopa::scene::Scene& scene, con
     }
     vol.counts.y = static_cast<float>(scatter_count);
     vol.counts.z = glm::max(config_.volumetrics_light_scatter, 0.0f);
+    // Whether the transparent-coverage attachment is readable. Not knowable yet -- the
+    // transparent pass has not been recorded at this point in the frame -- so it starts off
+    // and record_post_chain_() patches it before the volumetrics draws, its only readers.
     vol.counts.w = 0.0f;
 
     // Froxel mode's grid description and temporal history inputs (ignored by the march).

@@ -96,7 +96,8 @@ layout(set = 6, binding = 0) uniform ForwardGlobalsBlock {
     // layers, .z = detail distance (m), .w = ring draw range (m); per ring
     // [2i] = (x, y, age, strength), [2i+1] = (start radius, -, -, -). Read by water_surface.glsl.
     vec4  water_ripple_info;
-    vec4  water_view;   // x = 1 while the camera is below the water surface, else 0
+    vec4  water_view;   // x = 1 while the camera is below the water surface, else 0;
+                        // y = open-water variation strength (render water_open_variation)
     vec4  water_ripples[2 * WATER_MAX_RIPPLES];
 } forward_globals;
 

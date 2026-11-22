@@ -102,16 +102,37 @@ WaterWave water_gerstner(vec4 base, vec2 p, float t, float atten, float distance
     return water_gerstner(base, p, t, atten, distance, vec2(0.0));
 }
 
+/// Pixels a wave has to span before its slope is worth shading per pixel, and where it is fully
+/// resolved. Below the first figure the fragment stage samples a different point of the same wave
+/// in every neighbouring pixel, which is not water but moire -- a lattice of beat fringes over
+/// the whole surface, and a static one, since the pattern is a function of position rather than
+/// of anything that moves.
+///
+/// The mesh fade above cannot stand in for this. That one is about VERTEX spacing, and the
+/// residual exists precisely because the fragment stage can carry detail the mesh cannot; what
+/// bounds the residual is the PIXEL. The two only coincide when the camera sits a few metres from
+/// the water, which is the case a lake was tuned at -- water seen from hundreds of metres up
+/// keeps every wave in the residual and shades all of them through a footprint spanning several
+/// wavelengths. Fading them out there leaves the surface's roughness to stand in for the detail,
+/// which is what it already does past the ripple distance.
+const float WATER_RESIDUAL_FADE_PX = 2.0;
+const float WATER_RESIDUAL_FULL_PX = 6.0;
+
 /// The slope (dz/dx, dz/dy) of what water_wave_mesh_fade() took OUT of the tessellated mesh at
 /// world XY `p`: the fragment stage shades it back in, so the waves the far mesh cannot hold
 /// still read in the lighting. Zero where the mesh carries everything.
-vec2 water_gerstner_residual_slope(vec4 base, vec2 p, float t, float distance, vec2 lod) {
+///
+/// `px_per_m` is how many render pixels one world metre spans at this surface
+/// (`camera.jitter_ndc.z / distance`); waves below WATER_RESIDUAL_FADE_PX of it are dropped.
+vec2 water_gerstner_residual_slope(vec4 base, vec2 p, float t, float distance, vec2 lod,
+                                   float px_per_m) {
     vec2 slope = vec2(0.0);
     float amplitude = base.x, wavelength = base.y, direction = base.z;
     if (lod.y <= 0.0 || amplitude <= 1e-5 || wavelength <= 1e-3) return slope;
     for (int i = 0; i < WATER_WAVE_COUNT; ++i) {
         float lambda = wavelength * WATER_WAVE_LENGTH_RATIO[i];
-        float keep   = water_wave_distance_fade(lambda, distance) * (1.0 - water_wave_mesh_fade(lambda, distance, lod));
+        float keep   = water_wave_distance_fade(lambda, distance) * (1.0 - water_wave_mesh_fade(lambda, distance, lod))
+                     * smoothstep(WATER_RESIDUAL_FADE_PX, WATER_RESIDUAL_FULL_PX, lambda * px_per_m);
         if (keep <= 0.0) continue;
         float amp    = amplitude * WATER_WAVE_AMP_RATIO[i] * keep;
         float angle  = direction + WATER_WAVE_ANGLE_OFFSET[i];

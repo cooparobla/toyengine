@@ -16,16 +16,29 @@ layout(set = 0, binding = 0) uniform sampler2D scene_color;
 layout(set = 0, binding = 1) uniform sampler2D g_normal_metallic;
 layout(set = 0, binding = 2) uniform sampler2D g_position_roughness;
 layout(set = 0, binding = 3) uniform sampler2D march_result;
+// TransparentPass's coverage attachment -- see volumetrics_march.frag's binding 2, which
+// ends its ray on the same surface. Kept in step with the march or the upsample below would
+// reject as a depth edge every pixel whose ray the march had already clipped to water.
+layout(set = 0, binding = 4) uniform sampler2D u_transparent_coverage;
 
 #include <gfx/volumetrics_ubo.glsl>
 
 // Distance a march ray at `uv` was clipped to. Clamped to the march's max distance:
 // past it every ray stops at the same t, so sky and far geometry carry the same march
 // result and should blend freely rather than be rejected as a depth edge.
+//
+// A pixel with no opaque geometry may still be covered by a transparent surface the
+// G-buffer does not describe (transparents never depth-write), and the march ended its ray
+// there; counts.w gates the attachment the same way. This MUST mirror volumetrics_march.frag.
 float vol_ray_depth(vec2 uv, vec3 cam_pos) {
-    vec3  N      = texture(g_normal_metallic, uv).rgb;
-    float d      = (dot(N, N) < 0.001) ? 1e6
-                 : distance(cam_pos, texture(g_position_roughness, uv).rgb);
+    vec3  N = texture(g_normal_metallic, uv).rgb;
+    float d;
+    if (dot(N, N) < 0.001) {
+        float coverage = u_vol.counts.w > 0.5 ? texture(u_transparent_coverage, uv).r : 0.0;
+        d = coverage > 0.0 ? 1.0 / coverage : 1e6;
+    } else {
+        d = distance(cam_pos, texture(g_position_roughness, uv).rgb);
+    }
     return min(d, max(u_vol.march_params.y, 0.0));
 }
 

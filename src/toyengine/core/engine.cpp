@@ -290,22 +290,27 @@ coopa::scene::Scene& Engine::load_scene(const std::string& path) {
     return scene_mgr_.get_active_scene();
 }
 
-coopa::scene::Scene& Engine::set_scene(coopa::scene::Scene&& scene, const fkyaml::node& settings) {
+coopa::scene::Scene& Engine::set_scene(coopa::scene::Scene&& scene, const fkyaml::node& settings,
+                                       const std::string& source_path) {
     ctx_.wait_idle();
     cancel_scene_load_("superseded by set_scene()");
     clear_scenes_();
     coopa::scene::Scene* raw = scene_mgr_.add_scene(std::make_unique<coopa::scene::Scene>(std::move(scene)));
     scene_settings_[raw] = settings;
+    // Before prepare_scene_(), not after: a system set up there may resolve a file beside the
+    // scene, and it can only do that if scene_path() already answers.
+    if (!source_path.empty()) scene_paths_[raw] = source_path;
     prepare_scene_(*raw);
     return *raw;
 }
 
 coopa::scene::Scene& Engine::push_scene(coopa::scene::Scene&& scene, bool simulating,
-                                const fkyaml::node& settings) {
+                                const fkyaml::node& settings, const std::string& source_path) {
     ctx_.wait_idle();
     if (scene_mgr_.has_scene()) scene_mgr_.set_scene_active(&scene_mgr_.get_active_scene(), false);
     coopa::scene::Scene* raw = scene_mgr_.add_scene(std::make_unique<coopa::scene::Scene>(std::move(scene)));
     scene_settings_[raw] = settings;
+    if (!source_path.empty()) scene_paths_[raw] = source_path;
     scene_mgr_.set_active_scene(raw);
     prepare_scene_(*raw);
     raw->set_simulating(simulating);
@@ -390,10 +395,25 @@ void Engine::set_overlay_scene(coopa::scene::Scene* scene) {
 
 void Engine::add_overlay_layer(coopa::scene::Scene* scene, int order, bool in_display_rect, bool input) {
     if (!scene) return;
-    std::erase_if(overlay_layers_, [scene](const OverlayLayer& l) { return l.scene == scene; });
+    // Re-adding a registered layer only updates its placement; its DrawLists are this frame's.
+    const bool fresh =
+        std::erase_if(overlay_layers_, [scene](const OverlayLayer& l) { return l.scene == scene; }) == 0;
     auto at = std::find_if(overlay_layers_.begin(), overlay_layers_.end(),
                            [order](const OverlayLayer& l) { return l.order > order; });
     overlay_layers_.insert(at, OverlayLayer{scene, order, in_display_rect, input});
+    // A layer can be added part-way through a frame -- a host's post-late-update hook starting a
+    // scene transition is the usual one -- and drive_ui_canvases_() has then already run without
+    // it. Whatever its canvases emitted before the layer was last removed is still sitting in
+    // their DrawLists, and a view named there can be dead by now: the UI pass's own white view is
+    // replaced whenever the pipeline is rebuilt, and that view seeds every solid-colour quad
+    // (set_default_texture() in drive_ui_canvases_()). gather_ui_canvases_() would register that
+    // destroyed view and draw through a descriptor describing freed memory. Start the layer empty
+    // instead; the next frame drives it normally.
+    if (fresh) {
+        for (coopa::ui::CanvasComponent* canvas : coopa::ui::collect_canvases(*scene)) {
+            canvas->clear_emitted();
+        }
+    }
     sync_overlay_layers_();
 }
 

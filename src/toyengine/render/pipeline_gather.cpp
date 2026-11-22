@@ -742,6 +742,7 @@ void ToyRenderPipeline::gather_ui_canvases_(coopa::scene::Scene& scene, uint32_t
         }
     }
 
+
     world_canvases_.clear();
     if (world_ui_pass_) {
         size_t ui_verts = 0;

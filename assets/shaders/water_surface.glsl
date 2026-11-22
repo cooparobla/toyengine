@@ -40,7 +40,12 @@
 // stage fades each derived wave out with camera distance (water_waves.glsl). The fragment stage
 // reads forward_globals.water_ripple_info.yzw = (flow-ripple layers, detail distance, ring range):
 // past the detail distance the ripples and foam noise are skipped for a rougher surface, and
-// rings are only looped over within the ring range.
+// rings are only looped over within the ring range. The waves the mesh left out are shaded back
+// in per pixel only while they still span pixels (water_waves.glsl's residual fade) AND, on a
+// local-frame body, only while the surface is close enough to be worth drawing them on at all:
+// past that a sea's four-sinusoid wave sum reads as a weave rather than as water, so the
+// open-water field below stands in for it, at the strength forward_globals.water_view.y carries
+// (render water_open_variation).
 //
 // Flashing. The foam thresholds are softened against how far the measured depth moves across
 // a pixel (fwidth), because a hard threshold on an edge-on surface is a per-pixel coin flip and
@@ -118,6 +123,32 @@ vec3 water_noise_d(vec2 p) {
 }
 
 #ifdef WATER_LOCAL_FRAME
+// The period of the open-water field's first octave, metres. Hundreds of metres is the scale a
+// sea is actually structured at -- a current, a patch of weather -- and it is big enough to stay
+// tens of pixels wide at every range this field is drawn at, which is the point: what it
+// replaces failed by being REGULAR at a few pixels, and a second regular pattern would too.
+const float WATER_OPEN_PERIOD = 260.0;
+
+float water_hash3(vec3 p) {
+    p = fract(p * vec3(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yxz + 33.33);
+    return fract((p.x + p.y) * p.z);
+}
+
+// Value noise over the world POSITION rather than a plane projection of it. A sphere has no plane
+// to project onto: the dominant-plane trick the per-pixel detail above uses flips along the
+// diagonals, which is invisible for a ripple a few metres across and a seam right round the globe
+// for a field hundreds of metres across.
+float water_noise3(vec3 p) {
+    vec3 i = floor(p), f = fract(p);
+    vec3 u = f * f * (3.0 - 2.0 * f);
+    float x00 = mix(water_hash3(i + vec3(0, 0, 0)), water_hash3(i + vec3(1, 0, 0)), u.x);
+    float x10 = mix(water_hash3(i + vec3(0, 1, 0)), water_hash3(i + vec3(1, 1, 0)), u.x);
+    float x01 = mix(water_hash3(i + vec3(0, 0, 1)), water_hash3(i + vec3(1, 0, 1)), u.x);
+    float x11 = mix(water_hash3(i + vec3(0, 1, 1)), water_hash3(i + vec3(1, 1, 1)), u.x);
+    return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z);
+}
+
 // The world plane the per-pixel detail runs in: the axis pair facing the surface normal most
 // squarely (0: yz, 1: xz, 2: xy).
 int water_frame_plane(vec3 n) {
@@ -311,6 +342,34 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
         if (length(camera.camera_pos.xy - pos) <= ring_range) water_ripple_rings(pos, slope, ring_foam);
 #endif
     }
+#ifdef WATER_LOCAL_FRAME
+    // How much sea this pixel spans, measured BEFORE any per-pixel slope is added -- the far
+    // branches below all key on it, and the first of them decides whether a slope is added at
+    // all. Distance alone is the wrong measure of "too small to draw": what a pixel actually
+    // covers is the FORESHORTENED footprint, view_dist / NdotV, and on a sphere the horizon is
+    // grazing long before it is far (from a few metres up it sits ~60 m away, well inside the
+    // detail distance), so a surface read on range alone keeps its mirror roughness and its full
+    // wave detail exactly where a pixel spans hundreds of metres of sea.
+    //
+    // A wider onset than the ripple fade's own 0.6: the ripples merely stop adding detail, which
+    // reads fine as a binary cut, but this flips the surface's base roughness outright, and a
+    // world whose water is seen across a wide range of distances and grazing angles at once (a
+    // globe's horizon, orbit down to a shoreline) showed that as a visible seam rather than a
+    // fade. Ramping from a quarter of detail_distance instead spreads the same two endpoints
+    // (still 0.6 at the far edge, still unfiltered well inside) over a longer transition.
+    float ndv_f     = max(dot(s.normal_ws, normalize(camera.camera_pos - s.position_ws)), 1e-3);
+    float footprint = view_dist / ndv_f;
+    float filtered  = max(1.0 - detail, smoothstep(0.25 * detail_distance, detail_distance, footprint));
+    // Open water does not carry its swell to that range. The wave sum is four sinusoids, so
+    // drawn over a whole ocean at once it is not a sea but a weave -- a regular corduroy over
+    // every pixel of it, which is exactly what reads as "repeated" from orbit. Real water has no
+    // such structure at that scale either: what survives is brightness, not waveform. So the
+    // residual goes out with the ripples and the foam noise, in the same measure, and the
+    // open-water field below takes over what it was carrying.
+    float residual_keep = 1.0 - filtered;
+#else
+    float residual_keep = 1.0;
+#endif
     // The slope of the waves the vertex stage left out of the mesh (water_wave_mesh_fade), per
     // pixel: a tessellated draw's own params (packed in refraction_ior_flags.zw), or the baked
     // tile LOD rule. Shading them here rather than displacing them is what keeps a tile's
@@ -319,14 +378,16 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
     // A planet's sea takes the same treatment, through the one plane its ripples already use
     // rather than all three: the dominant plane is what every other per-pixel term here is
     // computed in, and following it keeps the residual consistent with them.
-    {
+    if (residual_keep > 0.0) {
         uvec2 tess_bits = floatBitsToUint(material.refraction_ior_flags.zw);
         vec2 mesh_lod = tess_bits.x != 0u
                       ? vec2(max(unpackHalf2x16(tess_bits.x).x, 0.5) / max(camera.jitter_ndc.z, 1.0),
                              unpackHalf2x16(tess_bits.y).x)
                       : water_baked_lod(camera.jitter_ndc.z);
-        slope += water_gerstner_residual_slope(vec4(gfx_params.x * wave_scale, gfx_params.yzw), pos,
-                                               gfx_time.w, view_dist, mesh_lod);
+        slope += residual_keep *
+                 water_gerstner_residual_slope(vec4(gfx_params.x * wave_scale, gfx_params.yzw), pos,
+                                               gfx_time.w, view_dist, mesh_lod,
+                                               camera.jitter_ndc.z / max(view_dist, 1e-3));
     }
 #ifdef WATER_LOCAL_FRAME
     s.normal_ws = normalize(s.normal_ws - water_plane_lift(slope, plane));
@@ -339,28 +400,44 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
     // How rough matters for more than blur. The grazing Fresnel the sky reflection is weighted by
     // tops out at max(1 - roughness, F0) (gfx/brdf.glsl's fresnel_schlick_roughness: at a grazing
     // angle its (1 - cos)^5 term is 1), so the floor is directly how much sky a distant surface
-    // hands back. A curved world's sea is seen edge-on all the way to its horizon, where 0.2
-    // returned ~80% of a sky an atmosphere shell has already repainted pale -- opaque water as a
-    // continuation of the sky. 0.6 halves that, and is the better description anyway: a pixel of
-    // distant sea spans many waves, so the spread of normals inside it is wide, not mirror-flat.
+    // hands back. A curved world's sea is seen edge-on all the way to its horizon, and a mirror
+    // roughness there hands back most of a sky an atmosphere shell has already painted pale --
+    // opaque water reading as a continuation of the sky. 0.45 keeps the sea's own colour
+    // dominant while still leaving the sun's glitter path and the cloud deck visible on it, and
+    // it describes the surface honestly: a pixel of distant sea spans many waves, so the spread
+    // of normals inside it is wide, not mirror-flat.
 #ifdef WATER_LOCAL_FRAME
-    const float far_roughness = 0.6;
-    // Distance alone is the wrong measure of "too small to draw". What a pixel actually covers
-    // is the FORESHORTENED footprint, view_dist / NdotV, and on a sphere the horizon is grazing
-    // long before it is far: from a few metres up it sits ~60 m away, well inside the detail
-    // distance, so the surface kept its mirror roughness exactly where a pixel spans hundreds of
-    // metres of sea. Rough it by the footprint as well as by range -- whichever says the detail
-    // is unresolvable wins.
-    float ndv_f     = max(dot(s.normal_ws, normalize(camera.camera_pos - s.position_ws)), 1e-3);
-    float footprint = view_dist / ndv_f;
-    // A wider onset than the ripple fade's own 0.6: the ripples merely stop adding detail, which
-    // reads fine as a binary cut, but this flips the surface's base roughness outright, and a
-    // world whose water is seen across a wide range of distances and grazing angles at once (a
-    // globe's horizon, orbit down to a shoreline) showed that as a visible seam rather than a
-    // fade. Ramping from a quarter of detail_distance instead spreads the same two endpoints
-    // (still 0.6 at the far edge, still unfiltered well inside) over a longer transition.
-    float filtered  = max(1.0 - detail, smoothstep(0.25 * detail_distance, detail_distance, footprint));
+    const float far_roughness = 0.45;
+    // `filtered` and the footprint it comes from are measured above, before the slope was added.
     s.roughness = mix(s.roughness, max(s.roughness, far_roughness), filtered);
+
+    // --- Open water: the structure that survives once the waves no longer do ---
+    //
+    // `filtered` says this pixel spans more sea than it can draw, and the roughness floor above
+    // is the whole of what stands in for the detail dropped there. That is honest for a lake seen
+    // across a valley and wrong for an ocean seen across a world: at hundreds of metres a sea is
+    // banded and mottled -- currents, turbidity, the wind's own patches -- and drawn perfectly
+    // uniform it reads as a painted sheet rather than as water. So the detail going out is traded
+    // for the structure that is actually resolvable at that range, in the same measure.
+    //
+    // Deliberately NOT another wave: anything periodic here beats against the pixel grid and
+    // returns the very lattice the residual's own pixel fade (water_waves.glsl) exists to stop.
+    float open_var = max(forward_globals.water_view.y, 0.0);
+    if (open_var > 0.0 && filtered > 0.0) {
+        float v = water_noise3(s.position_ws * (1.0 / WATER_OPEN_PERIOD)) * 0.65
+                + water_noise3(s.position_ws * (2.7 / WATER_OPEN_PERIOD) + 11.3) * 0.35;
+        v = clamp((v - 0.5) * 2.0, -1.0, 1.0);
+        float amount = filtered * open_var;
+        // Roughness carries most of it. It is what decides how much sky and sun a distant pixel
+        // of sea hands back (see far_roughness above), so varying it varies the glitter -- which
+        // is what the eye reads as a sea's surface at a range where no single wave is visible.
+        s.roughness = clamp(s.roughness + v * 0.22 * amount, 0.03, 1.0);
+        // And a little in the colour, between a warmer shelf and a deeper blue, so the structure
+        // stays legible on the half of the disc the sun is not glinting off.
+        s.albedo = mix(s.albedo,
+                       s.albedo * mix(vec3(0.72, 0.92, 1.08), vec3(1.26, 1.10, 0.95), v * 0.5 + 0.5),
+                       amount);
+    }
 #else
     s.roughness = mix(max(s.roughness, 0.2), s.roughness, detail);
 #endif

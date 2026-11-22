@@ -97,6 +97,7 @@
 
 #include <toyengine/world/terrain_component.h>
 #include <toyengine/world/terrain_views.h>
+#include <toyengine/scene/view_camera.h>
 
 namespace toy {
 namespace world {
@@ -108,7 +109,8 @@ inline constexpr int k_terrain_system_order = 60;
  * @class TerrainSystem
  * @brief Drives every TerrainComponent in the scene: generate, mesh, upload, retire.
  */
-class TerrainSystem : public coopa::scene::ISceneSystem {
+class TerrainSystem : public coopa::scene::ISceneSystem,
+                        public toy::scene::ViewCameraAware {
 public:
     using Mesh = coopa::gfx::engine::data::Mesh;
     using MeshRenderer = coopa::gfx::engine::components::MeshRenderer;

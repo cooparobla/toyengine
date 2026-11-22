@@ -63,6 +63,7 @@
 #include <gfxcoopa/engine/components/mesh_renderer.h>
 
 #include <toyengine/instance/instance_set.h>
+#include <toyengine/scene/view_camera.h>
 
 namespace toy {
 namespace instance {
@@ -214,6 +215,15 @@ public:
 
     /** @brief Metres per chunk edge. Applied to `data` by the parser. */
     float chunk_size = InstanceSetData::k_default_chunk_size;
+
+    /**
+     * @brief Which camera this follows -- the one the host renders the scene from by default.
+     *
+     * `use_main_camera: false` plus `camera: <object name>` points it at a camera of its own,
+     * for a view that should stream around something other than the player (a chase camera, a
+     * map view). See toyengine/scene/view_camera.h.
+     */
+    toy::scene::CameraRef camera_ref;
 
     /**
      * @brief Metres from the camera within which collidable instances have colliders.

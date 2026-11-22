@@ -101,6 +101,62 @@ on a component or child deletes it.
 | ClothRenderer | no keys; needs sibling Cloth + MeshRenderer |
 | CharacterCloth | `mass_per_area` (0.2 kg/m^2), `stretch_compliance` (0 = inextensible threads), `shear_compliance` (5e-3; a grid cloth's diagonals only -- a mesh garment has no separate shear degree of freedom), `compression_compliance` (**0**; above 0 the threads shrink), `bend_compliance` (**5e-3**; per unit mass, so the same number is the same fabric at any density or resolution -- 5e-4 reads as leather, 5e-2 as silk, and below ~1e-3 a sheet stops creasing and stands off whatever it is thrown over), `damping`, `thickness`, `friction`, `anim_drive_compliance` (1e-3, same per-unit-mass scale), `max_distance_scale` (1), `max_distance_blend` (**0** -- raising it draws a band of simulated cloth from the SKINNING instead, which throws away its collision response), `wind`, `wind_turbulence`, `weather_wind` (1), `air_drag`, `air_lift`, `self_collision`, `collide_world` (true), `auto_colliders` (**true** -- fits a capsule around every DRAWN PART riding the rig (`BoneAttachment` + `MeshRenderer`), falling back to the bone's length where nothing is drawn, so the garment collides with the body a viewer sees), `collider_scale` (1, multiplier on the auto radii = the standoff from the body), `layer`, `enabled`, `bone_colliders [{ bone, shape sphere|capsule|box, radius, half_height, axis, size, offset, rotation }]` (CORRECTIONS by bone name, replacing EVERY collider on that bone; `radius: 0` drops it. Usually none are needed -- write one only for a box-section part the capsule fit cannot describe). CLOTHING on a rig: simulates the sibling **SkinnedMeshRenderer**'s garment by the mesh's painted `cloth:` channels (Max Distance 0 = rides the skinning, more = free cloth; Backstop keeps fabric off the body; Anim Drive pulls back toward the pose). Paint them in the editor's **Cloth Paint** mode. Needs a sibling SkinnedMeshRenderer + MeshRenderer (no `mesh_path`, `cull_backfaces: false`); see assets/scenes/animation/character_cloth_demo |
 
+## Sub-scenes (a scene inside a scene)
+
+A `SubScene` loads **another scene**, simulates it alongside this one, and renders it into a
+texture this scene's UI can draw -- a live map, a security camera, a monitor screen.
+
+| Key | Meaning |
+|---|---|
+| `view` | Name UI code looks it up by, when a scene declares more than one |
+| `scene` | The scene to load, as a folder name (`ui/map_world_demo`), the same spelling `SCENE=` takes |
+| `camera` | Object holding the camera to render from. Empty uses the sub-scene's own `main: true` camera, else its first |
+| `width` / `height` | View size in pixels (`resolution: [w, h]` also accepted). **Fixed once loaded** |
+| `ortho_size` | Overwrites the view camera's orthographic half-height every frame; 0 leaves it alone. A zoom control writes this |
+| `input` | `hover` (default): the sub-scene gets input while the pointer is over the view. `never`: display only |
+| `simulate_in_edit_mode` | Keep it live while the editor is not playing (default true) |
+
+```yaml
+- type: SubScene
+  view: map
+  scene: ui/map_world_demo
+  camera: map_camera
+  width: 512
+  height: 512
+  ortho_size: 30.0
+```
+
+Drawn by UI code through the component's published `texture`, found via the component's own
+scene -- see `QuadrantDock::draw_map_` in `toyengine/ui/quadrant_dock_panels.cpp` for the worked
+example, and `assets/scenes/ui/glass_ui_demo` + `assets/scenes/ui/map_world_demo` for the pair.
+
+**What it costs, and what it will not do.** A sub-view runs the FULL deferred chain -- it is a
+second complete render every frame. One small view is affordable; several are not. Its own
+screen-space UI is deliberately not drawn, and its resolution cannot change without rebuilding
+the view. The sub-scene is an ordinary scene asset, so it still runs standalone
+(`./build/toyengine ui/map_world_demo`), which is the easiest way to author one.
+
+## Following a camera
+
+Terrain streaming and instance painting measure "where is the viewer" from a camera. By default
+that is **whatever camera the scene is being rendered from** -- the game's main camera, the
+editor's viewport camera, or a sub-scene's own camera when the scene is rendered into a texture.
+Nothing needs to be authored for that.
+
+To follow a different one, name it:
+
+| Key | Meaning |
+|---|---|
+| `use_main_camera` | `true` (default): follow the camera this scene is rendered from. `false`: follow `camera` below |
+| `camera` | Object name holding the camera to follow. Writing this alone turns `use_main_camera` off for you |
+
+Accepted by `TileTerrain`, `HeightmapTerrain` and `InstancePainter`. A name that matches no
+object -- or an object with no `Camera` on it -- falls back to the scene's camera rather than to
+none, so a typo cannot silently park a terrain at the world origin.
+
+Scene-wide systems (snow, weather, water focus, view blockers) follow the scene's camera and
+have no per-component override: there is only one of each per scene.
+
 ## Physics
 
 Shared collider keys: `center`, `is_trigger`, `enabled`, `layer` (int or name from config

@@ -195,6 +195,15 @@ public:
     coopa::ui::ImmediateCanvas* canvas() { return canvas_; }
 
     /**
+     * @brief Canvas units per window pixel for this screen's canvas, or 1 before it is built.
+     *
+     * A screen lays out in canvas units; anything it reports to the ENGINE -- where it drew a
+     * sub-view, so the engine can remap the cursor into it -- has to be in window pixels,
+     * because that is the space coopa::input::Input speaks.
+     */
+    float canvas_scale() const;
+
+    /**
      * @brief This screen's game roles -- which colour health is, what an empty slot looks like.
      *
      * The defaults if theme_ref named nothing, so draw() can always use it. Pair it with

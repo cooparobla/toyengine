@@ -46,7 +46,7 @@ void SnowSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameCo
     // A local pile needs a depth to scale even in a scene whose weather never snows.
     if (max_depth_ <= 0.0f && env::has_sources(env_)) max_depth_ = kLocalSnowDepth;
 
-    auto* cam = coopa::gfx::engine::components::CameraComponent::main();
+    const auto* cam = toy::scene::scene_view_camera(view_camera_);
     if (cam && cam->owner && cam->owner->get_transform()) {
         const glm::mat4& m = cam->owner->get_transform()->transform().get_world_matrix();
         field_.set_focus(focus_point(glm::vec3(m[3]), -glm::normalize(glm::vec3(m[2])), ground_at_(glm::vec2(m[3])),

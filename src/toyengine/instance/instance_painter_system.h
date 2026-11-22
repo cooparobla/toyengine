@@ -41,6 +41,7 @@
 #include <toyengine/instance/instance_cache.h>
 #include <toyengine/instance/instance_painter.h>
 #include <toyengine/render/particle_types.h>
+#include <toyengine/scene/view_camera.h>
 
 namespace toy {
 namespace instance {
@@ -52,7 +53,8 @@ inline constexpr int k_instance_painter_order = 62;
  * @class InstancePainterSystem
  * @brief See the file comment.
  */
-class InstancePainterSystem : public coopa::scene::ISceneSystem {
+class InstancePainterSystem : public coopa::scene::ISceneSystem,
+                        public toy::scene::ViewCameraAware {
 public:
     explicit InstancePainterSystem(coopa::asset::AssetManager* assets) : assets_(assets) {}
 

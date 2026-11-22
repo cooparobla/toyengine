@@ -195,6 +195,18 @@ scene:
     - name: dock
       active: true
       components:
+        # The Map panel's live view: map_world_demo is loaded, simulated and rendered into a
+        # 512x512 texture every frame, and QuadrantDock::draw_map_ draws it. `ortho_size` is
+        # overwritten by the panel's zoom segments, so those three buttons drive this view's
+        # camera rather than a fake grid.
+        - type: SubScene
+          view: map
+          scene: ui/map_world_demo
+          camera: map_camera
+          width: 512
+          height: 512
+          ortho_size: 30.0
+          input: hover
         - type: QuadrantDock
           theme_ref: ui/themes/glass
 

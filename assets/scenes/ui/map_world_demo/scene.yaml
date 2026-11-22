@@ -1,0 +1,213 @@
+# map_world_demo -- a small top-down town, meant to be rendered into a UI panel.
+#
+# This scene is the SUB-SCENE half of the sub-scene feature: glass_ui_demo declares it with a
+# `SubScene` component and draws the result inside its Map panel. It also stands alone --
+# `./build/toyengine map_world_demo` shows exactly what the panel shows -- which is the point of
+# a sub-scene being an ordinary scene asset rather than a special kind of thing.
+#
+#  * map_camera    -- ORTHOGRAPHIC and looking straight down (+Z is up in this engine, so a
+#    pitch of -90 on X points the camera at the ground). `orthographic_size` is the half-height
+#    in world units; the host's zoom control overwrites it every frame through the component's
+#    `ortho_size` key, which is why the three zoom segments in the panel are a live control
+#    rather than decoration. `main: true` is for the standalone run only -- the engine clears
+#    every main-camera claim in a sub-scene before starting it, because the HOST owns that
+#    singleton, and remembers this one as the camera to render the view from.
+#  * the town       -- a ground slab, two crossing roads and a handful of blocks at varying
+#    heights. Read from above, differing heights plus one directional light is what makes it
+#    legible as a plan rather than a flat grid.
+#  * rover          -- a Turntable orbiting the crossroads. A map that moves is the cheapest
+#    possible proof that the panel holds a LIVE render and not a baked image, and it is what the
+#    GPU test watches for motion.
+#
+# Deliberately small: a sub-view runs the full deferred chain, so the object count here is a
+# real per-frame cost in whatever scene hosts it. Its render settings below trim the passes a
+# map has no use for.
+#
+# Run: ./build/toyengine map_world_demo        (or hosted: ./build/toyengine glass_ui_demo)
+
+scene:
+  scene_name: map_world_demo
+  settings:
+    render:
+      # A map wants readability, not cinema: no lens effects, no screen-space reflections, and
+      # the sky is barely visible straight down anyway. Each of these is a pass not run per
+      # frame for a view that is a few hundred pixels across.
+      dof_enabled: false
+      ssr_enabled: false
+      volumetrics_enabled: false
+      bloom_enabled: false
+
+  root_objects:
+    - name: ground
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 60.0, y: 60.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: primitives/plane
+          material:
+            albedo: { r: 0.22, g: 0.26, b: 0.22 }
+            metallic: 0.0
+            roughness: 0.9
+            ao: 1.0
+      children: []
+
+    # Two crossing roads. Flat and pale against the ground, so the plan reads at a glance.
+    - name: road_ns
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.05 }
+          scale: { x: 4.0, y: 56.0, z: 0.1 }
+        - type: MeshRenderer
+          mesh_path: primitives/cube
+          material:
+            albedo: { r: 0.55, g: 0.54, b: 0.50 }
+            metallic: 0.0
+            roughness: 0.8
+            ao: 1.0
+      children: []
+
+    - name: road_ew
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.05 }
+          scale: { x: 56.0, y: 4.0, z: 0.1 }
+        - type: MeshRenderer
+          mesh_path: primitives/cube
+          material:
+            albedo: { r: 0.55, g: 0.54, b: 0.50 }
+            metallic: 0.0
+            roughness: 0.8
+            ao: 1.0
+      children: []
+
+    - name: block_nw
+      active: true
+      components:
+        - type: Transform
+          position: { x: -12.0, y: 12.0, z: 2.0 }
+          scale: { x: 10.0, y: 10.0, z: 4.0 }
+        - type: MeshRenderer
+          mesh_path: primitives/cube
+          material:
+            albedo: { r: 0.62, g: 0.42, b: 0.32 }
+            metallic: 0.0
+            roughness: 0.7
+            ao: 1.0
+      children: []
+
+    - name: block_ne
+      active: true
+      components:
+        - type: Transform
+          position: { x: 13.0, y: 11.0, z: 3.5 }
+          scale: { x: 12.0, y: 8.0, z: 7.0 }
+        - type: MeshRenderer
+          mesh_path: primitives/cube
+          material:
+            albedo: { r: 0.45, g: 0.47, b: 0.56 }
+            metallic: 0.0
+            roughness: 0.65
+            ao: 1.0
+      children: []
+
+    - name: block_sw
+      active: true
+      components:
+        - type: Transform
+          position: { x: -13.0, y: -12.0, z: 1.2 }
+          scale: { x: 9.0, y: 12.0, z: 2.4 }
+        - type: MeshRenderer
+          mesh_path: primitives/cube
+          material:
+            albedo: { r: 0.50, g: 0.52, b: 0.40 }
+            metallic: 0.0
+            roughness: 0.75
+            ao: 1.0
+      children: []
+
+    - name: block_se
+      active: true
+      components:
+        - type: Transform
+          position: { x: 12.0, y: -13.0, z: 2.6 }
+          scale: { x: 11.0, y: 9.0, z: 5.2 }
+        - type: MeshRenderer
+          mesh_path: primitives/cube
+          material:
+            albedo: { r: 0.58, g: 0.50, b: 0.36 }
+            metallic: 0.0
+            roughness: 0.7
+            ao: 1.0
+      children: []
+
+    # The moving thing. Turntable spins the parent; the rover hangs off-centre, so it orbits.
+    - name: rover_pivot
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.6 }
+        - type: Turntable
+          idle_spin_deg_per_sec: 28.0
+          axis: { x: 0.0, y: 0.0, z: 1.0 }
+      children:
+        - name: rover
+          active: true
+          components:
+            - type: Transform
+              position: { x: 18.0, y: 0.0, z: 0.0 }
+              scale: { x: 2.2, y: 2.2, z: 1.4 }
+            - type: MeshRenderer
+              mesh_path: primitives/cube
+              material:
+                albedo: { r: 0.90, g: 0.72, b: 0.20 }
+                emissive: { r: 0.95, g: 0.70, b: 0.10 }
+                emissive_strength: 1.6
+                metallic: 0.1
+                roughness: 0.4
+                ao: 1.0
+          children: []
+
+    - name: map_camera
+      active: true
+      components:
+        - type: Transform
+          # Straight down, and that is why there is NO rotation: a camera looks along its own
+          # -Z, and the world's up is +Z, so an unrotated camera placed above the ground is
+          # already a plan view. (glass_ui_demo's x: 72 is what tilts ITS camera up to the
+          # horizon, which is the same convention read the other way.)
+          position: { x: 0.0, y: 0.0, z: 40.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          main: true
+          projection: Orthographic
+          orthographic_size: 30.0
+          near_clip_plane: 0.1
+          far_clip_plane: 200.0
+      children: []
+
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          rotation: { x: -58.0, y: 0.0, z: 32.0 }
+        - type: DirectionalLight
+          color: { r: 1.0, g: 0.97, b: 0.9 }
+          intensity: 3.0
+          cast_shadows: true
+      children: []
+
+    - name: fill
+      active: true
+      components:
+        - type: Transform
+          position: { x: -8.0, y: -6.0, z: 14.0 }
+        - type: PointLight
+          color: { r: 0.6, g: 0.72, b: 0.95 }
+          intensity: 10.0
+          range: 50.0
+      children: []

@@ -26,6 +26,7 @@
 #define TOYENGINE_SCENE_VIEW_BLOCKER_SYSTEM_H
 
 #include <coopa/scene/scene.h>
+#include <toyengine/scene/view_camera.h>
 
 namespace toy {
 namespace scene {
@@ -38,7 +39,8 @@ inline constexpr int k_view_blocker_order = 365;
  * @brief Marks every ViewBlockerFade between the camera and an XraySubject, then advances
  *        all of their dissolves.
  */
-class ViewBlockerSystem : public coopa::scene::ISceneSystem {
+class ViewBlockerSystem : public coopa::scene::ISceneSystem,
+                        public toy::scene::ViewCameraAware {
 public:
     const char* system_name() const override { return "ViewBlocker"; }
 

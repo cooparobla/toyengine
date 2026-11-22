@@ -352,10 +352,12 @@ const EffectSpec* WeatherSystem::spec_for_(const std::string& prefab) const {
     return nullptr;
 }
 
-glm::vec3 WeatherSystem::viewer_position_() {
-    // Any main camera, not only one of this scene: weather falls around whoever is looking
-    // (the editor's viewport camera lives in its own UI scene).
-    auto* cam = coopa::gfx::engine::components::CameraComponent::main();
+glm::vec3 WeatherSystem::viewer_position_() const {
+    // The camera this scene is viewed from, which the host pushes per frame; with nothing
+    // pushed this is the global main camera, so weather still falls around whoever is looking
+    // even when the viewer's camera lives in another scene (the editor's viewport camera lives
+    // in its own UI scene). See toyengine/scene/view_camera.h.
+    const auto* cam = toy::scene::scene_view_camera(view_camera_);
     if (!cam || !cam->owner) return glm::vec3(0.0f);
     auto* tc = cam->owner->get_transform();
     return tc ? glm::vec3(tc->transform().get_world_matrix()[3]) : glm::vec3(0.0f);

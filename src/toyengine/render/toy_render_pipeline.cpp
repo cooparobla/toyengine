@@ -60,10 +60,33 @@ ToyRenderPipeline::ToyRenderPipeline(coopa::gfx::core::Device& device,
                     coopa::gfx::pipeline::RenderPass& swapchain_pass,
                     coopa::gfx::command::CommandPool& cmd_pool,
                     ToyRenderConfig config)
-    : device_(device), allocator_(allocator), swapchain_(swapchain), cmd_pool_(cmd_pool),
+    : ToyRenderPipeline(device, allocator, &swapchain, &swapchain_pass, cmd_pool,
+                        std::move(config), swapchain.extent_typed()) {}
+
+ToyRenderPipeline::ToyRenderPipeline(coopa::gfx::core::Device& device,
+                    coopa::gfx::memory::Allocator& allocator,
+                    coopa::gfx::command::CommandPool& cmd_pool,
+                    ToyRenderConfig config,
+                    coopa::gfx::Extent2D view_extent)
+    : ToyRenderPipeline(device, allocator, nullptr, nullptr, cmd_pool,
+                        std::move(config), view_extent) {}
+
+coopa::gfx::Extent2D ToyRenderPipeline::present_extent_() const {
+    return swapchain_ != nullptr ? swapchain_->extent_typed() : fixed_present_extent_;
+}
+
+ToyRenderPipeline::ToyRenderPipeline(coopa::gfx::core::Device& device,
+                    coopa::gfx::memory::Allocator& allocator,
+                    coopa::gfx::core::Swapchain* swapchain,
+                    coopa::gfx::pipeline::RenderPass* swapchain_pass,
+                    coopa::gfx::command::CommandPool& cmd_pool,
+                    ToyRenderConfig config,
+                    coopa::gfx::Extent2D present_extent)
+    : device_(device), allocator_(allocator), swapchain_(swapchain),
+      fixed_present_extent_(present_extent), cmd_pool_(cmd_pool),
       config_(std::move(config)),
-      render_extent_(compute_render_extent(config_, swapchain.extent().width, swapchain.extent().height)),
-      upscaled_extent_(compute_display_rect(config_, swapchain.extent().width, swapchain.extent().height,
+      render_extent_(compute_render_extent(config_, present_extent.width, present_extent.height)),
+      upscaled_extent_(compute_display_rect(config_, present_extent.width, present_extent.height,
                                             render_extent_.width, render_extent_.height)),
       gbuffer_target_(device, allocator, render_extent_.width, render_extent_.height),
       // HDR always -- the sky-based indirect lighting (see toy_lighting.frag) can exceed
@@ -126,7 +149,7 @@ ToyRenderPipeline::ToyRenderPipeline(coopa::gfx::core::Device& device,
     build_transparency_passes_();
     build_post_chain_(swapchain_pass);
     build_world_ui_descriptor_();
-    rebuild_overlay_chain_(swapchain.extent().width, swapchain.extent().height);
+    rebuild_overlay_chain_(present_extent.width, present_extent.height);
 }
 
 void ToyRenderPipeline::set_display_region(std::optional<LetterboxRect> region) {
@@ -252,21 +275,21 @@ void ToyRenderPipeline::apply_live_config(const ToyRenderConfig& next, bool warn
     }
 }
 
-bool ToyRenderPipeline::render(coopa::gfx::presentation::Renderer& renderer, coopa::scene::Scene& scene, float dt) {
+void ToyRenderPipeline::prepare_view(coopa::gfx::presentation::Renderer& renderer,
+                                     coopa::scene::Scene& scene, float dt,
+                                     const coopa::gfx::engine::components::CameraComponent* cam) {
     using coopa::gfx::engine::components::CameraComponent;
     using coopa::gfx::engine::components::CameraType;
     using coopa::gfx::engine::components::MeshRenderer;
     using coopa::gfx::engine::components::DirectionalLightComponent;
     using coopa::gfx::engine::components::PointLightComponent;
 
+    PreparedView out;
     frame_dt_ = dt;
     elapsed_time_ += dt;
 
     const LetterboxRect letterbox = handle_resize_();
 
-    // The main camera, not merely "the first one found" -- CameraComponent::main()
-    // guarantees a stable choice across multi-camera scenes (see camera_component.h).
-    auto* cam = CameraComponent::main();
     float aspect = static_cast<float>(render_extent_.width) / static_cast<float>(render_extent_.height);
 
     glm::mat4 view = cam ? cam->get_view_matrix() : glm::mat4(1.0f);
@@ -378,7 +401,7 @@ bool ToyRenderPipeline::render(coopa::gfx::presentation::Renderer& renderer, coo
     debug_line_pass_->upload(frame_slot, debug_lines_);
 
     gather_ui_canvases_(scene, frame_slot, view);
-    const std::vector<SdfDrawItem> sdf_draws = gather_sdf_(scene, view, proj, cam_pos, frame_slot);
+    out.sdf_draws = gather_sdf_(scene, view, proj, cam_pos, frame_slot);
 
     auto* dir_light = frame_scene_.dir_light;
     bool cast_dir_shadow = config_.shadows_enabled && dir_light && dir_light->cast_shadows;
@@ -395,7 +418,7 @@ bool ToyRenderPipeline::render(coopa::gfx::presentation::Renderer& renderer, coo
 
     // After both shadow fits: every view's frustum is now known, so the gather can cull
     // and batch each view's draw list (see gather_meshes_()).
-    const MeshGather meshes = gather_meshes_(frame_slot, view, unjittered_proj, cast_dir_shadow);
+    out.meshes = gather_meshes_(frame_slot, view, unjittered_proj, cast_dir_shadow);
 
     // Particle quads: every batch's instances into this slot's buffer in one go. They only
     // draw inside the forward transparent pass, so nothing uploads when that is off -- said
@@ -417,7 +440,7 @@ bool ToyRenderPipeline::render(coopa::gfx::presentation::Renderer& renderer, coo
     // with none in view -- every frame of a scene without transparency -- the seven-mip
     // build would be pure bandwidth, so it is skipped.
     refraction_this_frame_ = config_.transparency_enabled && config_.refraction_enabled
-                          && meshes.has_blend_mesh;
+                          && out.meshes.has_blend_mesh;
 
     light_datas_[light_frame_]->upload();
 
@@ -448,23 +471,83 @@ bool ToyRenderPipeline::render(coopa::gfx::presentation::Renderer& renderer, coo
         device_.wait_idle();
     }
 
-    FrameContext ctx;
-    ctx.cam                   = cam;
-    ctx.view                  = view;
-    ctx.proj                  = proj;
-    ctx.unjittered_proj       = unjittered_proj;
-    ctx.cam_pos               = cam_pos;
-    ctx.frame_slot            = frame_slot;
-    ctx.letterbox             = letterbox;
-    ctx.dof_focus_distance    = dof_focus.distance;
-    ctx.dof_focus_range       = dof_focus.range;
-    ctx.need_ssr_trace_inputs = need_ssr_trace_inputs;
-    ctx.cast_dir_shadow       = cast_dir_shadow;
+    out.ctx.cam                   = cam;
+    out.ctx.view                  = view;
+    out.ctx.proj                  = proj;
+    out.ctx.unjittered_proj       = unjittered_proj;
+    out.ctx.cam_pos               = cam_pos;
+    out.ctx.frame_slot            = frame_slot;
+    out.ctx.letterbox             = letterbox;
+    out.ctx.dof_focus_distance    = dof_focus.distance;
+    out.ctx.dof_focus_range       = dof_focus.range;
+    out.ctx.need_ssr_trace_inputs = need_ssr_trace_inputs;
+    out.ctx.cast_dir_shadow       = cast_dir_shadow;
 
     if (profile_) {
         profile_->add_cpu(CpuScope::Gather, std::chrono::duration<double, std::milli>(
                                                 std::chrono::steady_clock::now() - gather_start).count());
     }
+
+    prepared_          = std::move(out);
+    prepared_at_frame_ = frame_index_;
+}
+
+void ToyRenderPipeline::record_view(coopa::gfx::command::CommandBuffer& cmd) {
+    if (!prepared_ || prepared_at_frame_ != frame_index_) {
+        // Recording without this frame's prepare would draw last frame's gather against this
+        // frame's slot: a named complaint and a skipped view, rather than a garbage one.
+        std::cerr << "[toy::render] record_view() without prepare_view() for this frame; "
+                     "the view is skipped.\n";
+        return;
+    }
+    const PreparedView& prepared = *prepared_;
+
+    // GPU skinning first: every pass below (shadows, G-buffer...) draws its output.
+    if (skinning_pass_) skinning_pass_->record(cmd);
+    if (cloth_deform_pass_) cloth_deform_pass_->record(cmd);
+    gpu_mark_(cmd, GpuScope::Skinning);
+    record_scene_(cmd, prepared.ctx, prepared.meshes, prepared.sdf_draws);
+    frame_meshes_ = &prepared.meshes;
+    record_post_chain_(cmd, prepared.ctx);
+    frame_meshes_ = nullptr;
+    record_ui_backdrop_(cmd);
+    record_overlay_(cmd, prepared.ctx);
+
+    // Needed by both SSAO's and SSR's temporal resolve passes -- kept unconditional (not
+    // gated on either toggle) since ssao_pass_ always exists and either toggle can be
+    // re-enabled without a resize/reconstruct in between.
+    prev_view_proj_                = prepared.ctx.proj * prepared.ctx.view;
+    prev_unjittered_view_proj_     = prepared.ctx.unjittered_proj * prepared.ctx.view;
+    // For the velocity attachment: the view as uploaded (snapped), and the unjittered proj.
+    prev_snapped_view_             = camera_ubos_[prepared.ctx.frame_slot]->data().view;
+    prev_unjittered_proj_          = prepared.ctx.unjittered_proj;
+    prev_view_proj_valid_          = true;
+    // Advances once per view per frame, and only after the recording above: every consumer
+    // (the SSR/contact-shadow resolves, the cloud and froxel history checks, the TAA noise
+    // seed) reads it while recording.
+    ++frame_index_;
+}
+
+bool ToyRenderPipeline::render(coopa::gfx::presentation::Renderer& renderer,
+                               coopa::scene::Scene& scene, float dt) {
+    return render(renderer, scene, dt,
+                  coopa::gfx::engine::components::CameraComponent::main());
+}
+
+bool ToyRenderPipeline::render(coopa::gfx::presentation::Renderer& renderer,
+                               coopa::scene::Scene& scene, float dt,
+                               const coopa::gfx::engine::components::CameraComponent* camera) {
+    if (swapchain_ == nullptr) {
+        // An offscreen pipeline has no frame to acquire and no image to present. Its owner
+        // drives it with prepare_view() + set_sub_views() on the presenting pipeline instead.
+        std::cerr << "[toy::render] render() on an offscreen pipeline; use prepare_view() and the "
+                     "presenting pipeline's set_sub_views() instead.\n";
+        return false;
+    }
+    prepare_view(renderer, scene, dt, camera);
+    // record_view() advances frame_index_, so the present log below keeps the frame it recorded.
+    const uint32_t logged_frame = frame_index_;
+
     const auto submit_start = std::chrono::steady_clock::now();
     double record_ms = 0.0;
     // Split of the frame's submit half, for TOY_PRESENT_LOG below: the recording callback runs
@@ -487,17 +570,11 @@ bool ToyRenderPipeline::render(coopa::gfx::presentation::Renderer& renderer, coo
         [&](coopa::gfx::command::CommandBuffer& cmd) {
             const auto record_start = std::chrono::steady_clock::now();
             acquire_ms = std::chrono::duration<double, std::milli>(record_start - submit_start).count();
-            if (gpu_profiler_) gpu_profiler_->begin_frame(cmd, frame_slot, profile_->current_frame());
-            // GPU skinning first: every pass below (shadows, G-buffer...) draws its output.
-            if (skinning_pass_) skinning_pass_->record(cmd);
-            if (cloth_deform_pass_) cloth_deform_pass_->record(cmd);
-            gpu_mark_(cmd, GpuScope::Skinning);
-            record_scene_(cmd, ctx, meshes, sdf_draws);
-            frame_meshes_ = &meshes;
-            record_post_chain_(cmd, ctx);
-            frame_meshes_ = nullptr;
-            record_ui_backdrop_(cmd);
-            record_overlay_(cmd, ctx);
+            if (gpu_profiler_) gpu_profiler_->begin_frame(cmd, prepared_->ctx.frame_slot, profile_->current_frame());
+            // Sub-views first: each ends its target in SHADER_READ_ONLY_OPTIMAL, so this
+            // view's UI can sample them later in this same command buffer.
+            for (ToyRenderPipeline* sub : sub_views_) sub->record_view(cmd);
+            record_view(cmd);
             record_ms = std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - record_start).count();
         },
@@ -525,24 +602,13 @@ bool ToyRenderPipeline::render(coopa::gfx::presentation::Renderer& renderer, coo
         if (log_over_ms > 0.0 && submit_total_ms > log_over_ms) {
             std::printf("[present] frame %llu: submit half %.2f ms = acquire %.2f + record %.2f"
                         " + queue_submit %.2f + queue_present %.2f (rest %.2f)\n",
-                        static_cast<unsigned long long>(frame_index_), submit_total_ms, acquire_ms,
+                        static_cast<unsigned long long>(logged_frame), submit_total_ms, acquire_ms,
                         record_ms, renderer.last_submit_ms(), renderer.last_present_ms(),
                         std::max(0.0, submit_total_ms - acquire_ms - record_ms -
                                           renderer.last_submit_ms() - renderer.last_present_ms()));
             std::fflush(stdout);
         }
     }
-
-    // Needed by both SSAO's and SSR's temporal resolve passes -- kept unconditional (not
-    // gated on either toggle) since ssao_pass_ always exists and either toggle can be
-    // re-enabled without a resize/reconstruct in between.
-    prev_view_proj_                = proj * view;
-    prev_unjittered_view_proj_     = unjittered_proj * view;
-    // For the velocity attachment: the view as uploaded (snapped), and the unjittered proj.
-    prev_snapped_view_             = camera_ubos_[frame_slot]->data().view;
-    prev_unjittered_proj_          = unjittered_proj;
-    prev_view_proj_valid_          = true;
-    ++frame_index_;
 
     return frame_presented;
 }

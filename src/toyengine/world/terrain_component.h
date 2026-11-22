@@ -66,6 +66,7 @@
 #include <toyengine/world/terrain_field.h>
 #include <toyengine/world/terrain_water.h>
 #include <toyengine/water/water_body.h>
+#include <toyengine/scene/view_camera.h>
 
 namespace toy {
 namespace world {
@@ -349,6 +350,15 @@ public:
 
     /** @brief How the generated world is cut into tiles and chunks. */
     TerrainParams params;
+
+    /**
+     * @brief Which camera this follows -- the one the host renders the scene from by default.
+     *
+     * `use_main_camera: false` plus `camera: <object name>` points it at a camera of its own,
+     * for a view that should stream around something other than the player (a chase camera, a
+     * map view). See toyengine/scene/view_camera.h.
+     */
+    toy::scene::CameraRef camera_ref;
 
     /**
      * @brief The mapcoopa settings a bake generates the world with -- AUTHORED values (see

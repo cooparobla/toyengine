@@ -43,6 +43,7 @@
 
 #include <toyengine/env/env_field.h>
 #include <toyengine/world/snow_field.h>
+#include <toyengine/scene/view_camera.h>
 
 namespace toy {
 namespace world {
@@ -61,7 +62,8 @@ void register_snow_components();
 
 inline constexpr int k_snow_system_order = 370;
 
-class SnowSystem : public coopa::scene::ISceneSystem {
+class SnowSystem : public coopa::scene::ISceneSystem,
+                        public toy::scene::ViewCameraAware {
 public:
     const char* system_name() const override { return "Snow"; }
     /// Runs in edit mode only to keep the window on the camera; nothing presses in until the

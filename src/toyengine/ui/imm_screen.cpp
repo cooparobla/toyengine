@@ -228,4 +228,14 @@ void ImmScreen::ensure_canvas_() {
     on_ready();
 }
 
+float ImmScreen::canvas_scale() const {
+    // The CanvasComponent lives on the canvas object's PARENT -- ensure_canvas_() builds the
+    // canvas as a child of this screen's owner (see its doc), so the ratio is one hop up.
+    if (canvas_ == nullptr || canvas_->owner == nullptr) return 1.0f;
+    coopa::scene::SceneObject* parent = canvas_->owner->parent();
+    if (parent == nullptr) return 1.0f;
+    if (auto* cc = parent->get_component<coopa::ui::CanvasComponent>()) return cc->scale_factor();
+    return 1.0f;
+}
+
 }  // namespace toy::ui

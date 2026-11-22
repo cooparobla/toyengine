@@ -41,6 +41,7 @@
 
 #include <toyengine/render/surface_world.h>
 #include <toyengine/world/heightmap_terrain.h>
+#include <toyengine/scene/view_camera.h>
 
 namespace coopa {
 namespace gfx {
@@ -133,7 +134,8 @@ struct HeightmapTerrainRuntime {
  * @class HeightmapTerrainSystem
  * @brief See the file comment.
  */
-class HeightmapTerrainSystem : public coopa::scene::ISceneSystem {
+class HeightmapTerrainSystem : public coopa::scene::ISceneSystem,
+                        public toy::scene::ViewCameraAware {
 public:
     HeightmapTerrainSystem(coopa::gfx::core::Device& device, coopa::gfx::memory::Allocator& allocator,
                            coopa::gfx::command::CommandPool& cmd_pool, coopa::asset::AssetManager& assets);

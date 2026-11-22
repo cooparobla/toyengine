@@ -140,6 +140,23 @@ public:
     /// cursor position is undefined/arbitrary on the frame CursorMode::Disabled
     /// is first applied, so treating that one sample as a fresh baseline
     /// (rather than a real motion) avoids a one-frame camera snap.
+    /**
+     * @brief Sets the cursor position and delta outright, instead of deriving the delta.
+     *
+     * For a host routing input into a view drawn somewhere else -- a sub-scene rendered into a
+     * UI panel -- where the position must be remapped into that view's own pixels. Going
+     * through push_cursor_position() there would measure the delta across the jump BETWEEN
+     * coordinate spaces, which is a large bogus movement on the frame routing starts.
+     *
+     * @param position Cursor position in the target view's pixels (+Y down).
+     * @param delta Movement since the previous frame, in those same pixels.
+     */
+    void set_cursor(const glm::vec2& position, const glm::vec2& delta) {
+        cursor_position_ = position;
+        cursor_delta_    = delta;
+        cursor_valid_    = true;
+    }
+
     void push_cursor_position(double x, double y) {
         glm::vec2 pos(static_cast<float>(x), static_cast<float>(y));
         if (cursor_valid_) {

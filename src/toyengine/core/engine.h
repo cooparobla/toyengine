@@ -29,6 +29,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <gfxcoopa/app/context.h>
 #include <gfxcoopa/util/image_readback.h>
@@ -59,6 +60,7 @@
 #include <toyengine/core/module.h>
 #include <toyengine/debug/debug_overlay.h>
 #include <toyengine/save/save_system.h>
+#include <toyengine/render/sub_scene.h>
 
 #include <root_directory.h>
 
@@ -1093,6 +1095,10 @@ public:
     coopa::gfx::core::Device&         device() { return ctx_.device(); }
     coopa::gfx::memory::Allocator&    allocator() { return ctx_.allocator(); }
     coopa::gfx::command::CommandPool& command_pool() { return ctx_.command_pool(); }
+    /// @brief The renderer whose frame tick() drives. A second, offscreen ToyRenderPipeline
+    /// needs it to resolve the frame slot its per-slot uploads write, which is why this is
+    /// public: a sub-view must prepare against the SAME frame the host is about to record.
+    coopa::gfx::presentation::Renderer& renderer() { return ctx_.renderer(); }
     coopa::input::InputMap&           input()  { return input_; }
     /**
      * @brief Spawns an object asset (`objects/crate`) into the active scene at `position`,
@@ -1160,7 +1166,11 @@ private:
      *        loading cover is up (is_loading()) -- the player cannot see what they would be
      *        driving, whether that is a fresh load's Warming scene or a manual LoadingHold.
      */
-    bool input_blocked_() const { return no_input_ || !game_focused_ || is_loading(); }
+    bool input_blocked_() const {
+        // input_routed_away_ is folded in here so every existing gate honours a sub-view
+        // owning the pointer without growing a check of its own.
+        return no_input_ || !game_focused_ || is_loading() || input_routed_away_;
+    }
 
     void drive_camera_controller_(coopa::scene::Scene& scene);
 
@@ -1489,17 +1499,202 @@ private:
     /// Each managed scene's `scene.settings` overrides (null: none) -- see scene_config().
     std::unordered_map<const coopa::scene::Scene*, fkyaml::node> scene_settings_;
     bool overrides_applied_ = false;   ///< The live render config carries some scene's overrides.
-    bool weather_applied_ = false;     ///< The live render config carries the weather's (or the physical sky's) atmosphere.
-    weather::AtmosphereModel sky_atmosphere_;   ///< The physical sky on the CPU (sync_sky_render_state_()).
-    bool sky_applied_ = false;                  ///< sky_base_ holds the gradient colours the physical sky overwrote.
-    std::array<glm::vec3, 3> sky_base_{};       ///< The config's zenith / horizon / ground under the physical sky.
-    glm::dvec2 cloud_offset_{0.0};              ///< Accumulated cloud drift, metres (unwrapped: the renderer wraps it per use).
-    /// The scene's world shape, re-asked once a frame (set_world_frame_source) so the sky, the
-    /// clouds, the weather and the surface state all read ONE centre and radius rather than
-    /// each deriving it separately. With no source installed this is the default frame, which
-    /// IS the flat Z-up world -- so readers use it unconditionally. See env/world_frame.h.
-    env::WorldFrame world_frame_{};
-    /// Where world_frame_ comes from; empty on a flat world. See set_world_frame_source().
+    /**
+     * @struct ViewSync
+     * @brief The per-VIEW state the render-sync pass carries between frames.
+     *
+     * Every field here is "what this view's sky/weather/clouds/particles looked like last
+     * frame". A single copy was correct while the engine rendered one view; a second rendered
+     * view needs its own, and sharing them is not a tidiness question:
+     *
+     * - `particle_frame` holds the batch pointers the renderer reads until render() returns
+     *   (see ToyRenderPipeline::set_particle_state()), so one shared copy means a second
+     *   view's sync overwrites the batches the first is about to draw.
+     * - `weather_base` / `sky_base` are CAPTURE-AND-RESTORE slots holding the config values the
+     *   weather overwrote. Shared, a sub-scene's capture is what the host's fog gets restored
+     *   from, so the host's authored look drifts away a frame at a time.
+     * - the cloud and sky clocks are per-view elapsed time; shared, two views fight over them.
+     */
+    struct ViewSync {
+        bool weather_applied = false;   ///< The live config carries the weather's atmosphere.
+        weather::AtmosphereModel sky_atmosphere;   ///< The physical sky on the CPU.
+        bool sky_applied = false;       ///< `sky_base` holds the colours the physical sky overwrote.
+        std::array<glm::vec3, 3> sky_base{};   ///< Config zenith / horizon / ground under the physical sky.
+        glm::dvec2 cloud_offset{0.0};   ///< Accumulated cloud drift, metres (the renderer wraps it).
+        glm::vec2 cloud_wind_dir{1.0f, 0.0f};   ///< This frame's cloud wind; see CloudFrameState.
+        float cloud_wind_speed = 0.0f;
+        double cloud_flat_phase = 0.0;  ///< The flat clouds' evolution phase, 0..1.
+        float sky_time = 0.0f;          ///< Seconds the physical sky has run.
+        WeatherRenderBase weather_base; ///< The config's own values under the weather.
+        /// The scene's world shape, re-asked once a frame (set_world_frame_source) so the sky,
+        /// the clouds, the weather and the surface state all read ONE centre and radius. With
+        /// no source installed this is the default frame, which IS the flat Z-up world -- so
+        /// readers use it unconditionally. See env/world_frame.h.
+        env::WorldFrame world_frame{};
+        render::ParticleFrameState particle_frame;   ///< This frame's particle batches.
+    };
+
+    ViewSync host_sync_;              ///< The on-screen view's state.
+
+    /**
+     * @struct SubSceneView
+     * @brief One `SubScene` declaration, resolved: the scene it loaded, the pipeline that draws
+     *        it, and that view's own cross-frame sync state.
+     *
+     * Identified by its host scene plus the view name and scene path it was declared with --
+     * NOT by a pointer to the component. The editor destroys and rebuilds an object's
+     * components on every inspector edit, so a cached `SubScene*` would dangle on the first
+     * drag; the component is re-resolved each frame instead (find_sub_scene_component_()).
+     */
+    struct SubSceneView {
+        coopa::scene::Scene* host = nullptr;   ///< The scene that declared it.
+        std::string view_name;                 ///< Identity, with `scene_ref`.
+        std::string scene_ref;                 ///< The scene asset it loaded.
+        coopa::scene::Scene* scene = nullptr;  ///< The loaded sub-scene (owned by the manager).
+        std::unique_ptr<render::ToyRenderPipeline> pipeline;   ///< Draws it, offscreen.
+        ViewSync sync;                         ///< Its own render-sync state; see ViewSync.
+    };
+
+    std::vector<SubSceneView> sub_views_;
+    /// Declarations whose scene failed to load, by "<view>\0<scene_ref>". A failed load is
+    /// remembered so it is attempted ONCE: retrying every frame would re-throw, re-log and
+    /// stall the frame forever on a single typo.
+    std::unordered_set<std::string> failed_sub_views_;
+    /// Scenes activate_scene() must leave active: a sub-scene is simulated alongside whatever
+    /// scene is current, so the exclusivity that switch otherwise enforces would freeze it.
+    std::unordered_set<const coopa::scene::Scene*> pinned_active_;
+
+    /** @brief Loads any newly declared sub-scene and drops any whose component is gone. */
+    void ensure_sub_views_();
+    /**
+     * @brief Runs every sub-view's sync pass and publishes its texture.
+     *
+     * @param dt Seconds since the previous frame.
+     * @param prof The frame profile to charge, or null.
+     */
+    void sync_sub_views_(float dt, render::FrameProfile* prof);
+    /** @brief Tears one sub-view down: its texture registration, pipeline, then its scene. */
+    void drop_sub_view_(SubSceneView& view);
+    /** @brief This frame's `SubScene` component for a view, or null if it is gone. */
+    render::SubScene* find_sub_scene_component_(const SubSceneView& view) const;
+    /** @brief The render config an offscreen view of `c` is built with. */
+    render::ToyRenderConfig sub_view_config_(const render::SubScene& c,
+                                             const coopa::scene::Scene& sub) const;
+    /**
+     * @brief The pipeline that draws a given scene -- a sub-view's own, else the host's.
+     *
+     * Used by state that outlives one frame and must bind the right view later, such as the
+     * GPU-particle alive-count readback prepare_scene_() installs.
+     *
+     * @param scene The scene to look up.
+     * @return Its pipeline, or null before the host's exists.
+     */
+    render::ToyRenderPipeline* pipeline_for_scene_(const coopa::scene::Scene* scene) const;
+    /** @brief Hands the host pipeline the current sub-view list; safe to call every frame. */
+    void apply_sub_views_to_pipeline_();
+    /// The view the render-sync pass is currently running for. Points at host_sync_ except
+    /// inside sync_view_(), which swings it at a sub-view's own state for the duration.
+    ViewSync* sync_ = &host_sync_;
+
+    /// The pipeline the render-sync pass is currently targeting; null means the host's. Swung
+    /// by sync_view_() the same way `sync_` is, so every sync_* function writes to the view it
+    /// is running for without taking a pipeline parameter.
+    render::ToyRenderPipeline* active_pipeline_ = nullptr;
+
+    /**
+     * @brief Runs one view's whole render-sync pass: its camera, world frame, water, weather,
+     *        sky, surface, particles, UI blur and transform resolve.
+     *
+     * Swings `sync_` and `active_pipeline_` at this view for the duration and puts them back, so
+     * every sync_* function writes the view it is running for without taking either as a
+     * parameter. Single-threaded and non-reentrant by construction -- it is called from tick()
+     * once per view, never from a scene job.
+     *
+     * @param scene The scene this view renders.
+     * @param pipe The pipeline this view renders with.
+     * @param state This view's cross-frame sync state.
+     * @param camera The camera this view renders from; pushed to the scene's camera-relative
+     *               systems. Null leaves them following the global main camera.
+     * @param dt Seconds since the previous frame.
+     * @param prof The frame profile to charge, or null.
+     */
+    void sync_view_(coopa::scene::Scene& scene, render::ToyRenderPipeline& pipe, ViewSync& state,
+                    const coopa::gfx::engine::components::CameraComponent* camera, float dt,
+                    render::FrameProfile* prof);
+
+    /**
+     * @brief Pushes the camera a scene is viewed from into its camera-relative systems.
+     *
+     * Terrain streaming, snow, water focus, weather, view blockers and instance painting all
+     * need "where is the viewer", and must not read the process-global main camera when more
+     * than one scene is rendered per frame. See toyengine/scene/view_camera.h.
+     *
+     * @param scene The scene whose systems to push into.
+     * @param camera The camera, or null to leave them on the global main camera.
+     */
+    void push_view_camera_(coopa::scene::Scene& scene,
+                           const coopa::gfx::engine::components::CameraComponent* camera);
+
+    /**
+     * @brief Input as the scene currently being driven should see it.
+     *
+     * The host's real input unless a routed pass swung `active_input_` at a sub-view's own --
+     * same shape as pipe_(), and for the same reason: the ten drive_* functions then need no
+     * extra parameter to feed a view other than the on-screen one.
+     */
+    const coopa::input::Input& in_() {
+        return active_input_ != nullptr ? *active_input_ : ctx_.input();
+    }
+
+    /// The input a sub-scene sees while it owns the pointer: the host's, with the cursor
+    /// remapped into that view's pixels.
+    coopa::input::Input sub_input_;
+    /// What a scene that does NOT own the pointer sees. Deliberately an IDLE input rather than
+    /// a frozen one: held buttons and keys drain, so hovering out mid-drag releases rather than
+    /// sticking the drag down forever.
+    coopa::input::Input idle_input_;
+    /// Whichever of the two above the current drive pass reads; null means the host's real one.
+    const coopa::input::Input* active_input_ = nullptr;
+    /// True while driving a scene that does NOT own the pointer, which input_blocked_() folds
+    /// in so every existing gate honours the routing without its own check.
+    bool input_routed_away_ = false;
+
+    /**
+     * @brief The sub-view that owns the pointer this frame, or null when the host does.
+     *
+     * Reads the rect each view's UI reported while drawing. That is a frame old, because the UI
+     * draws after the input pass -- so hover changes take effect on the next frame, which is
+     * inherent to the frame order rather than a bug.
+     *
+     * @return The owning component, or null.
+     */
+    render::SubScene* pointer_owner_() const;
+
+    /**
+     * @brief The host's input with the cursor remapped into a sub-view's own pixels.
+     *
+     * @param view The view that owns the pointer.
+     * @return A reference to the scratch input this filled.
+     */
+    const coopa::input::Input& sub_view_input_(const render::SubScene& view);
+
+    /**
+     * @brief Runs the ten input drive_* functions for one scene.
+     *
+     * @param scene The scene to drive.
+     * @param input The input it should see.
+     * @param routed_away True when this scene does not own the pointer.
+     */
+    void drive_scene_input_(coopa::scene::Scene& scene, const coopa::input::Input& input,
+                            bool routed_away);
+
+    /** @brief The pipeline the current sync pass targets -- the host's unless one is swung in. */
+    render::ToyRenderPipeline& pipe_() const {
+        return active_pipeline_ != nullptr ? *active_pipeline_ : *pipeline_;
+    }
+
+    /// Where each view's ViewSync::world_frame comes from; empty on a flat world.
+    /// See set_world_frame_source().
     std::function<env::WorldFrame(coopa::scene::Scene&)> world_frame_source_;
     /// Finishes the cloud layer for a world the engine does not model. See set_cloud_state_hook().
     std::function<void(coopa::scene::Scene&, const env::WorldFrame&, float, render::CloudFrameState&)>
@@ -1507,16 +1702,11 @@ private:
     /// Finishes the sky for a world the engine does not model. See set_sky_state_hook().
     std::function<void(coopa::scene::Scene&, const env::WorldFrame&, float, render::SkyFrameState&)>
         sky_state_hook_;
-    glm::vec2 cloud_wind_dir_{1.0f, 0.0f};      ///< This frame's cloud wind; see CloudFrameState.
-    float cloud_wind_speed_ = 0.0f;
-    double cloud_flat_phase_ = 0.0;             ///< The flat clouds' evolution phase, 0..1.
-    float sky_time_ = 0.0f;                     ///< Seconds the physical sky has run.
     /// Sky illuminance per unit of sun light intensity. Brighter than a real sky (about 1) to keep
     /// the engine's ambient-rich look; the sun disc, stars and the CPU gradient all scale with it.
     static constexpr float k_sky_gain = 3.0f;
     /// Moon illuminance / sun illuminance for the moonlit sky (artistic: real is ~1/400000).
     static constexpr float k_moon_ratio = 0.025f;
-    WeatherRenderBase weather_base_;   ///< The config's own values under it (see sync_weather_render_state_()).
     bool source_driven_ = false;       ///< set_config_source() was called (the editor).
     std::function<void(AppConfig&)> config_adjust_;   ///< set_config_source()'s adjust hook.
 
@@ -1594,7 +1784,6 @@ private:
     /// Save slots (see saves()); SaveSystem::active() while this engine lives.
     save::SaveSystem saves_;
     /// This frame's particle batches (see sync_particle_render_state_()); kept to reuse capacity.
-    render::ParticleFrameState particle_frame_;
     /// Manual loading-state holds; see loading(). A hold acquired with no load in flight raises
     /// its own cover -- see update_loading_holds_().
     LoadingState loading_;

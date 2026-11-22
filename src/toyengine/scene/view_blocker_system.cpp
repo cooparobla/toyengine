@@ -36,7 +36,7 @@ void ViewBlockerSystem::execute(coopa::scene::Scene& scene, const coopa::scene::
     for (ViewBlockerFade* w : walls) w->set_blocking(false);
 
     std::vector<XraySubject*> subjects = scene.get_components<XraySubject>();
-    auto* camera  = coopa::gfx::engine::components::CameraComponent::main();
+    const auto* camera  = toy::scene::scene_view_camera(view_camera_);
     auto* physics = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene.find_system("Physics"));
 
     glm::vec3 eye(0.0f);

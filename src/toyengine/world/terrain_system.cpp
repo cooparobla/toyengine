@@ -262,7 +262,9 @@ glm::vec3 TerrainSystem::stream_centre_(const TerrainComponent& terrain) const {
     if (terrain.owner != nullptr) {
         if (auto* tc = terrain.owner->get_transform()) to_local = glm::inverse(tc->transform().get_world_matrix());
     }
-    CameraComponent* camera = CameraComponent::main();
+    const CameraComponent* camera = terrain.scene != nullptr
+        ? toy::scene::resolve_view_camera(terrain.camera_ref, *terrain.scene, view_camera_)
+        : toy::scene::scene_view_camera(view_camera_);
     if (camera == nullptr || camera->owner == nullptr || camera->owner->get_transform() == nullptr) {
         return glm::vec3(0.0f);   // the terrain's own origin
     }

@@ -1104,6 +1104,33 @@ std::map<std::string, ComponentSchema>& schema_table_() {
         // A movable four-quadrant panel workspace with a dock -- Inventory/Character/Map/
         // Quests/Settings, each panel draggable between quadrants and closable, growing into
         // any adjacent quadrant left empty (toyengine/ui/quadrant_layout.h's growth rule).
+        // Another scene, simulated and rendered into a texture this scene's UI can draw.
+        // Width/height are fixed for the view's lifetime: every render target it owns is sized
+        // once, so changing them rebuilds the whole view rather than resizing it.
+        add({"SubScene", "Rendering", {
+            with_tip(f_string("view", ""),
+                     "Name UI code looks this view up by, when a scene has more than one"),
+            with_tip(f_string("scene", ""),
+                     "The scene to load and simulate, e.g. ui/map_world_demo. A folder name, "
+                     "like the SCENE variable takes"),
+            with_tip(f_string("camera", ""),
+                     "Object holding the camera to render it from. Empty uses the scene's own "
+                     "main camera, else its first"),
+            with_tip(f_int("width", 512, 16, 4096, true),
+                     "View width in pixels. Fixed once loaded -- changing it rebuilds the view"),
+            with_tip(f_int("height", 512, 16, 4096, true),
+                     "View height in pixels. Fixed once loaded"),
+            with_tip(f_float("ortho_size", 0.0f, 0.5f, 0.0f, 10000.0f),
+                     "Drives the view camera's orthographic half-height every frame; 0 leaves "
+                     "the camera alone. A UI zoom control writes this"),
+            with_tip(f_enum("input", {"hover", "never"}, true),
+                     "hover: while the pointer is over the view, its scene receives input. "
+                     "never: display only"),
+            with_tip(f_bool("simulate_in_edit_mode", true),
+                     "Keep it simulating while the editor is not playing, so a panel built "
+                     "against it shows something real"),
+        }});
+
         add({"QuadrantDock", "UI", {
             with_tip(f_bool("open_inventory", true), "Open at start, in the Player group"),
             with_tip(f_bool("open_character", true), "Open at start, in the Player group"),
@@ -1670,6 +1697,12 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                      "Tiles the extra depth in shore_grade_depth ramps over"));
             fs.push_back(with_tip(f_float("water_skirt_tiles", 4.0f, 0.5f, 0.0f, 32.0f),
                      "Metres the water surface's buried apron reaches past the wet tiles, over ground that stays underwater"));
+            // Which camera it streams around. Default follows whatever camera the scene is
+            // being rendered from, which in the editor is the viewport camera.
+            fs.push_back(with_tip(f_bool("use_main_camera", true),
+                "Stream around the camera this scene is rendered from. Turn off to follow a camera named below"));
+            fs.push_back(with_tip(f_string("camera", ""),
+                "Object holding the camera to stream around, when Use Main Camera is off"));
             return fs;
         };
         add({"Terrain", "World", terrain_fields("tiles")});
@@ -1717,6 +1750,10 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                          "default instances/<object>.instances"),
                 with_tip(f_float("chunk_size", 32.0f, 0.5f, 4.0f, 512.0f, true),
                          "Metres per chunk -- the draw, cull, collide and file unit. Match the terrain's chunks"),
+                with_tip(f_bool("use_main_camera", true),
+                         "Stream around the camera this scene is rendered from. Turn off to follow a camera named below"),
+                with_tip(f_string("camera", ""),
+                         "Object holding the camera to stream around, when Use Main Camera is off"),
                 collapsed_items(with_item_noun(f_items("prototypes", {
                     with_tip(f_asset("object", "objects", ".yaml", true, false), "An object asset to paint; or use `mesh`"),
                     with_tip(f_asset("mesh", "meshes", ".yaml", true, true), "A bare mesh to paint, instead of an object asset"),

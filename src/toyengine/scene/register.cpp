@@ -50,6 +50,8 @@
 #include <toyengine/world/terrain_component.h>
 #include <toyengine/mapgen/map_generator_component.h>
 #include <toyengine/mapgen/terrain_generator.h>
+#include <toyengine/scene/view_camera.h>
+#include <toyengine/render/sub_scene.h>
 
 namespace toy {
 namespace scene {
@@ -348,6 +350,31 @@ void register_scene_components() {
     // A trigger box that loads another scene when the player walks in (toyengine/scene/scene_link.h).
     // A relative target_scene resolves against the declaring file first (a sibling scene), then
     // the asset roots; anything still unresolved goes to the engine's scene lookup by name.
+    // Another scene, simulated and rendered into a texture this scene's UI can draw. The
+    // component only DECLARES it: Engine::ensure_sub_views_() does the loading, on the frame
+    // after, because loading a scene from inside a scene build would be reentrant.
+    SceneLoader::register_component_parser("SubScene",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* view = obj.add_component<render::SubScene>();
+            read(node, "view", view->view_name);
+            // Left unresolved: Engine resolves it like any scene path, so the same spellings
+            // load_scene() accepts work here too.
+            read(node, "scene", view->scene_ref);
+            read(node, "camera", view->camera);
+            read(node, "width", view->width);
+            read(node, "height", view->height);
+            // `resolution: [w, h]` is accepted as a shorthand for the pair above.
+            if (node.contains("resolution") && node.at("resolution").is_sequence() &&
+                node.at("resolution").size() >= 2) {
+                view->width  = node.at("resolution")[0].get_value<std::uint32_t>();
+                view->height = node.at("resolution")[1].get_value<std::uint32_t>();
+            }
+            read(node, "ortho_size", view->ortho_size);
+            read(node, "simulate_in_edit_mode", view->simulate_in_edit_mode);
+            std::string input;
+            if (read(node, "input", input)) view->input = render::parse_sub_scene_input(input);
+        });
+
     SceneLoader::register_component_parser("SceneLink",
         [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext& ctx) {
             auto* link = obj.add_component<SceneLink>();
@@ -1039,6 +1066,11 @@ void register_scene_components(coopa::gfx::core::Device& device,
                 world::parse_heightmap_terrain(node, obj, ctx, assets);
             } else {
                 parse_tile_terrain(node, obj, ctx);
+            }
+            // Both modes are the same component type, so which camera the terrain streams
+            // around is read once, here, rather than in each branch.
+            if (auto* terrain = obj.get_component<world::TerrainComponent>()) {
+                scene::parse_camera_ref(node, terrain->camera_ref);
             }
         };
     SceneLoader::register_component_parser("Terrain", parse_terrain);

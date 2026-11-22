@@ -621,7 +621,7 @@ void ToyRenderPipeline::build_transparency_passes_() {
     }
 }
 
-void ToyRenderPipeline::build_post_chain_(coopa::gfx::pipeline::RenderPass& swapchain_pass) {
+void ToyRenderPipeline::build_post_chain_(coopa::gfx::pipeline::RenderPass* swapchain_pass) {
     // Without SSR, post reads the deferred-lit+sky target; with it, ssr_pass_'s composite
     // output. Chosen once from ssr_enabled's STARTUP value -- rebinding it per frame would
     // need either a wait or a shader-side selector between two permanently-bound views (file
@@ -954,10 +954,14 @@ void ToyRenderPipeline::build_post_chain_(coopa::gfx::pipeline::RenderPass& swap
             config_.shaders("ui_backdrop_blur.frag"));
     }
 
-    upscale_pass_ = std::make_unique<passes::UpscalePass>(
-        device_, swapchain_pass,
-        config_.shaders("fullscreen.vert"),
-        config_.shaders("upscale.frag"));
+    // Null for an offscreen view: this pass exists only to blit into a swapchain image, and
+    // such a view's result is read straight off overlay_target_ through output_view().
+    if (swapchain_pass != nullptr) {
+        upscale_pass_ = std::make_unique<passes::UpscalePass>(
+            device_, *swapchain_pass,
+            config_.shaders("fullscreen.vert"),
+            config_.shaders("upscale.frag"));
+    }
     // upscale_pass_ is a 1:1 blit of overlay_target_ (already swapchain-sized, letterbox bars
     // included) into the swapchain; the nearest upscale happens one stage earlier, inside
     // ui_composite_pass_, so the world UI can be composited after the display-space effects
@@ -1075,7 +1079,7 @@ void ToyRenderPipeline::rebuild_overlay_chain_(uint32_t w, uint32_t h) {
             ui_backdrop_pass_ ? ui_backdrop_pass_->result_view_typed() : coopa::gfx::TextureView{});
     }
 
-    upscale_pass_->set_source_image(overlay_target_->color_view_typed(), nearest_sampler_);
+    if (upscale_pass_) upscale_pass_->set_source_image(overlay_target_->color_view_typed(), nearest_sampler_);
 }
 
 void ToyRenderPipeline::rebuild_display_layer_() {
@@ -1176,7 +1180,8 @@ LetterboxRect ToyRenderPipeline::handle_resize_() {
     // upscaled_extent_ is assigned before the rebuilds because rebuild_overlay_chain_() reads
     // it to size the world-UI layer. upscale_pass_ needs no rebuild: it is built against
     // swapchain_pass, which Renderer::recreate_framebuffers() keeps compatible across a resize.
-    const LetterboxRect letterbox = display_rect_for(swapchain_.extent().width, swapchain_.extent().height);
+    const coopa::gfx::Extent2D present = present_extent_();
+    const LetterboxRect letterbox = display_rect_for(present.width, present.height);
 
     // Last resize's retired UI passes: the frame that drew with them was submitted, and is
     // done once the device idles.
@@ -1185,7 +1190,7 @@ LetterboxRect ToyRenderPipeline::handle_resize_() {
         retired_ui_ = RetiredUi{};
     }
 
-    const coopa::gfx::Extent2D swapchain_extent = swapchain_.extent_typed();
+    const coopa::gfx::Extent2D swapchain_extent = present;
     const bool swapchain_changed = swapchain_extent.width  != overlay_extent_.width ||
                                    swapchain_extent.height != overlay_extent_.height;
     const bool letterbox_changed = letterbox.w != upscaled_extent_.w ||

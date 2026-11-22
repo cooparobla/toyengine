@@ -324,7 +324,12 @@ void Engine::remove_scene(coopa::scene::Scene* scene) {
 }
 
 void Engine::activate_scene(coopa::scene::Scene* scene) {
-    for (coopa::scene::Scene* s : scene_mgr_.scenes()) scene_mgr_.set_scene_active(s, s == scene);
+    // Pinned scenes stay active: a sub-scene is simulated ALONGSIDE whatever scene is current,
+    // so the exclusivity this switch otherwise enforces would freeze it -- which in the editor
+    // means every play-mode toggle and asset-preview entry silently stops the sub-view.
+    for (coopa::scene::Scene* s : scene_mgr_.scenes()) {
+        scene_mgr_.set_scene_active(s, s == scene || pinned_active_.count(s) != 0);
+    }
     scene_mgr_.set_active_scene(scene);
     apply_scene_settings_(*scene);
 }
@@ -367,7 +372,7 @@ void Engine::set_edit_mode(bool edit) {
     edit_mode_ = edit;
     if (scene_mgr_.has_scene()) scene_mgr_.get_active_scene().set_simulating(!edit);
     // Edit mode never holds the pointer: hand back a cursor a game may have captured.
-    if (edit && ctx_.input().cursor_mode() != coopa::input::CursorMode::Normal) {
+    if (edit && in_().cursor_mode() != coopa::input::CursorMode::Normal) {
         ctx_.input().set_cursor_mode(coopa::input::CursorMode::Normal);
     }
 }
@@ -380,7 +385,7 @@ void Engine::set_game_input_focus(bool focused) {
         if (edit_mode_ || no_input_ || !config_.window.visible || !scene_mgr_.has_scene()) return;
         auto* cc = scene_mgr_.get_active_scene().find_first_component<scene::CameraController>();
         if (cc && cc->capture_cursor) ctx_.input().set_cursor_mode(coopa::input::CursorMode::Disabled);
-    } else if (ctx_.input().cursor_mode() != coopa::input::CursorMode::Normal) {
+    } else if (in_().cursor_mode() != coopa::input::CursorMode::Normal) {
         ctx_.input().set_cursor_mode(coopa::input::CursorMode::Normal);
     }
 }
@@ -646,8 +651,11 @@ void Engine::prepare_scene_(coopa::scene::Scene& scene, bool drain_assets) {
     // it; their alive counts come back from the renderer's readback.
     particles::install_particle_system(scene)->set_gpu(
         config_.particles.gpu_enabled && ctx_.device().supports_compute(),
-        [this](uint64_t id, uint32_t& count, uint32_t& generation) {
-            return pipeline_ && pipeline_->gpu_particle_alive(id, count, generation);
+        [this, sp = &scene](uint64_t id, uint32_t& count, uint32_t& generation) {
+            // Looked up per call, not captured: a sub-scene's particles must read alive counts
+            // back from the pipeline that drew them, not from the host's.
+            render::ToyRenderPipeline* p = pipeline_for_scene_(sp);
+            return p != nullptr && p->gpu_particle_alive(id, count, generation);
         });
     // Order 40: the clock, the active weather condition, sky / fog / sun and the runtime
     // weather effects -- ahead of the Behaviour walk, so gameplay reads this frame's weather.
@@ -776,6 +784,13 @@ Engine::~Engine() {
     // a use-after-free on every Engine teardown (AddressSanitizer: ~MeshRenderer writing a
     // slot freed by AssetManager::shutdown()), which corrupted the heap for whatever a
     // process did next (the editor tests' "random" segfaults).
+    // Sub-views first, and explicitly: each owns a pipeline whose render targets were
+    // allocated from ctx_'s allocator, but sub_views_ is declared BEFORE ctx_, so member
+    // destruction would free the allocator while those targets were still live -- VMA asserts
+    // on exactly that ("Some allocations were not freed before destruction of this memory
+    // block"). Dropped here, while the device and allocator are both still alive.
+    for (SubSceneView& view : sub_views_) drop_sub_view_(view);
+    sub_views_.clear();
     clear_scenes_();
     // An unfinished async load holds a built scene (asset handles) and the transition layer
     // a loading-screen UI (UIResourceCache fonts): both go before the caches below.
@@ -945,10 +960,12 @@ bool Engine::tick() {
     {
         CpuTimer t(prof, CpuScope::Input);
         ctx_.poll(); // window_.new_frame() + poll_events() + frame timer update.
+        // The window's own Input, never a routed view's: these callbacks PUSH synthetic
+        // events, which belong to the real event stream.
         for (auto& fn : input_queue_) fn(ctx_.input());
         input_queue_.clear();
 
-        if (options_.escape_quits && input_.is_down("quit", ctx_.input())) {
+        if (options_.escape_quits && input_.is_down("quit", in_())) {
             ctx_.window().set_should_close(true);
         }
 
@@ -966,6 +983,11 @@ bool Engine::tick() {
         // While a scene loads in the background its uploads are spread over frames.
         assets_.update(dt, scene_loading() ? scene_load_->options.finalize_budget_ms : -1.0f);
         consume_scene_link_requests_();
+        // Sub-scene declarations are acted on HERE rather than in the component's start():
+        // loading one installs systems and drains assets, which must not happen reentrantly
+        // in the middle of a scene build. Before the updates below, so a view loaded this
+        // frame is simulated this frame.
+        ensure_sub_views_();
         update_loading_holds_();
         // Also after a failure, while the cover fades back off the running scene.
         if (scene_load_ && (!scene_load_->finished() || scene_load_->alpha > 0.0f)) update_scene_load_(dt);
@@ -976,16 +998,18 @@ bool Engine::tick() {
     {
         CpuTimer t(prof, CpuScope::SceneUpdate);
         if (scene_mgr_.has_scene() && !edit_mode_) {
-            drive_camera_controller_(scene_mgr_.get_active_scene());
-            drive_kinematic_controllers_(scene_mgr_.get_active_scene());
-            drive_free_movers_(scene_mgr_.get_active_scene());
-            drive_fire_igniters_(scene_mgr_.get_active_scene());
-            drive_damage_cursors_(scene_mgr_.get_active_scene());
-            drive_turntables_(scene_mgr_.get_active_scene());
-            drive_terrain_diggers_(scene_mgr_.get_active_scene());
-            drive_character_controllers_(scene_mgr_.get_active_scene());
-            drive_vehicles_(scene_mgr_.get_active_scene());
-            drive_ragdolls_(scene_mgr_.get_active_scene());
+            // Who owns the pointer this frame: a sub-view the cursor is over, else the host.
+            // The loser is driven with an IDLE input rather than skipped, so held buttons and
+            // keys drain instead of sticking down across the hand-over.
+            render::SubScene* owner = pointer_owner_();
+            drive_scene_input_(scene_mgr_.get_active_scene(), owner != nullptr ? idle_input_ : in_(),
+                               owner != nullptr);
+            for (SubSceneView& view : sub_views_) {
+                if (view.scene == nullptr) continue;
+                render::SubScene* c = find_sub_scene_component_(view);
+                const bool owns = c != nullptr && c == owner;
+                drive_scene_input_(*view.scene, owns ? sub_view_input_(*c) : idle_input_, !owns);
+            }
         }
         scene_mgr_.update(dt);
         if (overlay_scene_) overlay_scene_->update(dt);
@@ -1038,30 +1062,13 @@ bool Engine::tick() {
         // Lens blur (depth of field, tilt shift) is a play-time look: an editor's edit mode
         // draws sharp. Every frame, so it also holds across renderer rebuilds.
         pipeline_->set_lens_blur_suppressed(edit_mode_);
-        // Before every sync below: the sky, the clouds, the fog and the surface state all read
-        // this one frame, so it has to be the same value for all of them within a frame.
-        world_frame_ = world_frame_source_
-                           ? world_frame_source_(scene_mgr_.get_active_scene())
-                           : env::WorldFrame{};   // no source: the flat Z-up world
-        sync_water_render_state_(scene_mgr_.get_active_scene());
-        sync_weather_render_state_(scene_mgr_.get_active_scene());
-        sync_sky_render_state_(scene_mgr_.get_active_scene(), dt);
-        sync_surface_state_(scene_mgr_.get_active_scene());
-        {
-            // After the host's pre_render hook, like the water sync: the batches point into
-            // the systems' buffers and go to THIS pipeline.
-            CpuTimer t(prof, CpuScope::DynamicMeshes);
-            sync_particle_render_state_(scene_mgr_.get_active_scene());
-        }
-        sync_ui_scene_blur_(scene_mgr_.get_active_scene());
-        // Last thing before the draw, because everything above may still move the scene:
-        // whatever wrote a transform after update()'s TransformResolve (350) -- a late_update()
-        // write, a deferred spawn flushed at the end of late_update(), a host's scene build,
-        // object rebuild or posed timeline frame (the editor's Play, inspector edits, animation
-        // scrubbing) -- left world matrices dirty, and render()'s gather reads the cached
-        // Transform::world_matrix() from several threads at once, which cannot resolve them.
-        // Resolved here, the frame draws this frame's poses.
-        coopa::scene::resolve_transforms(scene_mgr_.get_active_scene());
+        // Sub-views first: each needs its gather done before the host's render() records them,
+        // and prepare_view() must run before Renderer::begin_frame() opens the frame.
+        sync_sub_views_(dt, prof);
+        // One pass per view. The host's is last so its state is the one left installed, and
+        // so a sub-view's gather has already run by the time the host's frame is recorded.
+        sync_view_(scene_mgr_.get_active_scene(), *pipeline_, host_sync_,
+                   coopa::gfx::engine::components::CameraComponent::main(), dt, prof);
         CpuTimer t(prof, CpuScope::Render);
         pipeline_->render(ctx_.renderer(), scene_mgr_.get_active_scene(), dt);
     }
@@ -1155,6 +1162,9 @@ void Engine::rebuild_pipeline(const render::ToyRenderConfig& cfg) {
     pipeline_->set_overlay_scene(overlay_scene_);
     sync_overlay_layers_();
     pipeline_->set_display_region(region);
+    // The new pipeline starts with no sub-views; without this every sub-view silently stops
+    // being recorded the first time a startup-fixed render setting changes.
+    apply_sub_views_to_pipeline_();
     if (scene_mgr_.has_scene()) pipeline_->validate_material_shaders(scene_mgr_.get_active_scene());
     // Reconstructing every render target is not a frame either -- same reason as prepare_scene_().
     // This is the editor's other long stall: a render setting that is startup-fixed queues a
@@ -1352,18 +1362,18 @@ void Engine::drive_camera_controller_(coopa::scene::Scene& scene) {
     const bool look_held = cc->look_button.empty() || [&] {
         using coopa::input::MouseButton;
         const std::string& b = cc->look_button;
-        if (b == "left" || b == "Left") return ctx_.input().button_down(MouseButton::Left);
-        if (b == "middle" || b == "Middle") return ctx_.input().button_down(MouseButton::Middle);
-        return ctx_.input().button_down(MouseButton::Right);
+        if (b == "left" || b == "Left") return in_().button_down(MouseButton::Left);
+        if (b == "middle" || b == "Middle") return in_().button_down(MouseButton::Middle);
+        return in_().button_down(MouseButton::Right);
     }();
-    cc->mouse_delta = look_held ? ctx_.input().cursor_delta() : glm::vec2(0.0f);
-    cc->scroll_input = ctx_.input().scroll_delta().y;
+    cc->mouse_delta = look_held ? in_().cursor_delta() : glm::vec2(0.0f);
+    cc->scroll_input = in_().scroll_delta().y;
 
     cc->move_input = glm::vec3(
-        input_.axis("fly_x", ctx_.input()),
-        input_.axis("fly_y", ctx_.input()),
-        input_.axis("fly_z", ctx_.input()));
-    cc->look_input = input_.vector("look", ctx_.input());
+        input_.axis("fly_x", in_()),
+        input_.axis("fly_y", in_()),
+        input_.axis("fly_z", in_()));
+    cc->look_input = input_.vector("look", in_());
 }
 
 void Engine::drive_kinematic_controllers_(coopa::scene::Scene& scene) {
@@ -1373,7 +1383,7 @@ void Engine::drive_kinematic_controllers_(coopa::scene::Scene& scene) {
 
     const glm::vec2 move = input_blocked_()
         ? glm::vec2(0.0f)
-        : glm::vec2(input_.axis("move_x", ctx_.input()), input_.axis("move_y", ctx_.input()));
+        : glm::vec2(input_.axis("move_x", in_()), input_.axis("move_y", in_()));
     for (scene::KinematicController* kc : controllers) kc->move_input = move;
 }
 
@@ -1383,10 +1393,10 @@ void Engine::drive_free_movers_(coopa::scene::Scene& scene) {
 
     const glm::vec3 move = input_blocked_()
         ? glm::vec3(0.0f)
-        : glm::vec3(input_.axis("move_x", ctx_.input()),
-                    input_.axis("move_y", ctx_.input()),
-                    input_.axis("move_z", ctx_.input()));
-    const float zoom = input_blocked_() ? 0.0f : ctx_.input().scroll_delta().y;
+        : glm::vec3(input_.axis("move_x", in_()),
+                    input_.axis("move_y", in_()),
+                    input_.axis("move_z", in_()));
+    const float zoom = input_blocked_() ? 0.0f : in_().scroll_delta().y;
     for (scene::FreeMover* fm : movers) {
         fm->move_input = move;
         fm->zoom_input = zoom;
@@ -1400,14 +1410,14 @@ void Engine::drive_fire_igniters_(coopa::scene::Scene& scene) {
     using coopa::input::MouseButton;
     const bool blocked = input_blocked_();
     glm::vec3 origin(0.0f), dir(0.0f, 1.0f, 0.0f);
-    const bool have_ray = viewport_ray(ctx_.input().cursor_position(), origin, dir);
+    const bool have_ray = viewport_ray(in_().cursor_position(), origin, dir);
 
     for (fire::FireIgniter* g : igniters) {
         MouseButton button = MouseButton::Left;
         if (g->button == "right") button = MouseButton::Right;
         else if (g->button == "middle") button = MouseButton::Middle;
 
-        g->ignite_requested = !blocked && have_ray && ctx_.input().button_pressed(button);
+        g->ignite_requested = !blocked && have_ray && in_().button_pressed(button);
         // keys.h has a Key -> name table but no name -> Key, so the component's `reset_key`
         // is matched against it rather than a second table being invented here.
         bool reset = false;
@@ -1415,7 +1425,7 @@ void Engine::drive_fire_igniters_(coopa::scene::Scene& scene) {
             for (int k = 0; k < static_cast<int>(coopa::input::Key::Count); ++k) {
                 const auto key = static_cast<coopa::input::Key>(k);
                 if (g->reset_key == coopa::input::key_name(key)) {
-                    reset = ctx_.input().key_pressed(key);
+                    reset = in_().key_pressed(key);
                     break;
                 }
             }
@@ -1433,7 +1443,7 @@ void Engine::drive_damage_cursors_(coopa::scene::Scene& scene) {
     using coopa::input::MouseButton;
     const bool blocked = input_blocked_();
     glm::vec3 origin(0.0f), dir(0.0f, 1.0f, 0.0f);
-    const bool have_ray = viewport_ray(ctx_.input().cursor_position(), origin, dir);
+    const bool have_ray = viewport_ray(in_().cursor_position(), origin, dir);
 
     const auto button_of = [](const std::string& name) {
         if (name == "right") return MouseButton::Right;
@@ -1449,9 +1459,9 @@ void Engine::drive_damage_cursors_(coopa::scene::Scene& scene) {
 
     for (scene::DamageCursor* c : cursors) {
         c->slice_requested = !blocked && have_ray && enabled(c->slice_button) &&
-                             ctx_.input().button_pressed(button_of(c->slice_button));
+                             in_().button_pressed(button_of(c->slice_button));
         c->hit_requested = !blocked && have_ray && enabled(c->hit_button) &&
-                           ctx_.input().button_pressed(button_of(c->hit_button));
+                           in_().button_pressed(button_of(c->hit_button));
         c->ray_origin = origin;
         c->ray_direction = dir;
 
@@ -1464,7 +1474,7 @@ void Engine::drive_damage_cursors_(coopa::scene::Scene& scene) {
             // reset_key already gives for matching a component's key NAME against it.
             for (int k = 0; k < static_cast<int>(coopa::input::Key::Count); ++k) {
                 const auto key = static_cast<coopa::input::Key>(k);
-                if (want == coopa::input::key_name(key) && ctx_.input().key_pressed(key)) {
+                if (want == coopa::input::key_name(key) && in_().key_pressed(key)) {
                     c->damage_type = k_damage_type_names[i];
                     break;
                 }
@@ -1491,12 +1501,12 @@ void Engine::drive_turntables_(coopa::scene::Scene& scene) {
         const bool held = !blocked && (tt->drag_button.empty() || [&] {
             using coopa::input::MouseButton;
             const std::string& b = tt->drag_button;
-            if (b == "left" || b == "Left") return ctx_.input().button_down(MouseButton::Left);
-            if (b == "middle" || b == "Middle") return ctx_.input().button_down(MouseButton::Middle);
-            return ctx_.input().button_down(MouseButton::Right);
+            if (b == "left" || b == "Left") return in_().button_down(MouseButton::Left);
+            if (b == "middle" || b == "Middle") return in_().button_down(MouseButton::Middle);
+            return in_().button_down(MouseButton::Right);
         }());
         tt->dragging = held;
-        tt->drag_input = held ? ctx_.input().cursor_delta() : glm::vec2(0.0f);
+        tt->drag_input = held ? in_().cursor_delta() : glm::vec2(0.0f);
         tt->view_right = right;
     }
 }
@@ -1516,7 +1526,7 @@ void Engine::drive_terrain_diggers_(coopa::scene::Scene& scene) {
     const bool crosshair = cc != nullptr && cc->capture_cursor;
     const glm::vec2 centre(static_cast<float>(box.x) + 0.5f * static_cast<float>(box.w),
                            static_cast<float>(box.y) + 0.5f * static_cast<float>(box.h));
-    const glm::vec2 aim = crosshair ? centre : ctx_.input().cursor_position();
+    const glm::vec2 aim = crosshair ? centre : in_().cursor_position();
     glm::vec3 origin(0.0f), dir(0.0f);
     bool have_ray = !blocked && viewport_ray(aim, origin, dir);
     // A cursor that does not land inside the viewport at all -- a window whose scaling the
@@ -1528,15 +1538,15 @@ void Engine::drive_terrain_diggers_(coopa::scene::Scene& scene) {
     for (scene::TerrainDigger* d : diggers) {
         const bool held = have_ray && [&] {
             const std::string& b = d->dig_button;
-            if (b == "left" || b == "Left") return ctx_.input().button_down(MouseButton::Left);
-            if (b == "right" || b == "Right") return ctx_.input().button_down(MouseButton::Right);
-            return ctx_.input().button_down(MouseButton::Middle);
+            if (b == "left" || b == "Left") return in_().button_down(MouseButton::Left);
+            if (b == "right" || b == "Right") return in_().button_down(MouseButton::Right);
+            return in_().button_down(MouseButton::Middle);
         }();
         const bool raise_held = !blocked && !d->raise_key.empty() && [&] {
             const std::string& k = d->raise_key;
-            if (k == "ctrl" || k == "control") return ctx_.input().key_down(Key::LeftControl) || ctx_.input().key_down(Key::RightControl);
-            if (k == "alt") return ctx_.input().key_down(Key::LeftAlt) || ctx_.input().key_down(Key::RightAlt);
-            return ctx_.input().key_down(Key::LeftShift) || ctx_.input().key_down(Key::RightShift);
+            if (k == "ctrl" || k == "control") return in_().key_down(Key::LeftControl) || in_().key_down(Key::RightControl);
+            if (k == "alt") return in_().key_down(Key::LeftAlt) || in_().key_down(Key::RightAlt);
+            return in_().key_down(Key::LeftShift) || in_().key_down(Key::RightShift);
         }();
         const bool raise = held && raise_held;
         d->digging = held;
@@ -1564,11 +1574,11 @@ void Engine::drive_character_controllers_(coopa::scene::Scene& scene) {
         if (glm::length(glm::vec2(fwd.x, fwd.y)) > 1e-4f) yaw = glm::degrees(std::atan2(-fwd.x, fwd.y));
     }
     const bool blocked = input_blocked_();
-    const glm::vec2 move = blocked ? glm::vec2(0.0f) : input_.vector("move", ctx_.input());
-    const bool jump = !blocked && input_.is_pressed("jump", ctx_.input());
-    const bool sprint = !blocked && input_.is_down("sprint", ctx_.input());
-    const bool walk = !blocked && input_.is_down("walk", ctx_.input());
-    const bool interact = !blocked && input_.is_pressed("interact", ctx_.input());
+    const glm::vec2 move = blocked ? glm::vec2(0.0f) : input_.vector("move", in_());
+    const bool jump = !blocked && input_.is_pressed("jump", in_());
+    const bool sprint = !blocked && input_.is_down("sprint", in_());
+    const bool walk = !blocked && input_.is_down("walk", in_());
+    const bool interact = !blocked && input_.is_pressed("interact", in_());
     // Only the player's own body: not a horse (player_input off -- its Mount takes the input
     // below while ridden), nor a character handed over to a ragdoll or a saddle.
     for (scene::CharacterController* cc : characters) {
@@ -1603,7 +1613,7 @@ void Engine::drive_vehicles_(coopa::scene::Scene& scene) {
     if (driveable.empty()) return;
 
     const bool blocked = input_blocked_();
-    if (!blocked && input_.is_pressed("next_vehicle", ctx_.input())) {
+    if (!blocked && input_.is_pressed("next_vehicle", in_())) {
         std::size_t current = 0;
         for (std::size_t i = 0; i < driveable.size(); ++i) {
             if (driveable[i]->active) current = i;
@@ -1620,12 +1630,12 @@ void Engine::drive_vehicles_(coopa::scene::Scene& scene) {
         }
     }
 
-    const glm::vec2 move = blocked ? glm::vec2(0.0f) : input_.vector("move", ctx_.input());
-    const float handbrake = (!blocked && input_.is_down("handbrake", ctx_.input())) ? 1.0f : 0.0f;
+    const glm::vec2 move = blocked ? glm::vec2(0.0f) : input_.vector("move", in_());
+    const float handbrake = (!blocked && input_.is_down("handbrake", in_())) ? 1.0f : 0.0f;
     int gear_request = 0;
-    if (!blocked && input_.is_pressed("gear_up", ctx_.input())) gear_request = 1;
-    if (!blocked && input_.is_pressed("gear_down", ctx_.input())) gear_request = -1;
-    const bool recover = !blocked && input_.is_pressed("recover", ctx_.input());
+    if (!blocked && input_.is_pressed("gear_up", in_())) gear_request = 1;
+    if (!blocked && input_.is_pressed("gear_down", in_())) gear_request = -1;
+    const bool recover = !blocked && input_.is_pressed("recover", in_());
 
     for (VehicleComponent* v : driveable) {
         if (!v->active) continue;  // VehicleSystem zeroes the controls of the rest
@@ -1641,7 +1651,7 @@ void Engine::drive_vehicles_(coopa::scene::Scene& scene) {
 }
 
 void Engine::drive_ragdolls_(coopa::scene::Scene& scene) {
-    if (input_blocked_() || !input_.is_pressed("ragdoll", ctx_.input())) return;
+    if (input_blocked_() || !input_.is_pressed("ragdoll", in_())) return;
     for (scene::Ragdoll* r : scene.get_components<scene::Ragdoll>()) {
         // Not in the saddle: the Rider owns the body until it is back on foot.
         auto* rider = r->owner ? r->owner->get_component<scene::Rider>() : nullptr;
@@ -1802,7 +1812,7 @@ void Engine::drive_ui_canvases_(coopa::scene::Scene& scene, const std::optional<
                 canvas->set_input_enabled(placement->input);
             } else {
                 // The WINDOW extent, not the render extent: UiPass draws this canvas into the
-                // swapchain-sized overlay target, and ctx_.input()'s cursor is in window
+                // swapchain-sized overlay target, and in_()'s cursor is in window
                 // pixels, so this is the sizing that makes both agree. See the doc above.
                 canvas->set_viewport(ww, wh);
                 canvas->set_screen_origin(glm::vec2(0.0f));
@@ -1816,7 +1826,7 @@ void Engine::drive_ui_canvases_(coopa::scene::Scene& scene, const std::optional<
             canvas->set_ui_scale(canvas->ignore_ui_scale || placement ? 1.0f : ui_scale_);
             // Cursor positions arrive in screen points; the canvas is sized in framebuffer
             // pixels. They differ on HiDPI displays.
-            canvas->set_input(ctx_.input(), cursor_scale());
+            canvas->set_input(in_(), cursor_scale());
             if (preview) {
                 if (ui_preview_) canvas->preview_refresh();
                 else canvas->clear_emitted();
@@ -1837,7 +1847,7 @@ void Engine::drive_ui_canvases_(coopa::scene::Scene& scene, const std::optional<
         // A miss must land far OUTSIDE the canvas. (0, 0) would be the canvas's own
         // bottom-left corner, which would leave whatever widget sits there permanently
         // hovered whenever the pointer is anywhere else.
-        canvas->set_world_input(ctx_.input(), hit ? *hit : glm::vec2(-1.0e6f));
+        canvas->set_world_input(in_(), hit ? *hit : glm::vec2(-1.0e6f));
         if (preview) {
             if (ui_preview_) canvas->preview_refresh();
             else canvas->clear_emitted();
@@ -1852,7 +1862,7 @@ bool Engine::build_pointer_ray_(const glm::mat4& view, const glm::mat4& proj,
     render::LetterboxRect box = display_rect();
     if (box.w == 0 || box.h == 0) return false;
 
-    glm::vec2 cursor = ctx_.input().cursor_position() * cursor_scale() - glm::vec2(box.x, box.y);
+    glm::vec2 cursor = in_().cursor_position() * cursor_scale() - glm::vec2(box.x, box.y);
     // Divide by box.w/h rather than box.scale: under "fit" mode w/h are rounded to whole
     // pixels, so w/rw and scale differ slightly, and w/h is what the blit actually used.
     glm::vec2 px(cursor.x * static_cast<float>(rw) / static_cast<float>(box.w),

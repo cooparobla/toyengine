@@ -72,6 +72,7 @@
 #include <toyengine/weather/ground_probe.h>
 #include <toyengine/weather/sky_model.h>
 #include <toyengine/weather/weather_surface.h>
+#include <toyengine/scene/view_camera.h>
 
 namespace toy {
 namespace weather {
@@ -162,7 +163,8 @@ struct ProfileMix {
  * @class WeatherSystem
  * @brief See the file doc.
  */
-class WeatherSystem : public coopa::scene::ISceneSystem {
+class WeatherSystem : public coopa::scene::ISceneSystem,
+                        public toy::scene::ViewCameraAware {
 public:
     WeatherSystem() = default;
     ~WeatherSystem() override {
@@ -338,7 +340,7 @@ private:
     /** @brief The spec an effect is placed by: the target condition's, else any condition's. */
     const EffectSpec* spec_for_(const std::string& prefab) const;
 
-    static glm::vec3 viewer_position_();
+    glm::vec3 viewer_position_() const;
 
     bool spawn_effect_(coopa::scene::Scene& scene, const std::string& prefab, const EffectSpec& spec);
 

@@ -22,6 +22,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <toyengine/render/sub_scene.h>
 
 namespace toy::ui {
 
@@ -260,15 +261,38 @@ void QuadrantDock::draw_map_(Context& ctx, const Box& c) {
     ctx.segmented_in(ctx.get_id("qd_map_zoom"), zoom_row, &map_zoom_, kZooms);
     if (body.empty()) return;
 
-    // The grid tightens as the zoom goes in, which is the whole of what a zoom means to a map
-    // with no world behind it -- and it keeps the three segments from being a dead control.
-    const int cells = 4 + map_zoom_ * 3;
-    const glm::vec4 grid_col = with_alpha(ctx.style.text, 0.13f);
+    // The world behind the map: a SubScene on this scene renders map_world_demo into a texture
+    // every frame, and the three zoom segments drive THAT camera's orthographic half-height.
+    // Metres of world across the view, per zoom step -- Region, Local, Close.
+    static constexpr float kZoomSizes[] = {90.0f, 40.0f, 16.0f};
+    render::SubScene* sub = nullptr;
+    if (scene != nullptr) {
+        for (render::SubScene* s : scene->get_components<render::SubScene>()) {
+            if (s->view_name == "map" || s->view_name.empty()) { sub = s; break; }
+        }
+    }
+    const int zoom = std::clamp(map_zoom_, 0, static_cast<int>(std::size(kZoomSizes)) - 1);
+    if (sub != nullptr) sub->ortho_size = kZoomSizes[zoom];
+
     ctx.push_clip(body);
-    for (int i = 1; i < cells; ++i) {
-        const float f = static_cast<float>(i) / static_cast<float>(cells);
-        ctx.line({body.x + body.w * f, body.y}, {body.x + body.w * f, body.bottom()}, grid_col);
-        ctx.line({body.x, body.y + body.h * f}, {body.right(), body.y + body.h * f}, grid_col);
+    if (sub != nullptr && sub->ready && sub->texture.valid()) {
+        ctx.image(sub->texture, body);
+        // Where this view ended up, in WINDOW pixels -- the space coopa::input::Input speaks,
+        // which is what lets the engine remap the cursor into the view when it is hovered.
+        // A screen lays out in canvas units, hence the scale.
+        const float s = canvas_scale();
+        sub->set_panel_rect(glm::vec4(body.x * s, body.y * s, body.w * s, body.h * s),
+                            ctx.is_hovered(body));
+    } else {
+        // No sub-scene (or it has not finished loading): the grid still reads as a map, and
+        // tightening it with the zoom keeps the three segments from being a dead control.
+        const int cells = 4 + zoom * 3;
+        const glm::vec4 grid_col = with_alpha(ctx.style.text, 0.13f);
+        for (int i = 1; i < cells; ++i) {
+            const float f = static_cast<float>(i) / static_cast<float>(cells);
+            ctx.line({body.x + body.w * f, body.y}, {body.x + body.w * f, body.bottom()}, grid_col);
+            ctx.line({body.x, body.y + body.h * f}, {body.right(), body.y + body.h * f}, grid_col);
+        }
     }
 
     // Points of interest at fractions of the box, so they stay put at any panel size.

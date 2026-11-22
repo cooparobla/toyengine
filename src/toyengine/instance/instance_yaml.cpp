@@ -105,6 +105,7 @@ void register_instance_components(coopa::asset::AssetManager& assets) {
             auto* painter = obj.add_component<InstancePainter>();
             read(node, "chunk_size", painter->chunk_size);
             read(node, "collision_radius", painter->collision_radius);
+            toy::scene::parse_camera_ref(node, painter->camera_ref);
             read(node, "cast_shadows", painter->cast_shadows);
             read(node, "enabled", painter->enabled);
             read(node, "chunk_build_budget", painter->chunk_build_budget);

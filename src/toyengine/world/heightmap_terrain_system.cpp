@@ -386,7 +386,10 @@ float HeightmapTerrainSystem::chunk_distance(const TerraGeometry& g, const glm::
 }
 
 glm::vec3 HeightmapTerrainSystem::camera_position_(const HeightmapTerrain& terrain) const {
-    if (auto* camera = coopa::gfx::engine::components::CameraComponent::main()) {
+    const auto* resolved = terrain.scene != nullptr
+        ? toy::scene::resolve_view_camera(terrain.camera_ref, *terrain.scene, view_camera_)
+        : toy::scene::scene_view_camera(view_camera_);
+    if (const auto* camera = resolved) {
         if (camera->owner != nullptr) {
             if (auto* tc = camera->owner->get_transform()) return glm::vec3(tc->transform().get_world_matrix()[3]);
         }
@@ -395,7 +398,7 @@ glm::vec3 HeightmapTerrainSystem::camera_position_(const HeightmapTerrain& terra
 }
 
 float HeightmapTerrainSystem::camera_far_() const {
-    if (auto* camera = coopa::gfx::engine::components::CameraComponent::main()) return camera->clip_end;
+    if (const auto* camera = toy::scene::scene_view_camera(view_camera_)) return camera->clip_end;
     return 2000.0f;
 }
 

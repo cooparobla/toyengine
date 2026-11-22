@@ -219,12 +219,47 @@ namespace render {
  */
 class ToyRenderPipeline {
 public:
+    /**
+     * @brief The presenting pipeline: renders into the swapchain, one per window.
+     *
+     * @param device The device every resource is created on.
+     * @param allocator The allocator the render targets come from.
+     * @param swapchain The swapchain whose extent sizes the overlay chain and which render()
+     *                  acquires and presents.
+     * @param swapchain_pass The swapchain's render pass, which `upscale_pass_` is built against.
+     * @param cmd_pool The pool one-off uploads and transitions are recorded into.
+     * @param config The resolved render config; its startup-fixed fields are baked in here.
+     */
     ToyRenderPipeline(coopa::gfx::core::Device& device,
                         coopa::gfx::memory::Allocator& allocator,
                         coopa::gfx::core::Swapchain& swapchain,
                         coopa::gfx::pipeline::RenderPass& swapchain_pass,
                         coopa::gfx::command::CommandPool& cmd_pool,
                         ToyRenderConfig config);
+
+    /**
+     * @brief An offscreen pipeline: renders a view into its own image, never to a swapchain.
+     *
+     * Builds no `upscale_pass_`, because that pass exists only to blit into a swapchain image.
+     * The finished view is `output_view()`, already in `SHADER_READ_ONLY_OPTIMAL`.
+     *
+     * Such a pipeline must NOT be driven through render() -- it has no frame to acquire or
+     * present. Its owner calls prepare_view() before the presenting pipeline's render(), and
+     * hands it over through that pipeline's set_sub_views() so it records into the same buffer.
+     *
+     * @param device The device every resource is created on.
+     * @param allocator The allocator the render targets come from.
+     * @param cmd_pool The pool one-off uploads and transitions are recorded into.
+     * @param config The resolved render config for this view. `resolution_mode` should be
+     *               "fixed" and the shadow-atlas sizes scaled down: those are
+     *               extent-independent and otherwise cost as much as a full-window view's.
+     * @param view_extent The view's size in pixels, standing in for a swapchain extent.
+     */
+    ToyRenderPipeline(coopa::gfx::core::Device& device,
+                        coopa::gfx::memory::Allocator& allocator,
+                        coopa::gfx::command::CommandPool& cmd_pool,
+                        ToyRenderConfig config,
+                        coopa::gfx::Extent2D view_extent);
 
     ToyRenderPipeline(const ToyRenderPipeline&) = delete;
     ToyRenderPipeline& operator=(const ToyRenderPipeline&) = delete;
@@ -352,6 +387,22 @@ public:
      */
     coopa::gfx::memory::Image& final_color_image() const {
         return *overlay_target_->color_image_object();
+    }
+    /**
+     * @brief The finished view as a sampleable texture: the same image final_color_image()
+     *        returns, for a caller that draws it rather than reads it back.
+     *
+     * `OffscreenTarget`'s render pass leaves the colour attachment in
+     * `SHADER_READ_ONLY_OPTIMAL` and declares the exit dependency to FRAGMENT_SHADER/SHADER_READ,
+     * so a later pass in the SAME command buffer may sample this with no manual barrier -- which
+     * is what lets a host's UI draw a sub-view recorded moments earlier.
+     *
+     * The view is created once, at construction, and stays valid for this pipeline's lifetime.
+     * A consumer that registered it with a UI pass must unregister it (after a device wait)
+     * before this pipeline is destroyed; see unregister_screen_ui_texture().
+     */
+    coopa::gfx::TextureView output_view() const {
+        return overlay_target_->color_view_typed();
     }
     /**
      * @brief The screen-space UI pass's default white texture, for seeding a screen canvas's
@@ -553,6 +604,66 @@ public:
      */
     bool render(coopa::gfx::presentation::Renderer& renderer, coopa::scene::Scene& scene, float dt);
 
+    /**
+     * @brief Renders one frame of the given scene from an explicit camera.
+     *
+     * The three-argument overload passes `CameraComponent::main()`, which is what every
+     * on-screen frame wants. This one exists because a view that is not the main one -- a
+     * sub-scene drawn into a texture -- must not consult that process-global singleton.
+     *
+     * @param renderer The renderer whose frame this acquires, records and presents.
+     * @param scene The scene to render.
+     * @param dt Seconds since the previous frame; see the overload above.
+     * @param camera The camera to render from. A null camera yields identity matrices.
+     * @return True if the frame was presented, false if the window was minimized.
+     */
+    bool render(coopa::gfx::presentation::Renderer& renderer, coopa::scene::Scene& scene,
+                float dt, const coopa::gfx::engine::components::CameraComponent* camera);
+
+    /**
+     * @brief Resolves one view's frame state, up to but not including any recording.
+     *
+     * Camera matrices, the TAA jitter, every per-frame-in-flight upload, the scene snapshot,
+     * the shadow fits and all the gathers. Operates entirely on this instance's members, so
+     * two pipelines preparing two views in one frame share nothing.
+     *
+     * Must run BEFORE `Renderer::begin_frame()`: it sizes this frame's UI geometry buffers and
+     * may issue the one-off `device_.wait_idle()` that the lazily-bound trace inputs need
+     * (see rule 1 in the class doc), neither of which is legal during recording.
+     *
+     * @param renderer The renderer, for this frame's slot index and its fence.
+     * @param scene The scene this view renders.
+     * @param dt Seconds since the previous frame.
+     * @param camera The camera to render from; null yields identity matrices.
+     */
+    void prepare_view(coopa::gfx::presentation::Renderer& renderer, coopa::scene::Scene& scene,
+                      float dt, const coopa::gfx::engine::components::CameraComponent* camera);
+
+    /**
+     * @brief Records the view prepared this frame into a caller-supplied command buffer.
+     *
+     * Records only -- it neither acquires a swapchain image nor presents -- so several
+     * pipelines may record their views into one buffer before it is submitted. Each view's
+     * output target ends in `SHADER_READ_ONLY_OPTIMAL`, so a later view in the same buffer may
+     * sample it with no manual barrier.
+     *
+     * @param cmd The command buffer to record into. Recording without a prepare_view() for
+     *            this frame logs and skips the view.
+     */
+    void record_view(coopa::gfx::command::CommandBuffer& cmd);
+
+    /**
+     * @brief The views recorded into this pipeline's frame ahead of its own, in order.
+     *
+     * Non-owning. Each must have had `prepare_view()` called for the current frame before
+     * `render()` runs -- the caller does that, because only it knows each view's scene and
+     * camera. Recording them first is what lets this pipeline's UI sample their output in the
+     * same command buffer.
+     *
+     * @param views The sub-view pipelines, in record order.
+     */
+    void set_sub_views(std::vector<ToyRenderPipeline*> views) { sub_views_ = std::move(views); }
+
 private:
 
     /**
@@ -704,6 +815,21 @@ private:
     };
 
     /**
+     * @struct PreparedView
+     * @brief One view's resolved frame state, between prepare_view_() and record_view_().
+     *
+     * Everything a view needs to record itself, and nothing that belongs to the frame as a
+     * whole. Held by the caller for the lifetime of the recording, because frame_meshes_
+     * points into `meshes` while record_post_chain_() runs.
+     */
+    struct PreparedView {
+        FrameContext ctx{};
+        MeshGather   meshes{};
+        std::vector<SdfDrawItem> sdf_draws;
+    };
+
+
+    /**
      * @brief Builds the per-frame-in-flight camera and light UBOs plus their descriptor sets, and the
      * shared shadow-map sampler set. Every bind happens here, once -- see the class doc.
      */
@@ -742,7 +868,29 @@ private:
      *
      * @param swapchain_pass The swapchain's render pass; upscale_pass_ is built against it.
      */
-    void build_post_chain_(coopa::gfx::pipeline::RenderPass& swapchain_pass);
+    /**
+     * @brief The shared constructor both public ones delegate to.
+     *
+     * @param swapchain The swapchain, or null for an offscreen view.
+     * @param swapchain_pass The swapchain's render pass, or null -- null skips `upscale_pass_`.
+     * @param present_extent The extent the overlay chain is sized to: the swapchain's for a
+     *                       presenting pipeline, the fixed view extent otherwise.
+     */
+    ToyRenderPipeline(coopa::gfx::core::Device& device,
+                      coopa::gfx::memory::Allocator& allocator,
+                      coopa::gfx::core::Swapchain* swapchain,
+                      coopa::gfx::pipeline::RenderPass* swapchain_pass,
+                      coopa::gfx::command::CommandPool& cmd_pool,
+                      ToyRenderConfig config,
+                      coopa::gfx::Extent2D present_extent);
+
+    /**
+     * @brief The extent the overlay chain and the display rect are computed against: the
+     *        swapchain's current extent, or the fixed view extent when there is no swapchain.
+     */
+    coopa::gfx::Extent2D present_extent_() const;
+
+    void build_post_chain_(coopa::gfx::pipeline::RenderPass* swapchain_pass);
     /**
      * @brief Builds the scene-depth descriptor set the world-space UI pass compares against. The PASS
      * itself is built by rebuild_world_ui_pass_(), since it follows the window size.
@@ -1493,7 +1641,16 @@ private:
 
     coopa::gfx::core::Device&      device_;
     coopa::gfx::memory::Allocator& allocator_;
-    coopa::gfx::core::Swapchain&   swapchain_;
+    /// The swapchain this pipeline presents to, or null for an offscreen view.
+    coopa::gfx::core::Swapchain*   swapchain_ = nullptr;
+    /// Stands in for the swapchain extent when there is no swapchain. Never changes.
+    coopa::gfx::Extent2D           fixed_present_extent_{};
+    /// This frame's resolved view state, between prepare_view() and record_view().
+    std::optional<PreparedView> prepared_;
+    /// The frame prepared_ belongs to, so a missing prepare_view() is a named error.
+    uint64_t prepared_at_frame_ = ~0ull;
+    /// Views recorded ahead of this one; see set_sub_views().
+    std::vector<ToyRenderPipeline*> sub_views_;
     /// Retained because rebuild_overlay_chain_() constructs a UiPass outside the ctor, on
     /// every swapchain resize -- see overlay_target_'s own doc.
     coopa::gfx::command::CommandPool& cmd_pool_;

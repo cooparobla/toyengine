@@ -92,6 +92,7 @@
 #include <toyengine/water/water_flow_bake.h>
 #include <toyengine/water/water_settings.h>
 #include <toyengine/water/water_tiles.h>
+#include <toyengine/scene/view_camera.h>
 
 namespace toy {
 namespace water {
@@ -114,7 +115,8 @@ inline constexpr int k_max_tiles_per_side = 8;
  * @class WaterSystem
  * @brief See the file doc.
  */
-class WaterSystem : public coopa::scene::ISceneSystem {
+class WaterSystem : public coopa::scene::ISceneSystem,
+                        public toy::scene::ViewCameraAware {
 public:
     /** @brief GPU arguments may be null (headless tests): bodies are then baked CPU-side only. */
     WaterSystem(coopa::gfx::core::Device* device = nullptr, coopa::gfx::memory::Allocator* allocator = nullptr,

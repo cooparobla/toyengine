@@ -299,7 +299,7 @@ void WaterSystem::connect_physics_(coopa::scene::Scene& scene) {
 void WaterSystem::resolve_focus_(coopa::scene::Scene& scene) {
     if (focus_override_) return;
     has_focus_ = false;
-    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    const auto* camera = toy::scene::scene_view_camera(view_camera_);
     // Only a camera of THIS scene: the main camera may belong to another (an editor's
     // edit scene under a pushed play scene, or a previous scene not yet torn down).
     if (!camera || !camera->owner || camera->scene != &scene) return;

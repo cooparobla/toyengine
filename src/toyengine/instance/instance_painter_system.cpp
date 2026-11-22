@@ -73,15 +73,13 @@ void InstancePainterSystem::execute(coopa::scene::Scene& scene, const coopa::sce
         }
     }
 
-    const glm::vec3 camera = [&]() {
-        using coopa::gfx::engine::components::CameraComponent;
-        const CameraComponent* cam = CameraComponent::main();
-        return cam != nullptr ? cam->get_world_position() : glm::vec3(0.0f);
-    }();
-
     for (InstancePainter* painter : painters) {
         Painted* p = painted_for_(*painter);
         if (p == nullptr) continue;
+        // Resolved per painter, not once for the whole scene: a painter may name a camera of
+        // its own, and what streams in is measured from whichever camera that is.
+        const auto* cam = toy::scene::resolve_view_camera(painter->camera_ref, scene, view_camera_);
+        const glm::vec3 camera = cam != nullptr ? cam->get_world_position() : glm::vec3(0.0f);
         update_painter_(scene, *painter, *p, camera);
     }
     if (physics_dirty_) {

@@ -70,15 +70,69 @@
 
 #include <uicoopa/render/icon_library.h>
 #include <uicoopa/layout/canvas.h>
+#include <toyengine/scene/view_camera.h>
 
 namespace toy {
 namespace core {
+
+void Engine::push_view_camera_(coopa::scene::Scene& scene,
+                               const coopa::gfx::engine::components::CameraComponent* camera) {
+    // Pushed by system NAME rather than by walking every system: these seven are the ones that
+    // measure "where is the viewer", and a system that does not is not meant to care.
+    static constexpr const char* kViewerRelative[] = {
+        "Terrain", "HeightmapTerrain", "Snow", "Water", "Weather", "ViewBlocker", "InstancePainter",
+    };
+    for (const char* name : kViewerRelative) {
+        if (auto* sys = dynamic_cast<toy::scene::ViewCameraAware*>(scene.find_system(name))) {
+            sys->set_view_camera(camera);
+        }
+    }
+}
+
+void Engine::sync_view_(coopa::scene::Scene& scene, render::ToyRenderPipeline& pipe,
+                        ViewSync& state,
+                        const coopa::gfx::engine::components::CameraComponent* camera, float dt,
+                        render::FrameProfile* prof) {
+    ViewSync* prev_sync = sync_;
+    render::ToyRenderPipeline* prev_pipe = active_pipeline_;
+    sync_ = &state;
+    active_pipeline_ = &pipe;
+
+    push_view_camera_(scene, camera);
+
+    // Before every sync below: the sky, the clouds, the fog and the surface state all read
+    // this one frame, so it has to be the same value for all of them within a frame.
+    sync_->world_frame = world_frame_source_ ? world_frame_source_(scene)
+                                             : env::WorldFrame{};   // no source: flat Z-up world
+    sync_water_render_state_(scene);
+    sync_weather_render_state_(scene);
+    sync_sky_render_state_(scene, dt);
+    sync_surface_state_(scene);
+    {
+        // After the host's pre_render hook, like the water sync: the batches point into
+        // the systems' buffers and go to THIS pipeline.
+        render::CpuTimer t(prof, render::CpuScope::DynamicMeshes);
+        sync_particle_render_state_(scene);
+    }
+    sync_ui_scene_blur_(scene);
+    // Last thing before the draw, because everything above may still move the scene:
+    // whatever wrote a transform after update()'s TransformResolve (350) -- a late_update()
+    // write, a deferred spawn flushed at the end of late_update(), a host's scene build,
+    // object rebuild or posed timeline frame (the editor's Play, inspector edits, animation
+    // scrubbing) -- left world matrices dirty, and render()'s gather reads the cached
+    // Transform::world_matrix() from several threads at once, which cannot resolve them.
+    // Resolved here, the frame draws this frame's poses.
+    coopa::scene::resolve_transforms(scene);
+
+    sync_ = prev_sync;
+    active_pipeline_ = prev_pipe;
+}
 
 void Engine::sync_overlay_layers_() {
     std::vector<coopa::scene::Scene*> scenes;
     scenes.reserve(overlay_layers_.size());
     for (const OverlayLayer& l : overlay_layers_) scenes.push_back(l.scene);
-    pipeline_->set_overlay_layers(std::move(scenes));
+    pipe_().set_overlay_layers(std::move(scenes));
 }
 
 void Engine::sync_live_profile_() {
@@ -86,9 +140,9 @@ void Engine::sync_live_profile_() {
     if (want == (live_profile_ != nullptr)) return;
     if (want) {
         live_profile_ = std::make_unique<render::FrameProfile>();
-        pipeline_->set_profiler(live_profile_.get());
+        pipe_().set_profiler(live_profile_.get());
     } else {
-        pipeline_->set_profiler(nullptr);   // waits for the GPU, then drops its queries
+        pipe_().set_profiler(nullptr);   // waits for the GPU, then drops its queries
         live_profile_.reset();
     }
 }
@@ -96,8 +150,8 @@ void Engine::sync_live_profile_() {
 void Engine::sync_particle_render_state_(coopa::scene::Scene& scene) {
     using coopa::gfx::engine::components::DirectionalLightComponent;
 
-    particle_frame_.quads.clear();
-    particle_frame_.meshes.clear();
+    sync_->particle_frame.quads.clear();
+    sync_->particle_frame.meshes.clear();
 
     // A camera-frustum test alone drops a shadow caster the instant its OWN bounds leave the
     // frustum -- which a low sun throws tens of metres past them. Sweeping the test volume
@@ -110,7 +164,7 @@ void Engine::sync_particle_render_state_(coopa::scene::Scene& scene) {
     // fit): elevation-scaled for every fit except "clipmap", whose outer levels reach
     // kilometres and are floored by shadow_clip_caster_reach instead -- a chunk whose shadow
     // would arrive from further than that is already past its own draw distance regardless.
-    const render::ToyRenderConfig& rc = pipeline_->render_config();
+    const render::ToyRenderConfig& rc = pipe_().render_config();
     DirectionalLightComponent* sun = nullptr;
     for (DirectionalLightComponent* l : scene.get_components<DirectionalLightComponent>()) {
         if (l->owner && l->owner->active()) { sun = l; break; }
@@ -130,8 +184,8 @@ void Engine::sync_particle_render_state_(coopa::scene::Scene& scene) {
         render::Frustum frustum{};
         if (cam) {
             view.camera_pos = cam->get_world_position();
-            const float aspect = static_cast<float>(pipeline_->render_width()) /
-                                 static_cast<float>(std::max(1u, pipeline_->render_height()));
+            const float aspect = static_cast<float>(pipe_().render_width()) /
+                                 static_cast<float>(std::max(1u, pipe_().render_height()));
             frustum = render::Frustum::from_matrix(cam->get_projection_matrix(aspect) * cam->get_view_matrix());
         }
         sys->collect_render(scene, view, [&](const glm::vec3& lo, const glm::vec3& hi, bool casts) {
@@ -141,7 +195,7 @@ void Engine::sync_particle_render_state_(coopa::scene::Scene& scene) {
             b.extent = 0.5f * (hi - lo);
             if (casts) b = render::sweep_bounds(b, sun_dir, shadow_reach);
             return frustum.intersects(b);
-        }, particle_frame_);
+        }, sync_->particle_frame);
     }
     // Painted instances join the same mesh-batch list: one instanced, persistently-buffered
     // draw per (chunk, prototype, part). Same frustum test (widened along the sun for casters)
@@ -153,8 +207,8 @@ void Engine::sync_particle_render_state_(coopa::scene::Scene& scene) {
         render::Frustum frustum{};
         if (cam != nullptr) {
             camera_pos = cam->get_world_position();
-            const float aspect = static_cast<float>(pipeline_->render_width()) /
-                                 static_cast<float>(std::max(1u, pipeline_->render_height()));
+            const float aspect = static_cast<float>(pipe_().render_width()) /
+                                 static_cast<float>(std::max(1u, pipe_().render_height()));
             frustum = render::Frustum::from_matrix(cam->get_projection_matrix(aspect) * cam->get_view_matrix());
         }
         painter->collect_render(scene, camera_pos, [&](const glm::vec3& lo, const glm::vec3& hi, bool casts) {
@@ -164,9 +218,9 @@ void Engine::sync_particle_render_state_(coopa::scene::Scene& scene) {
             b.extent = 0.5f * (hi - lo);
             if (casts) b = render::sweep_bounds(b, sun_dir, shadow_reach);
             return frustum.intersects(b);
-        }, particle_frame_);
+        }, sync_->particle_frame);
     }
-    pipeline_->set_particle_state(particle_frame_);
+    pipe_().set_particle_state(sync_->particle_frame);
 }
 
 fkyaml::node Engine::weather_node_(const fkyaml::node& settings) {
@@ -201,8 +255,8 @@ void Engine::WeatherRenderBase::restore(render::ToyRenderConfig& c) const {
 void Engine::sync_weather_render_state_(coopa::scene::Scene& scene) {
     weather::WeatherSystem* w = weather::find(scene);
     if (!w || !w->enabled() || !w->state().enabled) { restore_weather_atmosphere_(); return; }
-    render::ToyRenderConfig& c = pipeline_->render_config_mut();
-    if (!weather_applied_) { weather_base_.capture(c); weather_applied_ = true; }
+    render::ToyRenderConfig& c = pipe_().render_config_mut();
+    if (!sync_->weather_applied) { sync_->weather_base.capture(c); sync_->weather_applied = true; }
     const weather::Atmosphere& a = w->atmosphere();
     c.indirect.sky_zenith = a.sky_zenith;
     c.indirect.sky_horizon = a.sky_horizon;
@@ -216,13 +270,13 @@ void Engine::sync_weather_render_state_(coopa::scene::Scene& scene) {
     c.fog_max_opacity = a.fog_max_opacity;
     c.fog_height_falloff = a.fog_height_falloff;
     c.fog_sun_amount = a.fog_sun_amount;
-    c.exposure = weather_base_.exposure * a.exposure_scale;   // scaled, not owned: the row stays editable
+    c.exposure = sync_->weather_base.exposure * a.exposure_scale;   // scaled, not owned: the row stays editable
     c.cloud_coverage = std::clamp(w->state().cloud_cover, 0.0f, 1.0f);
 }
 
 void Engine::sync_sky_render_state_(coopa::scene::Scene& scene, float dt) {
     using coopa::gfx::engine::components::DirectionalLightComponent;
-    render::ToyRenderConfig& c = pipeline_->render_config_mut();
+    render::ToyRenderConfig& c = pipe_().render_config_mut();
     weather::WeatherSystem* w = weather::find(scene);
     const bool physical = c.sky_model == "physical";
     const bool space    = c.sky_model == "space";
@@ -240,20 +294,20 @@ void Engine::sync_sky_render_state_(coopa::scene::Scene& scene, float dt) {
         if (ws > 0.05f) wind_dir = wind / ws;
         cloud_speed *= std::clamp(ws / 5.0f, 0.25f, 4.0f);
     }
-    cloud_offset_ += glm::dvec2(wind_dir) * static_cast<double>(cloud_speed * std::max(dt, 0.0f));
+    sync_->cloud_offset += glm::dvec2(wind_dir) * static_cast<double>(cloud_speed * std::max(dt, 0.0f));
     // Kept for sync_cloud_state_() to publish: a layer that cannot slide (a shell about a
     // curved world's pole) needs this same wind expressed as an angular rate instead.
-    cloud_wind_dir_ = wind_dir;
-    cloud_wind_speed_ = cloud_speed;
+    sync_->cloud_wind_dir = wind_dir;
+    sync_->cloud_wind_speed = cloud_speed;
     // The flat clouds' morph: a phase through the shape volume's (repeating) depth, at the
     // layer's evolve rate -- accumulated, so changing the rate never jumps the shapes.
-    cloud_flat_phase_ = std::fmod(cloud_flat_phase_ + 0.0015 * std::max(c.flat_cloud_evolve, 0.0f) * std::max(dt, 0.0f), 1.0);
-    sky_time_ += std::max(dt, 0.0f);
+    sync_->cloud_flat_phase = std::fmod(sync_->cloud_flat_phase + 0.0015 * std::max(c.flat_cloud_evolve, 0.0f) * std::max(dt, 0.0f), 1.0);
+    sync_->sky_time += std::max(dt, 0.0f);
 
     render::SkyFrameState st;
     if (space) {
         // A world seen from orbit: no atmosphere to scatter through, so no transmittance LUTs,
-        // no sky_atmosphere_ gradient, and the scene's own near-black sky_zenith/horizon/ground
+        // no sync_->sky_atmosphere gradient, and the scene's own near-black sky_zenith/horizon/ground
         // stand as authored (restore_sky_colours_() undoes a lingering physical/weather
         // override from an earlier model switch; it is a no-op otherwise). Stars are full
         // strength regardless of the sun's elevation -- there is no daytime sky to drown them
@@ -292,26 +346,26 @@ void Engine::sync_sky_render_state_(coopa::scene::Scene& scene, float dt) {
         // sent at all: the moon sits opposite the sun, so in world space it is the sun's own
         // travel direction, which the lighting pass already has as dir_direction.
         st.night_floor        = 0.0f;   // a project's sky hook raises this where its world has a moon
-        st.time               = std::fmod(sky_time_, 3600.0f);
-        if (sky_state_hook_) sky_state_hook_(scene, world_frame_, dt, st);
-        pipeline_->set_sky_state(st);
+        st.time               = std::fmod(sync_->sky_time, 3600.0f);
+        if (sky_state_hook_) sky_state_hook_(scene, sync_->world_frame, dt, st);
+        pipe_().set_sky_state(st);
         sync_cloud_state_(scene, nullptr, dt);
         return;
     }
     if (!physical) {
         restore_sky_colours_();
-        pipeline_->set_sky_state(st);
+        pipe_().set_sky_state(st);
         sync_cloud_state_(scene, nullptr, dt);
         return;
     }
-    if (weather_live && sky_applied_) {
+    if (weather_live && sync_->sky_applied) {
         // The weather started over our colours and captured them as "the config's": hand it
         // the real ones, and let its base own them from here on.
-        weather_base_.zenith = sky_base_[0]; weather_base_.horizon = sky_base_[1]; weather_base_.ground = sky_base_[2];
-        sky_applied_ = false;
-    } else if (!weather_live && !sky_applied_) {
-        sky_base_ = {c.indirect.sky_zenith, c.indirect.sky_horizon, c.indirect.sky_ground};
-        sky_applied_ = true;
+        sync_->weather_base.zenith = sync_->sky_base[0]; sync_->weather_base.horizon = sync_->sky_base[1]; sync_->weather_base.ground = sync_->sky_base[2];
+        sync_->sky_applied = false;
+    } else if (!weather_live && !sync_->sky_applied) {
+        sync_->sky_base = {c.indirect.sky_zenith, c.indirect.sky_horizon, c.indirect.sky_ground};
+        sync_->sky_applied = true;
     }
 
     // The scene's sun: the same light the renderer picks (the first active one).
@@ -326,12 +380,12 @@ void Engine::sync_sky_render_state_(coopa::scene::Scene& scene, float dt) {
     // Sun illuminance the sky is scaled by: the clear-sky sun (the weather's, else the light's own).
     const float sun_ref = weather_live ? w->settings().sun_intensity : (light ? std::max(light->intensity, 0.0f) : 1.2f);
 
-    sky_atmosphere_.set_media(render::SkyAtmosphereMedia::earth(c.atmosphere_density, c.ozone));
+    sync_->sky_atmosphere.set_media(render::SkyAtmosphereMedia::earth(c.atmosphere_density, c.ozone));
     glm::vec3 cam_pos(0.0f);
     if (auto* cam = coopa::gfx::engine::components::CameraComponent::main()) cam_pos = cam->get_world_position();
-    const float view_r = sky_atmosphere_.view_radius(cam_pos.z);
+    const float view_r = sync_->sky_atmosphere.view_radius(cam_pos.z);
     const float K = k_sky_gain * sun_ref;
-    const weather::SkyGradient g = sky_atmosphere_.gradient(sun_to, k_moon_ratio, view_r);
+    const weather::SkyGradient g = sync_->sky_atmosphere.gradient(sun_to, k_moon_ratio, view_r);
     const glm::vec3 floor_col = glm::vec3(0.55f, 0.75f, 1.3f) * 1e-3f * K * 0.3f;
     glm::vec3 zenith = g.zenith * K + floor_col, horizon = g.horizon * K + floor_col, ground = g.ground * K + floor_col * 0.5f;
     if (c.clouds && coverage > 0.0f) {
@@ -352,14 +406,14 @@ void Engine::sync_sky_render_state_(coopa::scene::Scene& scene, float dt) {
     // The light's colour through the air: transmittance toward it, relative to straight up
     // (so a high sun stays as authored and a low one reddens and fades).
     const glm::vec3 light_to = light && glm::length(light->direction) > 1e-6f ? -glm::normalize(light->direction) : sun_to;
-    const glm::vec3 t_up = glm::max(sky_atmosphere_.transmittance(view_r, 1.0f), glm::vec3(1e-4f));
-    glm::vec3 tint = sky_atmosphere_.transmittance_toward(view_r, light_to) / t_up;
+    const glm::vec3 t_up = glm::max(sync_->sky_atmosphere.transmittance(view_r, 1.0f), glm::vec3(1e-4f));
+    glm::vec3 tint = sync_->sky_atmosphere.transmittance_toward(view_r, light_to) / t_up;
     // Without shadows, the cover dims the sun uniformly (the weather's condition dims its own).
     if (c.clouds && !c.cloud_shadows && !weather_live) tint *= glm::mix(1.0f, 0.3f, coverage * coverage);
     st.light_tint = glm::min(tint, glm::vec3(1.0f));
 
     st.active = true;
-    st.media = sky_atmosphere_.media();
+    st.media = sync_->sky_atmosphere.media();
     st.sun_to = sun_to;
     st.moon_to = -sun_to;
     st.sky_illuminance = K;
@@ -372,19 +426,19 @@ void Engine::sync_sky_render_state_(coopa::scene::Scene& scene, float dt) {
     st.star_visibility = c.sky_stars ? dark * dark * (3.0f - 2.0f * dark) * (c.clouds ? 1.0f - 0.5f * coverage : 1.0f) : 0.0f;
     st.night_floor = K * 0.3f;
 
-    st.time = std::fmod(sky_time_, 3600.0f);
-    pipeline_->set_sky_state(st);
-    if (sky_state_hook_) sky_state_hook_(scene, world_frame_, dt, st);
+    st.time = std::fmod(sync_->sky_time, 3600.0f);
+    pipe_().set_sky_state(st);
+    if (sky_state_hook_) sky_state_hook_(scene, sync_->world_frame, dt, st);
     sync_cloud_state_(scene, &st, dt);
 }
 
 void Engine::drive_sky_gradient(float blend, const glm::vec3& colour) {
     if (blend <= 1e-3f) { restore_sky_colours_(); return; }
-    render::ToyRenderConfig& rc = pipeline_->render_config_mut();
+    render::ToyRenderConfig& rc = pipe_().render_config_mut();
     // Remember what the config authored, once, so restore_sky_colours_() can put it back.
-    if (!sky_applied_) {
-        sky_base_ = {rc.indirect.sky_zenith, rc.indirect.sky_horizon, rc.indirect.sky_ground};
-        sky_applied_ = true;
+    if (!sync_->sky_applied) {
+        sync_->sky_base = {rc.indirect.sky_zenith, rc.indirect.sky_horizon, rc.indirect.sky_ground};
+        sync_->sky_applied = true;
     }
     // Only a slight lift toward white for horizon and ground. The gradient's zenith is WORLD
     // +Z, not the world's local up, so anywhere but the pole most of the visible sky falls in
@@ -392,15 +446,15 @@ void Engine::drive_sky_gradient(float blend, const glm::vec3& colour) {
     // except directly over the north pole.
     const glm::vec3 pale = glm::mix(colour, glm::vec3(1.0f), 0.12f);
     const float t = std::clamp(blend, 0.0f, 1.0f);
-    rc.indirect.sky_zenith  = glm::mix(sky_base_[0], colour, t);
-    rc.indirect.sky_horizon = glm::mix(sky_base_[1], pale, t);
-    rc.indirect.sky_ground  = glm::mix(sky_base_[2], pale, t);
+    rc.indirect.sky_zenith  = glm::mix(sync_->sky_base[0], colour, t);
+    rc.indirect.sky_horizon = glm::mix(sync_->sky_base[1], pale, t);
+    rc.indirect.sky_ground  = glm::mix(sync_->sky_base[2], pale, t);
 }
 
 void Engine::sync_cloud_state_(coopa::scene::Scene& scene, const render::SkyFrameState* sky,
                               float dt) {
     using coopa::gfx::engine::components::DirectionalLightComponent;
-    const render::ToyRenderConfig& c = pipeline_->render_config();
+    const render::ToyRenderConfig& c = pipe_().render_config();
     render::CloudFrameState cs;
     cs.active = c.clouds;
     cs.type = c.cloud_type == "flat" ? render::CloudType::Flat : render::CloudType::Volumetric;
@@ -409,18 +463,18 @@ void Engine::sync_cloud_state_(coopa::scene::Scene& scene, const render::SkyFram
     cs.thickness = std::max(c.cloud_thickness, 0.1f);
     cs.density = std::max(c.cloud_density, 0.0f);
     cs.scale = std::clamp(c.cloud_scale, 1e-4f, 100.0f);
-    cs.offset = cloud_offset_;
-    cs.wind_dir = cloud_wind_dir_;
-    cs.wind_speed = cloud_wind_speed_;
-    cs.time = std::fmod(sky_time_, 3600.0f);
+    cs.offset = sync_->cloud_offset;
+    cs.wind_dir = sync_->cloud_wind_dir;
+    cs.wind_speed = sync_->cloud_wind_speed;
+    cs.time = std::fmod(sync_->sky_time, 3600.0f);
     cs.shadows = c.cloud_shadows;
-    cs.world_frame = world_frame_;
+    cs.world_frame = sync_->world_frame;
     // The rigid-rotation terms and the ambient fills are a curved world's alone: the cloud
     // hook below is what sets them, and a flat world leaves them at rest.
     // A project that models a world shape the engine does not finishes the layer here -- early
     // enough that the camera fade below reads the deck it actually wrote. See
     // Engine::set_cloud_state_hook().
-    if (cloud_state_hook_) cloud_state_hook_(scene, world_frame_, dt, cs);
+    if (cloud_state_hook_) cloud_state_hook_(scene, sync_->world_frame, dt, cs);
     cs.shadow_strength = std::clamp(c.cloud_shadow_strength, 0.0f, 1.0f);
     cs.shadow_distance = std::max(c.cloud_shadow_distance, 1.0f);
     cs.flat_size = std::max(c.flat_cloud_size, 0.5f);
@@ -429,14 +483,14 @@ void Engine::sync_cloud_state_(coopa::scene::Scene& scene, const render::SkyFram
     cs.flat_outline = std::clamp(c.flat_cloud_outline, 0.0f, 1.0f);
     cs.flat_turbulence = std::clamp(c.flat_cloud_turbulence, 0.0f, 4.0f);
     cs.flat_evolve = std::max(c.flat_cloud_evolve, 0.0f);
-    cs.flat_phase = static_cast<float>(cloud_flat_phase_);
+    cs.flat_phase = static_cast<float>(sync_->cloud_flat_phase);
 
     glm::vec3 cam_pos(0.0f);
     if (auto* cam = coopa::gfx::engine::components::CameraComponent::main()) cam_pos = cam->get_world_position();
     if (c.cloud_camera_fade) {
         // Altitude above the deck's top. On a flat world altitude_at() IS cam_pos.z, so this
         // is the same expression it always was; on a curved one it is the radial height.
-        const float above = world_frame_.altitude_at(cam_pos) - (cs.altitude + cs.thickness);
+        const float above = sync_->world_frame.altitude_at(cam_pos) - (cs.altitude + cs.thickness);
         const float end = std::max(c.cloud_fade_end, c.cloud_fade_start + 0.01f);
         const float f = std::clamp((above - c.cloud_fade_start) / (end - c.cloud_fade_start), 0.0f, 1.0f);
         cs.fade = f * f * (3.0f - 2.0f * f);
@@ -474,12 +528,12 @@ void Engine::sync_cloud_state_(coopa::scene::Scene& scene, const render::SkyFram
             cs.light_color = glm::vec3(0.0f);
         }
     }
-    pipeline_->set_cloud_state(cs);
+    pipe_().set_cloud_state(cs);
 }
 
 void Engine::sync_surface_state_(coopa::scene::Scene& scene) {
     render::SurfaceFrameState st;
-    const render::ToyRenderConfig& c = pipeline_->render_config();
+    const render::ToyRenderConfig& c = pipe_().render_config();
     weather::WeatherSystem* w = weather::find(scene);
     const bool live = w && w->enabled() && w->state().enabled;
     if (live) {
@@ -523,20 +577,20 @@ void Engine::sync_surface_state_(coopa::scene::Scene& scene) {
     // Local environmental influences -- the only part of the field the GPU fold can use.
     if (const env::EnvSystem* e = env::find_env(scene)) st.env = e->field();
 
-    pipeline_->set_surface_state(std::move(st));
+    pipe_().set_surface_state(std::move(st));
 }
 
 void Engine::restore_sky_colours_() {
-    if (!sky_applied_) return;
-    render::ToyRenderConfig& c = pipeline_->render_config_mut();
-    c.indirect.sky_zenith = sky_base_[0]; c.indirect.sky_horizon = sky_base_[1]; c.indirect.sky_ground = sky_base_[2];
-    sky_applied_ = false;
+    if (!sync_->sky_applied) return;
+    render::ToyRenderConfig& c = pipe_().render_config_mut();
+    c.indirect.sky_zenith = sync_->sky_base[0]; c.indirect.sky_horizon = sync_->sky_base[1]; c.indirect.sky_ground = sync_->sky_base[2];
+    sync_->sky_applied = false;
 }
 
 void Engine::restore_weather_atmosphere_() {
-    if (!weather_applied_) return;
-    weather_base_.restore(pipeline_->render_config_mut());
-    weather_applied_ = false;
+    if (!sync_->weather_applied) return;
+    sync_->weather_base.restore(pipe_().render_config_mut());
+    sync_->weather_applied = false;
 }
 
 water::WaterSettings Engine::water_settings_for_(render::RenderQuality q) {
@@ -554,7 +608,7 @@ void Engine::sync_water_render_state_(coopa::scene::Scene& scene) {
     auto* water = dynamic_cast<water::WaterSystem*>(scene.find_system("Water"));
     if (water) {
         // water_quality is live: a changed tier reaches the system for its next update.
-        const render::RenderQuality q = pipeline_->render_config().water_quality;
+        const render::RenderQuality q = pipe_().render_config().water_quality;
         if (water->settings().quality != water_settings_for_(q).quality) water->set_settings(water_settings_for_(q));
         const water::WaterSettings& ws = water->settings();
         state.ripple_layers   = ws.ripple_layers;
@@ -605,12 +659,12 @@ void Engine::sync_water_render_state_(coopa::scene::Scene& scene) {
             }
         }
     }
-    pipeline_->set_water_state(std::move(state));
+    pipe_().set_water_state(std::move(state));
 
     // A curved world gives the sky and fog a frame to be evaluated in; Engine re-asked for it
     // for this frame before the syncs ran, so the renderer gets the same centre and radius the
-    // weather and the surface state did. nullopt keeps the pipeline's `if (world_frame_)` idiom.
-    pipeline_->set_world_frame(world_frame_.curved() ? std::optional<render::WorldFrameState>(world_frame_)
+    // weather and the surface state did. nullopt keeps the pipeline's `if (sync_->world_frame)` idiom.
+    pipe_().set_world_frame(sync_->world_frame.curved() ? std::optional<render::WorldFrameState>(sync_->world_frame)
                                                 : std::nullopt);
 }
 } // namespace core

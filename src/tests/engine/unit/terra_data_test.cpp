@@ -375,3 +375,62 @@ COOPA_TEST(refresh_steps_is_idempotent_on_a_gentle_slope) {
         expect(h2.at(tx, 0).steps == steps_1[tx], "re-deriving from the expansion must not drift");
     }
 }
+
+// --------------------------------------------------------------------------- the roof span
+//
+// `TileCell::roof_steps`/`roof_top` give a column a SECOND solid span, above the open air over
+// its ground -- a cave roof. Every world that has ever existed has none, so the first thing
+// these pin is that the record is unchanged where the flag is clear.
+
+COOPA_TEST(a_cell_without_a_roof_is_the_record_it_has_always_been) {
+    const toy::world::TileCell bare;
+    // Still 24 bytes, still the on-disk record: the roof spent the reserved bytes rather than
+    // growing the struct, so no `.terra` ever written changes size or layout.
+    ASSERT_EQ(sizeof(toy::world::TileCell), static_cast<std::size_t>(24));
+    ASSERT_TRUE(!bare.has(toy::world::TileCell::Roofed));
+    ASSERT_TRUE(!bare.roofed());
+
+    const toy::world::TileColumn col = toy::world::tile_column(bare, 1.0f);
+    ASSERT_TRUE(!col.roofed);
+    // And the one thing every mesher and every coarse tier reads is still the ground.
+    ASSERT_EQ(col.outer_top(), col.steps);
+}
+
+COOPA_TEST(a_roofed_column_carries_two_spans_and_shows_its_roof_from_outside) {
+    toy::world::TileCell cell;
+    cell.steps = 4;                 // the floor
+    cell.roof_steps = 11;           // the underside of the roof: seven steps of air between
+    cell.roof_top = 14;             // three steps of roof over that
+    cell.set_top_kind(toy::world::TileKind::Stone);
+    cell.set_roof_top_kind(toy::world::TileKind::Ice);
+    cell.set_roof_side_kind(toy::world::TileKind::Ice);
+    cell.set(toy::world::TileCell::Roofed, true);
+
+    ASSERT_TRUE(cell.roofed());
+    ASSERT_TRUE(cell.roof_top_kind() == toy::world::TileKind::Ice);
+    // The roof's kinds are packed in their own byte and must not disturb the ground's.
+    ASSERT_TRUE(cell.top_kind() == toy::world::TileKind::Stone);
+
+    const toy::world::TileColumn col = toy::world::tile_column(cell, 1.0f);
+    ASSERT_TRUE(col.roofed);
+    ASSERT_EQ(col.steps, 4);
+    ASSERT_EQ(col.roof_steps, 11);
+    ASSERT_EQ(col.roof_top, 14);
+    // Seen from outside the world the roof is the surface, not the floor under it.
+    ASSERT_EQ(col.outer_top(), 14);
+    ASSERT_TRUE(col.outer_top_kind() == toy::world::TileKind::Ice);
+}
+
+COOPA_TEST(a_roof_with_no_room_under_it_is_not_a_roof) {
+    // The flag alone does not make a roof: a span that does not stand above its own underside
+    // is a degenerate record, and treating it as real would have the mesher emit a roof of zero
+    // thickness -- two coincident faces, which is exactly the z-fighting the model avoids by
+    // keeping its comparisons exact.
+    toy::world::TileCell flat;
+    flat.steps = 2;
+    flat.roof_steps = 9;
+    flat.roof_top = 9;
+    flat.set(toy::world::TileCell::Roofed, true);
+    ASSERT_TRUE(!flat.roofed());
+    ASSERT_EQ(toy::world::tile_column(flat, 1.0f).outer_top(), 2);
+}

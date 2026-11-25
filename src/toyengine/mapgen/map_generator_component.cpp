@@ -131,6 +131,14 @@ bool MapGeneratorComponent::apply_to(world::TerrainComponent& terrain, coopa::jo
     std::shared_ptr<const world::TerrainSampler> sampler = built;
     sampler_ = sampler;
 
+    // NOTHING about the fluid is set here. What a basin is filled with is written per tile by
+    // the bake (`TileCell::water_kind`) and read back per chunk where the body is built, in
+    // TerrainSystem::add_chunk_water_(). Setting it here instead -- on the terrain's shared
+    // `water_look`, at the moment the generator applies -- looked equivalent and was not: a
+    // terrain only applies its generator when it has no data yet, so a world LOADED from its
+    // `.terra` (which is every world the second time, including every entry into play mode)
+    // skipped it entirely and came back as water.
+
     // The map names a surface as a TileKind; the terrain names its own in `layers:`. Resolve
     // one to the other BY NAME, not by index -- a terrain's list is its own, and only the
     // built-in set happens to be in TileKind order. A kind the terrain has no layer for falls

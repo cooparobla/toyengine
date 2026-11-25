@@ -67,12 +67,13 @@ vec4 styled_sample(sampler2D tex, vec2 uv);
 // backbone's smoothly-interpolated frag_uv -- see that file's doc for why.
 layout(location = 6) flat in float frag_blend_code;
 
-// Twelve, though TileKind has THIRTEEN (cubeworld appended Road). The clamp below is doing real
-// work: a TERRAIN_CURVED build's chunks decode surface nibbles above the table's range, and
-// raising this to 13 moved 1.2% of such a world's pixels -- 27x the capture noise -- by routing
-// them to a new entry instead of salt. Whatever those nibbles are, they are not roads: the engine's own bake never
-// produces TileKind::Road. Extending this table means fixing that decode first.
-const int k_kind_count = 12;
+// Every TileKind, and the tables below must stay that long. The clamp in styled_kind() remains
+// as a backstop rather than as load-bearing logic: the out-of-range decode this count used to
+// guard against was the SMOOTH interpolation of the blend code, which terrain_styled.vert now
+// carries through its own `flat` varying (see that file -- a perspective-corrected varying
+// drifted far enough on a distant grazing triangle to round to a different kind). With the code
+// arriving exactly, a nibble can only be a kind the bake wrote.
+const int k_kind_count = 15;
 
 // x = broad blotches, y = mid grain, z = fine grain, w = specks (amplitudes, as albedo fractions)
 const vec4 k_detail[k_kind_count] = vec4[](
@@ -87,7 +88,10 @@ const vec4 k_detail[k_kind_count] = vec4[](
     vec4(0.10, 0.08, 0.06, 0.10),  // moss
     vec4(0.07, 0.08, 0.06, 0.10),  // clay
     vec4(0.07, 0.08, 0.06, 0.08),  // ash
-    vec4(0.03, 0.03, 0.04, 0.03)); // salt
+    vec4(0.03, 0.03, 0.04, 0.03),  // salt
+    vec4(0.05, 0.05, 0.04, 0.04),  // road
+    vec4(0.09, 0.07, 0.05, 0.03),  // lava: broad plates, and the fissures between them
+    vec4(0.07, 0.08, 0.05, 0.05)); // basalt
 
 // x = strata (horizontal banding on walls), y = bump strength, z = warm/cool hue drift,
 // w = speck polarity (+1 lighter specks, -1 darker)
@@ -103,7 +107,10 @@ const vec4 k_extra[k_kind_count] = vec4[](
     vec4(0.00, 0.30, 0.5,  1.0),   // moss
     vec4(0.04, 0.40, 0.3,  1.0),   // clay
     vec4(0.03, 0.40, 0.1, -1.0),   // ash
-    vec4(0.00, 0.10, 0.0,  1.0));  // salt
+    vec4(0.00, 0.10, 0.0,  1.0),   // salt
+    vec4(0.02, 0.25, 0.2,  1.0),   // road
+    vec4(0.00, 0.35, 0.0, -1.0),   // lava: dark pits, no strata -- a flow has no bedding
+    vec4(0.05, 0.45, 0.0, -1.0));  // basalt
 
 // How readily a surface holds standing water, 0..1 -- what rain pools on and what it drains
 // through. Sand and ash take it away; stone, clay and trodden ground keep it.
@@ -119,13 +126,28 @@ const float k_holds_water[k_kind_count] = float[](
     0.80,  // moss
     1.00,  // clay
     0.25,  // ash
-    0.30); // salt
+    0.30,  // salt
+    1.00,  // road -- trodden ground keeps it
+    0.00,  // lava -- rain does not pool on it
+    0.60); // basalt
 
 // Octave frequencies, cycles per world unit (one tile is one unit in the stock scenes).
 const float k_freq_broad = 0.22;
 const float k_freq_mid   = 1.7;
 const float k_freq_fine  = 6.5;
 const float k_freq_speck = 5.0;
+
+/// Black-body heat, 0 (barely glowing) to 1 (white hot). The same ramp and the same magnitudes
+/// gfx/surface/burn.glsl uses for a burn front, which are the ones already tuned to this
+/// engine's exposure -- duplicated rather than included because burn.glsl brings a whole
+/// surface hook with it, and this needs only the curve.
+vec3 styled_heat(float t) {
+    t = clamp(t, 0.0, 1.0);
+    vec3 dull   = vec3(0.65, 0.07, 0.01);
+    vec3 orange = vec3(1.00, 0.33, 0.03);
+    vec3 pale   = vec3(1.00, 0.78, 0.32);
+    return t < 0.5 ? mix(dull, orange, t * 2.0) : mix(orange, pale, (t - 0.5) * 2.0);
+}
 
 // Radius, in tiles, of the curve that replaces a kind boundary's corner. At most 0.5, the
 // quadrant's own size.
@@ -329,4 +351,30 @@ void gfx_surface_fragment(inout GfxSurface s) {
     float hollow = clamp(blotch * 0.5 + 0.5, 0.0, 1.0);
     float puddle = k_holds_water[kind] * smoothstep(0.90, 0.99, up) * smoothstep(0.40, 0.85, hollow);
     gfx_wet_apply(s, geo_n, puddle);
+
+    // Heat, for the one kind that emits it. The STRENGTH comes from the metallic-roughness
+    // atlas's red channel -- unread by the G-buffer, which takes only .bg, so it is a free
+    // per-kind channel costing no sampler, no descriptor and no uniform (`shader_params` is
+    // fully spent on the atlas grid, the height step and the tile size, and there is nothing
+    // left in it).
+    //
+    // What makes this read as molten rather than as orange rock is that the glow is NOT
+    // uniform: it rides the same prefiltered detail the albedo does, so the fissures between
+    // cooled plates light up and the plates themselves stay nearly black. Driving it from the
+    // mipmapped detail rather than from analytic noise also means the glow filters with
+    // distance exactly as the surface does, instead of flickering per pixel under motion.
+    float heat = GFX_SURFACE_SAMPLE(u_metallic_roughness_map, frag_uv).r;
+    if (heat > 0.0) {
+        // Dark detail is a crack. Narrowed by a square so the hot lines stay thin and the
+        // crust between them stays crust.
+        float fissure = smoothstep(0.10, 0.85, -(blotch * 0.6 + grain * 0.4));
+        fissure *= fissure;
+        // A floor under it, so a plate is embers rather than a hole in the world.
+        //
+        // The magnitudes are far below burn.glsl's 3.4-4.5, and deliberately: a burn front is a
+        // thin travelling rim on one object, while this is GROUND, and a whole hemisphere of it
+        // is in frame at once. At the fire's brightness a lava world simply saturates to white
+        // and every cone, fissure and shadow in it disappears.
+        s.emissive += styled_heat(0.25 + 0.6 * fissure) * heat * (0.05 + 1.1 * fissure);
+    }
 }

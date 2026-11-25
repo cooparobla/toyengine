@@ -135,7 +135,8 @@ inline bool landmark_suits_biome(LandmarkKind kind, Biome biome) {
     switch (kind) {
         case LandmarkKind::Volcano:
             return biome == Biome::VolcanicField || biome == Biome::Scorched
-                || biome == Biome::Badlands || biome == Biome::Bare;
+                || biome == Biome::Badlands || biome == Biome::Bare
+                || biome == Biome::LavaField || biome == Biome::BasaltPlain;
         case LandmarkKind::Glacier:
             return biome == Biome::Glacier || biome == Biome::Ice || biome == Biome::Snow;
         case LandmarkKind::Oasis:

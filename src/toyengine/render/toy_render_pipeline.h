@@ -96,6 +96,7 @@
 #include "toyengine/render/passes/contact_shadow_pass.h"
 #include "toyengine/render/passes/motion_blur_pass.h"
 #include <gfxcoopa/engine/data/camera_ubo.h>
+#include <gfxcoopa/engine/data/texture.h>
 #include <gfxcoopa/engine/components/camera_component.h>
 #include <gfxcoopa/engine/components/directional_light.h>
 #include <gfxcoopa/engine/components/point_light.h>
@@ -467,6 +468,26 @@ public:
     void set_sky_state(const SkyFrameState& state) { sky_state_ = state; }
     /** @brief This frame's cloud layer (render clouds), with either sky model (see sky_state.h). */
     void set_cloud_state(const CloudFrameState& state) { cloud_state_ = state; }
+
+    /// The sky-body atlas's fixed size, texels. Its descriptor is bound once at construction;
+    /// only its CONTENTS change (Texture::update), which is what keeps the binding
+    /// startup-fixed-safe.
+    static constexpr uint32_t kSkyBodyAtlasWidth = 4096;
+    static constexpr uint32_t kSkyBodyAtlasHeight = 2048;
+
+    /**
+     * @brief Replaces a region of the sky-body atlas -- the faces the sky's additional moon
+     *        discs sample (`SkyMoonState::atlas_rect`).
+     *
+     * Blocks on a one-shot upload; call from update, between frames, never mid-record. The
+     * atlas starts white, so a disc whose rect is written before its region is uploaded would
+     * draw flat white -- upload first, then publish the rect.
+     *
+     * @param rgba8 The region's texels, tightly packed RGBA8 (sRGB), w * h * 4 bytes.
+     * @param x,y Region origin, texels.
+     * @param w,h Region size, texels; must lie inside the atlas.
+     */
+    void update_sky_body_atlas(const void* rgba8, uint32_t x, uint32_t y, uint32_t w, uint32_t h);
     const CloudFrameState& cloud_state() const { return cloud_state_; }
     const SkyFrameState& sky_state() const { return sky_state_; }
     /** @brief True when this frame draws the volumetric cloud layer's march (on, and not faded out). */
@@ -1797,6 +1818,9 @@ private:
     std::unique_ptr<coopa::gfx::engine::passes::VolumetricsPass> volumetrics_pass_;
     std::unique_ptr<coopa::gfx::engine::passes::FroxelVolumetricsPass> froxel_volumetrics_pass_;
     glm::vec3 prev_vol_cam_pos_{0.0f};      ///< Last frame's camera, for froxel reprojection.
+    /// Last frame's fitted froxel grid range. The history grid was laid out with it, so the
+    /// reprojection has to map distance through it rather than through this frame's.
+    glm::vec2 prev_froxel_near_far_{0.1f, 40.0f};
     bool      froxel_history_valid_ = false; ///< A previous frame filled the froxel grid.
     uint32_t  froxel_last_frame_    = 0;     ///< frame_index_ of the last frame that filled it.
 
@@ -1863,6 +1887,9 @@ private:
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout>   contact_extra_layout_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>        contact_extra_pool_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>         contact_extra_set_;
+    /// The sky-body atlas (binding 4 of the extra set): built once at construction, white until
+    /// an app streams moon faces into it with update_sky_body_atlas().
+    std::unique_ptr<coopa::gfx::engine::data::Texture>           sky_body_atlas_;
     std::unique_ptr<coopa::gfx::engine::passes::DeferredLightingPass> toy_lighting_pass_;
     std::unique_ptr<coopa::gfx::engine::passes::StylizePass> stylize_pass_;
     // debug_view diagnostic (see build_post_chain_()'s own doc on this instance) -- the

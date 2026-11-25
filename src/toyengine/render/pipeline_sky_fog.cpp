@@ -8,6 +8,7 @@
  */
 
 #include <cmath>
+#include <limits>
 
 #include <toyengine/render/toy_render_pipeline.h>
 #include <glm/gtx/quaternion.hpp>
@@ -76,7 +77,9 @@ void ToyRenderPipeline::record_clouds_(coopa::gfx::command::CommandBuffer& cmd, 
     // sinks (cloud_shadow_layer.z), so below that point it would render for nothing.
     const bool shadows = cloud_shadows_active() && dir && current_light_data().cloud_shadow_layer.z > 0.0f;
     if (!volumetric) {
-        sky_cloud_pass_->ensure_noise(cmd);
+        // The flat layer reads the weather map directly; it has no pole and so no banding, but
+        // its map is seeded the same way.
+        sky_cloud_pass_->ensure_noise(cmd, cs.weather_seed);
         cloud_overlay_pass_->upload_flat(ctx.frame_slot, passes::CloudOverlayPass::flat_frame_of(cs));
         if (shadows) {
             cloud_shadow_pass_->render_flat(cmd, ctx.frame_slot, cloud_shadow_place_, -glm::normalize(dir->direction));
@@ -148,6 +151,27 @@ void ToyRenderPipeline::record_clouds_(coopa::gfx::command::CommandBuffer& cmd, 
         cp.spin_angle = static_cast<float>(a);
     }
     cp.spin_delta = cs.spin_delta;
+    cp.albedo = cs.albedo;
+    cp.albedo_deep = cs.albedo_deep;
+    cp.deep_onset = cs.deep_onset;
+    // Bands and storms need a pole to be measured about, and a flat world has none.
+    const bool curved = cs.world_frame.radius > 0.0f;
+    cp.bands = curved ? cs.bands : glm::vec4(0.0f);
+    cp.weather_seed = cs.weather_seed;
+    cp.storm_count = 0;
+    if (curved) {
+        const int n = std::min<int>(static_cast<int>(cs.storms.size()),
+                                    static_cast<int>(passes::SkyCloudPass::kMaxStorms));
+        for (int i = 0; i < n; ++i) {
+            const CloudFrameState::Storm& st = cs.storms[static_cast<std::size_t>(i)];
+            // cos(radius), so the march's inside test is one dot against one number.
+            cp.storm[static_cast<std::size_t>(i)] =
+                glm::vec4(glm::normalize(st.direction), std::cos(std::max(st.angular_radius, 1e-4f)));
+            cp.storm_spin[static_cast<std::size_t>(i)] =
+                glm::vec4(st.swirl, st.lift, glm::clamp(st.eye, 0.0f, 0.9f), st.wall);
+        }
+        cp.storm_count = n;
+    }
     cp.day_fill = cs.day_fill;
     cp.night_fill = cs.night_fill;
     cp.time = cs.time;
@@ -500,20 +524,83 @@ void ToyRenderPipeline::update_volumetrics_data_(coopa::scene::Scene& scene, con
                                     static_cast<float>(froxel_volumetrics_pass_->grid_height()),
                                     static_cast<float>(froxel_volumetrics_pass_->slices()),
                                     static_cast<float>(coopa::gfx::engine::passes::FroxelVolumetricsPass::kAtlasColumns));
-        const float far = glm::max(config_.volumetrics_max_distance, 0.2f);
+        const float max_far = glm::max(config_.volumetrics_max_distance, 0.2f);
+        float near = 0.1f;
+        float far  = max_far;
+
+        // Fit the grid to where the volumes actually are. The slices are spread exponentially
+        // over [near, far], so that range is what decides a slice's length -- spanning the whole
+        // march distance spends half the grid on empty air in front of the camera and leaves one
+        // slice covering tens of world units out where the volumes sit. Each volume contributes
+        // its world bounding sphere; the union's near and far faces are the range worth covering.
+        //
+        // `finest` is the shortest length any of them varies over, which is what the inject pass
+        // needs to decide how many points to average inside a slice (froxel_params2.z).
+        float finest = 0.0f;
+        if (volume_count > 0) {
+            float fit_near = std::numeric_limits<float>::max();
+            float fit_far  = 0.0f;
+            for (uint32_t i = 0; i < volume_count; ++i) {
+                const auto* vc = volumes[i];
+                const glm::mat4 world = (vc->owner && vc->owner->get_transform())
+                    ? vc->owner->get_transform()->get_world_matrix() : glm::mat4(1.0f);
+                const glm::vec3 centre(world[3]);
+                // The largest axis scale, so a non-uniformly scaled volume is still bounded.
+                const float scale = glm::max(glm::length(glm::vec3(world[0])),
+                                    glm::max(glm::length(glm::vec3(world[1])),
+                                             glm::length(glm::vec3(world[2]))));
+                // A Shell's reach is its outer radius (extent.x); a Sphere's is the same field;
+                // a Box's is the half-diagonal of its extents.
+                const float local_reach = (vc->shape == VolumeShape::Box)
+                                        ? glm::length(vc->extent) : vc->extent.x;
+                const float reach = glm::max(local_reach * scale, 0.0f);
+                const float d = glm::distance(cam_pos, centre);
+                fit_near = glm::min(fit_near, d - reach);
+                fit_far  = glm::max(fit_far,  d + reach);
+
+                // What the volume's field varies over. A Shell's gradient IS its scale height;
+                // anything else is bounded below by its own smallest extent.
+                float feature = (vc->shape == VolumeShape::Shell)
+                              ? vc->height_falloff
+                              : glm::min(vc->extent.x, glm::min(vc->extent.y, vc->extent.z));
+                feature *= scale;
+                if (feature > 1e-4f) finest = (finest > 0.0f) ? glm::min(finest, feature) : feature;
+            }
+            if (config_.volumetrics_froxel_fit && fit_far > 0.0f) {
+                // A hair of margin either side so a volume's own edge is never the first or last
+                // boundary, and never past max_far -- nothing is marched beyond that.
+                near = glm::clamp(fit_near * 0.95f, 0.1f, max_far * 0.5f);
+                far  = glm::clamp(fit_far * 1.05f, near * 1.01f, max_far);
+            }
+        }
         // History is last frame's grid only if last frame ran this pass with the same grid:
         // record_grid() ping-pongs on frame parity, so a skipped frame (volumetrics toggled
         // off and back on) would otherwise read a grid two or more frames stale.
         const bool history_ok = froxel_history_valid_ && prev_view_proj_valid_ &&
                                 froxel_last_frame_ + 1 == frame_index_;
-        vol.froxel_params   = glm::vec4(0.1f, far, glm::clamp(config_.volumetrics_froxel_history, 0.0f, 0.99f),
+        // Last frame's range, before this frame's overwrites it: the history grid was laid out
+        // with that pair, so reprojecting into it has to map distance through it.
+        vol.prev_froxel_params = glm::vec4(prev_froxel_near_far_, 0.0f, 0.0f);
+        vol.froxel_params   = glm::vec4(near, far, glm::clamp(config_.volumetrics_froxel_history, 0.0f, 0.99f),
                                         history_ok ? 1.0f : 0.0f);
         vol.prev_view_proj  = prev_unjittered_view_proj_;
         vol.prev_camera_pos = glm::vec4(prev_vol_cam_pos_, 0.0f);
+        // slice_samples 0 is "decide per froxel", which is what a finest-feature length lets the
+        // shader do; an explicit count pins it by handing over a length that forces exactly that
+        // many samples in the longest slice.
+        const uint32_t slice_samples = glm::min(config_.volumetrics_froxel_slice_samples, 8u);
+        float feature = finest;
+        if (slice_samples == 1u) {
+            feature = 0.0f;                                  // one point per slice, as before
+        } else if (slice_samples > 1u) {
+            const float longest = far - far / glm::pow(far / near, 1.0f / glm::max(vol.froxel_grid.z, 1.0f));
+            feature = longest / static_cast<float>(slice_samples);
+        }
         vol.froxel_params2  = glm::vec4(
             static_cast<float>(glm::clamp(config_.volumetrics_froxel_miss_samples, 1u, 16u)),
             config_.aa_mode == "taa" ? glm::max(config_.volumetrics_froxel_lookup_jitter, 0.0f) : 0.0f,
-            0.0f, 0.0f);
+            glm::max(feature, 0.0f), 0.0f);
+        prev_froxel_near_far_ = glm::vec2(near, far);
         prev_vol_cam_pos_     = cam_pos;
         froxel_history_valid_ = true;
         froxel_last_frame_    = frame_index_;

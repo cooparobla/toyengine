@@ -60,6 +60,35 @@ public:
     /** @brief Forgets every entry (an editor opening a scene fresh; tests). Live holders keep theirs. */
     void clear();
 
+    /**
+     * @brief Forgets ONE entry: a streamed world leaving memory.
+     *
+     * The store is keyed on path and holds what it loads for the life of the process, which is
+     * right while a scene streams one world in and out of view -- the second visit is free. A
+     * project that streams many worlds through one scene needs the other half of that: without
+     * this, every world ever visited stays resident, and the tiles of a large one are hundreds
+     * of megabytes each.
+     *
+     * Refused by default for an entry with unsaved edits, because dropping sculpted work
+     * silently is the one outcome worth never doing. `discard_unsaved` is for the other kind of
+     * entry: one a generator filled in memory and no one authored, which the next `acquire()`
+     * rebuilds from the same seed. Note that an entry a world bake has just filled counts as
+     * unsaved -- filling the grid IS an edit -- so a streamed, generated world needs the flag.
+     *
+     * A caller still holding the `shared_ptr` keeps its data either way; what goes is the
+     * store's own reference and the cached earlier shapes beside it, so the next `acquire()`
+     * reads the file again (or rebakes, if there is no file).
+     *
+     * @param path The entry's path, as given to `acquire()`.
+     * @param discard_unsaved Drop the entry even with unsaved edits. Only for derived data.
+     * @return True when an entry was forgotten; false when there was none, or it was dirty and
+     *         `discard_unsaved` was false.
+     */
+    bool release(const std::string& path, bool discard_unsaved = false);
+
+    /** @brief Whether the store is holding an entry for `path`. */
+    bool contains(const std::string& path) const;
+
 private:
     struct Entry {
         std::string path;

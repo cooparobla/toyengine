@@ -21,6 +21,7 @@
 
 #include <coopa/maps/biome.h>
 #include <coopa/maps/portable_random.h>
+#include <coopa/maps/volcano.h>
 
 namespace coopa {
 namespace maps {
@@ -376,6 +377,18 @@ struct NaturalTerrainConfig {
     double plateau_coverage = 0.25;
     /** @brief How far the landform fields are pushed around, in grid units: bends ridges and valleys. */
     double warp = 1.5;
+    /**
+     * @brief Impact craters over the land: bowls with raised rims, in three sizes.
+     *
+     * The amplitude of the field, 0 (none -- the default, and every existing map) to 1. An
+     * analytic field rather than a noise one: each lattice cell of each octave holds at most
+     * one crater, jittered and sized to stay inside its cell, so the field needs no neighbour
+     * search and cannot seam. Airless worlds are the audience; a weathered world wants at most
+     * a trace.
+     */
+    double craters = 0.0;
+    /** @brief Chance each lattice cell of each octave holds a crater, 0 to 1. */
+    double crater_density = 0.55;
 
     // --- Under the water ---
     // The ground does not stop at the shore. Without these the submerged ground is the bare
@@ -408,7 +421,127 @@ struct NaturalTerrainConfig {
      * default 600 m elevation range, the first 30 m of water.
      */
     double seabed_shelf = 0.05;
+
+    // --- Volcanoes ---
+    // A landform rather than a biome: `biome_profile` already decides what volcanic GROUND looks
+    // like, and these decide whether anything actually stands up out of it. Placed on the same
+    // kind of hash lattice the craters use -- at most one vent per lattice cell, sized to die out
+    // inside it -- so the field needs no neighbour search and cannot seam, and on a sphere the
+    // lattice is over the unit direction so a vent is the same size on every face.
+
+    /**
+     * @brief Volcanic cones over the ground: a shield, and a caldera sunk into its summit.
+     *
+     * The amplitude of the field, 0 (none -- the default, and every existing map) to 1. Unlike
+     * the crater field this one only ever RAISES the ground, so a vent builds an island out of
+     * the sea rather than being clamped flat by the depth floor, and a shoreline is never
+     * undercut. Scaled against `elevation_range_m` like every other height here, so a cone is
+     * tens of metres of relief on a 600 m world and worth looking at from orbit.
+     */
+    double volcanoes = 0.0;
+    /** @brief Chance each lattice cell of each octave holds a vent, 0 to 1. */
+    double volcano_density = 0.35;
+    /**
+     * @brief How much of a cone's summit collapses into a crater, 0 (a plain shield) to 1.
+     *
+     * The notch is cut from the cone's own height, so the floor of a full caldera lands back
+     * near the ground the cone grew out of and the rim stands around it.
+     */
+    double volcano_caldera = 0.45;
+    /**
+     * @brief How strongly the field also builds vents BELOW the waterline, 0 to 1.
+     *
+     * 1 (the default) gives seamounts and black smokers on an ocean floor at the same amplitude
+     * as the cones on land; 0 confines volcanism to dry ground. Submarine vents are what thin an
+     * ice crust from underneath, so an ice-shell world wants this at full strength.
+     */
+    double volcano_submarine = 1.0;
+    /**
+     * @brief Which sort of edifice the vents build; `mixed` (the default) picks one per vent.
+     *
+     * See `volcano.h`. Naming a single kind is what a themed world and the demo scenes do --
+     * every vent is then that shape, which is how you look at one morphology at a time.
+     */
+    VolcanoKind volcano_kind = VolcanoKind::Mixed;
+    /**
+     * @brief How large the edifices are, 1 being the default size.
+     *
+     * Scales the lattice itself rather than the cones inside it, so vents get bigger AND
+     * further apart together. That is deliberate: a cone may never grow wider than the lattice
+     * cell holding it (it has to die out inside its own cell -- see `volcano_site_()`), so
+     * widening the cone alone would simply saturate against that cap and stop responding.
+     */
+    double volcano_size = 1.0;
+    /**
+     * @brief What fraction of the vents are still alive, 0 to 1.
+     *
+     * The landform does not depend on it -- an extinct cone is the same cone -- but the lava
+     * and every effect that stands at a vent do: a dead volcano pools nothing and throws
+     * nothing. Most volcanoes on a real landscape are extinct, hence the low default; 1 makes
+     * every vent erupt, which is what a hell world wants.
+     */
+    double volcano_active = 0.3;
+    /**
+     * @brief How hard a live vent warms the ground around it, 0 (off, the default) to 1.
+     *
+     * The one thing that makes an ice shell over an ocean possible: a frozen world's water is
+     * ice everywhere except where something underneath is melting it, so a live vent opens a
+     * lake of open water in the crust around itself and a dead one does not. Written to
+     * `MapCenter::warmth` rather than to `temperature`, because it is a local heat source and
+     * not a climate -- see that field.
+     *
+     * Reaches a couple of vent radii and falls off smoothly, scaled by how alive each vent is.
+     * 0 leaves every map exactly as it was.
+     */
+    double volcano_warmth = 0.0;
 };
+
+/**
+ * @enum SurfaceFluid
+ * @brief What fills a map's seas, lakes and basins.
+ *
+ * The generator decides *where* a basin floods and how deep, which is the same arithmetic
+ * whatever is in it; this says what the thing that flooded is. A lava world's basins are
+ * placed, levelled and shored exactly as an ocean's -- so `Lava` costs the water passes
+ * nothing and reaches a consumer as `WaterKind::Lava` instead of `Sea`/`Lake`.
+ *
+ * Names are append-only, as every other serialised enum here is.
+ */
+enum class SurfaceFluid {
+    Water,  /**< @brief Seas, lakes and rivers of water. The default, and every existing map. */
+    Lava    /**< @brief The same bodies, filled with lava. */
+};
+
+/** @brief Number of distinct `SurfaceFluid` values. */
+inline constexpr std::size_t k_surface_fluid_count = 2;
+
+/**
+ * @brief Maps a surface fluid to its serialisation name.
+ * @param fluid The fluid to name.
+ * @return A `snake_case` identifier, e.g. `"lava"`.
+ */
+inline std::string_view surface_fluid_name(SurfaceFluid fluid) {
+    switch (fluid) {
+        case SurfaceFluid::Water: return "water";
+        case SurfaceFluid::Lava:  return "lava";
+    }
+    return "water";
+}
+
+/**
+ * @brief Resolves a serialisation name back to a surface fluid.
+ * @param name A name previously produced by `surface_fluid_name()`.
+ * @return The matching fluid, or `SurfaceFluid::Water` if the name is unknown.
+ */
+inline SurfaceFluid surface_fluid_from_name(std::string_view name) {
+    for (std::size_t i = 0; i < k_surface_fluid_count; ++i) {
+        const SurfaceFluid candidate = static_cast<SurfaceFluid>(i);
+        if (surface_fluid_name(candidate) == name) {
+            return candidate;
+        }
+    }
+    return SurfaceFluid::Water;
+}
 
 /**
  * @enum MapShape
@@ -1406,6 +1539,15 @@ struct MapConfig {
      */
     double biome_river_boundary = 1.0;
     /**
+     * @brief Which diagram classifies the land; see `BiomeProfile` in `biome.h`.
+     *
+     * `temperate` (the default) is the Whittaker diagram every existing map was built on.
+     * `barren` and `volcanic` are the reduced diagrams for worlds no earthlike climate
+     * describes -- both the cell pass and the per-point query read it, so the map layers and
+     * a sampled surface classify the same ground the same way.
+     */
+    BiomeProfile biome_profile = BiomeProfile::Temperate;
+    /**
      * @brief The detail field displacing the sampled ground surface.
      *
      * A higher frequency than the island or temperature fields on purpose: this
@@ -1605,6 +1747,15 @@ struct MapConfig {
      * *land* height must go through `land_height()` first.
      */
     double sea_level = 0.25;
+    /**
+     * @brief What fills this map's seas, lakes and basins.
+     *
+     * Purely a reinterpretation: every water pass runs unchanged and a body is placed and
+     * levelled identically, so switching this costs nothing and changes no elevation. What
+     * changes is the `WaterKind` a consumer reads back, and therefore what the terrain fills
+     * the basin with.
+     */
+    SurfaceFluid surface_fluid = SurfaceFluid::Water;
     /** @brief Noise value above which a corner is water. */
     double threshold_water = 0.3;
     /** @brief A cell becomes water once more than this many of its corners are. */
@@ -1832,6 +1983,13 @@ struct MapConfig {
     bool enable_water = true;       /**< @brief Run the water pass. */
     bool enable_coast = true;       /**< @brief Run the coast pass. */
     bool enable_elevation = true;   /**< @brief Run the elevation pass. */
+    /**
+     * @brief Run the volcano pass, which records where the vents are.
+     *
+     * On by default, and inert until `natural.volcanoes` is raised above zero -- the pass
+     * records nothing and the field contributes nothing, so every existing map is untouched.
+     */
+    bool enable_volcanoes = true;
     bool enable_temperature = true; /**< @brief Run the temperature pass. */
     bool enable_rivers = true;      /**< @brief Run the river pass. */
     bool enable_valleys = true;     /**< @brief Run the valley pass, which cuts rivers into the terrain. */
@@ -2591,7 +2749,11 @@ struct BiomePalette {
         glm::vec3(178, 128, 88),   // Badlands
         glm::vec3(238, 238, 230),  // SaltFlat
         glm::vec3(232, 206, 148),  // Dunes
-        glm::vec3(92, 74, 70)      // VolcanicField
+        glm::vec3(92, 74, 70),     // VolcanicField
+        glm::vec3(168, 164, 158),  // Regolith
+        glm::vec3(76, 78, 86),     // BasaltPlain
+        glm::vec3(118, 44, 26),    // LavaField
+        glm::vec3(212, 186, 94)    // SulfurFlat
     };
 
     /** @brief Colour of river strokes. */

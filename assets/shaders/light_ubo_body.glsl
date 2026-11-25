@@ -129,6 +129,73 @@ layout(set = 1, binding = 0) uniform LightUBO {
                                     // (tile uv), w=transition band (tile uv)
     vec4 dir_level_age[2];          // per-level frames since its tile was re-rendered
                                     // (debug view only; shading ignores it)
+
+    // Additional sky bodies -- appended per light_data.h's append-only rule. Extra sun and moon
+    // discs the sky draws beyond the single sky_sun / sky_moon pair; all zero (counts == 0)
+    // keeps that pair authoritative.
+    vec4 sky_body_counts;    // x = live sun count, y = live moon count
+    vec4 sky_sun_dirs[4];    // xyz = unit dir TO sun i (sky_sun's frame), w = cos(disc radius)
+    vec4 sky_sun_colors[4];  // rgb = tint, w = disc radiance
+    vec4 sky_moon_dirs[8];   // xyz = unit dir TO moon i (sky_moon's frame), w = cos(disc radius)
+    vec4 sky_moon_colors[8]; // rgb = tint, w = disc radiance before phase shading
+    vec4 sky_moon_lit[8];    // xyz = unit dir from moon i TO the sun lighting it (same frame)
+    vec4 sky_moon_rects[8];  // moon face in the sky-body atlas: xy = uv offset, zw = uv size;
+                             // zw = 0 draws the procedural face
+    vec4 sky_moonlight;      // xyz = WORLD-space unit dir TO the brightest moon (night ground
+                             // light), w = 1 live / 0 anti-solar fallback
+    vec4 sky_moonlight_tint; // rgb = the night-side moonlight's tint
+    vec4 sky_backdrop;       // xyz = the star backdrop's galactic-band pole (sky_sun's frame),
+                             // w = its variation seed; xyz = 0 keeps the built-in orientation
+    vec4 sky_moon_atmo[8];   // moon i's limb shell: rgb = scatter tint, w = thickness as a
+                             // fraction of the disc's radius; w = 0 draws no shell
+
+    // Analytic occluders of the directional light -- appended per light_data.h's append-only
+    // rule. See toy_dir_occlusion() below.
+    vec4 dir_occluder_info;  // x = live count, y = the light's angular radius (rad), 0 = off
+    vec4 dir_occluders[4];   // xyz = sphere centre, WORLD space; w = its radius
 } lights;
+
+/**
+ * How much of the directional light survives the occluder spheres at `world_pos`.
+ *
+ * The light is a disc of angular radius `dir_occluder_info.y`; each occluder is a disc of its
+ * own, `asin(radius / distance)` across, centred on the direction to it. What is left is the
+ * fraction of the first disc the others have not covered -- 1 in the open, 0 under a total
+ * eclipse, and a smooth ramp through the penumbra as the discs slide past one another.
+ *
+ * Not a shadow map and deliberately so: a map is fitted to the camera's own few hundred metres,
+ * and these spheres are thousands of units away. The cost is a handful of ALU per occluder.
+ *
+ * `to_light` points TO the light. Occluders behind the shaded point are skipped, as is any
+ * sphere the point is inside or on -- a body must not eclipse itself, which is what its own
+ * N.L already says.
+ */
+float toy_dir_occlusion(vec3 world_pos, vec3 to_light) {
+    int n = int(lights.dir_occluder_info.x);
+    float light_r = lights.dir_occluder_info.y;
+    if (n <= 0 || light_r <= 0.0) return 1.0;
+
+    float visible = 1.0;
+    for (int i = 0; i < 4; ++i) {
+        if (i >= n) break;
+        vec3 to_centre = lights.dir_occluders[i].xyz - world_pos;
+        float radius = lights.dir_occluders[i].w;
+        float dist = length(to_centre);
+        if (radius <= 0.0 || dist <= radius * 1.001) continue;   // inside it, or it is us
+        vec3 dir = to_centre / dist;
+        if (dot(dir, to_light) <= 0.0) continue;                 // behind us, not between
+
+        float occ_r = asin(clamp(radius / dist, 0.0, 1.0));
+        float sep = acos(clamp(dot(dir, to_light), -1.0, 1.0));
+        // How far the two discs overlap, 0 at first contact .. 1 when the occluder's centre is
+        // on the light's, and how much of the light such a disc can cover at most.
+        float reach = light_r + occ_r;
+        if (sep >= reach) continue;
+        float overlap = clamp((reach - sep) / max(2.0 * min(light_r, occ_r), 1e-6), 0.0, 1.0);
+        float cover = clamp((occ_r * occ_r) / (light_r * light_r), 0.0, 1.0);
+        visible *= 1.0 - cover * smoothstep(0.0, 1.0, overlap);
+    }
+    return visible;
+}
 
 #endif // TOY_LIGHT_UBO_BODY_GLSL

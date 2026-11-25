@@ -21,6 +21,11 @@
  * - **A river reaches** the points inside its channel, at its banked height interpolated along
  *   the course. Banked surfaces stay under both banks, so a river is wet only in its channel.
  *
+ * - **A lava pool reaches** the points inside a vent's crater, at the surface the volcano pass
+ *   recorded for it. A crater is a basin like any other, so the same rule decides its shore:
+ *   wet where the ground is under the surface, dry on the rim. These pools are molten whatever
+ *   `MapConfig::surface_fluid` says, which is how a water world gets lava in its calderas.
+ *
  * Where several reach a point, the highest wet one wins: a lake standing over the last stretch
  * of its inflow floods that channel, which is what a drowned inlet is.
  *
@@ -35,6 +40,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #include <coopa/maps/map_config.h>
 #include <coopa/maps/map_data.h>
@@ -53,6 +59,14 @@ enum class WaterKind : std::uint8_t {
 /** @brief One answer of `WaterField::at()`. Heights are normalised like all elevation. */
 struct WaterSample {
     WaterKind kind = WaterKind::None;
+    /**
+     * @brief What the body is filled with, from `MapConfig::surface_fluid`.
+     *
+     * Orthogonal to `kind` on purpose: what flooded a basin and what SHAPE the basin is are
+     * two different questions, and a consumer wants both. A lava river is still a `River`,
+     * with its downstream direction intact.
+     */
+    SurfaceFluid fluid = SurfaceFluid::Water;
     double surface = 0.0;   /**< @brief Height of the water surface; the ground when dry. */
     double ground = 0.0;    /**< @brief Height of the ground (the bed, under water). */
     MapPoint flow{0.0, 0.0};/**< @brief Unit downstream direction for a river; zero otherwise. */
@@ -77,7 +91,10 @@ public:
                const RiverChannels& channels)
         : graph_(graph), detail_(detail), channels_(channels),
           rivers_(make_river_surfaces(graph, config, detail, channels, RiverFit::Banked)),
-          min_depth_(meters_to_height(config, config.river_depth_m)) {}
+          min_depth_(meters_to_height(config, config.river_depth_m)),
+          fluid_(config.surface_fluid) {
+        build_pools_(graph, detail, channels);
+    }
 
     /**
      * @brief The water at a point.
@@ -160,6 +177,30 @@ public:
                 }
             }
         }
+        // Lava pools: the craters filed under this cell.
+        bool molten = false;
+        if (index < pool_cells_.size()) {
+            const Bucket& bucket = pool_cells_[index];
+            for (std::size_t i = bucket.first; i < bucket.first + bucket.count; ++i) {
+                const LavaPool& pool = pools_[pool_refs_[i]];
+                if (pool.surface <= sample.surface) {
+                    continue;   // a higher water already covers it, or the rim stands over it
+                }
+                if (p.distance_to(pool.point) >= pool.radius) {
+                    continue;
+                }
+                sample.kind = WaterKind::Lake;
+                sample.surface = pool.surface;
+                sample.flow = MapPoint{};
+                molten = true;
+            }
+        }
+
+        // What is in it: the map's fluid, except where a crater overrides it. A dry point keeps
+        // `Water`, which is meaningless there and never read -- `wet()` gates every consumer.
+        if (sample.wet()) {
+            sample.fluid = molten ? SurfaceFluid::Lava : fluid_;
+        }
         return sample;
     }
 
@@ -167,6 +208,79 @@ public:
     const RiverSurfaces& rivers() const { return rivers_; }
 
 private:
+    /** @brief One vent's molten crater, in the field's own absolute terms. */
+    struct LavaPool {
+        MapPoint point;        /**< @brief The vent, in grid units. */
+        double radius = 0.0;   /**< @brief How far the pool reaches from it. */
+        double surface = 0.0;  /**< @brief Where the lava stands, in normalised elevation. */
+    };
+
+    /** @brief A slice of `pool_refs_`: the pools one cell can see. */
+    struct Bucket {
+        std::uint32_t first = 0;
+        std::uint32_t count = 0;
+    };
+
+    /**
+     * @brief Turns the volcano pass's relative records into absolute surfaces, and indexes them.
+     *
+     * `MapVolcano::lava_rise` is measured from the vent's own ground because the pass cannot
+     * sample the surface a consumer bakes -- it has no detail field. Here both are in hand, so
+     * the floor is read once per vent and the lake gets a flat surface, exactly as a lake's
+     * `water_level` is flat.
+     *
+     * The index is what keeps `at()` cheap: a vent is filed under every cell whose polygon could
+     * contain a point inside its pool, which is every cell within the pool's radius plus that
+     * cell's own reach -- so a query scans the handful of pools that can possibly cover it
+     * rather than all of them. One pass per vent over the cells, once per map.
+     */
+    void build_pools_(const MapGraph& graph, const TerrainDetail& detail,
+                      const RiverChannels& channels) {
+        for (const MapVolcano& vent : graph.volcanoes) {
+            if (vent.lava_rise <= 0.0 || vent.lava_radius <= 0.0 || vent.center == k_invalid_id) {
+                continue;
+            }
+            const MapCenter& home = graph.centers[static_cast<std::size_t>(vent.center)];
+            const double floor = graph.elevation_at(home, vent.point, detail, channels);
+            pools_.push_back(LavaPool{vent.point, vent.lava_radius, floor + vent.lava_rise});
+        }
+        if (pools_.empty()) {
+            return;
+        }
+        pool_cells_.assign(graph.centers.size(), Bucket{});
+        for (std::size_t pass = 0; pass < 2; ++pass) {
+            if (pass == 1) {
+                std::uint32_t total = 0;
+                for (Bucket& bucket : pool_cells_) {
+                    bucket.first = total;
+                    total += bucket.count;
+                    bucket.count = 0;
+                }
+                pool_refs_.resize(total);
+            }
+            for (std::size_t ci = 0; ci < graph.centers.size(); ++ci) {
+                const MapCenter& cell = graph.centers[ci];
+                double reach = 0.0;
+                for (const CornerId corner : cell.corners) {
+                    if (corner == k_invalid_id) continue;
+                    reach = std::max(reach, cell.point.distance_to(
+                                                graph.corners[static_cast<std::size_t>(corner)].point));
+                }
+                for (std::size_t pi = 0; pi < pools_.size(); ++pi) {
+                    if (cell.point.distance_to(pools_[pi].point) > pools_[pi].radius + reach) {
+                        continue;
+                    }
+                    if (pass == 0) {
+                        ++pool_cells_[ci].count;
+                    } else {
+                        pool_refs_[pool_cells_[ci].first + pool_cells_[ci].count++] =
+                            static_cast<std::uint32_t>(pi);
+                    }
+                }
+            }
+        }
+    }
+
     /**
      * @brief A river's surface at a point of one segment, blended toward its neighbours.
      *
@@ -211,6 +325,10 @@ private:
     const RiverChannels& channels_;
     RiverSurfaces rivers_;
     double min_depth_ = 0.0; ///< A widened channel's bed under its water: `river_depth_m`.
+    std::vector<LavaPool> pools_;
+    std::vector<Bucket> pool_cells_;
+    std::vector<std::uint32_t> pool_refs_;
+    SurfaceFluid fluid_ = SurfaceFluid::Water; ///< What fills every body on this map.
 };
 
 } // namespace maps

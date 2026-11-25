@@ -81,10 +81,12 @@ public:
     /**
      * @brief Records the generator into mip 0, then every further mip, and leaves the image
      *        shader-readable. Outside any render pass. `generator` must take gen_layout() at set 0
-     *        and a uint size push constant.
+     *        and a `uvec2 (size, seed)` push constant. A generator that has nothing to vary
+     *        ignores the second word; re-calling this with a different seed re-bakes the image
+     *        in place, which is how one scene's worlds get different weather.
      */
     void generate(coopa::gfx::command::CommandBuffer& cmd, const coopa::gfx::pipeline::ComputePipeline& generator,
-                  const CloudNoiseGenerators& gens);
+                  const CloudNoiseGenerators& gens, std::uint32_t seed = 0);
 
 private:
     /** @brief One level of the chain, as the storage image the mip passes bind. */
@@ -94,6 +96,8 @@ private:
 
     uint32_t                  size_;
     bool                      volume_;
+    /** @brief Whether generate() has already run: a re-bake starts from ShaderRead, not Undefined. */
+    bool                      generated_ = false;
     uint32_t                  levels_ = 1;
     coopa::gfx::memory::Image image_;
     /** @brief One single-level storage view per mip; a chain-spanning view is illegal in one. */

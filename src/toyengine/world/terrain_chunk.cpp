@@ -514,10 +514,15 @@ void mesh_chunk_field(const ColumnPad& pad, const TerrainParams& params, std::in
             for (std::int32_t y = edges[by]; y < edges[by + 1]; ++y) {
                 for (std::int32_t x = edges[bx]; x < edges[bx + 1]; ++x) {
                     const TileColumn& col = pad.at(x, y);
-                    if (col.steps > best || (x == edges[bx] && y == edges[by])) {
-                        best           = col.steps;
-                        cell.steps     = col.steps;
-                        cell.side_kind = col.side_kind;
+                    // The OUTERMOST surface, not the ground: a roofed column's floor is under a
+                    // roof, and the coarse tier is only ever seen from outside the world. Reading
+                    // `steps` here would draw the floor of a roofed world and leave the roof --
+                    // the only part of it visible from out there -- missing.
+                    const std::int32_t top = col.outer_top();
+                    if (top > best || (x == edges[bx] && y == edges[by])) {
+                        best           = top;
+                        cell.steps     = top;
+                        cell.side_kind = col.roofed ? col.roof_side_kind : col.side_kind;
                     }
                 }
             }
@@ -526,7 +531,7 @@ void mesh_chunk_field(const ColumnPad& pad, const TerrainParams& params, std::in
             std::array<std::uint16_t, k_tile_kind_count> votes{};
             for (std::int32_t y = edges[by]; y < edges[by + 1]; ++y) {
                 for (std::int32_t x = edges[bx]; x < edges[bx + 1]; ++x) {
-                    ++votes[static_cast<std::size_t>(pad.at(x, y).top_kind)];
+                    ++votes[static_cast<std::size_t>(pad.at(x, y).outer_top_kind())];
                 }
             }
             std::size_t winner = 0;
@@ -549,7 +554,7 @@ void mesh_chunk_field(const ColumnPad& pad, const TerrainParams& params, std::in
     // Off the chunk this is the neighbour's OWN column, never a coarsened one -- see the Cell
     // comment above for why that is what keeps the seam watertight.
     auto coarse_steps = [&](std::int32_t x, std::int32_t y) -> std::int32_t {
-        if (x < 0 || y < 0 || x >= n || y >= n) return pad.at(x, y).steps;
+        if (x < 0 || y < 0 || x >= n || y >= n) return pad.at(x, y).outer_top();
         return cell_at(x, y).steps;
     };
 
@@ -763,7 +768,7 @@ void build_chunk_water(const ColumnPad& pad, const TerrainParams& params, ChunkW
                         if (o.water == k_water_none) continue;
                         const float z = surface_z(o);
                         if (!any || z > level) level = z;
-                        if (!any || o.water == k_water_still) {
+                        if (!any || column_water_is_still(o.water)) {
                             kind = o.water;
                             flow = o.flow;
                         }
@@ -773,6 +778,9 @@ void build_chunk_water(const ColumnPad& pad, const TerrainParams& params, ChunkW
                 if (!any) continue;
             }
             ChunkWaterData& out = kind == k_water_flowing ? flowing : still;
+            // Lava meshes as a still surface, so it shares `still`'s geometry -- but the body
+            // built from it has to know, or it comes out as water.
+            if (kind == k_water_lava) out.lava = true;
             glm::vec2 down(1.0f, 0.0f);
             if (kind == k_water_flowing && flow >= 1 && flow <= 8) down = flow_direction(flow);
             const glm::vec2 across(-down.y, down.x);

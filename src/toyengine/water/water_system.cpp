@@ -542,8 +542,11 @@ void WaterSystem::bake_(coopa::scene::Scene& scene, WaterBody& body, const glm::
     std::vector<float> turbulence(n, 0.0f);
     if (body.mode == WaterMode::Flowing) {
         FlowBakeParams fp;
-        fp.speed           = body.flow_speed;
-        fp.min_speed       = body.flow_min_speed;
+        // Viscosity is not a second simulation -- it scales the current the bake already
+        // produces. A fluid this sluggish still has a direction; it just creeps along it.
+        const float creep = 1.0f - 0.9f * glm::clamp(body.viscosity, 0.0f, 1.0f);
+        fp.speed           = body.flow_speed * creep;
+        fp.min_speed       = body.flow_min_speed * creep;
         fp.slope_gain      = body.flow_slope_gain;
         fp.obstacle_radius = body.obstacle_radius;
         fp.wake_length     = body.wake_length;
@@ -937,9 +940,19 @@ void WaterSystem::apply_material_(WaterBody& body) {
     if (!renderer) return;
     auto& m = renderer->material;
     // A local-frame body draws with the water shader's local-frame build.
-    m.shader               = body.local_frame ? "water_local_frame" : "water";
+    const bool lava = body.fluid == FluidKind::Lava;
+    m.shader               = lava ? (body.local_frame ? "lava_local_frame" : "lava")
+                                  : (body.local_frame ? "water_local_frame" : "water");
     m.shader_params        = body.live_waves().pack();
-    m.shader_params_ext[0] = glm::vec4(body.foam_color, body.foam_amount);
+    // The heat shares foam's parameter slot, because a lava surface derives its crust from its
+    // own colour and has no use for an authored foam -- and because there is nowhere else to
+    // put it: `shader_params` is the packed wave, ext1 is the shoreline and ripple block, and
+    // the transparent material UBO is full at Vulkan's guaranteed 128 bytes. The opaque path's
+    // `PBRMaterial::emissive` is no help either; water is Transparent-domain, and that field
+    // reaches the G-buffer only.
+    m.shader_params_ext[0] = lava
+        ? glm::vec4(body.emissive_color, std::max(0.0f, body.emissive_strength))
+        : glm::vec4(body.foam_color, body.foam_amount);
     m.shader_params_ext[1] = glm::vec4(body.shore_foam_depth, body.edge_fade_depth,
                                        body.ripple_strength * (body.wind_applied ? body.wind_ripple : 1.0f), body.ripple_scale);
     m.refraction_thickness = std::max(body.clarity, 1e-3f);

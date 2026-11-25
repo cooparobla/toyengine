@@ -303,7 +303,12 @@ public:
         if (water.wet()) {
             out.water = water.kind;
             out.water_surface = static_cast<float>(water.surface * params_.height_scale);
-            if (biome == coopa::maps::Biome::Ice && water.kind != coopa::maps::WaterKind::River) {
+            // MOLTEN DOES NOT FREEZE. An ice biome locks its still water into a crust, and a
+            // vent's crater standing in the middle of one is exactly where the exception has to
+            // hold -- otherwise a frozen world is where the lava silently disappears.
+            const bool molten = water.fluid == coopa::maps::SurfaceFluid::Lava;
+            if (biome == coopa::maps::Biome::Ice && !molten &&
+                water.kind != coopa::maps::WaterKind::River) {
                 // Frozen: solid ice up at the water's surface, and no water over it.
                 out.ground = out.water_surface;
                 out.water = coopa::maps::WaterKind::None;
@@ -314,9 +319,9 @@ public:
                     out.flow = flow_octant(f.x, f.y);
                 }
                 // The bed graded by depth, exactly as the terraced bake does: both measure it
-                // in metres.
+                // in metres -- except under lava, which leaves basalt however deep it stands.
                 const float depth = std::max(0.0f, out.water_surface - out.ground);
-                out.top = bed_kind_for(water.kind, depth);
+                out.top = molten ? TileKind::Basalt : bed_kind_for(water.kind, depth);
             }
         }
         return out;
@@ -358,20 +363,29 @@ private:
         TileKind top = tile_kind_for_biome(biome);
         if (water.wet()) {
             const std::int32_t level_steps = std::max(1, steps_from_elevation_(water.surface));
-            if (biome == coopa::maps::Biome::Ice && water.kind != coopa::maps::WaterKind::River) {
-                // Frozen: solid ice at the water's terrace.
+            const bool lava = water.fluid == coopa::maps::SurfaceFluid::Lava;
+            if (biome == coopa::maps::Biome::Ice && !lava &&
+                water.kind != coopa::maps::WaterKind::River) {
+                // Frozen: solid ice at the water's terrace. Lava is exempt -- see the column
+                // sampler: a vent's crater on an ice world stays molten.
                 r.steps = static_cast<std::int16_t>(level_steps);
                 r.set_top_kind(TileKind::Ice);
                 r.set_side_kind(TileKind::Ice);
                 return r;
             }
-            const bool flowing = water.kind == coopa::maps::WaterKind::River;
+            // A lava channel is still, not flowing: the viscosity that stops it running is the
+            // whole character of the stuff, and a flowing surface would advect ripples down it
+            // at a river's pace. So every body of lava, however it was shaped, meshes as one
+            // still surface -- which is also why `water_is_still()` counts it.
+            const bool flowing = !lava && water.kind == coopa::maps::WaterKind::River;
             if (flowing) r.set(TileCell::River, true);
             // The bed rounds down: at least a step under the water, however shallow mapcoopa's.
             r.steps = static_cast<std::int16_t>(std::min<std::int32_t>(r.steps, level_steps - 1));
-            r.water_kind = static_cast<std::uint8_t>(water.kind == coopa::maps::WaterKind::Sea
-                                                          ? WaterKind::Ocean
-                                                          : (flowing ? WaterKind::River : WaterKind::Lake));
+            r.water_kind = static_cast<std::uint8_t>(
+                lava ? WaterKind::Lava
+                     : (water.kind == coopa::maps::WaterKind::Sea
+                            ? WaterKind::Ocean
+                            : (flowing ? WaterKind::River : WaterKind::Lake)));
             r.water_level = continuous_water_level
                                 ? static_cast<float>(water.surface * params_.height_scale)
                                 : static_cast<float>(level_steps) * params_.height_step;
@@ -380,8 +394,9 @@ private:
                 r.flow = flow_octant(glm::dot(f, across), glm::dot(f, along));
                 r.flow_authored = 1;   // mapcoopa's own flow, not a fallback to derive over later
             }
-            top = bed_kind_for(water.kind,
-                               static_cast<float>(level_steps - r.steps) * params_.height_step);
+            top = lava ? TileKind::Basalt
+                       : bed_kind_for(water.kind,
+                                      static_cast<float>(level_steps - r.steps) * params_.height_step);
         }
         r.set_top_kind(top);
         r.set_side_kind(side_kind_for(top));
@@ -470,7 +485,7 @@ public:
     /**
      * @brief Maps a mapcoopa biome onto the surface a tile face is textured with.
      *
-     * Thirty-three biomes collapse onto twelve surfaces: a face needs to know which patch of the
+     * Thirty-seven biomes collapse onto twelve surfaces: a face needs to know which patch of the
      * atlas to sample, not which Whittaker cell it came from. A flat table indexed by the enum,
      * the same shape coopa::maps::BiomePalette uses for exactly the same reason.
      *
@@ -511,7 +526,11 @@ public:
             TileKind::Clay,  // Badlands
             TileKind::Salt,  // SaltFlat
             TileKind::Sand,  // Dunes
-            TileKind::Ash    // VolcanicField
+            TileKind::Basalt, // VolcanicField (open ground on a restless world: cooled, not molten)
+            TileKind::Stone,  // Regolith
+            TileKind::Basalt, // BasaltPlain
+            TileKind::Lava,   // LavaField -- the one biome whose ground emits light
+            TileKind::Clay    // SulfurFlat (clay's ochre reads as sulphur; sand reads as snow)
         };
         const std::size_t index = static_cast<std::size_t>(biome);
         return index < table.size() ? table[index] : TileKind::Stone;

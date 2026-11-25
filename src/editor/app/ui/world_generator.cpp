@@ -161,6 +161,10 @@ const std::vector<Row>& rows() {
                  noise_plateau.frequency),
         WGEN_ROW(7, "Warp", "How far the landforms are bent, in cells: winding ridges and valleys.", false, 0.0, 4.0,
                  natural.warp),
+        WGEN_ROW(7, "Craters", "Impact craters over the land: bowls with raised rims, in three sizes.", false, 0.0, 1.0,
+                 natural.craters),
+        WGEN_ROW(7, "Crater Density", "Chance each crater lattice cell holds one.", false, 0.0, 1.0,
+                 natural.crater_density),
     };
     return table;
 }

@@ -41,7 +41,8 @@ public:
             // moved off zero.
             center.biome = classify_biome(land_height(config, center.elevation),
                                           center.moisture, center.temperature,
-                                          center.water, center.ocean, center.coast);
+                                          center.water, center.ocean, center.coast,
+                                          config.biome_profile, center.warmth);
         }
     }
 };

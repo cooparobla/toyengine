@@ -117,6 +117,17 @@ void ToyRenderConfig::apply_quality_presets() {
         case RenderQuality::High:   volumetrics_step_count = 48; volumetrics_max_scatter_lights = 4; break;
         case RenderQuality::Ultra:  volumetrics_step_count = 96; volumetrics_max_scatter_lights = 4; break; // 4 == MAX_SCATTER_LIGHTS
     }
+    // How far out a mesh keeps each LOD level -- the dial for a world seen whole, where every
+    // chunk of a streamed terrain is small enough to be drawing its coarsest level. The rows are
+    // measured, not guessed: see mesh_lod_quality's own doc for the table. High is the knee --
+    // roughly twice the triangles of Medium at a whole-world framing; Ultra is four to five
+    // times, and reaches the point where a `field` ladder has nothing finer left to show.
+    switch (mesh_lod_quality) {
+        case RenderQuality::Low:    mesh_lod_bias = 0.6f; break;
+        case RenderQuality::Medium: mesh_lod_bias = 1.0f; break;
+        case RenderQuality::High:   mesh_lod_bias = 1.5f; break;
+        case RenderQuality::Ultra:  mesh_lod_bias = 2.0f; break;
+    }
     switch (sdf_quality) {
         case RenderQuality::Low:    sdf_max_steps = 32;  sdf_shadow_max_steps = 16; break;
         case RenderQuality::Medium: sdf_max_steps = 48;  sdf_shadow_max_steps = 24; break;

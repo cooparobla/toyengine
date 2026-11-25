@@ -102,9 +102,10 @@ struct ToyLightingPushConstants {
     /// Unreal's AO "Intensity": the shader reads mix(1, ssao, intensity). Occupies what was
     /// the padding slot that aligns the mat4 below to 16 bytes (offset 32).
     float ssao_intensity = 1.0f;
-    /// inverse(proj * view) -- the lighting draw also writes the SKY at background pixels
-    /// (no separate skybox draw) and reconstructs their view ray from this, computed on the
-    /// CPU.
+    /// Camera-relative inverse view-projection (the camera rebased to the origin, in double,
+    /// on the CPU) -- the lighting draw also writes the SKY at background pixels (no separate
+    /// skybox draw), and the dehomogenized unprojection of far-plane NDC through this IS the
+    /// view ray, with no large-coordinate subtraction in the shader.
     glm::mat4 sky_inv_view_proj = glm::mat4(1.0f);
     /// The scene's curved world: xyz = centre (world), w = radius. `w <= 0` is a FLAT world, which is
     /// the default and what every flat scene uploads.

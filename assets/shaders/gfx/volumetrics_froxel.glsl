@@ -13,19 +13,29 @@
 // There are no 3D images in gfxcoopa, so the grid lives in a 2D ATLAS: slice s is a W x H
 // tile at column s % cols, row s / cols (cols = froxel_grid.w).
 
-/// Ray distance of slice BOUNDARY b (0..D): b = 0 is near, b = D is far.
-float vol_froxel_boundary_dist(float b) {
-    float near = u_vol.froxel_params.x;
-    float far  = u_vol.froxel_params.y;
+// The near/far the grid spans are FITTED to the live volumes each frame, so they move -- and
+// last frame's grid was laid out with last frame's pair. Every mapping therefore comes in a
+// form that takes the range explicitly; the unsuffixed ones are this frame's.
+
+/// Ray distance of slice BOUNDARY b (0..D) in a grid spanning [near, far]: b = 0 is near.
+float vol_froxel_boundary_dist_in(float b, float near, float far) {
     return near * pow(far / near, b / u_vol.froxel_grid.z);
 }
 
-/// Inverse of vol_froxel_boundary_dist: fractional boundary coordinate in [0, D].
-float vol_froxel_slice_of(float dist) {
-    float near = u_vol.froxel_params.x;
-    float far  = u_vol.froxel_params.y;
+/// Inverse of vol_froxel_boundary_dist_in: fractional boundary coordinate in [0, D].
+float vol_froxel_slice_of_in(float dist, float near, float far) {
     float s = u_vol.froxel_grid.z * log(max(dist, near) / near) / log(far / near);
     return clamp(s, 0.0, u_vol.froxel_grid.z);
+}
+
+/// Ray distance of slice BOUNDARY b (0..D) in THIS frame's grid.
+float vol_froxel_boundary_dist(float b) {
+    return vol_froxel_boundary_dist_in(b, u_vol.froxel_params.x, u_vol.froxel_params.y);
+}
+
+/// Inverse of vol_froxel_boundary_dist, in THIS frame's grid.
+float vol_froxel_slice_of(float dist) {
+    return vol_froxel_slice_of_in(dist, u_vol.froxel_params.x, u_vol.froxel_params.y);
 }
 
 /// Top-left atlas texel of slice `slice`'s tile.

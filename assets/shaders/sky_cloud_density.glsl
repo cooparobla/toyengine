@@ -46,6 +46,16 @@ vec4  g_spin;     // xyz = the deck's rotation axis, w = angle (rad); w == 0 and
 /// pattern across the world as the eye moves.
 vec3  g_march_origin;
 
+/// How far toward `cf.albedo_deep` the last sample's colour lies, 0..1. Written by
+/// cloud_density(), read by the march one line later.
+///
+/// Two sources, and which one is live is the world's own answer to "what makes these clouds
+/// coloured". A BANDED world takes it from the belt the sample sits in, so a band is one colour
+/// end to end -- which is what a gas giant looks like. Anywhere else it is the sample's own
+/// density, so thin edges stay bright and thick cores take the deeper tint, which is what a
+/// water cloud looks like. At the default albedos the two are the same colour and neither shows.
+float g_tint;
+
 /// The point the cloud field is evaluated at: `p` turned backwards by the deck's rotation.
 ///
 /// A flat world slides the field across the world by adding `cf.wind.xy` (done at the call
@@ -56,10 +66,87 @@ vec3  g_march_origin;
 vec3 cloud_domain(vec3 p) {
     if (g_spin.w == 0.0) return p;
     vec3 d = p - g_center;
+    float angle = -g_spin.w;
+    // ZONAL JETS. A rigid turn gives one deck moving as a plate; a real atmosphere does not --
+    // Jupiter's belts and zones run past one another at different speeds, and that shear is what
+    // draws them out into bands in the first place. The angle is scaled by latitude rather than
+    // the rate being, so the field stays a function of position: a sample's total turn depends
+    // only on where it is, and nothing has to be integrated per band.
+    //
+    // `bands.x` sets how many belts alternate between prograde and retrograde, and the
+    // equator-weighted `1 - lat^2` keeps the poles near the deck's own rate (a polar vortex is a
+    // storm, not a jet). At `bands.w` 0 this is exactly the rigid turn it replaced.
+    if (cf.bands.w != 0.0 && cf.bands.x > 0.0) {
+        float len = max(length(d), 1e-5);
+        float lat = clamp(dot(d / len, g_spin.xyz), -1.0, 1.0);
+        angle *= 1.0 + cf.bands.w * cos(lat * cf.bands.x * 3.14159265) * (1.0 - lat * lat);
+    }
     // Rodrigues, by -angle: the field turns one way so the clouds appear to turn the other.
-    float c = cos(-g_spin.w), s_ = sin(-g_spin.w);
+    float c = cos(angle), s_ = sin(angle);
     vec3  k = g_spin.xyz;
     return g_center + d * c + cross(k, d) * s_ + k * (dot(k, d) * (1.0 - c));
+}
+
+/// How much a belt at this point raises or lowers the coverage, and which band it is in.
+///
+/// Latitude about the deck's own pole, banded into alternating belts and zones. `phase` comes
+/// back as 0 in the middle of a zone and 1 in the middle of a belt, which is what carries a
+/// band's COLOUR (the march blends the two albedos by it) -- so the light bands and the dark
+/// ones are the same two numbers seen from either end.
+///
+/// Returns 1 and a phase of 0 when `bands.x` is zero, which is every earthlike sky.
+float cloud_band(vec3 q_centred, out float phase) {
+    phase = 0.0;
+    if (cf.bands.x <= 0.0) return 1.0;
+    float len = max(length(q_centred), 1e-5);
+    float lat = clamp(dot(q_centred / len, g_spin.xyz), -1.0, 1.0);
+    float wave = sin(lat * cf.bands.x * 3.14159265);
+    // Sharpness squares the belts off (>1) or softens them into a swell (<1). Signed power, so
+    // the shaping is symmetric about the band edge rather than biased to one side.
+    float sharp = max(cf.bands.z, 0.05);
+    float shaped = sign(wave) * pow(abs(wave), 1.0 / sharp);
+    phase = shaped * 0.5 + 0.5;
+    return clamp(1.0 + cf.bands.y * shaped, 0.0, 2.0);
+}
+
+/// A cyclone's effect at one point: swirls `q` about the storm's own axis and reports how much
+/// the storm raises the coverage there.
+///
+/// The same four numbers are a hurricane on an earthlike world and a Great Red Spot on a giant:
+/// a swirl that falls off from the wall, a raised wall, and a cleared eye. Costs one dot per
+/// storm outside its disc, which is almost every sample.
+float cloud_storms(inout vec3 q_centred) {
+    int n = int(cf.storms.x);
+    if (n <= 0) return 0.0;
+    float len = max(length(q_centred), 1e-5);
+    vec3 dir = q_centred / len;
+    float lift = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        if (i >= n) break;
+        float cd = dot(dir, cf.storm[i].xyz);
+        if (cd <= cf.storm[i].w) continue;            // outside this storm's disc
+        // 0 at the rim .. 1 at the eye, in the cosine the test already computed.
+        float t = (cd - cf.storm[i].w) / max(1.0 - cf.storm[i].w, 1e-5);
+        vec4 sp = cf.storm_spin[i];
+        // The swirl: strongest just inside the rim and winding tighter toward the middle, which
+        // is what draws the field out into the spiral arms a cyclone reads by.
+        float angle = sp.x * t * t;
+        if (angle != 0.0) {
+            vec3 k = cf.storm[i].xyz;
+            float c = cos(angle), s_ = sin(angle);
+            q_centred = q_centred * c + cross(k, q_centred) * s_ + k * (dot(k, q_centred) * (1.0 - c));
+        }
+        // A RING, NOT A DISC: the wall stands just outside a cleared eye, which is the one
+        // feature that reads as a cyclone from any distance. `t` runs 0 at the rim to 1 at the
+        // middle, so the eye is the innermost `sp.z` of the radius.
+        float inner = 1.0 - clamp(sp.z, 0.0, 0.9);
+        float in_eye = smoothstep(inner, inner + 0.04, t);
+        float wall = smoothstep(inner - 0.25, inner, t) * (1.0 - in_eye);
+        // Negative inside the eye: the storm CLEARS it rather than merely not filling it, so a
+        // cyclone over an overcast deck still has a hole in the middle.
+        lift = max(lift, (sp.y * t + sp.w * wall) * (1.0 - in_eye) - in_eye);
+    }
+    return lift;
 }
 
 // Height in the layer, 0 at the base .. 1 at the top.
@@ -142,8 +229,17 @@ float cloud_density(vec3 p, float h, float foot, float step_len, bool detail, ou
     // (cloud_domain).
     vec3 q  = cf.world_frame.w > 0.0 ? cloud_domain(p) - g_center
                                      : cloud_domain(p) + g_march_origin;
+    // The cyclones warp the domain before anything reads it, so the shape volume and the
+    // weather map spiral together rather than one sliding over the other.
+    float storm_lift = cf.world_frame.w > 0.0 ? cloud_storms(q) : 0.0;
+    float band_phase = 0.0;
+    float band = cf.world_frame.w > 0.0 ? cloud_band(q, band_phase) : 1.0;
+    g_tint = cf.bands.x > 0.0 ? band_phase : 0.0;
     vec2 xy = q.xy + cf.wind.xy;
     vec3 w = weather_at(q, xy, log2(max(foot / (WEATHER_PERIOD / 512.0), 1.0)));
+    // The belts and the storms act on the COVERAGE the weather left, not on the map itself:
+    // one tiling map still places the clouds, and these say how much of it survives here.
+    w.x = clamp(w.x * band + storm_lift, 0.0, 1.0);
     if (w.x <= 0.0) { empty = true; return 0.0; }
     // Base height varies cloud to cloud, so the deck's bottoms don't line up.
     float hl = (h - w.z) / (1.0 - w.z);
@@ -186,7 +282,12 @@ float cloud_density(vec3 p, float h, float foot, float step_len, bool detail, ou
             d = clamp(remap(d, hf * 0.45 * fade, 1.0, 0.0, 1.0), 0.0, 1.0);
         }
     }
-    return min(d * CONTRAST, 1.0) * cf.slab.w;
+    float dens = min(d * CONTRAST, 1.0) * cf.slab.w;
+    // Where there are no bands the tint comes from the cloud's own body instead: thin edges keep
+    // the bright albedo and thick cores take the deeper one. `albedo.w` is how quickly that
+    // happens, and at 0 it never does -- which is every sky that has not asked for it.
+    if (cf.bands.x <= 0.0) g_tint = clamp(dens * cf.albedo.w, 0.0, 1.0);
+    return dens;
 }
 
 #endif // TOY_SKY_CLOUD_DENSITY_GLSL

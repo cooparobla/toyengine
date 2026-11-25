@@ -921,8 +921,14 @@ by layer / slope / height, streamed around the camera, re-scattered where the te
 
 ## Not here yet
 
-Caves and overhangs (the height-column model has no room for them, though mapcoopa generates cave
-systems), waterfalls as their own effect (a river's step is a steep slope of its surface),
+Caves and overhangs as GEOMETRY. The data model now has room for one roof -- `TileCell` carries
+a second solid span (`roof_steps`..`roof_top`, behind the `Roofed` flag), so a column can have
+something over its head, and the coarse field tier already draws the outermost surface rather
+than the ground. What is still missing is the styled mesher: it decides face exposure by exact
+integer comparison against `steps`, and every one of those comparisons has to become
+span-relative before a roof is drawn, along with a downward-facing underside piece the tile
+library has no counterpart of. Until then a roofed column renders as its floor alone. Waterfalls
+as their own effect (a river's step is a steep slope of its surface),
 rivers/roads/towns as 3D geometry, loading only the `.terra` chunks near the camera (the file
 format allows it; everything is loaded today), and a per-tile tile-set override. A mode-agnostic
 water inset (today the terraced mesher still quantises `water_level` to a step and subtracts an

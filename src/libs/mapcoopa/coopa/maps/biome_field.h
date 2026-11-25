@@ -113,6 +113,7 @@ public:
                           const WaterSample& water) const {
         double moisture = center.moisture;
         double temperature = center.temperature;
+        double warmth = center.warmth;
         double ring = ring_of_(center.index);
         double water_level = center.water_level;
 
@@ -121,6 +122,7 @@ public:
         if (graph_.triangle_at(center, p, cells, weights)) {
             double blended_moisture = 0.0;
             double blended_temperature = 0.0;
+            double blended_warmth = 0.0;
             double blended_ring = 0.0;
             double total = 0.0;
             for (std::size_t i = 0; i < 3; ++i) {
@@ -133,6 +135,7 @@ public:
                 }
                 blended_moisture += w * cell.moisture;
                 blended_temperature += w * cell.temperature;
+                blended_warmth += w * cell.warmth;
                 blended_ring += w * ring_of_(cell.index);
                 total += w;
                 // The highest surface any of the triangle's cells puts over the point --
@@ -147,6 +150,7 @@ public:
             if (total > 1.0e-9) {
                 moisture = blended_moisture / total;
                 temperature = blended_temperature / total;
+                warmth = blended_warmth / total;
                 ring = blended_ring / total;
             }
         }
@@ -161,7 +165,21 @@ public:
         }
         sample.moisture = std::clamp(moisture, 0.0, 1.0);
         sample.temperature = std::clamp(temperature, 0.0, 1.0);
+        // NOT dithered. The dither exists to break a diagram boundary into a ragged edge, and
+        // the melt's edge is already a smooth falloff around a point -- roughening it would
+        // only speckle the shoreline of the one feature this field is for.
+        sample.warmth = std::clamp(warmth, 0.0, 1.0);
         sample.elevation = land_height(config_, water.ground);
+        // The reduced profiles classify on elevation, so they need the dither THERE or their
+        // boundaries trace the raw threshold -- hard aliased steps where a maria meets the
+        // highlands. The temperate diagram keeps its elevation clean, as every map so far has.
+        if (dither > 0.0 && config_.biome_profile != BiomeProfile::Temperate) {
+            sample.elevation = std::clamp(
+                sample.elevation + dither * 0.7
+                    * static_cast<double>(graph_.noise_at(
+                          dither_, MapPoint{p.x - 61.7, p.y + 203.9, p.z - 118.3})),
+                0.0, 1.0);
+        }
         sample.is_water = water.kind == WaterKind::Sea || water.kind == WaterKind::Lake;
         sample.is_ocean = water.kind == WaterKind::Sea;
         // Proximity fades to nothing over the first two rings of cells around the
@@ -171,6 +189,7 @@ public:
         sample.relief_m =
             height_to_meters(config_, std::max(0.0, water.ground - level));
         sample.beach_height_m = beach_height_at_(p);
+        sample.profile = config_.biome_profile;
         return sample;
     }
 

@@ -371,6 +371,12 @@ biome_dither: 0.05            # noise added to moisture/temperature by the per-p
                               # query so boundaries wander organically instead of tracing
                               # interpolation seams. Cells (roads, towns, regions) never
                               # dither. 0 classifies on the blended fields alone.
+biome_profile: temperate      # which diagram classifies the land: `temperate` (the Whittaker
+                              # diagram, the default), `barren` (airless rock: regolith,
+                              # basalt basins, bare heights), `volcanic` (lava basins, basalt,
+                              # sulphur; temperature is the activity axis) or `glacial` (ice
+                              # sheets, snowfields, glacier heights). Both the cell pass and
+                              # the per-point query read it.
 terrain_roughness: 0.0        # how strongly the detail field displaces the SAMPLED surface,
                               # 0 to 1. Zero leaves it exactly as the passes computed it.
                               # Raising it adds jaggedness without touching cell or corner

@@ -285,9 +285,22 @@ void ToyRenderPipeline::record_scene_(coopa::gfx::command::CommandBuffer& cmd, c
     lighting_pc.ssao_intensity       = config_.ssao_intensity;
     // The sky is drawn by this same pass at background pixels (see toy_lighting.frag),
     // so sky and lighting share one fullscreen draw.
-    lighting_pc.sky_inv_view_proj    = glm::inverse(ctx.proj * ctx.view);
-    // On a curved world the sky is drawn in the camera's own frame there (sky_frame_()).
-    if (world_frame_) lighting_pc.sky_inv_view_proj = glm::mat4(sky_frame_()) * lighting_pc.sky_inv_view_proj;
+    // The unprojection runs CAMERA-RELATIVE, like the cloud layer's matrices (see the
+    // rationale in record_clouds_()): rebasing the camera to the origin in double makes
+    // the large translation cancellation exact. A float32 inverse of the raw view-projection
+    // carries the camera's distance from the origin in its translation column against a tiny
+    // near:far ratio, and the ray it hands the shader staircases ulp by ulp as the camera
+    // moves -- which TAA accumulates into visible background jitter far from the origin.
+    {
+        glm::dmat4 vp = glm::dmat4(ctx.proj) * glm::dmat4(ctx.view);
+        vp[3]         = vp * glm::dvec4(glm::dvec3(ctx.cam_pos), 1.0);
+        glm::dmat4 inv_vp = glm::inverse(vp);
+        // On a curved world the sky is drawn in the camera's own frame there (sky_frame_()).
+        // The rotation applies to the camera-relative ray; rotating an absolute world point
+        // and then subtracting the unrotated camera would bend the ray by (R - I) * cam_pos.
+        if (world_frame_) inv_vp = glm::dmat4(glm::dmat3(sky_frame_())) * inv_vp;
+        lighting_pc.sky_inv_view_proj = glm::mat4(inv_vp);
+    }
     // World space, unrotated -- unlike the sky directions above, which sky_frame_() turns into
     // the camera's frame. The lighting pass shades world-space fragments, so it needs the
     // world frame where it actually is to tell day from night at each of them.

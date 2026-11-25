@@ -57,7 +57,7 @@ inline constexpr std::array<TileFace, 4> k_lateral_faces = {
  * @enum TileKind
  * @brief The surface a face is textured with -- one cell of the terrain atlas.
  *
- * A *surface*, not a biome: thirty-three biomes (see coopa::maps::Biome) collapse onto this
+ * A *surface*, not a biome: thirty-seven biomes (see coopa::maps::Biome) collapse onto this
  * much smaller set, because what a face needs from a biome is only which patch of the atlas to
  * sample. TerrainSampler owns that collapse; nothing else in the tile system knows biomes exist.
  *
@@ -79,13 +79,24 @@ enum class TileKind : std::uint8_t {
     Ash,
     Salt,
     /** @brief Packed, trodden roadway -- the surface a street or a highway is laid in. */
-    Road
+    Road,
+    /**
+     * @brief Molten rock: the only kind that emits light rather than only reflecting it.
+     *
+     * The emission is not in the albedo -- it comes from the metallic-roughness atlas's red
+     * channel, which nothing else reads (see `gen_terrain_atlas.py` and
+     * `assets/shaders/terrain_styled.glsl`). A cooled crust with incandescent cracks reads as
+     * lava; a uniformly orange surface reads as orange rock.
+     */
+    Lava,
+    /** @brief Cooled lava: dark, fine-grained, the ground a flow leaves behind. */
+    Basalt
 };
 
 /** @brief Number of distinct `TileKind` values; the number of occupied atlas cells. */
-inline constexpr std::size_t k_tile_kind_count = 13;
+inline constexpr std::size_t k_tile_kind_count = 15;
 
-/** @brief Atlas cells per row. 4 x 4 leaves four spare cells for new kinds without a re-layout. */
+/** @brief Atlas cells per row. 4 x 4 leaves one spare cell for a new kind without a re-layout. */
 inline constexpr std::uint32_t k_atlas_columns = 4;
 /** @brief Atlas cells per column. */
 inline constexpr std::uint32_t k_atlas_rows = 4;
@@ -107,12 +118,53 @@ struct TileColumn {
     std::uint8_t water = 0;
     /** @brief Flowing water's downstream direction: an octant 1..8 (k_flow_directions), 0 none. */
     std::uint8_t flow = 0;
+
+    /**
+     * @brief The underside of the solid roof over this column, in steps; see `roofed`.
+     *
+     * The column is solid 0..`steps`, open above it, and solid again `roof_steps`..`roof_top`.
+     * A mesher that knows nothing about roofs reads `steps` exactly as it always did.
+     */
+    std::int32_t roof_steps = 0;
+    /** @brief The top of that roof: its walkable surface, in steps. */
+    std::int32_t roof_top = 0;
+    TileKind     roof_top_kind  = TileKind::Stone; /**< @brief Surface of the roof's upper face. */
+    TileKind     roof_side_kind = TileKind::Stone; /**< @brief Surface of the roof's lateral faces. */
+    /** @brief Whether this column has a roof at all. False on every world that has none. */
+    bool         roofed = false;
+
+    /**
+     * @brief The outermost solid surface of this column: the roof's top where there is one, the
+     *        ground otherwise.
+     *
+     * What anything looking at the world FROM OUTSIDE should read. A coarse tier that read
+     * `steps` on a roofed column would draw the floor and leave the roof -- the only part
+     * visible from out there -- missing entirely.
+     */
+    std::int32_t outer_top() const { return roofed ? roof_top : steps; }
+    /** @brief The outermost surface's kind, to match `outer_top()`. */
+    TileKind outer_top_kind() const { return roofed ? roof_top_kind : top_kind; }
 };
 
 /** @brief TileColumn::water values. */
 inline constexpr std::uint8_t k_water_none = 0;
 inline constexpr std::uint8_t k_water_still = 1;
 inline constexpr std::uint8_t k_water_flowing = 2;
+/**
+ * @brief Molten rock. Meshes as a still surface, but kept distinct from `k_water_still`.
+ *
+ * The distinction is what makes a lava world still lava after it has been RELOADED. What a
+ * basin is filled with is stored per column (`TileCell::water_kind`), so it survives a bake, a
+ * `.terra` on disk and a scene reopening -- but only if the column's kind reaches the body that
+ * is built from it. Folded into `k_water_still` here, it does not, and the body comes back as
+ * water the next time the world is loaded rather than generated.
+ */
+inline constexpr std::uint8_t k_water_lava = 3;
+
+/** @brief Whether a column's fluid meshes as a still surface rather than a flowing one. */
+inline constexpr bool column_water_is_still(std::uint8_t water) {
+    return water == k_water_still || water == k_water_lava;
+}
 
 /** @brief The eight downstream directions TileColumn::flow / TileRecord::flow name, 1-based. */
 inline constexpr std::array<std::array<int, 2>, 8> k_flow_directions = {{
@@ -256,6 +308,10 @@ inline TileKind side_kind_for(TileKind top) {
         case TileKind::Salt:  return TileKind::Clay;
         case TileKind::Road:  return TileKind::Dirt;
         case TileKind::Ash:   return TileKind::Stone;
+        // A lava surface is a skin over the rock it flowed from, so the wall under it is the
+        // rock -- a cliff of glowing lava would read as a wall of fire.
+        case TileKind::Lava:   return TileKind::Basalt;
+        case TileKind::Basalt: return TileKind::Basalt;
         case TileKind::Ice:   return TileKind::Ice;
         case TileKind::Water: return TileKind::Water;
         default:              return TileKind::Stone;
@@ -266,7 +322,7 @@ inline TileKind side_kind_for(TileKind top) {
 inline const char* const* tile_kind_names() {
     static const char* const names[k_tile_kind_count] = {
         "grass", "dirt", "stone", "sand", "snow", "rock", "water", "ice", "moss", "clay", "ash",
-        "salt",  "road"};
+        "salt",  "road", "lava",  "basalt"};
     return names;
 }
 
@@ -296,7 +352,9 @@ inline const glm::vec3* tile_kind_base_colors() {
         {190.0f / 255.0f, 138.0f / 255.0f,  96.0f / 255.0f},   // clay
         { 96.0f / 255.0f,  90.0f / 255.0f,  88.0f / 255.0f},   // ash
         {238.0f / 255.0f, 236.0f / 255.0f, 226.0f / 255.0f},   // salt
-        {150.0f / 255.0f, 128.0f / 255.0f, 100.0f / 255.0f}};  // road
+        {150.0f / 255.0f, 128.0f / 255.0f, 100.0f / 255.0f},   // road
+        {196.0f / 255.0f,  58.0f / 255.0f,  22.0f / 255.0f},   // lava
+        { 54.0f / 255.0f,  50.0f / 255.0f,  56.0f / 255.0f}};  // basalt
     return colors;
 }
 

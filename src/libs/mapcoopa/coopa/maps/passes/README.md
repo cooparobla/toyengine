@@ -205,7 +205,7 @@ then rank-normalise so every map spans the full range.
 
 ### 8. Biomes ([`pass_biomes.h`](./pass_biomes.h))
 Delegates to `classify_biome()` in [`../biome.h`](../biome.h), which branches on
-temperature first, then elevation, then moisture — about 33 biomes rather than the
+temperature first, then elevation, then moisture — about 37 biomes rather than the
 original 18.
 
 **A water cell always gets a water biome** — `Ocean`, `Lake` or `Ice`, and nothing else.

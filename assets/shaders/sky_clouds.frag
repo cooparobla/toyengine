@@ -293,7 +293,11 @@ void main() {
         vec3 direct = sun_light * beer * (4.0 * SKY_PI * 0.6)
                     + moon_light * moon_phase * (4.0 * SKY_PI * 0.6);
         vec3 ambient = mix(amb_bottom, amb_top, clamp(h * 1.4, 0.0, 1.0)) * mix(0.55, 1.0, powder);
-        vec3 s = (direct + ambient) * 0.9;   // 0.9: cloud single-scattering albedo
+        // The single-scattering albedo, which used to be the scalar 0.9 and is now a colour the
+        // sample chooses between: `g_tint` came back from cloud_density() saying how far toward
+        // the deep albedo this sample lies (its band on a banded world, its own density
+        // elsewhere). At the default both ends are vec3(0.9) and this is the old constant.
+        vec3 s = (direct + ambient) * mix(cf.albedo.rgb, cf.albedo_deep.rgb, g_tint);
 
         // Energy-conserving integration of the step (Hillaire 2015): exact for constant
         // in-scatter over the step, so thin steps and thick ones agree.

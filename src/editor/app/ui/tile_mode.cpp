@@ -71,8 +71,9 @@ double tile_now() {
 // Unsized on purpose, with the assert below: a sized array leaves a null in the gap when a kind
 // is added to TileKind and forgotten here, and kind_options() then throws building a string from
 // it -- which is a crash in the Tile Mode panel, not a compile error.
-const char* const k_kind_names[] = {"Grass", "Dirt", "Stone", "Sand", "Snow", "Rock",
-                                    "Water", "Ice",  "Moss",  "Clay", "Ash",  "Salt", "Road"};
+const char* const k_kind_names[] = {"Grass", "Dirt", "Stone", "Sand",  "Snow",   "Rock",
+                                    "Water", "Ice",  "Moss",  "Clay",  "Ash",    "Salt",
+                                    "Road",  "Lava", "Basalt"};
 static_assert(std::size(k_kind_names) == toy::world::k_tile_kind_count,
               "every TileKind needs a name here -- see tile_types.h's k_tile_kind_count");
 

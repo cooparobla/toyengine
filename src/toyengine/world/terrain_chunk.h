@@ -130,6 +130,16 @@ struct ChunkWaterData {
     /// unused, on a flat terrain.
     glm::mat4                  frame{1.0f};
     bool                       local_frame = false;
+    /**
+     * @brief Whether this surface is lava rather than water.
+     *
+     * Read off the COLUMNS, which is what makes it survive a reload: what fills a basin is
+     * stored per tile, so a world opened from its `.terra` carries it exactly as a world that
+     * has just been generated does. Deriving it from the generator instead would make the look
+     * a property of the moment the world was built, and a terrain that is loaded rather than
+     * generated -- which is every terrain, the second time -- would come back as water.
+     */
+    bool                       lava = false;
 
     bool empty() const { return indices.empty(); }
     void clear() {
@@ -138,6 +148,7 @@ struct ChunkWaterData {
         depths.clear();
         wave_scales.clear();
         indices.clear();
+        lava = false;
     }
 };
 

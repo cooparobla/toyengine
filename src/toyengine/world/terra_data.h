@@ -79,7 +79,25 @@ struct TileCell {
     std::uint8_t  flow_authored = 0;  /**< @brief 1: a human set `flow`; derive_water_flow() leaves it alone. */
     std::uint16_t region = 0xFFFFu;   /**< @brief mapcoopa region id; 0xFFFF for none. */
     std::uint16_t country = 0xFFFFu;  /**< @brief mapcoopa country id; 0xFFFF for none. */
-    std::uint16_t reserved[3] = {0, 0, 0}; /**< @brief Zero; kept for later per-tile data. */
+    /**
+     * @brief The underside of the solid ROOF over this column, in whole steps.
+     *
+     * Meaningless unless `Roofed` is set. A column is then solid from 0 to `steps` (the floor,
+     * carrying whatever water stands on it), open above that, and solid again from here up to
+     * `roof_top` -- two spans, not one, which is the first time a column has been able to have
+     * anything above its own head.
+     *
+     * A cave roof, in other words. The height-column model has never had one, and this is the
+     * smallest shape that gives it one: not a voxel column, and not a second terrain, just a
+     * second pair of ends on the column that is already here. Where `Roofed` is clear the record
+     * is exactly what it has always been.
+     */
+    std::int16_t  roof_steps = 0;
+    /** @brief The top of that roof -- its walkable surface. Meaningless unless `Roofed`. */
+    std::int16_t  roof_top = 0;
+    /** @brief The roof's own top/side kinds, packed exactly as `kinds` is. */
+    std::uint8_t  roof_kinds = 0;
+    std::uint8_t  reserved = 0;       /**< @brief Zero; the record's last spare byte. */
 
     /// Flag bits (water's kind moved to `water_kind`; `Water`/`Ocean`/`Flowing` are gone with it).
     enum Flag : std::uint8_t {
@@ -87,11 +105,25 @@ struct TileCell {
         River = 1u << 1, /**< @brief A river channel cuts this tile. */
         Road  = 1u << 2, /**< @brief A roadway runs over this tile. */
         Town  = 1u << 3, /**< @brief This tile is inside a settlement. */
+        /**
+         * @brief This column has a solid roof over it (`roof_steps` .. `roof_top`).
+         *
+         * Clear on every column of every world that has no roof, which is every world there has
+         * ever been -- so a default-constructed cell is byte-identical to the one before this
+         * existed, and so is every `.terra` written from one.
+         */
+        Roofed = 1u << 4,
     };
     static constexpr std::uint16_t k_no_id = 0xFFFFu;
 
     TileKind top_kind() const { return static_cast<TileKind>(kinds & 0x0Fu); }
     TileKind side_kind() const { return static_cast<TileKind>(kinds >> 4); }
+    TileKind roof_top_kind() const { return static_cast<TileKind>(roof_kinds & 0x0Fu); }
+    TileKind roof_side_kind() const { return static_cast<TileKind>(roof_kinds >> 4); }
+    void set_roof_top_kind(TileKind k) { roof_kinds = static_cast<std::uint8_t>((roof_kinds & 0xF0u) | (static_cast<unsigned>(k) & 0x0Fu)); }
+    void set_roof_side_kind(TileKind k) { roof_kinds = static_cast<std::uint8_t>((roof_kinds & 0x0Fu) | ((static_cast<unsigned>(k) & 0x0Fu) << 4)); }
+    /** @brief Whether a solid roof stands over this column, with room under it. */
+    bool roofed() const { return has(Roofed) && roof_top > roof_steps; }
     void set_top_kind(TileKind k) { kinds = static_cast<std::uint8_t>((kinds & 0xF0u) | (static_cast<unsigned>(k) & 0x0Fu)); }
     void set_side_kind(TileKind k) { kinds = static_cast<std::uint8_t>((kinds & 0x0Fu) | ((static_cast<unsigned>(k) & 0x0Fu) << 4)); }
     bool has(Flag f) const { return (flags & f) != 0; }
@@ -128,8 +160,17 @@ inline TileColumn tile_column(const TileCell& c, float height_step) {
     out.side_kind = c.side_kind();
     if (c.wet() && height_step > 0.0f) {
         out.water_level = static_cast<std::int32_t>(std::floor(c.water_level / height_step + 1e-4f));
-        out.water = c.water_kind == static_cast<std::uint8_t>(WaterKind::River) ? k_water_flowing : k_water_still;
+        out.water = c.water_kind == static_cast<std::uint8_t>(WaterKind::River)   ? k_water_flowing
+                  : c.water_kind == static_cast<std::uint8_t>(WaterKind::Lava)    ? k_water_lava
+                                                                                  : k_water_still;
         out.flow = out.water == k_water_flowing ? c.flow : 0;
+    }
+    if (c.roofed()) {
+        out.roofed = true;
+        out.roof_steps = c.roof_steps;
+        out.roof_top = c.roof_top;
+        out.roof_top_kind = c.roof_top_kind();
+        out.roof_side_kind = c.roof_side_kind();
     }
     return out;
 }

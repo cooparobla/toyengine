@@ -302,6 +302,10 @@ void build_smooth_chunk_water(const TerrainField& field, glm::ivec2 chunk, int c
             if (!shows.wet()) continue;
 
             Builder& b = shows.kind == WaterKind::River ? flow_b : still_b;
+            // Lava meshes as a still surface and shares its geometry, but the body built from
+            // it has to know -- read off the field for the same reason the tile path reads it
+            // off the columns: it is stored, so it survives a reload.
+            if (shows.kind == WaterKind::Lava && b.out != nullptr) b.out->lava = true;
             std::uint32_t v[4];
             for (int c = 0; c < 4; ++c) {
                 const int ox = c == 1 || c == 2 ? 1 : 0;

@@ -38,6 +38,7 @@
 #include <physxcoopa/components/vehicle.h>
 #include <physxcoopa/system/vehicle_system.h>
 #include <toyengine/core/branding.h>
+#include <toyengine/io/derived_cache.h>
 #include <toyengine/io/user_settings.h>
 #include <toyengine/ui/imm_screen.h>
 #include <toyengine/ui/ui_panel.h>
@@ -123,6 +124,14 @@ Engine::Engine(AppConfig config, EngineOptions options)
     scene_mgr_.set_job_engine(&jobs_);
     pipeline_->set_job_engine(&jobs_);
     pipeline_->set_parallel_threshold(config_.jobs.parallel_threshold);
+
+    // Derived data a project cached from an earlier run (io/derived_cache.h): drop what no
+    // longer has a source, then the oldest entries until the cache is back inside its cap. Done
+    // once, at startup, because it is a directory walk and a few deletes -- and because startup
+    // is the one moment nothing is reading from it.
+    if (const std::uint64_t freed = io::prune_derived_cache(); freed > 0) {
+        std::cout << "[toyengine] Derived cache: freed " << (freed / (1024 * 1024)) << " MB\n";
+    }
 
     // Profiling mode (PROFILE env var): per-frame CPU/GPU timings to a CSV + an exit summary.
     if (const std::string path = profile_path_from_env_(); !path.empty()) {
@@ -2173,6 +2182,37 @@ render::ToyRenderConfig Engine::make_render_config_(const AppConfig& config,
         /* cull */ coopa::gfx::CullMode::None,
         /* tesc */ "water.tesc",
         /* tese */ "water_local_frame.tese",
+    });
+    // Lava: the same body, the same waves, the same shoreline -- compiled with WATER_LAVA so
+    // the surface comes out opaque and incandescent instead of clear and foaming. A separate
+    // registration rather than a runtime branch because a surface shader's defines are baked
+    // into its pipeline, and because water then carries none of this code (exactly as
+    // water_local_frame is its own build).
+    rc.surface_shaders.add({
+        /* name  */ "lava",
+        /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Transparent,
+        /* vert  */ "lava.vert",
+        /* frag  */ "lava.frag",
+        /* shadow_vert */ "",
+        /* shadow_frag */ "",
+        /* shadow_cube_vert */ "",
+        /* shadow_cube_frag */ "",
+        /* cull */ coopa::gfx::CullMode::None,
+        /* tesc */ "water.tesc",   // the same wave reach; nothing lava-specific in the margin
+        /* tese */ "lava.tese",
+    });
+    rc.surface_shaders.add({
+        /* name  */ "lava_local_frame",
+        /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Transparent,
+        /* vert  */ "lava_local_frame.vert",
+        /* frag  */ "lava_local_frame.frag",
+        /* shadow_vert */ "",
+        /* shadow_frag */ "",
+        /* shadow_cube_vert */ "",
+        /* shadow_cube_frag */ "",
+        /* cull */ coopa::gfx::CullMode::None,
+        /* tesc */ "water.tesc",
+        /* tese */ "lava_local_frame.tese",
     });
     // A project's own surface shaders, last. This is the only moment early enough for them:
     // the pipeline builds one variant per registered surface shader when it is constructed

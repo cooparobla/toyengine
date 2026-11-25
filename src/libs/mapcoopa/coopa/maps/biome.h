@@ -64,11 +64,62 @@ enum class Biome {
     Badlands,
     SaltFlat,
     Dunes,
-    VolcanicField
+    VolcanicField,
+    // The airless and volcanic set, reached through `BiomeProfile` rather than the
+    // temperate Whittaker diagram.
+    Regolith,
+    BasaltPlain,
+    LavaField,
+    SulfurFlat
 };
 
 /** @brief Number of distinct `Biome` values; the size of any biome-indexed table. */
-inline constexpr std::size_t k_biome_count = 33;
+inline constexpr std::size_t k_biome_count = 37;
+
+/**
+ * @enum BiomeProfile
+ * @brief Which classification the land consults: the temperate Whittaker diagram, or one of the
+ *        reduced diagrams for ground no earthlike climate describes.
+ *
+ * `Temperate` is the default and is bit-for-bit the classification every existing map was built
+ * on. `Barren` is airless rock -- regolith plains, basalt lowlands, bright bare highlands --
+ * classified on elevation with temperature deciding the scorched extreme. `Volcanic` is a young
+ * hot surface -- lava floods in the basins, basalt and ash over the middle ground, sulphur
+ * where the ground runs cooler -- classified on elevation with temperature as the activity axis.
+ * `Glacial` is a world frozen through: ice sheets in the lowlands, snowfields over the middle,
+ * glacier at the heights, bare rock only where the ground runs warmest.
+ */
+enum class BiomeProfile {
+    Temperate,
+    Barren,
+    Volcanic,
+    Glacial
+};
+
+/** @brief Number of distinct `BiomeProfile` values. */
+inline constexpr std::size_t k_biome_profile_count = 4;
+
+/** @brief Maps a profile to its serialisation name. */
+inline std::string_view biome_profile_name(BiomeProfile profile) {
+    switch (profile) {
+        case BiomeProfile::Temperate: return "temperate";
+        case BiomeProfile::Barren:    return "barren";
+        case BiomeProfile::Volcanic:  return "volcanic";
+        case BiomeProfile::Glacial:   return "glacial";
+    }
+    return "temperate";
+}
+
+/** @brief Resolves a serialisation name back to its profile; unknown names are `Temperate`. */
+inline BiomeProfile biome_profile_from_name(std::string_view name) {
+    for (std::size_t i = 0; i < k_biome_profile_count; ++i) {
+        const BiomeProfile candidate = static_cast<BiomeProfile>(i);
+        if (biome_profile_name(candidate) == name) {
+            return candidate;
+        }
+    }
+    return BiomeProfile::Temperate;
+}
 
 /**
  * @brief Elevation below which land is basin floor: wetland if wet, salt flat if dry.
@@ -139,6 +190,10 @@ inline std::string_view biome_name(Biome biome) {
         case Biome::SaltFlat:                 return "salt_flat";
         case Biome::Dunes:                    return "dunes";
         case Biome::VolcanicField:            return "volcanic_field";
+        case Biome::Regolith:                 return "regolith";
+        case Biome::BasaltPlain:              return "basalt_plain";
+        case Biome::LavaField:                return "lava_field";
+        case Biome::SulfurFlat:               return "sulfur_flat";
     }
     return "ocean";
 }
@@ -213,14 +268,18 @@ inline double biome_habitability(Biome biome) {
         case Biome::Badlands:                 return 0.10;
         case Biome::Dunes:                    return 0.05;
         case Biome::SaltFlat:                 return 0.03;
-        // Nothing is built on open water, ice, or bare volcanic rock.
+        // Nothing is built on open water, ice, bare volcanic rock, or ground with no air over it.
         case Biome::Ocean:
         case Biome::Lake:
         case Biome::Ice:
         case Biome::Snow:
         case Biome::Glacier:
         case Biome::VolcanicField:
-        case Biome::Scorched:                 return 0.0;
+        case Biome::Scorched:
+        case Biome::Regolith:
+        case Biome::BasaltPlain:
+        case Biome::LavaField:
+        case Biome::SulfurFlat:               return 0.0;
     }
     return 0.0;
 }
@@ -239,6 +298,13 @@ struct BiomeSample {
     double elevation = 0.0;   /**< @brief Land-relative height in `[0, 1]`; see `land_height()`. */
     double moisture = 0.0;    /**< @brief Normalised wetness in `[0, 1]`. */
     double temperature = 0.0; /**< @brief Normalised warmth in `[0, 1]`; 0 polar, 1 equatorial. */
+    /**
+     * @brief Heat from under the ground in `[0, 1]`, separate from the climate.
+     *
+     * Only the profiles that freeze their water read it, and only to decide whether a
+     * particular patch of that water is molten instead. See `MapCenter::warmth`.
+     */
+    double warmth = 0.0;
     bool is_water = false;    /**< @brief True under a lake or the ocean. */
     bool is_ocean = false;    /**< @brief True under the ocean specifically. */
     /** @brief Proximity to open water: 1 at the waterline, fading to 0 inland. */
@@ -247,6 +313,8 @@ struct BiomeSample {
     double relief_m = 1.0e9;
     /** @brief `MapConfig::beach_height_m`: how high a shore may stand and still be beach. */
     double beach_height_m = 6.0;
+    /** @brief Which diagram classifies the land; see `BiomeProfile`. */
+    BiomeProfile profile = BiomeProfile::Temperate;
 };
 
 /**
@@ -270,10 +338,62 @@ struct BiomeSample {
  * @param sample The point's terrain state and climate; see `BiomeSample`.
  * @return The assigned biome.
  */
+/**
+ * @brief What a frozen profile's water is where something under it is melting the crust.
+ *
+ * A glacial or airless world's water is ice everywhere, with one exception worth naming: a live
+ * volcanic vent beneath it. That is what an ice moon with an ocean under its shell IS -- a
+ * frozen lid with open water where the heat comes up -- and without the exception the whole
+ * class of world is indistinguishable from a solid snowball. `warmth` is zero on every map that
+ * has not set `natural.volcano_warmth`, so this reads as plain `Ice` unless asked otherwise.
+ */
+inline Biome thawed_(const BiomeSample& sample) {
+    /** Half strength: the vent's core melts through, its fringe only thins the ice. */
+    if (sample.warmth < 0.5) return Biome::Ice;
+    return sample.is_ocean ? Biome::Ocean : Biome::Lake;
+}
+
 inline Biome classify_biome(const BiomeSample& sample) {
     const double elevation = sample.elevation;
     const double moisture = sample.moisture;
     const double temperature = sample.temperature;
+
+    // --- Barren: airless rock -------------------------------------------------------------
+    // No shore band, no wetland, no diagram row that assumes rainfall. Elevation carries the
+    // look -- dark basalt floods the basins (the maria look), bright bare rock crowns the
+    // heights -- and temperature alone separates the sun-scorched middle ground from regolith.
+    // Any water a config leaves on is frozen solid: nothing stays liquid under vacuum.
+    if (sample.profile == BiomeProfile::Barren) {
+        if (sample.is_water) return thawed_(sample);
+        if (elevation < 0.22) return Biome::BasaltPlain;
+        if (elevation > 0.78) return Biome::Bare;
+        if (temperature > 0.72) return Biome::Scorched;
+        return Biome::Regolith;
+    }
+
+    // --- Volcanic: a young, hot surface ---------------------------------------------------
+    // Lava floods the basins the way the sea floods a temperate map's, the peaks are scorched
+    // clean, and in between temperature is the ACTIVITY axis: the hottest ground is open
+    // volcanic field, the middle is basalt, and the coolest ground collects sulphur deposits.
+    if (sample.profile == BiomeProfile::Volcanic) {
+        if (sample.is_water || elevation < 0.14) return Biome::LavaField;
+        if (elevation > 0.82) return Biome::Scorched;
+        if (temperature > 0.78) return Biome::VolcanicField;
+        if (temperature > 0.45) return Biome::BasaltPlain;
+        return Biome::SulfurFlat;
+    }
+
+    // --- Glacial: frozen through --------------------------------------------------------
+    // Ice sheets flood the lowlands the way lava floods a volcanic world's, snow blankets the
+    // middle ground, glacier crowns the heights, and only the warmest ground bares its rock.
+    if (sample.profile == BiomeProfile::Glacial) {
+        if (sample.is_water) return thawed_(sample);
+        if (elevation > 0.8) return Biome::Glacier;
+        if (elevation < 0.18) return Biome::Ice;
+        if (temperature > 0.6) return Biome::Bare;
+        return Biome::Snow;
+    }
+
     if (sample.is_ocean) {
         return Biome::Ocean;
     }
@@ -389,18 +509,23 @@ inline Biome classify_biome(const BiomeSample& sample) {
  * @param is_water True if the cell is a lake or ocean.
  * @param is_ocean True if the cell is connected to the map border by water.
  * @param is_coast True if the cell is land bordering an ocean cell.
+ * @param profile Which diagram classifies the land; see `BiomeProfile`.
  * @return The assigned biome.
  */
 inline Biome classify_biome(double elevation, double moisture, double temperature,
-                            bool is_water, bool is_ocean, bool is_coast) {
+                            bool is_water, bool is_ocean, bool is_coast,
+                            BiomeProfile profile = BiomeProfile::Temperate,
+                            double warmth = 0.0) {
     BiomeSample sample;
     sample.elevation = elevation;
     sample.moisture = moisture;
     sample.temperature = temperature;
+    sample.warmth = warmth;
     sample.is_water = is_water;
     sample.is_ocean = is_ocean;
     sample.shore = is_coast ? 1.0 : 0.0;
     sample.relief_m = is_coast ? 0.0 : sample.relief_m;
+    sample.profile = profile;
     return classify_biome(sample);
 }
 

@@ -54,20 +54,25 @@ CloudNoiseTexture::CloudNoiseTexture(coopa::gfx::core::Device& device, coopa::gf
 }
 
 void CloudNoiseTexture::generate(coopa::gfx::command::CommandBuffer& cmd, const coopa::gfx::pipeline::ComputePipeline& generator,
-              const CloudNoiseGenerators& gens) {
+              const CloudNoiseGenerators& gens, std::uint32_t seed) {
     using coopa::gfx::ImageAccess;
     using coopa::gfx::SubresourceRange;
     using coopa::gfx::TextureUsage;
 
     const SubresourceRange whole = SubresourceRange::mips(0, levels_);
-    barrier_(cmd, whole, TextureUsage::Undefined, TextureUsage::Storage,
-             ImageAccess::None, ImageAccess::ComputeWrite);
+    // A re-bake has to WAIT for the frames already reading this image -- the first bake has
+    // nothing to wait for and discards an Undefined image, but taking that path a second time
+    // is a write-after-read hazard against every submission still sampling the chain.
+    barrier_(cmd, whole, generated_ ? TextureUsage::ShaderRead : TextureUsage::Undefined,
+             TextureUsage::Storage,
+             generated_ ? ImageAccess::FragmentShaderRead : ImageAccess::None,
+             ImageAccess::ComputeWrite);
 
     const uint32_t local = volume_ ? 4u : 8u;
     cmd.bind_pipeline(generator);
     cmd.bind_descriptor_set(*gen_set_);
-    const uint32_t push = size_;
-    cmd.push_constants(coopa::gfx::ShaderStage::Compute, 0, sizeof(push), &push);
+    const uint32_t push[2] = {size_, seed};
+    cmd.push_constants(coopa::gfx::ShaderStage::Compute, 0, sizeof(push), push);
     const uint32_t g = (size_ + local - 1) / local;
     cmd.dispatch(g, g, volume_ ? g : 1u);
 
@@ -84,6 +89,7 @@ void CloudNoiseTexture::generate(coopa::gfx::command::CommandBuffer& cmd, const 
     }
     barrier_(cmd, whole, TextureUsage::Storage, TextureUsage::ShaderRead,
              ImageAccess::ComputeWrite, ImageAccess::FragmentShaderRead);
+    generated_ = true;
 }
 
 void CloudNoiseTexture::barrier_(coopa::gfx::command::CommandBuffer& cmd, coopa::gfx::SubresourceRange range,

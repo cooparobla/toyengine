@@ -43,7 +43,7 @@ SWATCH_DIR = REPO_ROOT / "assets" / "svg"
 README = REPO_ROOT / "README.md"
 """Carries the two legend tables this script rewrites in place."""
 
-BIOME_COUNT = 33
+BIOME_COUNT = 37
 """Expected `k_biome_count`. Asserted rather than inferred: finding fewer colours than
 this means the regex stopped matching partway through the array, and writing a short
 legend is worse than refusing to write one."""
@@ -84,6 +84,14 @@ OVERLAYS = [
     ("landmark_natural_color", "landmark-natural", "Natural landmark",
      "Diamond; 21 m for a region's wonder, 13 m otherwise"),
     ("landmark_built_color", "landmark-built", "Built landmark", "Square, 13 m"),
+    ("cave_shallow_color", "cave-shallow", "Shallow cave passage",
+     "Stroke on the overview layer; depth blends toward the deep colour"),
+    ("cave_deep_color", "cave-deep", "Deep cave passage",
+     "The cold end of the depth blend"),
+    ("cave_chamber_color", "cave-chamber", "Cave chamber",
+     "Outline drawn over the passage colour"),
+    ("cave_mouth_color", "cave-mouth", "Cave mouth",
+     "Ringed marker where a cave opens to the surface"),
     ("background_color", "background", "Background", "Whatever no cell covers"),
 ]
 """The overlay rows, in the order `MapLayers` draws them.

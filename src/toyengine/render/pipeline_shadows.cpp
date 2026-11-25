@@ -8,6 +8,8 @@
  * (and the rules that govern them) are in toy_render_pipeline.h.
  */
 
+#include <algorithm>
+
 #include <toyengine/render/toy_render_pipeline.h>
 #include <glm/gtx/quaternion.hpp>
 
@@ -63,6 +65,21 @@ void ToyRenderPipeline::update_lights_(coopa::scene::Scene& scene) {
     ubo.sky_ground  = glm::vec4(config_.indirect.sky_ground, 0.0f);
     fill_fog_block_(ubo);
 
+    // The analytic occluders of the directional light, written whatever the sky model is doing:
+    // this is a property of the LIGHT, not of the sky, and the scene that needs it most draws no
+    // sky at all. In WORLD space and never rotated into the sky's frame -- the lighting pass
+    // shades world positions, so these have to be in the same space as those.
+    {
+        const int occ = std::min(sky_state_.occluder_count, SkyFrameState::k_max_occluders);
+        ubo.dir_occluder_info =
+            glm::vec4(static_cast<float>(occ), sky_state_.light_angular_radius, 0.0f, 0.0f);
+        for (int i = 0; i < occ; ++i) {
+            ubo.dir_occluders[i] =
+                glm::vec4(sky_state_.occluders[static_cast<std::size_t>(i)].center,
+                          sky_state_.occluders[static_cast<std::size_t>(i)].radius);
+        }
+    }
+
     auto* dir = frame_scene_.dir_light;
     ubo.light_counts.x = dir ? 1 : 0;
     if (dir) {
@@ -74,6 +91,36 @@ void ToyRenderPipeline::update_lights_(coopa::scene::Scene& scene) {
     // the fraction of the cloud target the march filled (0 = no clouds composited), and applies
     // under any model.
     const float cloud_fill = volumetric_clouds_traced() ? cloud_quality_steps_().cloud_scale : 0.0f;
+
+    // The additional sun/moon discs (SkyFrameState's arrays): rotated into the same frame as
+    // sky_sun/sky_moon, except sky_moonlight, which the lighting pass reads in WORLD space (it
+    // shades world positions -- the same reason toy_lighting.frag re-derives the single moon
+    // from dir_direction rather than from sky_moon).
+    const auto fill_sky_bodies = [&ubo, this](const SkyFrameState& st, const glm::mat3& frame) {
+        ubo.sky_body_counts = glm::vec4(static_cast<float>(st.sun_count),
+                                        static_cast<float>(st.moon_count), 0.0f, 0.0f);
+        for (int i = 0; i < st.sun_count && i < SkyFrameState::k_max_suns; ++i) {
+            const SkySunState& sun = st.suns[static_cast<std::size_t>(i)];
+            ubo.sky_sun_dirs[i] = glm::vec4(world_frame_ ? frame * sun.dir : sun.dir, sun.disc_cos);
+            ubo.sky_sun_colors[i] = glm::vec4(sun.color, sun.disc_radiance);
+        }
+        for (int i = 0; i < st.moon_count && i < SkyFrameState::k_max_moons; ++i) {
+            const SkyMoonState& moon = st.moons[static_cast<std::size_t>(i)];
+            ubo.sky_moon_dirs[i] =
+                glm::vec4(world_frame_ ? frame * moon.dir : moon.dir, moon.disc_cos);
+            ubo.sky_moon_colors[i] = glm::vec4(moon.tint, moon.disc_radiance);
+            ubo.sky_moon_lit[i] = glm::vec4(world_frame_ ? frame * moon.lit_from : moon.lit_from,
+                                            moon.banded ? 1.0f : 0.0f);
+            ubo.sky_moon_rects[i] = moon.atlas_rect;
+            ubo.sky_moon_atmo[i] = glm::vec4(moon.atmo_tint, moon.atmo_thickness);
+        }
+        const bool moonlight_live = glm::length(st.moonlight_to) > 0.5f;
+        ubo.sky_moonlight = glm::vec4(st.moonlight_to, moonlight_live ? 1.0f : 0.0f);
+        ubo.sky_moonlight_tint = glm::vec4(st.moonlight_tint, 0.0f);
+        ubo.sky_backdrop =
+            glm::vec4(world_frame_ ? frame * st.backdrop_to : st.backdrop_to, st.backdrop_seed);
+    };
+
     if (config_.sky_model == "space" && sky_state_.active) {
         const SkyFrameState& st = sky_state_;
         // (On a curved world the sky's directions are in the camera's own frame: see sky_frame_().)
@@ -82,6 +129,7 @@ void ToyRenderPipeline::update_lights_(coopa::scene::Scene& scene) {
         ubo.sky_moon   = glm::vec4(world_frame_ ? frame * st.moon_to : st.moon_to, st.moon_disc_cos);
         ubo.sky_params = glm::vec4(2.0f, cloud_fill, st.star_visibility, st.sky_illuminance);
         ubo.sky_extra  = glm::vec4(st.sun_disc_radiance, st.moon_disc_radiance, st.night_floor, st.time);
+        fill_sky_bodies(st, frame);
     } else if (physical_sky_active()) {
         const SkyFrameState& st = sky_state_;
         // (On a curved world the sky's directions are in the camera's own frame: see sky_frame_().)
@@ -90,8 +138,12 @@ void ToyRenderPipeline::update_lights_(coopa::scene::Scene& scene) {
         ubo.sky_moon   = glm::vec4(world_frame_ ? frame * st.moon_to : st.moon_to, st.moon_disc_cos);
         ubo.sky_params = glm::vec4(1.0f, cloud_fill, st.star_visibility, st.sky_illuminance);
         ubo.sky_extra  = glm::vec4(st.sun_disc_radiance, st.moon_disc_radiance, st.night_floor, st.time);
+        fill_sky_bodies(st, frame);
     } else {
         ubo.sky_params = glm::vec4(0.0f, cloud_fill, 0.0f, 0.0f);
+        // Zeroed, not left: counts surviving a model switch would draw stale discs.
+        ubo.sky_body_counts = glm::vec4(0.0f);
+        ubo.sky_moonlight = glm::vec4(0.0f, 0.0f, -1.0f, 0.0f);
     }
 
     // The cloud layer's shadow map (cloud_shadow.glsl): where it lies, how dark, and how it

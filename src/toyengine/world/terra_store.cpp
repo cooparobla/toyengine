@@ -114,5 +114,21 @@ bool TerraStore::any_dirty() const {
 
 void TerraStore::clear() { entries_.clear(); }
 
+bool TerraStore::release(const std::string& path, bool discard_unsaved) {
+    const auto it = entries_.find(path);
+    if (it == entries_.end()) return false;
+    // Unsaved edits are never dropped on the quiet: a caller releasing a world it has sculpted
+    // wants save() first, and silently losing the work is the one outcome worth refusing. A
+    // caller that knows its entry is derived says so, and generated worlds all look unsaved --
+    // filling the grid is an edit like any other.
+    if (!discard_unsaved && it->second.data && it->second.data->dirty_on_disk()) return false;
+    entries_.erase(it);
+    return true;
+}
+
+bool TerraStore::contains(const std::string& path) const {
+    return entries_.find(path) != entries_.end();
+}
+
 } // namespace world
 } // namespace toy

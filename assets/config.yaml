@@ -84,7 +84,7 @@ render:
   grading_enabled: true
   grading_lut: ""
   light_bands: 4
-  mesh_lod_bias: 1.0
+  mesh_lod_quality: medium
   moon_disc_size: 0.6
   motion_blur: false
   motion_blur_intensity: 0.5

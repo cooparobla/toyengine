@@ -92,6 +92,10 @@ layout(set = 3, binding = 0) uniform sampler2D u_contact_shadow;
 layout(set = 3, binding = 1) uniform sampler2D u_sky_transmittance;
 layout(set = 3, binding = 2) uniform sampler2D u_sky_view;
 layout(set = 3, binding = 3) uniform sampler2D u_sky_clouds;
+// The sky-body atlas (Engine::update_sky_body_atlas): the faces of any additional moon discs
+// the sky draws. Bound whether or not any are live; a white 1x1 until an app streams into it.
+layout(set = 3, binding = 4) uniform sampler2D u_sky_bodies;
+#define TOY_SKY_BODY_ATLAS
 
 // Set 4: G-Buffer textures + screen-space AO -- LAST, after the extra above.
 layout(set = 4, binding = 0) uniform sampler2D g_albedo_ao;          // RGB = Albedo, A = AO
@@ -110,7 +114,8 @@ layout(push_constant) uniform ToyLightingParams {
     float ssao_direct_strength; // how much occlusion darkens DIRECT lighting (HDRP's
                                 // Direct Lighting Strength): 0 = indirect only
     float ssao_intensity;       // Unreal's AO Intensity: ssao = mix(1, ssao, intensity)
-    mat4  sky_inv_view_proj;     // inverse(proj * view), for the sky at background pixels
+    mat4  sky_inv_view_proj;     // camera-relative inverse view-projection (camera rebased to
+                                 // the origin), for the sky ray at background pixels
     vec4  world_frame;           // xyz = the centre the world curves about (world), w = its radius.
                                  // w <= 0 is a FLAT world -- every term below then reduces to
                                  // what it has always been. WORLD space, unlike lights.sky_sun /
@@ -192,8 +197,10 @@ void main() {
         // second fullscreen pass that would re-read every pixel's normal just to discard
         // all the geometry ones.
         vec3 ndc   = vec3(in_uv.x * 2.0 - 1.0, 1.0 - in_uv.y * 2.0, 1.0);
+        // Camera-relative: the matrix rebases the camera to the origin, so the dehomogenized
+        // point IS the view ray -- no large-coordinate subtraction here to lose bits in.
         vec4 world = params.sky_inv_view_proj * vec4(ndc, 1.0);
-        vec3 dir   = normalize(world.xyz / world.w - camera.camera_pos);
+        vec3 dir   = normalize(world.xyz / world.w);
         // sky_params.x selects the sky model (sky_physical.glsl): 0 gradient, 1 physical,
         // 2 space -- no atmosphere, stars and discs only, added to the scene's own near-black
         // sky_zenith/horizon/ground.
@@ -248,6 +255,13 @@ void main() {
         bool  faces_light = dot(N, L) > 0.0;
         float shadow = faces_light ? calc_dir_shadow(world_pos, N, L) : 0.0;
 
+        // An eclipse: a sphere standing between this point and the light, shadowed with no map
+        // and no range at all (light_ubo_body.glsl). max()-combined like every other term here,
+        // so it can only ever ADD occlusion to what the cascades already found.
+        if (faces_light && lights.dir_occluder_info.x > 0.0) {
+            shadow = max(shadow, 1.0 - toy_dir_occlusion(world_pos, L));
+        }
+
         // Screen-space contact shadows (HDRP's own feature of that name): a short
         // G-buffer march from the surface toward the light, catching the small-scale
         // occlusion the shadow map's normal-offset bias necessarily recedes from (see
@@ -276,11 +290,12 @@ void main() {
         //
         // Gated by the SAME terminator the atmosphere shell and the cloud deck use
         // (gfx_world_day), so ground, air and cloud cross into night together. Its direction is
-        // derived rather than sent: the moon sits opposite the sun, so the direction TOWARD it
-        // is the direction the sun's light TRAVELS -- `lights.dir_direction.xyz`, already world
-        // space here. (`lights.sky_moon` is NOT usable: it is pre-rotated into the camera's
-        // frame for the sky shaders, so it would place the moon correctly only directly beneath
-        // the camera.)
+        // `lights.sky_moonlight` -- WORLD space, filled from the brightest real moon when the
+        // frame carries one (sky_moonlight.w = 1) -- and otherwise derived: a moon opposite the
+        // sun lights along the direction the sun's light TRAVELS, `lights.dir_direction.xyz`,
+        // already world space here. (`lights.sky_moon` is NOT usable: it is pre-rotated into
+        // the camera's frame for the sky shaders, so it would place the moon correctly only
+        // directly beneath the camera.)
         //
         // Casts no shadow, deliberately: the cascades belong to the sun, and a second shadowed
         // light would double this pass's most expensive term to light a hemisphere that is, by
@@ -292,10 +307,14 @@ void main() {
             vec3  sun_to = normalize(-lights.dir_direction.xyz);
             float night = 1.0 - gfx_world_day(up, sun_to);
             if (night > 0.0) {
-                // The same tint the night sky itself uses (sky_physical.glsl's airglow term),
-                // so the ground a moonlit cloud sits over reads as the same light.
-                vec3 moon_radiance = vec3(0.55, 0.75, 1.3) * moon_lum * night;
-                Lo += shade_light(N, V, normalize(lights.dir_direction.xyz), moon_radiance,
+                vec3 moon_to = lights.sky_moonlight.w > 0.5
+                                   ? normalize(lights.sky_moonlight.xyz)
+                                   : normalize(lights.dir_direction.xyz);
+                // The frame's own moonlight tint; its default is the night sky's airglow tint
+                // (sky_physical.glsl), so the ground a moonlit cloud sits over reads as the
+                // same light.
+                vec3 moon_radiance = lights.sky_moonlight_tint.rgb * moon_lum * night;
+                Lo += shade_light(N, V, moon_to, moon_radiance,
                                   albedo, metallic, roughness, F0, 0.0, toon);
             }
         }

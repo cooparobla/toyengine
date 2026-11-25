@@ -1,5 +1,7 @@
 #include <toyengine/water/water_yaml.h>
 
+#include <string>
+
 #include <glm/glm.hpp>
 
 #include <toyengine/io/yaml_read.h>
@@ -23,6 +25,19 @@ glm::vec3 parse_rgb(const fkyaml::node& n, const glm::vec3& fallback) {
 } // namespace
 
 void parse_water_settings(const fkyaml::node& node, WaterBody& w) {
+    // FIRST, so every key below overrides it. `fluid: lava` is a bundle of defaults -- colour,
+    // density, waves, viscosity, the underwater volume -- and a scene that names one of those
+    // as well means to change it, not to have it quietly put back.
+    if (node.contains("fluid")) {
+        apply_fluid_preset(w, fluid_kind_from_name(node.at("fluid").get_value<std::string>()));
+    }
+    if (node.contains("emissive_color")) {
+        w.emissive_color = parse_rgb(node.at("emissive_color"), w.emissive_color);
+    }
+    read(node, "emissive_strength", w.emissive_strength);
+    read(node, "viscosity", w.viscosity);
+    read(node, "temperature_c", w.temperature_c);
+
     // Render granularity, not look: a body wider than one tile is drawn as several child
     // objects, each its own renderer, draw and per-frame CPU cost. A body whose extent is
     // already the granularity the rest of the world is culled at wants one tile, and only

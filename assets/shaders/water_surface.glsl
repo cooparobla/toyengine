@@ -305,8 +305,19 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
     float wave_scale = s.custom.z;
     float crest = s.custom.w;
 
+    // WATER_LAVA reuses this slot. Lava has no foam -- what gathers at its edges and over its
+    // cooling skin is CRUST, which is derived from the body's own colour rather than authored --
+    // so the slot carries the heat instead. There is nowhere else to put it: `gfx_params` is the
+    // packed Gerstner wave and ext1 is the shoreline and ripple block, and the transparent
+    // material UBO is full at Vulkan's guaranteed 128 bytes.
     vec3  foam_color      = gfx_params_ext0.rgb;
     float foam_amount     = gfx_params_ext0.a;
+#ifdef WATER_LAVA
+    vec3  heat_color      = gfx_params_ext0.rgb;
+    float heat_strength   = gfx_params_ext0.a;
+    foam_color            = vec3(0.0);   // unused below; the crust is derived
+    foam_amount           = 1.0;
+#endif
     float shore_depth     = max(gfx_params_ext1.x, 1e-3);
     float edge_depth      = max(gfx_params_ext1.y, 1e-3);
     float ripple_strength = gfx_params_ext1.z;
@@ -583,8 +594,28 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
 
     foam = max(foam, ring_foam);
     foam = clamp(foam * foam_amount, 0.0, 1.0);
+#ifdef WATER_LAVA
+    // Molten rock. Everything above -- the waves, the flow, the shoreline band, the contact
+    // line -- is reused as it stands; only what the surface DOES with it changes.
+    //
+    // `foam` is where water would froth: crests, shores, contacts. On lava that is exactly
+    // where a skin forms and cools, so it becomes crust. The heat then shows between the
+    // plates, which is what reads as molten instead of as tinted water: a uniform glow looks
+    // like orange glass.
+    vec3 crust  = s.albedo * 0.3;
+    s.albedo    = mix(s.albedo, crust, foam);
+    // Opaque: nothing is visible through lava at any depth, so there is no bed to show and no
+    // refraction to carry. The underside the two-sided cull still draws is simply more lava.
+    s.alpha     = 1.0;
+    s.roughness = mix(0.5, 0.9, foam);
+    // Hotter on a crest and cooler in a trough, so the glow moves with the surface rather than
+    // sitting under it as a flat tint.
+    float hot   = clamp(0.45 + 0.55 * (crest * 0.5 + 0.5), 0.0, 1.0);
+    s.emission += heat_color * heat_strength * hot * (1.0 - 0.85 * foam);
+#else
     s.albedo    = mix(s.albedo, foam_color, foam);
     s.alpha     = mix(s.alpha, 1.0, foam * 0.9);
     s.roughness = mix(s.roughness, 0.85, foam);
+#endif
 }
 #endif // GFX_SURFACE_FRAGMENT

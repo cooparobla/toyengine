@@ -185,7 +185,13 @@ void CameraController::update_orbit_(coopa::util::Transform& t, float dt) {
         // at rest. Snap to the target once the error is sub-visible so rest is rest.
         if (std::abs(yaw_deg   - smoothed_yaw_deg_)   < 1e-3f) smoothed_yaw_deg_   = yaw_deg;
         if (std::abs(pitch_deg - smoothed_pitch_deg_) < 1e-3f) smoothed_pitch_deg_ = pitch_deg;
-        if (std::abs(distance  - smoothed_distance_)  < 1e-4f) smoothed_distance_  = distance;
+        // The distance snap is RELATIVE: at large orbit distances a float32 ulp exceeds any
+        // absolute threshold, so the chase increment rounds to nothing while the error still
+        // sits above the deadband -- the distance then quantizes ulp by ulp forever instead
+        // of converging, which reads as camera jitter. 1e-5 of the distance is ~80x a float
+        // ulp (so the snap is reachable) and far below a pixel at any orbit radius.
+        if (std::abs(distance  - smoothed_distance_)  <
+            std::max(1e-4f, std::abs(distance) * 1e-5f)) smoothed_distance_ = distance;
     }
 
     float e = glm::radians(smoothed_pitch_deg_);

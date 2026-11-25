@@ -555,3 +555,57 @@ COOPA_TEST(a_coarse_build_with_no_field_tier_falls_back_to_the_full_build) {
     expect(job.mesh.vertices.size() == full.mesh.vertices.size(),
            "a degradation, not a failure: it draws the real chunk rather than nothing");
 }
+
+// A lava world has to stay lava after it has been RELOADED, which is the whole reason the
+// fluid is read off the tiles here rather than set once when a generator applies. A terrain
+// applies its generator only when it has no data yet, so every world opened from its `.terra`
+// -- including every entry into play mode -- takes the path these two cover.
+
+COOPA_TEST(lava_columns_mesh_into_the_still_surface_and_say_so) {
+    using namespace toy::world;
+    TerrainParams params;
+    params.chunk_size = 4;
+    params.tile_size = 1.0f;
+    params.height_step = 1.0f;
+
+    // Built from CELLS, the way a world loaded off disk is -- not from a generator.
+    ColumnPad pad = make_flat_pad(params.chunk_size, 0);
+    for (std::int32_t y = -1; y <= params.chunk_size; ++y) {
+        for (std::int32_t x = -1; x <= params.chunk_size; ++x) {
+            TileCell cell;
+            cell.steps = 0;
+            cell.water_kind = static_cast<std::uint8_t>(WaterKind::Lava);
+            cell.water_level = 2.0f;
+            pad.at(x, y) = tile_column(cell, params.height_step);
+        }
+    }
+    // The column kind survives the cell -> column step; folded into `k_water_still` it would not.
+    expect(pad.at(0, 0).water == k_water_lava, "a lava cell makes a lava column");
+
+    ChunkWaterData still, flowing;
+    build_chunk_water(pad, params, still, flowing);
+    expect(flowing.positions.empty(), "lava is still, so it never meshes into the flowing surface");
+    expect(!still.positions.empty(), "lava meshes into the still surface");
+    expect(still.lava, "and the still surface reports that it is lava, not water");
+}
+
+COOPA_TEST(a_water_chunk_never_claims_to_be_lava) {
+    using namespace toy::world;
+    TerrainParams params;
+    params.chunk_size = 4;
+    params.tile_size = 1.0f;
+    params.height_step = 1.0f;
+
+    ColumnPad pad = make_flat_pad(params.chunk_size, 0);
+    for (std::int32_t y = -1; y <= params.chunk_size; ++y) {
+        for (std::int32_t x = -1; x <= params.chunk_size; ++x) {
+            TileColumn& c = pad.at(x, y);
+            c.steps = 0;
+            c.water = k_water_still;
+            c.water_level = 2;
+        }
+    }
+    ChunkWaterData still, flowing;
+    build_chunk_water(pad, params, still, flowing);
+    expect(!still.positions.empty() && !still.lava, "ordinary water is not flagged as lava");
+}

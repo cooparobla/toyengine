@@ -63,6 +63,27 @@ layout(set = CLOUD_UBO_SET, binding = CLOUD_UBO_BINDING) uniform CloudFrame {
     vec4 night_fill;      // rgb = its night-side ambient, already scaled by the moon. Both are
                           // zero on a flat world, where the scene's sky_zenith family is used
                           // exactly as it always was.
+
+    // --- What the clouds are MADE of, rather than where they are ---------------------------
+    //
+    // Everything below is neutral at its default and a scene that sets none of it draws exactly
+    // what it drew before these existed: albedo vec3(0.9) is the scalar the march used to carry,
+    // and a zero in `bands.x` or `storms.x` switches its whole term off at the first compare.
+
+    vec4 albedo;      // rgb = single-scattering albedo where a cloud is thin and lit.
+                      // w = the blend's onset: how far the deep tint has taken over, 0 = never.
+    vec4 albedo_deep; // rgb = the albedo the blend reaches -- a band's own colour on a giant, a
+                      // thick base's grey on an earthlike world. w unused.
+    vec4 bands;       // x = bands from pole to pole (0 = none, and the whole term is skipped).
+                      // y = contrast: how much a band's coverage differs from a zone's, 0..1.
+                      // z = sharpness: >1 squares the belts off, <1 softens them.
+                      // w = jet shear: how much faster a belt turns than the deck as a whole.
+    vec4 storms;      // x = how many of the four below are live. yzw unused.
+    // A cyclone: a swirl in the field plus a raised wall and a cleared eye. The same four
+    // numbers are a hurricane on an earthlike world and a Great Red Spot on a giant.
+    vec4 storm[4];      // xyz = unit direction from the world's centre to the eye, w = cos(angular radius)
+    vec4 storm_spin[4]; // x = swirl at the wall (rad), y = coverage lift, z = eye fraction of the
+                        // radius, w = how hard the wall itself is raised over the lift
 } cf;
 #endif
 

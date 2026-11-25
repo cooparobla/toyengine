@@ -843,6 +843,13 @@ void TerrainSystem::add_chunk_water_(const TerrainComponent& terrain, coopa::sce
     if (auto* parent = chunk_object.get_transform()) tc->set_parent_transform(&parent->transform());
     auto* body = object->add_component<water::WaterBody>();
     water::copy_water_settings(terrain.water_look, *body);
+    // What the body is MADE of comes from the tiles under it, not from the terrain's authored
+    // look: the fluid is stored per column, so this is the one place that reads it and it reads
+    // the same answer whether the world was just generated or loaded off disk. The scene's own
+    // `water:` block still decides everything the preset does not name.
+    if (water.lava && body->fluid != water::FluidKind::Lava) {
+        water::apply_fluid_preset(*body, water::FluidKind::Lava);
+    }
     if (water.local_frame) {
         // A shaped chunk's: placed in its own frame (ChunkWaterData::frame), and worked on in it.
         tc->transform().set_position(glm::vec3(water.frame[3]));

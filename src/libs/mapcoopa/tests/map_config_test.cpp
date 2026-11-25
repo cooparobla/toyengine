@@ -120,10 +120,15 @@ MapConfig perturbed_config() {
 
     // The ground, above and below the waterline. Positional like the four above, and correct
     // only while it covers every field of NaturalTerrainConfig in declaration order:
-    // smoothing, hills, mountains, mountain_start, plateaus, plateau_coverage, warp, then the
-    // bed's own seabed, seabed_ridges, seabed_shelf.
+    // smoothing, hills, mountains, mountain_start, plateaus, plateau_coverage, warp, craters,
+    // crater_density, then the bed's own seabed, seabed_ridges, seabed_shelf, then the vents'
+    // volcanoes, volcano_density, volcano_caldera, volcano_submarine, volcano_kind, volcano_size,
+    // volcano_active, volcano_warmth.
     config.terrain_model = TerrainModel::Natural;
-    config.natural = {0.4, 0.07, 0.6, 0.31, 0.11, 0.42, 2.25, 0.055, 0.09, 0.07};
+    config.natural = {0.4, 0.07, 0.6, 0.31, 0.11, 0.42, 2.25, 0.8, 0.33, 0.055, 0.09, 0.07,
+                      0.62, 0.41, 0.58, 0.73, VolcanoKind::Caldera, 1.85, 0.62, 0.37};
+    config.biome_profile = BiomeProfile::Volcanic;
+    config.surface_fluid = SurfaceFluid::Lava;
     config.noise_hills = {55, 0.25, FastNoiseLite::NoiseType_Perlin,
                           FastNoiseLite::FractalType_FBm, 4, 2.2, 0.45, 0.3};
     config.noise_ridge = {56, 0.19, FastNoiseLite::NoiseType_Perlin,
@@ -151,6 +156,7 @@ MapConfig perturbed_config() {
     config.enable_towns = false;
     config.enable_landmarks = false;
     config.enable_caves = false;
+    config.enable_volcanoes = false;
     config.enable_noisy_edges = false;
 
     // Derived last, from the grid and the scale above, so this fixture satisfies
@@ -252,9 +258,20 @@ COOPA_TEST(config_round_trips_every_field) {
     ASSERT_TRUE(std::abs(loaded.natural.plateaus - original.natural.plateaus) < 1e-9);
     ASSERT_TRUE(std::abs(loaded.natural.plateau_coverage - original.natural.plateau_coverage) < 1e-9);
     ASSERT_TRUE(std::abs(loaded.natural.warp - original.natural.warp) < 1e-9);
+    ASSERT_TRUE(std::abs(loaded.natural.craters - original.natural.craters) < 1e-9);
+    ASSERT_TRUE(std::abs(loaded.natural.crater_density - original.natural.crater_density) < 1e-9);
+    ASSERT_TRUE(loaded.biome_profile == original.biome_profile);
     ASSERT_TRUE(std::abs(loaded.natural.seabed - original.natural.seabed) < 1e-9);
     ASSERT_TRUE(std::abs(loaded.natural.seabed_ridges - original.natural.seabed_ridges) < 1e-9);
     ASSERT_TRUE(std::abs(loaded.natural.seabed_shelf - original.natural.seabed_shelf) < 1e-9);
+    ASSERT_TRUE(std::abs(loaded.natural.volcanoes - original.natural.volcanoes) < 1e-9);
+    ASSERT_TRUE(std::abs(loaded.natural.volcano_density - original.natural.volcano_density) < 1e-9);
+    ASSERT_TRUE(std::abs(loaded.natural.volcano_caldera - original.natural.volcano_caldera) < 1e-9);
+    ASSERT_TRUE(std::abs(loaded.natural.volcano_submarine - original.natural.volcano_submarine) < 1e-9);
+    ASSERT_TRUE(loaded.natural.volcano_kind == original.natural.volcano_kind);
+    ASSERT_TRUE(std::abs(loaded.natural.volcano_size - original.natural.volcano_size) < 1e-9);
+    ASSERT_TRUE(std::abs(loaded.natural.volcano_active - original.natural.volcano_active) < 1e-9);
+    ASSERT_TRUE(std::abs(loaded.natural.volcano_warmth - original.natural.volcano_warmth) < 1e-9);
     ASSERT_TRUE(std::abs(loaded.terrain_relief - original.terrain_relief) < 1e-9);
     ASSERT_TRUE(std::abs(loaded.terrain_roughness - original.terrain_roughness) < 1e-9);
     ASSERT_EQ(loaded.caves.cave_count, original.caves.cave_count);
@@ -286,6 +303,8 @@ COOPA_TEST(config_round_trips_every_field) {
     ASSERT_TRUE(std::abs(loaded.caves.shaft_drop_m - original.caves.shaft_drop_m) < 1e-9);
     ASSERT_EQ(loaded.caves.smoothing_iterations, original.caves.smoothing_iterations);
     ASSERT_TRUE(loaded.enable_caves == original.enable_caves);
+    ASSERT_TRUE(loaded.enable_volcanoes == original.enable_volcanoes);
+    ASSERT_TRUE(loaded.surface_fluid == original.surface_fluid);
     ASSERT_EQ(loaded.noise_cave.seed, original.noise_cave.seed);
     ASSERT_TRUE(std::abs(loaded.noise_cave.frequency - original.noise_cave.frequency) < 1e-9);
     ASSERT_TRUE(loaded.shape.shape == original.shape.shape);

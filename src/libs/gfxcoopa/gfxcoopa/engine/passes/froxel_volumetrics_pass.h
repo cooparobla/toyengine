@@ -67,6 +67,9 @@ public:
         std::string integrate_partial_frag_spv;
         std::string integrate_frag_spv;
         std::string apply_frag_spv;
+        /// Optional in-slice blur between inject and integrate. Empty disables the stage
+        /// entirely -- no target, no pass -- so it costs nothing when a project does not want it.
+        std::string filter_frag_spv;
     };
 
     /**
@@ -94,6 +97,10 @@ public:
                                                                  Format::RGBA16_Sfloat, targets::kColorOnly);
         integrated_ = std::make_unique<targets::OffscreenTarget>(device, allocator, atlas_w_, atlas_h_,
                                                                  Format::RGBA16_Sfloat, targets::kColorOnly);
+        if (!desc.filter_frag_spv.empty()) {
+            filtered_ = std::make_unique<targets::OffscreenTarget>(device, allocator, atlas_w_, atlas_h_,
+                                                                   Format::RGBA16_Sfloat, targets::kColorOnly);
+        }
 
         inject_    = std::make_unique<FullscreenStage>(device, injected_[0]->render_pass_object(),
                                                        describe_inject(desc.vert_spv, desc.inject_frag_spv));
@@ -103,14 +110,28 @@ public:
                                                        describe_integrate(desc.vert_spv, desc.integrate_frag_spv, 1));
         apply_     = std::make_unique<FullscreenStage>(device, composite_pass,
                                                        describe_apply(desc.vert_spv, desc.apply_frag_spv));
+        // Same layout as the integrate stages (source grid + UBO), one set per parity because
+        // the grid it reads is the one this frame's parity just wrote.
+        if (filtered_) {
+            filter_ = std::make_unique<FullscreenStage>(device, filtered_->render_pass_object(),
+                                                        describe_integrate(desc.vert_spv, desc.filter_frag_spv, 2));
+        }
 
         // Parity p writes injected_[p] and reprojects injected_[1-p]; the partial pass reads
         // injected_[p]; the final integrate pass reads the (single) partial grid.
         for (uint32_t p = 0; p < 2; ++p) {
             inject_->set(0, p).bind_image(0, injected_[1 - p]->color_view_typed(), linear_sampler_);
             inject_->set(1, p).bind_buffer(0, vol_ubo);
-            partial_stage_->set(0, p).bind_image(0, injected_[p]->color_view_typed(), nearest_sampler_);
+            // With the filter in the chain the partial pass reads its output instead. The
+            // HISTORY the inject pass reprojects stays the UNfiltered grid above: feeding a
+            // blurred grid back into itself would smear a little further every frame.
+            partial_stage_->set(0, p).bind_image(0,
+                filtered_ ? filtered_->color_view_typed() : injected_[p]->color_view_typed(), nearest_sampler_);
             partial_stage_->set(1, p).bind_buffer(0, vol_ubo);
+            if (filter_) {
+                filter_->set(0, p).bind_image(0, injected_[p]->color_view_typed(), nearest_sampler_);
+                filter_->set(1, p).bind_buffer(0, vol_ubo);
+            }
         }
         integrate_->set(0).bind_image(0, partial_->color_view_typed(), nearest_sampler_);
         integrate_->set(1).bind_buffer(0, vol_ubo);
@@ -176,6 +197,13 @@ public:
         inject_->draw(cmd);
         injected_[p]->end(cmd);
         if (stage_hook_) stage_hook_(cmd, Stage::Inject);
+
+        if (filter_) {
+            filtered_->begin(cmd, VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+            filter_->bind(cmd, atlas_w_, atlas_h_, p);
+            filter_->draw(cmd);
+            filtered_->end(cmd);
+        }
 
         partial_->begin(cmd, VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
         partial_stage_->bind(cmd, atlas_w_, atlas_h_, p);
@@ -248,7 +276,10 @@ private:
     std::array<std::unique_ptr<targets::OffscreenTarget>, 2> injected_;
     std::unique_ptr<targets::OffscreenTarget> partial_;
     std::unique_ptr<targets::OffscreenTarget> integrated_;
+    /// The in-slice blur's output; null when Desc::filter_frag_spv was empty.
+    std::unique_ptr<targets::OffscreenTarget> filtered_;
     std::unique_ptr<FullscreenStage> inject_, partial_stage_, integrate_, apply_;
+    std::unique_ptr<FullscreenStage> filter_;   ///< Null when there is no filter stage.
     std::function<void(command::CommandBuffer&, Stage)> stage_hook_;
     bool initialized_ = false;
 };

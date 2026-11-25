@@ -14,7 +14,10 @@ tools/gen_material_maps.py):
   terrain_atlas.png    -- base color (RGB), authored in sRGB. One flat-colour cell per
       toy::world::TileKind, laid out in a 4x4 grid in enum order. THE ORDER OF `KINDS` BELOW IS
       LOAD-BEARING: it must match TileKind exactly, and a new kind is appended, never inserted.
-  terrain_atlas_mr.png -- metallic-roughness (metallic in B, roughness in G), linear.
+  terrain_atlas_mr.png -- metallic-roughness (metallic in B, roughness in G), linear. The RED
+      channel, which the glTF convention leaves unused and the G-buffer never samples, carries
+      each kind's EMISSIVE STRENGTH -- a free per-kind channel that needs no new sampler, no new
+      descriptor and no new uniform. terrain_styled.glsl reads it to make lava glow.
 
 Each cell is a single colour and nothing else. Chunks draw with
 assets/shaders/terrain_styled.frag, which reads a kind's colour from the centre of its cell and
@@ -39,20 +42,26 @@ ROWS = 4
 """Cells per atlas column. Must match k_atlas_rows in tile_types.h."""
 
 KINDS = [
-    # (name, base colour RGB, roughness) -- IN ENUM ORDER.
-    ("grass", (118, 184, 76), 0.92),
-    ("dirt", (158, 110, 72), 0.94),
-    ("stone", (138, 140, 150), 0.86),
-    ("sand", (236, 222, 170), 0.90),
-    ("snow", (244, 247, 252), 0.70),
-    ("rock", (112, 108, 116), 0.86),
-    ("water", (78, 150, 205), 0.15),
-    ("ice", (182, 224, 240), 0.25),
-    ("moss", (112, 160, 84), 0.94),
-    ("clay", (190, 138, 96), 0.92),
-    ("ash", (96, 90, 88), 0.90),
-    ("salt", (238, 236, 226), 0.82),
-    ("road", (150, 128, 100), 0.95),
+    # (name, base colour RGB, roughness, emissive strength) -- IN ENUM ORDER.
+    ("grass", (118, 184, 76), 0.92, 0.0),
+    ("dirt", (158, 110, 72), 0.94, 0.0),
+    ("stone", (138, 140, 150), 0.86, 0.0),
+    ("sand", (236, 222, 170), 0.90, 0.0),
+    ("snow", (244, 247, 252), 0.70, 0.0),
+    ("rock", (112, 108, 116), 0.86, 0.0),
+    ("water", (78, 150, 205), 0.15, 0.0),
+    ("ice", (182, 224, 240), 0.25, 0.0),
+    ("moss", (112, 160, 84), 0.94, 0.0),
+    ("clay", (190, 138, 96), 0.92, 0.0),
+    ("ash", (96, 90, 88), 0.90, 0.0),
+    ("salt", (238, 236, 226), 0.82, 0.0),
+    ("road", (150, 128, 100), 0.95, 0.0),
+    # Lava's albedo is the COOLED CRUST, not the glow: the heat arrives through the emissive
+    # channel, modulated by the shader's own detail noise so the cracks light up and the plates
+    # between them stay dark. An albedo that was already orange would read as orange rock the
+    # moment it fell into shadow.
+    ("lava", (46, 30, 28), 0.80, 1.0),
+    ("basalt", (54, 50, 56), 0.88, 0.0),
 ]
 """One entry per toy::world::TileKind, IN ENUM ORDER. See this module's docstring.
 
@@ -76,10 +85,11 @@ def main():
     # as chrome if a future kind lands on one before this file is updated.
     mr = np.zeros((height, width, 3), dtype=np.uint8)
     mr[:, :, 1] = 255
-    for index, (_name, color, roughness) in enumerate(KINDS):
+    for index, (_name, color, roughness, emissive) in enumerate(KINDS):
         y0 = (index // COLUMNS) * CELL
         x0 = (index % COLUMNS) * CELL
         albedo[y0:y0 + CELL, x0:x0 + CELL] = color
+        mr[y0:y0 + CELL, x0:x0 + CELL, 0] = int(round(emissive * 255))
         mr[y0:y0 + CELL, x0:x0 + CELL, 1] = int(round(roughness * 255))
         mr[y0:y0 + CELL, x0:x0 + CELL, 2] = 0  # nothing in this world is metal
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

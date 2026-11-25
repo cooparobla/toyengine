@@ -644,6 +644,9 @@ std::map<std::string, ComponentSchema>& schema_table_() {
         // and a floating Rigidbody. `size` uses x/y only (the procedural grid's extent).
         add({"WaterBody", "Water", {
             f_enum("mode", {"planar", "flowing"}, true),
+            with_tip(f_enum("fluid", {"water", "lava"}, true),
+                     "What the body is made of. Choosing one sets its colour, density, waves, viscosity and "
+                     "underwater look together; any key set below still wins over the preset"),
             f_asset("mesh_path", "meshes", ".yaml", true, true),
             f_vec3("size", glm::vec3(20.0f, 20.0f, 0.0f), 0.1f, true),
             f_int("resolution", 48, 1, 512, true),
@@ -674,6 +677,14 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             f_float("caustics", 1.0f, 0.01f, 0.0f, 10.0f),
             f_float("density", 1000.0f, 1.0f, 1.0f, 20000.0f),
             f_float("max_depth", 60.0f, 0.5f, 0.1f, 10000.0f),
+            f_color("emissive_color", glm::vec3(1.0f, 0.35f, 0.07f)),
+            with_tip(f_float("emissive_strength", 0.0f, 0.02f, 0.0f, 50.0f),
+                     "How brightly the surface emits. 0 is an ordinary unlit fluid; a lava body carries the heat here"),
+            with_tip(f_float("viscosity", 0.0f, 0.01f, 0.0f, 1.0f),
+                     "How sluggish the fluid is: scales the current down, to a tenth at 1. Does not touch the waves, "
+                     "which are authored above"),
+            with_tip(f_float("temperature_c", 15.0f, 1.0f, -100.0f, 2000.0f),
+                     "Temperature in Celsius, for gameplay (contact damage, heat). Nothing visual reads it"),
         }});
         // Hair/fur grown from the faces of the mesh beside it -- see toyengine/hair/README.md.
         // `thickness_over_length` is the first user of FieldKind::Curve in the tree: a width

@@ -12,8 +12,25 @@
 
 namespace toy::test {
 
+/// Turns the derived cache off for every test that builds an Engine through this fixture.
+///
+/// A test copies its scene into a scratch directory and gets its own cache entry -- at the same
+/// path every run, so the SECOND run of a suite would read back what the first one derived and
+/// take a different path through the code than the first. A suite whose behaviour depends on
+/// whether it has been run before is the hard kind of flake, and the generation it would be
+/// skipping is usually the thing under test. Read once, inside `Engine`'s constructor, so
+/// setting it here is early enough for every caller.
+void disable_derived_cache_() {
+    static const bool once = [] {
+        setenv("TOY_DERIVED_CACHE", "0", /*overwrite=*/0);   // 0: a deliberate export still wins
+        return true;
+    }();
+    (void)once;
+}
+
 toy::core::AppConfig make_test_config(const std::string& scene, uint32_t win_w, uint32_t win_h,
                                       uint32_t rw, uint32_t rh) {
+    disable_derived_cache_();
     toy::core::AppConfig config;
     config.window.title   = "toyengine_tests";
     config.window.width   = win_w;
@@ -46,6 +63,7 @@ toy::core::AppConfig make_test_config(const std::string& scene, uint32_t win_w, 
 }
 
 toy::core::AppConfig make_shipped_config(const std::string& scene, uint32_t rw, uint32_t rh) {
+    disable_derived_cache_();
     toy::core::AppConfig config =
         toy::core::AppConfig::load(std::string(ROOT_DIR) + "/assets/config.yaml");
     config.window.width   = rw * 2;

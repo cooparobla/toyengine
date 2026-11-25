@@ -41,7 +41,17 @@ pixels), `SsaoPass`, `HiZPass`, `SceneColorMipPass`,
 The exceptions are built only when their startup switch is on, because the switch changes
 which descriptor downstream passes are bound to: `FxaaPass`, `SmaaPass` and `TaaPass` (all
 three together, when `aa_mode != "off"`), `ExposurePass` (`auto_exposure_enabled`), and
-`UnderwaterPass` (`underwater_enabled`).
+`UnderwaterPass` (`underwater_enabled`). `FroxelVolumetricsPass` carries one of its own: its
+in-slice blur (`volumetrics_froxel_filter`) adds a target and a render pass, so an empty
+`Desc::filter_frag_spv` leaves the stage out entirely rather than skipping it per frame.
+
+**The froxel grid's RANGE is the thing most likely to catch you.** Its slices are spread
+exponentially over `[near, far]`, so that range -- not the slice count -- is what sets how long
+one slice is. `volumetrics_froxel_fit` (on by default) spans it over the live volumes; with it
+off the grid covers `0.1 .. volumetrics_max_distance`, and in a scene whose march reaches
+kilometres one slice out where the volumes are can be tens of world units, which reads as depth
+banding and an 8-pixel cell mosaic. `assets/scenes/rendering/distant_volume_probe` is that case,
+with both keys in its settings block to A/B.
 
 `PaletteLut` and `StylizePass` are shared with blendy — exposure → ACES tonemap →
 outline (alpha-blended over the tonemapped colour) → Bayer dither → palette quantize, one

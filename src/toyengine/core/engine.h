@@ -393,6 +393,23 @@ public:
     /** @brief Puts the authored sky gradient back; a no-op if nothing drove it. */
     void restore_sky_gradient() { restore_sky_colours_(); }
 
+    /**
+     * @brief Replaces a region of the sky-body atlas -- the faces the sky's additional moon
+     *        discs sample (`render::SkyMoonState::atlas_rect`).
+     *
+     * Blocks on a one-shot upload; call from update, between frames, never from a render
+     * hook. The atlas starts white, so upload a moon's face first and publish its rect after.
+     * See `render::ToyRenderPipeline::update_sky_body_atlas` for the atlas's size.
+     *
+     * @param rgba8 The region's texels, tightly packed RGBA8 (sRGB), `w * h * 4` bytes.
+     * @param x Region origin, texels.
+     * @param y Region origin, texels.
+     * @param w Region width, texels; the region must lie inside the atlas.
+     * @param h Region height, texels.
+     */
+    void update_sky_body_atlas(const void* rgba8, std::uint32_t x, std::uint32_t y,
+                               std::uint32_t w, std::uint32_t h);
+
     void set_cloud_state_hook(
         std::function<void(coopa::scene::Scene&, const env::WorldFrame&, float, render::CloudFrameState&)> fn) {
         cloud_state_hook_ = std::move(fn);

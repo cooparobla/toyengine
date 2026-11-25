@@ -54,9 +54,11 @@ vec4 vol_froxel_history(vec3 p) {
     if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return vec4(-1.0);
 
     // Froxel values describe whole slices, so sample at slice CENTRES: centre k sits at
-    // boundary coordinate k + 0.5.
+    // boundary coordinate k + 0.5. Mapped through LAST frame's near/far, which is how the grid
+    // being read was laid out -- this frame's pair is fitted to where the volumes are NOW.
     float D  = u_vol.froxel_grid.z;
-    float fs = vol_froxel_slice_of(distance(u_vol.prev_camera_pos.xyz, p)) - 0.5;
+    float fs = vol_froxel_slice_of_in(distance(u_vol.prev_camera_pos.xyz, p),
+                                      u_vol.prev_froxel_params.x, u_vol.prev_froxel_params.y) - 0.5;
     if (fs < -0.5 || fs > D - 0.5) return vec4(-1.0);
     fs = clamp(fs, 0.0, D - 1.0);
     int   s0 = int(floor(fs));
@@ -64,15 +66,28 @@ vec4 vol_froxel_history(vec3 p) {
     return mix(vol_froxel_sample(history_grid, uv, s0), vol_froxel_sample(history_grid, uv, s1), fs - float(s0));
 }
 
-/// Pre-integrated (in-scatter, transmittance) of the slice [d0, d1] evaluated at the single
-/// point p on view_dir -- one raymarch step's worth of work.
-vec4 vol_froxel_evaluate(vec3 p, vec3 view_dir, float dt) {
-    // --- Density: the same per-volume accumulation as one raymarch step ---
+/// How many points to average the medium over inside one slice.
+///
+/// A slice's length grows with distance (the boundaries are spread exponentially), so far out a
+/// single sample can be asked to stand for tens of world units. That is not merely noisy: the
+/// slice's output is `1 - exp(-sigma * dt)`, which is CONVEX in sigma, so averaging single-point
+/// slices over time converges to something DIMMER than the slice really is. Averaging sigma
+/// across the slice first removes that bias. froxel_params2.z is the shortest length any live
+/// volume's field varies over, so one sample per such length is enough to stop under-resolving it.
+int vol_froxel_slice_samples(float dt) {
+    float feature = u_vol.froxel_params2.z;
+    if (feature <= 0.0) return 1;
+    return clamp(int(ceil(dt / feature)), 1, 8);
+}
+
+/// Density, emission and occlusion of the medium at one point -- the per-volume accumulation a
+/// raymarch step does. `sigma <= 0` on return means empty air.
+void vol_froxel_medium(vec3 p, out float sigma, out vec3 emit, out float light_w, out float occl_sum) {
     int   volume_count = min(int(u_vol.counts.x), VOL_MAX_VOLUMES);
-    float sigma    = 0.0;
-    vec3  emit     = vec3(0.0);
-    float light_w  = 0.0;
-    float occl_sum = 0.0;
+    sigma    = 0.0;
+    emit     = vec3(0.0);
+    light_w  = 0.0;
+    occl_sum = 0.0;
     for (int v = 0; v < VOL_MAX_VOLUMES; ++v) {
         if (v >= volume_count) break;
         float density = u_vol.volumes[v].shape_params.x;
@@ -104,6 +119,31 @@ vec4 vol_froxel_evaluate(vec3 p, vec3 view_dir, float dt) {
         emit     += s * u_vol.volumes[v].color_occlusion.rgb;
         light_w  += s * u_vol.volumes[v].mode_params.y;
         occl_sum += s * u_vol.volumes[v].color_occlusion.w;
+    }
+}
+
+/// Pre-integrated (in-scatter, transmittance) of the slice [p - view_dir*dt/2, + dt/2] -- one
+/// raymarch step's worth of work, with the medium averaged over vol_froxel_slice_samples() points.
+vec4 vol_froxel_evaluate(vec3 p, vec3 view_dir, float dt) {
+    float sigma, light_w, occl_sum;
+    vec3  emit;
+    int   n = vol_froxel_slice_samples(dt);
+    if (n <= 1) {
+        vol_froxel_medium(p, sigma, emit, light_w, occl_sum);
+    } else {
+        // Stratified about the point the caller jittered to, so the set still covers the slice
+        // evenly over time rather than locking onto its centre.
+        sigma = 0.0; emit = vec3(0.0); light_w = 0.0; occl_sum = 0.0;
+        for (int k = 0; k < 8; ++k) {
+            if (k >= n) break;
+            float t = (float(k) + 0.5) / float(n) - 0.5;
+            float s_k, lw_k, oc_k;
+            vec3  em_k;
+            vol_froxel_medium(p + view_dir * (t * dt), s_k, em_k, lw_k, oc_k);
+            sigma += s_k; emit += em_k; light_w += lw_k; occl_sum += oc_k;
+        }
+        float inv = 1.0 / float(n);
+        sigma *= inv; emit *= inv; light_w *= inv; occl_sum *= inv;
     }
 
     if (sigma <= 1e-4) return vec4(0.0, 0.0, 0.0, 1.0);   // empty air: adds nothing, transmits everything

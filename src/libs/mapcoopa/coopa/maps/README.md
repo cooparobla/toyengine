@@ -88,7 +88,7 @@ the per-pass configs (`RoadConfig`, `RegionConfig`, `TownConfig`, `LandmarkConfi
 chain.
 
 ### [`biome.h`](./biome.h)
-The `Biome` enum (33 entries), its stable `snake_case` serialisation names, and
+The `Biome` enum (37 entries), its stable `snake_case` serialisation names, and
 `classify_biome()` — a Whittaker table in three dimensions, branching on temperature
 first, then elevation, then moisture. Temperature comes first because latitude is the
 strongest control on what grows: the same height and rainfall give taiga at the pole and

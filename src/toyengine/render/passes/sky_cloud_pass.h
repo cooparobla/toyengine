@@ -58,6 +58,10 @@ namespace passes {
  */
 class SkyCloudPass {
 public:
+    /// How many cyclones one deck may carry. Four is what the UBO holds and what the march can
+    /// afford: each live one costs a dot and, inside its own disc, a rotation per sample.
+    static constexpr uint32_t kMaxStorms = 4;
+
     static constexpr uint32_t kWeatherSize = 512;
     static constexpr uint32_t kShapeSize = 128;
     static constexpr uint32_t kDetailSize = 64;
@@ -92,8 +96,18 @@ public:
         /// Curved worlds only: rgb = the night side's fill (moonlight / airglow), already scaled by
         /// the moon's intensity -- zero gives the black night side the engine had before.
         glm::vec4 night_fill{0.0f};
+
+        // What the clouds are MADE of, rather than where they are. Every default here is the
+        // behaviour the march had before they existed: `albedo` vec3(0.9) is the scalar it
+        // carried, and a zero band count or storm count skips that term at the first compare.
+        glm::vec4 albedo{0.9f, 0.9f, 0.9f, 0.0f};       ///< rgb thin-cloud albedo, w deep-tint onset (0 = never)
+        glm::vec4 albedo_deep{0.9f, 0.9f, 0.9f, 0.0f};  ///< rgb the albedo the blend reaches
+        glm::vec4 bands{0.0f};                          ///< x count, y contrast, z sharpness, w jet shear
+        glm::vec4 storms{0.0f};                         ///< x live storm count (0..kMaxStorms)
+        glm::vec4 storm[kMaxStorms]{};                  ///< xyz unit direction to the eye, w cos(angular radius)
+        glm::vec4 storm_spin[kMaxStorms]{};             ///< x swirl, y lift, z eye fraction, w wall boost
     };
-    static_assert(sizeof(FrameData) == 320, "SkyCloudPass::FrameData must match sky_cloud_common.glsl's CloudFrame");
+    static_assert(sizeof(FrameData) == 512, "SkyCloudPass::FrameData must match sky_cloud_common.glsl's CloudFrame");
 
     /// What the pipeline fills each frame (execute() derives the rest).
     struct Params {
@@ -125,6 +139,19 @@ public:
         float     spin_delta = 0.0f;            ///< Curved worlds only: this frame's step (rad), for the resolve's reprojection.
         glm::vec3 day_fill{0.0f};               ///< Curved worlds only: the deck's day-side ambient (see CloudFrameState).
         glm::vec3 night_fill{0.0f};             ///< Curved worlds only: its night-side ambient, moon-scaled.
+
+        /// What the clouds are made of; see CloudFrameState for what each one means.
+        glm::vec3 albedo{0.9f};
+        glm::vec3 albedo_deep{0.9f};
+        float     deep_onset = 0.0f;
+        glm::vec4 bands{0.0f};
+        std::array<glm::vec4, kMaxStorms> storm{};
+        std::array<glm::vec4, kMaxStorms> storm_spin{};
+        int       storm_count = 0;
+        /// Seeds the weather map. Changing it re-bakes the 512^2 map (a compute dispatch) and
+        /// invalidates the temporal history for a frame, so two worlds in one scene can wear
+        /// different weather instead of the same pattern at different scales.
+        std::uint32_t weather_seed = 0;
     };
 
     SkyCloudPass(coopa::gfx::core::Device& device, coopa::gfx::memory::Allocator& allocator,
@@ -154,7 +181,16 @@ public:
     uint32_t frames() const { return frames_; }
 
     /** @brief Bakes the noise textures if they have not been yet. Outside any render pass. */
-    void ensure_noise(coopa::gfx::command::CommandBuffer& cmd);
+    /**
+     * @brief Bakes the three noise volumes on first use, and re-bakes the weather map when the
+     *        seed changes.
+     *
+     * Only the WEATHER map is seeded. It is what places clouds across a sky, so re-rolling it is
+     * what makes one world's weather different from another's; the shape and detail volumes are
+     * the substance of a cloud, which is the same stuff everywhere, and they are 128^3 and 64^3
+     * against the weather map's 512^2.
+     */
+    void ensure_noise(coopa::gfx::command::CommandBuffer& cmd, std::uint32_t weather_seed);
     /** @brief The sampler to bind output_view() with: nearest (the upsample texelFetches it). */
     const coopa::gfx::engine::util::Sampler& sampler() const { return nearest_; }
     uint32_t width() const { return output_.width(); }
@@ -200,6 +236,8 @@ private:
     coopa::gfx::engine::util::Sampler            nearest_;
     coopa::gfx::engine::util::Sampler            noise_sampler_;   ///< trilinear, repeating, full mip chain
     CloudNoiseGenerators                         gens_;
+    /// The seed the weather map currently holds; see ensure_noise().
+    std::uint32_t                                weather_seed_ = 0;
     coopa::gfx::pipeline::ComputePipeline        weather_gen_;
     coopa::gfx::pipeline::ComputePipeline        shape_gen_;
     coopa::gfx::pipeline::ComputePipeline        detail_gen_;

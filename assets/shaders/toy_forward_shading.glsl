@@ -166,6 +166,13 @@ vec4 toy_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view, mat4 
         // See toy_lighting.frag's identical call: the raw point, biased per cascade inside.
         float shadow = calc_dir_shadow(world_pos, N, L);
 
+        // And the same eclipse term the deferred pass applies (light_ubo_body.glsl). Both
+        // paths need it, not one: a solar system draws its bodies forward, and that is exactly
+        // where one body standing in front of another's star has to be answered.
+        if (lights.dir_occluder_info.x > 0.0) {
+            shadow = max(shadow, 1.0 - toy_dir_occlusion(world_pos, L));
+        }
+
         Lo += gfx_forward_shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow, p);
     }
 

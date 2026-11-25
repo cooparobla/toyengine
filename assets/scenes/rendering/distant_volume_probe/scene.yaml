@@ -1,0 +1,70 @@
+# distant_volume_probe -- the case the froxel grid used to fall apart on.
+#
+# Run:   HEADLESS=1 MAX_FRAMES=240 CAPTURE_RING=1 SCENE=assets/scenes/rendering/distant_volume_probe/scene.yaml ./build/toyengine
+#
+# One thin shell of fog 700 m away, in a scene whose march reaches 4 km -- the configuration a
+# project with a large world authors. The grid spreads its slices exponentially over whatever
+# range it covers, so spanning the whole march distance makes one slice about 0.15 x its own
+# distance: ~107 m out here, against a shell 80 m thick with a 20 m scale height. The whole
+# feature then lands inside ONE slice sampled at ONE point, which reads as depth banding, an
+# 8-pixel cell mosaic, and a shell that stays dull however its density is tuned.
+#
+# The two keys that fix it, both RUNTIME so they A/B without a restart:
+#   volumetrics_froxel_fit           span the grid over the live volumes instead (default on)
+#   volumetrics_froxel_slice_samples points averaged inside a slice (0 = decide per froxel)
+#
+# Set `volumetrics_froxel_fit: false` and `volumetrics_froxel_slice_samples: 1` to see what the
+# grid did before either existed.
+scene:
+  scene_name: distant_volume_probe
+  settings:
+    render:
+      volumetrics_max_distance: 4000.0   # a large world's march, which is what stretches the grid
+      fog_enabled: false                 # the global layer would hide what the volume is doing
+      sky_zenith: [0.02, 0.03, 0.05]
+      sky_horizon: [0.03, 0.04, 0.06]
+      sky_ground: [0.01, 0.01, 0.02]
+  root_objects:
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          rotation: { x: 90.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - { type: Camera, fov: 50.0, main: true, projection: Perspective }
+      children: []
+
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 10.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: DirectionalLight
+          direction: { x: 0.35, y: 0.85, z: -0.4 }
+          color: { r: 1.0, g: 0.97, b: 0.92 }
+          intensity: 3.0
+      children: []
+
+    # The shell: dense at 620 m from the camera and fading outward over a 20 m scale height, so
+    # its whole gradient is far shorter than one unfitted slice out here.
+    - name: distant_shell
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 700.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Volume
+          kind: fog
+          shape: shell
+          extent: { x: 160.0, y: 160.0, z: 160.0 }
+          density: 0.004
+          height_base: 80.0
+          height_falloff: 20.0
+          occlusion: 0.5
+          sun_amount: 0.9
+          color: { r: 0.35, g: 0.55, b: 1.0 }
+      children: []

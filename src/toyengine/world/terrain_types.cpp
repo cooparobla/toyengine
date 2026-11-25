@@ -16,6 +16,7 @@ WaterKind water_kind_from_name(const std::string& name) {
     if (name == "ocean" || name == "sea") return WaterKind::Ocean;
     if (name == "lake") return WaterKind::Lake;
     if (name == "river") return WaterKind::River;
+    if (name == "lava") return WaterKind::Lava;
     return WaterKind::None;
 }
 
@@ -24,6 +25,7 @@ const char* water_kind_name(WaterKind kind) {
         case WaterKind::Ocean: return "ocean";
         case WaterKind::Lake:  return "lake";
         case WaterKind::River: return "river";
+        case WaterKind::Lava:  return "lava";
         case WaterKind::None:  break;
     }
     return "none";

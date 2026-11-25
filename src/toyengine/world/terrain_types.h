@@ -62,11 +62,24 @@ enum class WaterKind : std::uint8_t {
     None = 0,  /**< @brief Dry. */
     Ocean,     /**< @brief The sea: one body at one level over the whole world. */
     Lake,      /**< @brief Still water at a basin's spill level. */
-    River      /**< @brief Flowing water in a cut channel, falling toward its mouth. */
+    River,     /**< @brief Flowing water in a cut channel, falling toward its mouth. */
+    /**
+     * @brief Molten rock, wherever water would otherwise stand.
+     *
+     * A kind rather than a property of a body because the kind is what decides which surface a
+     * column's fluid is meshed into, and lava never shares one with water: the two want
+     * different waves, a different density, and one of them emits light. Still, like a sea or a
+     * lake -- a lava flow creeps rather than runs, and the viscosity that makes it do so is what
+     * `WaterBody::viscosity` carries.
+     *
+     * Appended, and this enum is stored as a byte in every `.terra`, so it may never be
+     * reordered.
+     */
+    Lava
 };
 
 /** @brief Number of distinct `WaterKind` values. */
-inline constexpr std::size_t k_water_kind_count = 4;
+inline constexpr std::size_t k_water_kind_count = 5;
 
 /** @brief `WaterKind` as scene YAML and the editor spell it; unknown text reads as None. */
 WaterKind water_kind_from_name(const std::string& name);
@@ -74,7 +87,9 @@ WaterKind water_kind_from_name(const std::string& name);
 const char* water_kind_name(WaterKind kind);
 
 /** @brief Still water (Ocean, Lake) shares one surface mesh; a River gets the flowing one. */
-inline bool water_is_still(WaterKind kind) { return kind == WaterKind::Ocean || kind == WaterKind::Lake; }
+inline bool water_is_still(WaterKind kind) {
+    return kind == WaterKind::Ocean || kind == WaterKind::Lake || kind == WaterKind::Lava;
+}
 
 /**
  * @struct IRect

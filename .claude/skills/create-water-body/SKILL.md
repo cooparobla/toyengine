@@ -45,7 +45,28 @@ authored); river `flow_speed`, `flow_min_speed`, `flow_slope_gain`,
 body has no `MeshRenderer` of its own, which then supplies it as the material's `albedo`),
 `foam_color`, `foam_amount`, `shore_foam_depth`,
 `edge_fade_depth`, `ripple_strength`, `ripple_scale`, `clarity`; underwater `underwater_color`,
-`underwater_visibility`, `underwater_absorption`, `caustics`; physics `density`, `max_depth`.
+`underwater_visibility`, `underwater_absorption`, `caustics`; physics `density`, `max_depth`;
+fluid `fluid`, `emissive_color`, `emissive_strength`, `viscosity`, `temperature_c`.
+
+## A body of something other than water
+
+`fluid: lava` makes the same component a body of molten rock. It is a preset, not a second
+system: it sets the colour, the density (~2800 kg/m^3), the waves, the viscosity and the
+underwater volume together, and **every key written after it still wins**, so a scene tunes one
+of them by naming it. `fluid: water` restores the defaults, so it is not a one-way door.
+
+What the four fluid keys do on their own, without the preset:
+
+| Key | Meaning |
+|---|---|
+| `emissive_color` / `emissive_strength` | The surface emits light. 0 strength (the default) is an ordinary unlit fluid and costs nothing. A body with any strength draws through its own surface shader build, where the crust reads where water would foam and the heat shows between the plates |
+| `viscosity` | 0 (water) to 1 (barely moves). Scales the baked CURRENT down, to a tenth at 1 -- so a viscous fluid still has a direction and merely creeps along it. It deliberately does not touch the waves, which are authored |
+| `temperature_c` | Gameplay only (contact damage, heat). Nothing visual reads it |
+
+A terrain whose map sets `surface_fluid: lava` gets this preset on every body its chunks
+produce. The fluid is stored **per tile**, so it is read back where each chunk's body is built
+and a world loaded from its `.terra` is lava exactly as a freshly generated one is. The
+terrain's own `water:` block still decides everything the preset does not name.
 
 The global fog (render `fog_*`) and water cooperate: the water surface is fogged at its own
 distance, so it hazes exactly like the shore beside it, and with the camera under water the air

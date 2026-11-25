@@ -12,6 +12,11 @@
 #ifndef TOYENGINE_RENDER_SKY_STATE_H
 #define TOYENGINE_RENDER_SKY_STATE_H
 
+#include <array>
+
+#include <cstdint>
+#include <vector>
+
 #include <glm/glm.hpp>
 
 #include <toyengine/env/world_frame.h>
@@ -63,6 +68,39 @@ struct SkyAtmosphereMedia {
 };
 
 /**
+ * @brief One additional sun disc in the sky, beyond the built-in `sun_to` pair.
+ */
+struct SkySunState {
+    glm::vec3 dir{0.0f, 0.0f, 1.0f};  ///< Unit direction TO the sun, world space.
+    glm::vec3 color{1.0f};            ///< The disc's tint.
+    float disc_cos = 1.0f;            ///< cos of the disc's angular radius.
+    float disc_radiance = 0.0f;       ///< The disc's brightness.
+};
+
+/**
+ * @brief One additional moon disc in the sky: a lit sphere with a phase and an optional face
+ *        sampled from the sky-body atlas.
+ */
+struct SkyMoonState {
+    glm::vec3 dir{0.0f, 0.0f, -1.0f};       ///< Unit direction TO the moon, world space.
+    glm::vec3 tint{0.95f, 0.96f, 1.0f};     ///< The disc's tint.
+    float disc_cos = 1.0f;                  ///< cos of the disc's angular radius.
+    float disc_radiance = 0.0f;             ///< The disc's brightness before its phase shading.
+    glm::vec3 lit_from{0.0f, 0.0f, 1.0f};   ///< Unit direction from the moon TO its sun.
+    /// The moon's face in the sky-body atlas (`Engine::update_sky_body_atlas`): xy = uv offset,
+    /// zw = uv size. zw == 0 draws a procedural face.
+    glm::vec4 atlas_rect{0.0f};
+    /// The procedural fallback face when `atlas_rect.zw` is zero: false = cratered maria,
+    /// true = latitude bands (a body with no solid surface).
+    bool banded = false;
+    /// The thin scattering shell hugging the body's limb: a tinted rim inside the disc's edge
+    /// and a soft halo just past it, brightest when the body is backlit. `atmo_thickness` is the
+    /// shell's thickness as a fraction of the disc's radius; 0 (the default) draws no shell.
+    glm::vec3 atmo_tint{0.0f};
+    float atmo_thickness = 0.0f;
+};
+
+/**
  * @brief One frame of the physical sky. `active` false (the default) draws the gradient sky.
  */
 struct SkyFrameState {
@@ -85,6 +123,47 @@ struct SkyFrameState {
     glm::vec3 light_tint{1.0f};
 
     float time = 0.0f;                ///< Seconds; star twinkle.
+
+    /// The star backdrop's structure: the galactic band's pole (world space, unit) and the
+    /// field's variation seed (any value in [0, 1024)). The defaults give every scene the same
+    /// tilted band; a sky-state hook may retune both per world.
+    glm::vec3 backdrop_to{0.853f, 0.201f, 0.482f};
+    float backdrop_seed = 0.0f;
+
+    /// At most this many additional suns / moons are drawn.
+    static constexpr int k_max_suns = 4;
+    static constexpr int k_max_moons = 8;
+
+    /// Additional sun and moon discs, filled by the sky-state hook. Counts of zero (the default)
+    /// keep the single `sun_to` / `moon_to` pair above authoritative -- exactly the behaviour a
+    /// scene that never touches these gets.
+    std::array<SkySunState, k_max_suns> suns{};
+    int sun_count = 0;
+    std::array<SkyMoonState, k_max_moons> moons{};
+    int moon_count = 0;
+
+    /// WORLD-space unit direction TO the brightest moon, for the night-side ground light; zero
+    /// keeps the anti-solar fallback (the single moon sits opposite the sun).
+    glm::vec3 moonlight_to{0.0f};
+    /// The night-side moonlight's tint.
+    glm::vec3 moonlight_tint{0.55f, 0.75f, 1.3f};
+
+    /// A sphere that may stand between a shaded point and the directional light.
+    struct Occluder {
+        glm::vec3 center{0.0f};   ///< WORLD space -- the frame the lighting pass shades in.
+        float radius = 0.0f;      ///< 0 is an empty slot.
+    };
+    /// At most this many are shadowed against; see `LightUBO::dir_occluders`.
+    static constexpr int k_max_occluders = 4;
+    /// Spheres shadowing the directional light ANALYTICALLY -- no map, and so no range limit.
+    /// The cascades are fitted to the camera's own surroundings; an eclipse is cast by something
+    /// tens of thousands of units away, and the two problems have nothing in common. A count of
+    /// 0 (the default) costs the lighting pass one compare.
+    std::array<Occluder, k_max_occluders> occluders{};
+    int occluder_count = 0;
+    /// The directional light's own angular radius, radians. 0 (the default) disables the term --
+    /// a light with no disc has no penumbra and nothing to partially cover.
+    float light_angular_radius = 0.0f;
 };
 
 /// The cloud layer's two looks (render cloud_type).
@@ -135,6 +214,45 @@ struct CloudFrameState {
     /// whatever fills them through the cloud-state hook instead.
     glm::vec3 day_fill{0.0f};
     glm::vec3 night_fill{0.0f};
+
+    // --- What the clouds are MADE of --------------------------------------------------------
+    //
+    // Every default below is what the layer drew before these existed, so a scene that sets none
+    // of them is untouched: vec3(0.9) is the scalar albedo the march carried, and a zero band
+    // count or storm count skips that term entirely.
+
+    /// Single-scattering albedo where a cloud is thin and lit -- the colour of its bright edge.
+    glm::vec3 albedo{0.9f};
+    /// The albedo the blend reaches: a band's own colour on a giant, a thick base's grey on an
+    /// earthlike world.
+    glm::vec3 albedo_deep{0.9f};
+    /// How fast a sample's own density carries it from one albedo to the other. 0 = never, which
+    /// leaves `albedo` alone everywhere. Unused on a banded world, where the BAND chooses.
+    float deep_onset = 0.0f;
+
+    /// x = belts from pole to pole (0 = none, and bands and jets both switch off), y = contrast
+    /// of a belt against a zone, z = sharpness (>1 squares them off), w = jet shear: how much
+    /// faster a belt turns than the deck as a whole. Curved worlds only -- a flat world has no
+    /// pole to band about.
+    glm::vec4 bands{0.0f};
+
+    /// A cyclone: a swirl, a raised wall and a cleared eye. The same four numbers are a
+    /// hurricane on an earthlike world and a Great Red Spot on a giant. Curved worlds only.
+    struct Storm {
+        glm::vec3 direction{0.0f, 0.0f, 1.0f};  ///< Unit, from the world's centre to the eye.
+        float angular_radius = 0.0f;            ///< Radians of arc from the eye to the rim.
+        float swirl = 0.0f;                     ///< How far the field winds round, at the wall (rad).
+        float lift = 0.0f;                      ///< Coverage the storm adds over its whole disc.
+        float eye = 0.3f;                       ///< Fraction of the radius that is cleared eye.
+        float wall = 0.0f;                      ///< Extra coverage in the ring around that eye.
+    };
+    /// Live cyclones; `SkyCloudPass::kMaxStorms` of them reach the march, nearest-first.
+    std::vector<Storm> storms;
+
+    /// Seeds the weather map that PLACES the clouds. Changing it re-bakes a 512^2 compute and
+    /// cuts the temporal history for a frame; 0 is the map the engine always baked, so two
+    /// worlds in one scene can wear different weather instead of one pattern at two scales.
+    std::uint32_t weather_seed = 0;
 
     // Shadows (render cloud_shadows).
     bool shadows = false;

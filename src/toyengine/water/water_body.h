@@ -42,6 +42,21 @@ namespace water {
 enum class WaterMode { Planar, Flowing };
 
 /**
+ * @enum FluidKind
+ * @brief What a body is made of.
+ *
+ * Everything a body of water does -- a surface mesh over a bed, waves on it, a current, a depth
+ * to float things in, a volume to fog the camera inside -- a body of lava also does. So lava is
+ * this system with different numbers rather than a system of its own, and `water_fluid_preset()`
+ * is where those numbers live.
+ *
+ * The kind itself exists only so a preset has a name and the editor has a dropdown; nothing in
+ * `WaterSystem` branches on it. Every difference in behaviour is carried by a field below, which
+ * is what lets a body be lava-ish (viscous, dim, hot) without being lava.
+ */
+enum class FluidKind { Water, Lava };
+
+/**
  * @class WaterBody
  * @brief A body of water. See the file doc.
  */
@@ -92,6 +107,33 @@ public:
     float     underwater_visibility = 14.0f;         ///< Metres until ~95% fogged.
     glm::vec3 underwater_absorption{0.35f, 0.09f, 0.06f}; ///< Per-metre extinction, r/g/b (red goes first).
     float     caustics = 1.0f;                       ///< Caustic brightness on submerged surfaces.
+
+    // --- Fluid ---
+    /// What this body is made of; `water_fluid_preset()` fills in the rest from it.
+    FluidKind fluid = FluidKind::Water;
+    /**
+     * @brief Emitted colour, premultiplied by `emissive_strength` onto the material's emissive.
+     *
+     * Water leaves `emissive_strength` at zero and never reaches the G-buffer's emissive at all,
+     * so this costs an unlit body nothing.
+     */
+    glm::vec3 emissive_color{1.0f, 0.35f, 0.07f};
+    /// How brightly the surface emits; 0 (the default) is an ordinary, unlit fluid.
+    float emissive_strength = 0.0f;
+    /**
+     * @brief How sluggish the fluid is, 0 (water) to 1 (barely moves).
+     *
+     * Not a new simulation: it scales the **current** the flow bake produces, down to a tenth at
+     * 1. A viscous fluid still has a direction, it just creeps along it. That makes a
+     * half-viscous body (mud, tar) authorable without another code path.
+     *
+     * It deliberately does NOT touch the waves, which are authored (`waves`) and set by
+     * `apply_fluid_preset()` -- scaling them here as well would damp a lava body twice, once
+     * from its preset and once from this.
+     */
+    float viscosity = 0.0f;
+    /// Temperature in Celsius, for gameplay -- contact damage, heat sources. Nothing visual.
+    float temperature_c = 15.0f;
 
     // --- Physics ---
     float density   = 1000.0f;           ///< kg/m^3 -- fresh water.
@@ -206,6 +248,26 @@ private:
  *        baked state. For code that spawns bodies from a template (a TileTerrain's water).
  */
 void copy_water_settings(const WaterBody& from, WaterBody& to);
+
+/**
+ * @brief Sets every field a fluid kind implies, leaving geometry and placement alone.
+ *
+ * One place where "what lava is" lives, so a scene, a terrain's `water_look` and a programmatic
+ * body cannot each invent their own. Call it first and then override whatever the scene actually
+ * authored -- the preset is a starting point, not a lock.
+ *
+ * `FluidKind::Water` restores the component's own defaults, so switching a body back is not a
+ * one-way door.
+ *
+ * @param body The body to configure.
+ * @param kind What it should be made of.
+ */
+void apply_fluid_preset(WaterBody& body, FluidKind kind);
+
+/** @brief `FluidKind` as scene YAML spells it; unknown text reads as `Water`. */
+FluidKind fluid_kind_from_name(const std::string& name);
+/** @brief The YAML spelling of `kind`. */
+const char* fluid_kind_name(FluidKind kind);
 
 } // namespace water
 } // namespace toy

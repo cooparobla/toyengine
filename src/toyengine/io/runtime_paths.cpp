@@ -199,6 +199,14 @@ std::filesystem::path user_log_dir(const std::string& app) {
 #endif
 }
 
+std::filesystem::path user_cache_dir(const std::string& app) {
+#if defined(__APPLE__)
+    return detail::home_dir() / "Library" / "Caches" / app;
+#else
+    return detail::xdg_dir("XDG_CACHE_HOME", ".cache") / app;
+#endif
+}
+
 void prepare_runtime_environment() {
     static bool done = false;
     if (done) return;

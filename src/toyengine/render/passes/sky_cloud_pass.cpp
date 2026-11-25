@@ -43,9 +43,9 @@ SkyCloudPass::SkyCloudPass(coopa::gfx::core::Device& device, coopa::gfx::memory:
       nearest_(coopa::gfx::engine::util::Sampler::nearest(device)),
       noise_sampler_(device, noise_sampler_desc(), 16.0f),
       gens_(device, mip2d_spv, mip3d_spv),
-      weather_gen_(device, weather_spv, {&gens_.gen_layout()}, {{coopa::gfx::ShaderStage::Compute, 0, 4}}),
-      shape_gen_(device, shape_spv, {&gens_.gen_layout()}, {{coopa::gfx::ShaderStage::Compute, 0, 4}}),
-      detail_gen_(device, detail_spv, {&gens_.gen_layout()}, {{coopa::gfx::ShaderStage::Compute, 0, 4}}),
+      weather_gen_(device, weather_spv, {&gens_.gen_layout()}, {{coopa::gfx::ShaderStage::Compute, 0, 8}}),
+      shape_gen_(device, shape_spv, {&gens_.gen_layout()}, {{coopa::gfx::ShaderStage::Compute, 0, 8}}),
+      detail_gen_(device, detail_spv, {&gens_.gen_layout()}, {{coopa::gfx::ShaderStage::Compute, 0, 8}}),
       weather_(device, allocator, gens_, kWeatherSize, false),
       shape_(device, allocator, gens_, kShapeSize, true),
       detail_(device, allocator, gens_, kDetailSize, true),
@@ -84,11 +84,18 @@ void SkyCloudPass::set_inputs(coopa::gfx::TextureView transmittance, coopa::gfx:
     copy_stage_.set(0).bind_image(0, output_.color_view_typed(), nearest_);
 }
 
-void SkyCloudPass::ensure_noise(coopa::gfx::command::CommandBuffer& cmd) {
-    if (noise_ready_) return;
-    weather_.generate(cmd, weather_gen_, gens_);
+void SkyCloudPass::ensure_noise(coopa::gfx::command::CommandBuffer& cmd, std::uint32_t weather_seed) {
+    if (noise_ready_) {
+        if (weather_seed == weather_seed_) return;
+        // A re-roll, not a rebuild: only the map that PLACES clouds is seeded.
+        weather_.generate(cmd, weather_gen_, gens_, weather_seed);
+        weather_seed_ = weather_seed;
+        return;
+    }
+    weather_.generate(cmd, weather_gen_, gens_, weather_seed);
     shape_.generate(cmd, shape_gen_, gens_);
     detail_.generate(cmd, detail_gen_, gens_);
+    weather_seed_ = weather_seed;
     noise_ready_ = true;
 }
 
@@ -112,7 +119,8 @@ void SkyCloudPass::execute(coopa::gfx::command::CommandBuffer& cmd, uint32_t fra
              const coopa::gfx::pipeline::DescriptorSet& camera_set,
              const coopa::gfx::pipeline::DescriptorSet& light_set, const Params& p, float scale,
              bool trace) {
-    ensure_noise(cmd);
+    const bool reseeded = noise_ready_ && p.weather_seed != weather_seed_;
+    ensure_noise(cmd, p.weather_seed);
     const uint32_t slot = frame_slot % frames_;
     const uint32_t rw = scaled_extent(output_.width(), scale), rh = scaled_extent(output_.height(), scale);
     // The traced pixel of each 2x2 block, cycling in an order that spreads consecutive
@@ -131,7 +139,10 @@ void SkyCloudPass::execute(coopa::gfx::command::CommandBuffer& cmd, uint32_t fra
     d.trace = glm::vec4(static_cast<float>(o[0]), static_cast<float>(o[1]), static_cast<float>(rw), static_cast<float>(rh));
     // A region pixel's angular size: the vertical field of view over the region's rows.
     const float pix_angle = 2.0f / (std::max(p.proj_y, 1e-3f) * static_cast<float>(rh));
-    const bool valid = p.history_valid && last_extent_ == glm::uvec2(rw, rh);
+    // A RE-ROLLED WEATHER MAP IS A CUT. Every cloud in the sky has just moved somewhere else,
+    // and reprojecting a history of the old pattern onto the new one smears one into the other
+    // for as long as the blend takes to decay.
+    const bool valid = p.history_valid && !reseeded && last_extent_ == glm::uvec2(rw, rh);
     d.history = glm::vec4(p.drift, valid ? 1.0f : 0.0f, pix_angle);
     d.camera = glm::vec4(p.camera_pos, p.light_change);
     d.look = glm::vec4(cs, std::clamp(p.fade, 0.0f, 1.0f), p.atmosphere_lut ? 1.0f : 0.0f, p.spin_delta);
@@ -151,6 +162,15 @@ void SkyCloudPass::execute(coopa::gfx::command::CommandBuffer& cmd, uint32_t fra
     // temporal smoothing.
     d.day_fill = glm::vec4(p.day_fill, p.cam_delta);
     d.night_fill = glm::vec4(p.night_fill, 0.0f);
+    d.albedo = glm::vec4(p.albedo, std::max(p.deep_onset, 0.0f));
+    d.albedo_deep = glm::vec4(p.albedo_deep, 0.0f);
+    d.bands = p.bands;
+    const int storms = std::clamp(p.storm_count, 0, static_cast<int>(kMaxStorms));
+    d.storms = glm::vec4(static_cast<float>(storms), 0.0f, 0.0f, 0.0f);
+    for (int i = 0; i < static_cast<int>(kMaxStorms); ++i) {
+        d.storm[i] = i < storms ? p.storm[static_cast<std::size_t>(i)] : glm::vec4(0.0f);
+        d.storm_spin[i] = i < storms ? p.storm_spin[static_cast<std::size_t>(i)] : glm::vec4(0.0f);
+    }
     ubos_[slot]->upload(&d, sizeof(d));
     if (!trace) { last_extent_ = glm::uvec2(0u); return; }
     last_extent_ = glm::uvec2(rw, rh);

@@ -276,6 +276,7 @@ inline fkyaml::node config_to_node(const MapConfig& config) {
     passes["enable_water"] = config.enable_water;
     passes["enable_coast"] = config.enable_coast;
     passes["enable_elevation"] = config.enable_elevation;
+    passes["enable_volcanoes"] = config.enable_volcanoes;
     passes["enable_temperature"] = config.enable_temperature;
     passes["enable_rivers"] = config.enable_rivers;
     passes["enable_valleys"] = config.enable_valleys;
@@ -322,6 +323,7 @@ inline fkyaml::node config_to_node(const MapConfig& config) {
     node["png_compression_level"] = config.png_compression_level;
     node["border_length"] = config.border_length;
     node["sea_level"] = config.sea_level;
+    node["surface_fluid"] = std::string(surface_fluid_name(config.surface_fluid));
     node["terrain_relief"] = config.terrain_relief;
     node["terrain_ridges"] = config.terrain_ridges;
     node["erosion"] = config.erosion;
@@ -331,6 +333,7 @@ inline fkyaml::node config_to_node(const MapConfig& config) {
     node["beach_height_contrast"] = config.beach_height_contrast;
     node["biome_dither"] = config.biome_dither;
     node["biome_river_boundary"] = config.biome_river_boundary;
+    node["biome_profile"] = std::string(biome_profile_name(config.biome_profile));
     node["terrain_roughness"] = config.terrain_roughness;
     node["threshold_water"] = config.threshold_water;
     node["threshold_water_count"] = config.threshold_water_count;
@@ -364,9 +367,19 @@ inline fkyaml::node config_to_node(const MapConfig& config) {
         natural["plateaus"] = config.natural.plateaus;
         natural["plateau_coverage"] = config.natural.plateau_coverage;
         natural["warp"] = config.natural.warp;
+        natural["craters"] = config.natural.craters;
+        natural["crater_density"] = config.natural.crater_density;
         natural["seabed"] = config.natural.seabed;
         natural["seabed_ridges"] = config.natural.seabed_ridges;
         natural["seabed_shelf"] = config.natural.seabed_shelf;
+        natural["volcanoes"] = config.natural.volcanoes;
+        natural["volcano_density"] = config.natural.volcano_density;
+        natural["volcano_caldera"] = config.natural.volcano_caldera;
+        natural["volcano_submarine"] = config.natural.volcano_submarine;
+        natural["volcano_kind"] = std::string(volcano_kind_name(config.natural.volcano_kind));
+        natural["volcano_size"] = config.natural.volcano_size;
+        natural["volcano_active"] = config.natural.volcano_active;
+        natural["volcano_warmth"] = config.natural.volcano_warmth;
         node["natural"] = std::move(natural);
     }
     node["noise_hills"] = detail::noise_to_node(config.noise_hills);
@@ -493,6 +506,8 @@ inline void apply_config_node(const fkyaml::node& node, MapConfig& config) {
         detail::read_or(node, "png_compression_level", config.png_compression_level);
     config.border_length = detail::read_or(node, "border_length", config.border_length);
     config.sea_level = detail::read_or(node, "sea_level", config.sea_level);
+    config.surface_fluid = surface_fluid_from_name(detail::read_or(
+        node, "surface_fluid", std::string(surface_fluid_name(config.surface_fluid))));
     config.terrain_relief = detail::read_or(node, "terrain_relief", config.terrain_relief);
     config.terrain_ridges = detail::read_or(node, "terrain_ridges", config.terrain_ridges);
     config.erosion = detail::read_or(node, "erosion", config.erosion);
@@ -506,6 +521,8 @@ inline void apply_config_node(const fkyaml::node& node, MapConfig& config) {
     config.biome_dither = detail::read_or(node, "biome_dither", config.biome_dither);
     config.biome_river_boundary =
         detail::read_or(node, "biome_river_boundary", config.biome_river_boundary);
+    config.biome_profile = biome_profile_from_name(detail::read_or(
+        node, "biome_profile", std::string(biome_profile_name(config.biome_profile))));
     config.terrain_roughness =
         detail::read_or(node, "terrain_roughness", config.terrain_roughness);
     config.threshold_water = detail::read_or(node, "threshold_water", config.threshold_water);
@@ -554,9 +571,20 @@ inline void apply_config_node(const fkyaml::node& node, MapConfig& config) {
         c.plateaus = detail::read_or(n, "plateaus", c.plateaus);
         c.plateau_coverage = detail::read_or(n, "plateau_coverage", c.plateau_coverage);
         c.warp = detail::read_or(n, "warp", c.warp);
+        c.craters = detail::read_or(n, "craters", c.craters);
+        c.crater_density = detail::read_or(n, "crater_density", c.crater_density);
         c.seabed = detail::read_or(n, "seabed", c.seabed);
         c.seabed_ridges = detail::read_or(n, "seabed_ridges", c.seabed_ridges);
         c.seabed_shelf = detail::read_or(n, "seabed_shelf", c.seabed_shelf);
+        c.volcanoes = detail::read_or(n, "volcanoes", c.volcanoes);
+        c.volcano_density = detail::read_or(n, "volcano_density", c.volcano_density);
+        c.volcano_caldera = detail::read_or(n, "volcano_caldera", c.volcano_caldera);
+        c.volcano_submarine = detail::read_or(n, "volcano_submarine", c.volcano_submarine);
+        c.volcano_kind = volcano_kind_from_name(detail::read_or(
+            n, "volcano_kind", std::string(volcano_kind_name(c.volcano_kind))));
+        c.volcano_size = detail::read_or(n, "volcano_size", c.volcano_size);
+        c.volcano_active = detail::read_or(n, "volcano_active", c.volcano_active);
+        c.volcano_warmth = detail::read_or(n, "volcano_warmth", c.volcano_warmth);
     }
     detail::noise_from_node(node, "noise_hills", config.noise_hills);
     detail::noise_from_node(node, "noise_biome", config.noise_biome);
@@ -707,6 +735,7 @@ inline void apply_config_node(const fkyaml::node& node, MapConfig& config) {
         config.enable_water = detail::read_or(passes, "enable_water", config.enable_water);
         config.enable_coast = detail::read_or(passes, "enable_coast", config.enable_coast);
         config.enable_elevation = detail::read_or(passes, "enable_elevation", config.enable_elevation);
+        config.enable_volcanoes = detail::read_or(passes, "enable_volcanoes", config.enable_volcanoes);
         config.enable_temperature =
             detail::read_or(passes, "enable_temperature", config.enable_temperature);
         config.enable_rivers = detail::read_or(passes, "enable_rivers", config.enable_rivers);
@@ -1192,6 +1221,28 @@ inline fkyaml::node map_to_node(const MapGraph& graph, const MapConfig& config) 
         landmarks.push_back(std::move(node));
     }
 
+    std::vector<fkyaml::node> volcanoes;
+    volcanoes.reserve(graph.volcanoes.size());
+    for (const MapVolcano& vent : graph.volcanoes) {
+        fkyaml::node node = fkyaml::node::mapping();
+        node["center"] = static_cast<int>(vent.center);
+        node["x"] = vent.point.x;
+        node["y"] = vent.point.y;
+        if (vent.point.z != 0.0) node["z"] = vent.point.z;   // sphere maps only
+        node["radius"] = vent.radius;
+        node["height"] = vent.height;
+        node["caldera"] = vent.caldera;
+        node["kind"] = std::string(volcano_kind_name(vent.kind));
+        node["submarine"] = vent.submarine;
+        node["activity"] = vent.activity;
+        if (vent.lava_rise > 0.0) {
+            node["lava_rise"] = vent.lava_rise;
+            node["lava_radius"] = vent.lava_radius;
+        }
+        node["region"] = static_cast<int>(vent.region);
+        volcanoes.push_back(std::move(node));
+    }
+
     std::vector<fkyaml::node> caves;
     caves.reserve(graph.caves.size());
     for (const MapCave& cave : graph.caves) {
@@ -1262,6 +1313,7 @@ inline fkyaml::node map_to_node(const MapGraph& graph, const MapConfig& config) 
     root["regions"] = fkyaml::node::sequence(std::move(regions));
     root["countries"] = fkyaml::node::sequence(std::move(countries));
     root["landmarks"] = fkyaml::node::sequence(std::move(landmarks));
+    root["volcanoes"] = fkyaml::node::sequence(std::move(volcanoes));
     root["caves"] = fkyaml::node::sequence(std::move(caves));
     return root;
 }
@@ -1488,6 +1540,28 @@ inline bool map_from_node(const fkyaml::node& root, MapGraph& out_graph, MapConf
             landmark.region = static_cast<RegionId>(
                 detail::read_or(node, "region", static_cast<int>(k_invalid_id)));
             out_graph.landmarks.push_back(std::move(landmark));
+        }
+    }
+
+    if (root.contains("volcanoes") && root.at("volcanoes").is_sequence()) {
+        for (const fkyaml::node& node : root.at("volcanoes")) {
+            MapVolcano vent;
+            vent.center = static_cast<CenterId>(
+                detail::read_or(node, "center", static_cast<int>(k_invalid_id)));
+            vent.point = {detail::read_or(node, "x", 0.0), detail::read_or(node, "y", 0.0),
+                          detail::read_or(node, "z", 0.0)};
+            vent.radius = detail::read_or(node, "radius", 0.0);
+            vent.height = detail::read_or(node, "height", 0.0);
+            vent.caldera = detail::read_or(node, "caldera", 0.0);
+            vent.kind = volcano_kind_from_name(
+                detail::read_or(node, "kind", std::string("stratovolcano")));
+            vent.submarine = detail::read_or(node, "submarine", false);
+            vent.activity = detail::read_or(node, "activity", 0.0);
+            vent.lava_rise = detail::read_or(node, "lava_rise", 0.0);
+            vent.lava_radius = detail::read_or(node, "lava_radius", 0.0);
+            vent.region = static_cast<RegionId>(
+                detail::read_or(node, "region", static_cast<int>(k_invalid_id)));
+            out_graph.volcanoes.push_back(std::move(vent));
         }
     }
 

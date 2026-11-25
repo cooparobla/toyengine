@@ -70,6 +70,7 @@ AppConfig AppConfig::from_node(const fkyaml::node& root) {
             if (r.contains("sdf_quality"))         config.render.sdf_quality         = parse_render_quality(r.at("sdf_quality").get_value<std::string>());
             if (r.contains("water_quality"))       config.render.water_quality       = parse_render_quality(r.at("water_quality").get_value<std::string>());
             if (r.contains("sky_quality"))         config.render.sky_quality         = parse_render_quality(r.at("sky_quality").get_value<std::string>());
+            if (r.contains("mesh_lod_quality"))    config.render.mesh_lod_quality    = parse_render_quality(r.at("mesh_lod_quality").get_value<std::string>());
             config.render.apply_quality_presets();
 
             // An explicit key still wins over the preset, same rule as every *_quality tier.
@@ -169,6 +170,10 @@ AppConfig AppConfig::from_node(const fkyaml::node& root) {
             auto sky_num = [](const fkyaml::node& v) {
                 return v.is_integer() ? static_cast<float>(v.get_value<int64_t>()) : v.get_value<float>();
             };
+            auto sky_rgb = [&sky_num](const fkyaml::node& v, glm::vec3 fallback) {
+                if (v.size() < 3) return fallback;
+                return glm::vec3(sky_num(v.at(0)), sky_num(v.at(1)), sky_num(v.at(2)));
+            };
             read(r, "sky_model", config.render.sky_model);
             if (r.contains("atmosphere_density")) config.render.atmosphere_density = sky_num(r.at("atmosphere_density"));
             if (r.contains("ozone"))              config.render.ozone              = sky_num(r.at("ozone"));
@@ -182,6 +187,14 @@ AppConfig AppConfig::from_node(const fkyaml::node& root) {
             if (r.contains("cloud_altitude"))     config.render.cloud_altitude     = sky_num(r.at("cloud_altitude"));
             if (r.contains("cloud_thickness"))    config.render.cloud_thickness    = sky_num(r.at("cloud_thickness"));
             if (r.contains("cloud_density"))      config.render.cloud_density      = sky_num(r.at("cloud_density"));
+            if (r.contains("cloud_albedo"))       config.render.cloud_albedo       = sky_rgb(r.at("cloud_albedo"), config.render.cloud_albedo);
+            if (r.contains("cloud_albedo_deep"))  config.render.cloud_albedo_deep  = sky_rgb(r.at("cloud_albedo_deep"), config.render.cloud_albedo_deep);
+            if (r.contains("cloud_deep_onset"))   config.render.cloud_deep_onset   = sky_num(r.at("cloud_deep_onset"));
+            if (r.contains("cloud_seed"))         config.render.cloud_seed         = static_cast<int>(sky_num(r.at("cloud_seed")));
+            if (r.contains("cloud_bands"))        config.render.cloud_bands        = sky_num(r.at("cloud_bands"));
+            if (r.contains("cloud_band_contrast"))  config.render.cloud_band_contrast  = sky_num(r.at("cloud_band_contrast"));
+            if (r.contains("cloud_band_sharpness")) config.render.cloud_band_sharpness = sky_num(r.at("cloud_band_sharpness"));
+            if (r.contains("cloud_jet_shear"))    config.render.cloud_jet_shear    = sky_num(r.at("cloud_jet_shear"));
             if (r.contains("cloud_wind_speed"))   config.render.cloud_wind_speed   = sky_num(r.at("cloud_wind_speed"));
             if (r.contains("cloud_scale"))        config.render.cloud_scale        = sky_num(r.at("cloud_scale"));
             if (r.contains("flat_cloud_size"))        config.render.flat_cloud_size        = sky_num(r.at("flat_cloud_size"));
@@ -419,6 +432,9 @@ AppConfig AppConfig::from_node(const fkyaml::node& root) {
             read(r, "volumetrics_froxel_slices", config.render.volumetrics_froxel_slices);
             read(r, "volumetrics_froxel_history", config.render.volumetrics_froxel_history);
             read(r, "volumetrics_froxel_miss_samples", config.render.volumetrics_froxel_miss_samples);
+            read(r, "volumetrics_froxel_fit", config.render.volumetrics_froxel_fit);
+            read(r, "volumetrics_froxel_slice_samples", config.render.volumetrics_froxel_slice_samples);
+            read(r, "volumetrics_froxel_filter", config.render.volumetrics_froxel_filter);
             read(r, "volumetrics_froxel_lookup_jitter", config.render.volumetrics_froxel_lookup_jitter);
             read(r, "volumetrics_max_opacity", config.render.volumetrics_max_opacity);
             read(r, "volumetrics_sun_anisotropy", config.render.volumetrics_sun_anisotropy);

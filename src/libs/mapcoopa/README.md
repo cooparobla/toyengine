@@ -3,7 +3,7 @@
 **A seeded, header-only C++20 generator for whole fantasy worlds.**
 
 mapcoopa turns a seed and a `MapConfig` into a `MapGraph`: Voronoi cells with elevation,
-climate and one of 33 biomes, rivers that run downhill to the sea, a graded road network,
+climate and one of 37 biomes, rivers that run downhill to the sea, a graded road network,
 nations and provinces, named settlements with streets and buildings, landmarks, and
 multi-level cave systems. It produces data, not pixels. The graph saves to YAML so a game
 can load a world it did not generate, and a software renderer draws nine PNG layers for
@@ -55,7 +55,7 @@ All images are cropped from the `map_out_*.png` renders at the repository root, 
   the sphere with no edges, latitude climate from the poles, continents and seas as anywhere
   else. See [Sphere maps](#sphere-maps). `plane` (the default) is the flat map.
 - **Climate and biomes.** Temperature from latitude, altitude, noise and a global offset,
-  with independent polar caps. Moisture from water and coast distance. 33 biomes from a
+  with independent polar caps. Moisture from water and coast distance. 37 biomes from a
   three-axis Whittaker table.
 
 ### Water
@@ -347,6 +347,10 @@ on-disk identity, accepted back by `biome_from_name()`. These rows and the swatc
 | ![](assets/svg/salt_flat.svg) | Salt flat | `salt_flat` | `#EEEEE6` | 238, 238, 230 |
 | ![](assets/svg/dunes.svg) | Dunes | `dunes` | `#E8CE94` | 232, 206, 148 |
 | ![](assets/svg/volcanic_field.svg) | Volcanic field | `volcanic_field` | `#5C4A46` | 92, 74, 70 |
+| ![](assets/svg/regolith.svg) | Regolith | `regolith` | `#A8A49E` | 168, 164, 158 |
+| ![](assets/svg/basalt_plain.svg) | Basalt plain | `basalt_plain` | `#4C4E56` | 76, 78, 86 |
+| ![](assets/svg/lava_field.svg) | Lava field | `lava_field` | `#762C1A` | 118, 44, 26 |
+| ![](assets/svg/sulfur_flat.svg) | Sulfur flat | `sulfur_flat` | `#D4BA5E` | 212, 186, 94 |
 
 `ocean` and `lake` share a colour on purpose: they look like the same water, and a lake is
 told apart by its shape. `ice` is a pale version of the same blue, so a river visibly ends
@@ -373,10 +377,10 @@ Drawn over the filled cells in this order; each covers the one beneath it.
 | ![](assets/svg/settlement.svg) | Settlement | `#782828` | 120, 40, 40 | Square marker; 25 m capital, 17 m town, 11 m village |
 | ![](assets/svg/landmark-natural.svg) | Natural landmark | `#283C82` | 40, 60, 130 | Diamond; 21 m for a region's wonder, 13 m otherwise |
 | ![](assets/svg/landmark-built.svg) | Built landmark | `#5A3C82` | 90, 60, 130 | Square, 13 m |
-| ![](assets/svg/cave-shallow.svg) | Cave, shallow | `#ECC478` | 236, 196, 120 | One end of the cave overview's depth ramp |
-| ![](assets/svg/cave-deep.svg) | Cave, deep | `#56489C` | 86, 72, 156 | The other end. Stretched over the range of cave floors *on that map*, so two systems are comparable |
-| ![](assets/svg/cave-chamber.svg) | Cave chamber | `#D28C60` | 210, 140, 96 | Where passages meet or a run ends |
-| ![](assets/svg/cave-mouth.svg) | Cave mouth | `#E6E6EC` | 230, 230, 236 | Ring on the slope a system opens on |
+| ![](assets/svg/cave-shallow.svg) | Shallow cave passage | `#ECC478` | 236, 196, 120 | Stroke on the overview layer; depth blends toward the deep colour |
+| ![](assets/svg/cave-deep.svg) | Deep cave passage | `#56489C` | 86, 72, 156 | The cold end of the depth blend |
+| ![](assets/svg/cave-chamber.svg) | Cave chamber | `#D28C60` | 210, 140, 96 | Outline drawn over the passage colour |
+| ![](assets/svg/cave-mouth.svg) | Cave mouth | `#E6E6EC` | 230, 230, 236 | Ringed marker where a cave opens to the surface |
 | ![](assets/svg/background.svg) | Background | `#FFFFFF` | 255, 255, 255 | Whatever no cell covers |
 
 The three road tiers are told apart by width first and colour second. `RoadClass` comes

@@ -10,7 +10,7 @@
 
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 0, rgba8) uniform writeonly image2D u_out;
-layout(push_constant) uniform Gen { uint size; } gen;
+layout(push_constant) uniform Gen { uint size; uint seed; } gen;
 
 #include "sky_cloud_noise_common.glsl"
 
@@ -18,11 +18,18 @@ void main() {
     ivec2 id = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(id, ivec2(gen.size)))) return;
     vec3 uvw = vec3((vec2(id) + 0.5) / float(gen.size), 0.0);
-    float perlin = cn_perlin_fbm(uvw, 6, 3, 5u);
-    float worley = (0.625 * (1.0 - cn_worley(uvw * 8.0, 8, 7u)) + 0.25 * (1.0 - cn_worley(uvw * 16.0, 16, 11u))) / 0.875;
+    // SEED ZERO IS THE MAP THIS ALWAYS BAKED. The seed enters as an offset on each noise's own
+    // channel, so a scene that asks for none gets the identical texture it used to -- and two
+    // worlds in one scene that ask for different ones wear different weather rather than the
+    // same pattern at two scales. Scaled by large odd strides so neighbouring seeds do not land
+    // on neighbouring channels and come back looking like the same sky nudged.
+    uint sd = gen.seed;
+    float perlin = cn_perlin_fbm(uvw, 6, 3, 5u + sd * 7919u);
+    float worley = (0.625 * (1.0 - cn_worley(uvw * 8.0, 8, 7u + sd * 104729u)) +
+                    0.25 * (1.0 - cn_worley(uvw * 16.0, 16, 11u + sd * 15485863u))) / 0.875;
     float field = clamp(cn_remap(perlin, worley - 1.0, 1.0, 0.0, 1.0), 0.0, 1.0);
     field = clamp((field - 0.44) / 0.46, 0.0, 1.0);   // 5th..95th percentile -> [0, 1]: near-uniform
-    float type = smoothstep(0.3, 0.7, cn_perlin_fbm(uvw, 3, 2, 13u));
-    float variation = cn_perlin_fbm(uvw, 2, 3, 19u);
+    float type = smoothstep(0.3, 0.7, cn_perlin_fbm(uvw, 3, 2, 13u + sd * 32452843u));
+    float variation = cn_perlin_fbm(uvw, 2, 3, 19u + sd * 49979687u);
     imageStore(u_out, id, vec4(field, type, variation, 1.0));
 }

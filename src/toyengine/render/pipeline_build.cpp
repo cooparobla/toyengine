@@ -302,13 +302,29 @@ void ToyRenderPipeline::build_lighting_passes_() {
     sky_cloud_pass_->set_inputs(sky_atmosphere_pass_->transmittance_view(), gbuffer_target_.g1_view_typed(),
                                 gbuffer_target_.g2_view_typed());
 
-    // Bindings 1-3 are the physical sky's inputs (toy_lighting.frag's sky branch).
+    // The sky-body atlas (binding 4): a fixed-size texture whose DESCRIPTOR never changes --
+    // only its contents do, through update_sky_body_atlas() / Texture::update(), which keeps
+    // the same image and view. White until an app streams moon faces into it, and a disc with
+    // no published rect never samples it, so the default costs nothing.
+    {
+        const std::size_t texels =
+            static_cast<std::size_t>(kSkyBodyAtlasWidth) * kSkyBodyAtlasHeight;
+        const std::vector<uint8_t> white(texels * 4, 0xFF);
+        sky_body_atlas_ = std::make_unique<coopa::gfx::engine::data::Texture>(
+            coopa::gfx::engine::data::Texture::upload(
+                device_, allocator_, cmd_pool_, white.data(), kSkyBodyAtlasWidth,
+                kSkyBodyAtlasHeight, coopa::gfx::Format::RGBA8_Srgb));
+    }
+
+    // Bindings 1-3 are the physical sky's inputs (toy_lighting.frag's sky branch); 4 is the
+    // sky-body atlas.
     contact_extra_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
         coopa::gfx::pipeline::DescriptorLayoutBuilder()
             .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
             .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
             .combined_sampler(2, coopa::gfx::ShaderStage::Fragment)
             .combined_sampler(3, coopa::gfx::ShaderStage::Fragment)
+            .combined_sampler(4, coopa::gfx::ShaderStage::Fragment)
             .build(device_));
     contact_extra_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
         coopa::gfx::pipeline::DescriptorPoolBuilder()
@@ -320,6 +336,8 @@ void ToyRenderPipeline::build_lighting_passes_() {
     contact_extra_set_->bind_image(1, sky_atmosphere_pass_->transmittance_view(), sky_atmosphere_pass_->sampler());
     contact_extra_set_->bind_image(2, sky_atmosphere_pass_->sky_view_view(), sky_atmosphere_pass_->sampler());
     contact_extra_set_->bind_image(3, sky_cloud_pass_->output_view(), sky_cloud_pass_->sampler());
+    contact_extra_set_->bind_image(4, sky_body_atlas_->view_typed(),
+                                   sky_body_atlas_->sampler_object());
 
     // ssao_enabled is a load-time config value (no live reload), so which image to bind is
     // decided once here rather than every frame -- see the update_descriptors comment above
@@ -348,6 +366,13 @@ void ToyRenderPipeline::build_lighting_passes_() {
         gbuffer_target_.g0_view_typed(), gbuffer_target_.g1_view_typed(), gbuffer_target_.g2_view_typed(),
         gbuffer_target_.g3_view_typed(), linear_sampler_);
     toy_lighting_pass_->set_ssao_image(ssao_view, ssao_pass_->sampler().handle_typed());
+}
+
+void ToyRenderPipeline::update_sky_body_atlas(const void* rgba8, uint32_t x, uint32_t y,
+                                              uint32_t w, uint32_t h) {
+    if (sky_body_atlas_ == nullptr || rgba8 == nullptr || w == 0 || h == 0) return;
+    if (x + w > kSkyBodyAtlasWidth || y + h > kSkyBodyAtlasHeight) return;
+    sky_body_atlas_->update(device_, allocator_, cmd_pool_, rgba8, x, y, w, h);
 }
 
 void ToyRenderPipeline::build_ssr_passes_() {
@@ -666,6 +691,10 @@ void ToyRenderPipeline::build_post_chain_(coopa::gfx::pipeline::RenderPass* swap
         fd.integrate_partial_frag_spv = config_.shaders("volumetrics_froxel_integrate_partial.frag");
         fd.integrate_frag_spv = config_.shaders("volumetrics_froxel_integrate.frag");
         fd.apply_frag_spv     = config_.shaders("volumetrics_froxel_apply.frag");
+        // Startup-fixed: it adds a target and a render pass, so it cannot switch live.
+        if (config_.volumetrics_froxel_filter) {
+            fd.filter_frag_spv = config_.shaders("volumetrics_froxel_filter.frag");
+        }
         froxel_volumetrics_pass_ = std::make_unique<coopa::gfx::engine::passes::FroxelVolumetricsPass>(
             device_, allocator_, fd, volumetrics_target_.render_pass_object(),
             volumetrics_data_.buffer());

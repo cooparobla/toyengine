@@ -155,6 +155,17 @@ std::filesystem::path user_data_dir(const std::string& app = RuntimeLayout::curr
 std::filesystem::path user_log_dir(const std::string& app = RuntimeLayout::current().app_id());
 
 /**
+ * @brief Per-user REGENERABLE data: ~/Library/Caches/<app>, or $XDG_CACHE_HOME/<app>. Not
+ *        created here.
+ *
+ * Separate from user_data_dir() because the contents are disposable by definition -- anything
+ * here can be deleted at any time and the only cost is making it again. That is the contract
+ * `io/derived_cache.h` is built on, and the reason derived data does not go in the project tree:
+ * a file the project did not author has no business turning up in its source control.
+ */
+std::filesystem::path user_cache_dir(const std::string& app = RuntimeLayout::current().app_id());
+
+/**
  * @brief Process environment a packaged game needs before the Vulkan loader starts. On macOS
  *        a package carries MoltenVK's ICD manifest in Resources/vulkan/icd.d; pointing the
  *        loader at it explicitly means a player's own installed ICDs never replace the driver

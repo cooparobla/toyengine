@@ -23,6 +23,7 @@
 #include <coopa/maps/cave.h>
 #include <coopa/maps/landmark.h>
 #include <coopa/maps/map_config.h>
+#include <coopa/maps/volcano.h>
 #include <coopa/maps/noise.h>
 #include <coopa/maps/portable_sort.h>
 
@@ -202,6 +203,16 @@ struct MapCenter {
     double moisture = 0.0;      /**< @brief Mean of the cell's corner moistures, in `[0, 1]`. */
     /** @brief Mean of the cell's corner temperatures, in `[0, 1]`; 0 polar, 1 equatorial. */
     double temperature = 0.0;
+    /**
+     * @brief Heat reaching this cell from under the ground, in `[0, 1]`; see `volcano_warmth`.
+     *
+     * Deliberately NOT folded into `temperature`. Latitude, altitude and the climate noise are
+     * what the Whittaker diagram was drawn against, and a world where a vent could push a cell
+     * into "rain forest" would be wrong twice over. What this answers is the narrower question
+     * a frozen world asks -- is something under this spot melting it -- and only the profiles
+     * that freeze their water consult it.
+     */
+    double warmth = 0.0;
 
     /** @brief The region this cell belongs to, or `k_invalid_id` for water and unclaimed land. */
     RegionId region = k_invalid_id;
@@ -231,6 +242,8 @@ struct MapCorner {
 
     double elevation = 0.0;    /**< @brief Height in `[0, 1]`, zero at the coast. */
     double moisture = 0.0;     /**< @brief Wetness in `[0, 1]`. */
+    /** @brief Heat from under the ground, in `[0, 1]`; see `MapCenter::warmth`. */
+    double warmth = 0.0;
     double temperature = 0.0;  /**< @brief Warmth in `[0, 1]`; 0 polar, 1 equatorial. */
     int river = 0;             /**< @brief Volume of river water passing through, or 0 for none. */
 
@@ -567,6 +580,61 @@ struct MapLandmark {
 };
 
 /**
+ * @struct MapVolcano
+ * @brief A vent: where volcanism actually stands up out of the ground.
+ *
+ * Distinct from `LandmarkKind::Volcano`, which is *descriptive* -- the landmark pass reports a
+ * summit that happens to stand on volcanic ground. This is the generative record: the volcano
+ * pass put the cone here, and the sampled surface raises it to match.
+ *
+ * It exists because several consumers need to agree on where the vents are and none of them can
+ * re-derive it: the surface raises a cone, a plume effect stands at one, a crust is thinned from
+ * beneath by one, and a test has to find one to measure it.
+ */
+struct MapVolcano {
+    CenterId center = k_invalid_id;  /**< @brief The cell the vent stands on. */
+    MapPoint point;                  /**< @brief The vent itself, in grid units (on the globe for a sphere). */
+    double radius = 0.0;             /**< @brief The cone's base radius, in grid units. */
+    double height = 0.0;             /**< @brief Its summit rise over the ground it grew from, in normalised elevation. */
+    double caldera = 0.0;            /**< @brief How much of the summit is sunk into a crater, 0 to 1. */
+    bool submarine = false;          /**< @brief Whether the vent stands below the waterline. */
+    VolcanoKind kind = VolcanoKind::Stratovolcano; /**< @brief Which sort of edifice it built. */
+    RegionId region = k_invalid_id;  /**< @brief The region it lies in, or invalid. */
+    /**
+     * @brief How far molten lava stands above the vent's own centre ground, normalised; 0 = dry.
+     *
+     * Relative rather than absolute because the pass that records it cannot sample the surface
+     * a consumer will actually bake -- it has no detail field and no channels. A consumer that
+     * has them adds this to the ground it reads at `point` and gets the lake's surface, in its
+     * own terms. `WaterField` is the one that does, and it is where the pool becomes water.
+     */
+    double lava_rise = 0.0;
+    /** @brief How far the pool reaches from `point`, in grid units; 0 when there is none. */
+    double lava_radius = 0.0;
+    /**
+     * @brief How alive the vent is: 0 for an extinct cone, up to 1 for one erupting hard.
+     *
+     * The one number an effect consumer needs. A dead vent is still recorded -- the landform is
+     * there and a map wants to name it -- but it pools no lava and should throw nothing.
+     */
+    double activity = 0.0;
+
+    /**
+     * @brief Unit direction the vent LINE runs along, in grid units; zero unless it is a rift.
+     *
+     * A fissure is the one kind that is not a point, and an effect standing at one has to run
+     * along it or it reads as a cone. Tangential to the globe on a sphere map, so stepping
+     * along it stays on the ground.
+     */
+    MapPoint line;
+    /** @brief Half the line's length, in grid units; 0 for every kind but a fissure. */
+    double half_length = 0.0;
+
+    /** @brief Whether the vent is still erupting at all. */
+    bool alive() const { return activity > 0.0; }
+};
+
+/**
  * @brief The language seed for a country, from the map seed and its id.
  *
  * Shared so the region pass and the town pass derive the same language without
@@ -790,12 +858,18 @@ struct NaturalTerrain {
      * keep the land and bed shaping below from raising a point back out of water deeper than it.
      */
     double min_protected_depth = 0.0;
+    /** @brief Seeds the crater lattice, so two seeds crater differently; from `MapConfig::seed`. */
+    std::uint32_t crater_salt = 0;
+    /** @brief Seeds the vent lattice, offset from the crater salt so the two never coincide. */
+    std::uint32_t volcano_salt = 0;
 
     NaturalTerrain(const MapConfig& map, std::vector<std::uint8_t> water_rings)
         : config(map.natural), sea_level(map.sea_level), hills(map.noise_hills), ridge(map.noise_ridge),
           plateau(map.noise_plateau), warp(map.noise_warp), seabed(map.noise_seabed),
           rings(std::move(water_rings)),
-          min_protected_depth(meters_to_height(map, std::max(0.0, map.lake_depth_m))) {}
+          min_protected_depth(meters_to_height(map, std::max(0.0, map.lake_depth_m))),
+          crater_salt(static_cast<std::uint32_t>(map.seed)),
+          volcano_salt(static_cast<std::uint32_t>(map.seed) ^ 0x5bf03635u) {}
 };
 
 /**
@@ -968,6 +1042,7 @@ public:
     std::vector<MapRegion> regions; /**< @brief Provinces carved by the region pass. */
     std::vector<MapCountry> countries; /**< @brief Nations carved by the region pass. */
     std::vector<MapLandmark> landmarks; /**< @brief Notable places found by the landmark pass. */
+    std::vector<MapVolcano> volcanoes;  /**< @brief Vents placed by the volcano pass. */
     std::vector<MapCave> caves;     /**< @brief Cave systems opened by the cave pass. */
     /**
      * @brief A sphere map's radius in grid units (`MapTopology::Sphere`): its points lie on a
@@ -1045,6 +1120,7 @@ public:
         regions.clear();
         countries.clear();
         landmarks.clear();
+        volcanoes.clear();
         caves.clear();
     }
 
@@ -1288,6 +1364,359 @@ public:
      * shaping above from raising the point back out of water deeper than that -- see
      * `min_protected_depth` below.
      */
+    /** @brief One lattice hash in [0, 1), integer arithmetic only, identical on any host. */
+    static double crater_hash_(int x, int y, int z, std::uint32_t salt) {
+        std::uint32_t h = static_cast<std::uint32_t>(x) * 0x8da6b343u ^
+                          static_cast<std::uint32_t>(y) * 0xd8163841u ^
+                          static_cast<std::uint32_t>(z) * 0xcb1ab31fu ^ salt * 0x165667b1u;
+        h ^= h >> 15;
+        h *= 0x2c1b3c6du;
+        h ^= h >> 12;
+        h *= 0x297a2d39u;
+        h ^= h >> 15;
+        return static_cast<double>(h & 0xffffffu) / 16777216.0;
+    }
+
+    /**
+     * @brief The crater field at a point: bowls with raised rims, summed over three octaves.
+     *
+     * Analytic rather than noise-thresholded: each lattice cell of each octave holds at most
+     * one crater, jittered no closer than 0.35 of a cell to any border and never wider than
+     * the margin left, so the profile dies out inside its own cell -- no neighbour search,
+     * and no seam for a sampler that only ever evaluates the cell it stands in. On a sphere
+     * the lattice is over the unit direction, so crater size is angular and face-seam free;
+     * on a plane it is over the grid at a fixed scale.
+     *
+     * @param p The point, in grid units (on the globe for a sphere map).
+     * @param n Supplies the density and the seed salt.
+     * @return The signed field, roughly [-1.6, 0.8]; the caller scales it by `craters`.
+     */
+    double crater_field_(const MapPoint& p, const NaturalTerrain& n) const {
+        double dx = p.x, dy = p.y, dz = p.z;
+        if (is_sphere()) {
+            const double len = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (len > 1e-9) { dx /= len; dy /= len; dz /= len; }
+        } else {
+            dx *= 0.125; dy *= 0.125; dz = 0.31;
+        }
+        const double density = std::clamp(n.config.crater_density, 0.0, 1.0);
+        double sum = 0.0;
+        double freq = 6.0;
+        double amp = 1.0;
+        for (int o = 0; o < 3; ++o) {
+            const double gx = dx * freq, gy = dy * freq, gz = dz * freq;
+            const int cx = static_cast<int>(std::floor(gx));
+            const int cy = static_cast<int>(std::floor(gy));
+            const int cz = static_cast<int>(std::floor(gz));
+            const std::uint32_t salt = n.crater_salt + static_cast<std::uint32_t>(o) * 97u;
+            if (crater_hash_(cx, cy, cz, salt) < density) {
+                const double jx = cx + 0.35 + 0.30 * crater_hash_(cx, cy, cz, salt + 1u);
+                const double jy = cy + 0.35 + 0.30 * crater_hash_(cx, cy, cz, salt + 2u);
+                const double jz = cz + 0.35 + 0.30 * crater_hash_(cx, cy, cz, salt + 3u);
+                const double radius = 0.10 + 0.12 * crater_hash_(cx, cy, cz, salt + 4u);
+                const double ex = gx - jx, ey = gy - jy, ez = gz - jz;
+                const double u = std::sqrt(ex * ex + ey * ey + ez * ez) / radius;
+                if (u < 1.6) {
+                    const double bowl = u < 1.0 ? (u * u - 1.0) : 0.0;
+                    const double rim = 0.45 * std::exp(-((u - 1.0) * (u - 1.0)) / 0.06);
+                    sum += amp * (bowl + rim);
+                }
+            }
+            freq *= 2.3;
+            amp *= 0.55;
+        }
+        return sum;
+    }
+
+    /**
+     * @brief The vent lattice's constants, shared by the field and the pass that records it.
+     *
+     * The two must agree about where every vent is and cannot be allowed to drift apart, so
+     * neither owns these: `volcano_field_()` raises the ground from them and `PassVolcanoes`
+     * enumerates the same lattice to write `MapGraph::volcanoes`. A consumer that stands a
+     * plume at a recorded vent therefore stands it on the cone the surface actually raised.
+     *
+     * Two octaves rather than the crater field's three: a volcano is a landform, not a texture,
+     * and a third octave of small cones reads as lumpy ground instead of volcanism.
+     */
+    static constexpr int k_volcano_octaves = 2;
+    /** @brief Lattice frequency of the first octave; each next one is this times `k_volcano_lacunarity`. */
+    static constexpr double k_volcano_frequency = 3.0;
+    /** @brief Frequency step between octaves. */
+    static constexpr double k_volcano_lacunarity = 2.1;
+    /** @brief Height step between octaves: a smaller cone for a finer lattice. */
+    static constexpr double k_volcano_gain = 0.5;
+    /**
+     * @brief Plane-space scale of the lattice, the crater field's `0.125` made much coarser.
+     *
+     * This sets both how often a vent occurs on a flat map and how wide its cone is, since a
+     * cone is a fraction of its own lattice cell. At the crater field's scale a flat map came
+     * out as a close-packed field of small bumps; this gives a handful of edifices a couple of
+     * hundred metres across at the default world scale, which is what a volcano is.
+     */
+    static constexpr double k_volcano_plane_scale = 0.025;
+    /** @brief Peak rise of a full-amplitude cone, in normalised elevation. */
+    static constexpr double k_volcano_peak = 0.35;
+
+    /**
+     * @struct VolcanoSite
+     * @brief One vent as the lattice places it, in lattice units of its own octave.
+     */
+    struct VolcanoSite {
+        bool present = false;  /**< @brief False when this lattice cell holds no vent. */
+        double x = 0.0;        /**< @brief Centre, in lattice units. */
+        double y = 0.0;
+        double z = 0.0;
+        double radius = 0.0;   /**< @brief Edifice base radius, in lattice units, kind applied. */
+        double scale = 0.0;    /**< @brief Height multiplier, so vents vary in size. */
+        double caldera = 0.0;  /**< @brief How sunk the summit is, 0 to 1. */
+        /**
+         * @brief How alive the vent is: 0 extinct, up to 1 for one erupting hard.
+         *
+         * Hashed here with everything else about the site rather than decided by a consumer, so
+         * the ground, the pass's record, the pools and whatever stands a plume at one all agree
+         * about which vents are cold. It deliberately does NOT change the SHAPE -- a dead cone
+         * is still a cone, and an extinct caldera is still a caldera.
+         */
+        double activity = 0.0;
+        VolcanoKind kind = VolcanoKind::Stratovolcano; /**< @brief Which shape it builds. */
+        /** @brief Half-length of the vent line, in lattice units; 0 for every kind but a fissure. */
+        double half_length = 0.0;
+        double dx = 0.0;       /**< @brief Unit direction the line runs along (fissures only). */
+        double dy = 0.0;
+        double dz = 0.0;
+    };
+
+    /** @brief How far from its cell's centre anything a vent builds may reach. */
+    static constexpr double k_volcano_reach = 0.44;
+
+    /**
+     * @brief The vent in one lattice cell, if it holds one.
+     *
+     * Jittered to stay at least `0.44` of a cell from every border and never wider than that
+     * margin, so a cone dies out inside its own cell: no neighbour search, and no seam for a
+     * sampler that only evaluates the cell it stands in. Integer-only hashing, so it is
+     * identical on any host and needs none of the RNG streams.
+     *
+     * **The jitter is deliberately tighter than the crater field's.** On a sphere the lattice is
+     * three-dimensional while the ground is a two-dimensional shell through it, so jitter along
+     * the radius carries a vent off that shell -- and since the sampler only ever stands ON the
+     * shell, every metre of radial offset is subtracted from the cone it can reach. At the
+     * crater field's spread the tallest vent on a globe lost most of its height that way.
+     * Projecting the site back onto the shell instead would let it leave its own lattice cell,
+     * which is the one thing this construction may not do.
+     *
+     * @param cx Lattice cell, x.
+     * @param cy Lattice cell, y.
+     * @param cz Lattice cell, z.
+     * @param salt The octave's salt.
+     * @param density Chance a cell holds a vent at all, 0 to 1.
+     * @param caldera `NaturalTerrainConfig::volcano_caldera`, the mean collapse.
+     * @param want Which kind to build, or `Mixed` to hash one per vent.
+     * @param sphere Whether the lattice is over a globe's unit direction.
+     * @return The vent, or a site with `present` false.
+     */
+    static VolcanoSite volcano_site_(int cx, int cy, int cz, std::uint32_t salt, double density,
+                                     double caldera, double live, VolcanoKind want, bool sphere) {
+        VolcanoSite site;
+        if (crater_hash_(cx, cy, cz, salt) >= std::clamp(density, 0.0, 1.0)) {
+            return site;
+        }
+        site.present = true;
+        site.x = cx + 0.44 + 0.12 * crater_hash_(cx, cy, cz, salt + 11u);
+        site.y = cy + 0.44 + 0.12 * crater_hash_(cx, cy, cz, salt + 23u);
+        site.z = cz + 0.44 + 0.12 * crater_hash_(cx, cy, cz, salt + 37u);
+        site.scale = 0.55 + 0.45 * crater_hash_(cx, cy, cz, salt + 71u);
+        // Varied either side of the configured mean, so one world holds shields and calderas
+        // both rather than every summit collapsing to the same depth.
+        site.caldera = std::clamp(caldera * (0.55 + 0.9 * crater_hash_(cx, cy, cz, salt + 89u)),
+                                  0.0, 1.0);
+
+        // ALIVE OR DEAD, from one hash. Most of the volcanoes on a real landscape are extinct,
+        // so `live` is a fraction of the population rather than a switch -- and the same draw
+        // sets how hard the survivors go, scaled so a vent only just inside the threshold is a
+        // sleepy one and the rarest are the ones throwing lava.
+        const double pulse = crater_hash_(cx, cy, cz, salt + 149u);
+        const double threshold = std::clamp(live, 0.0, 1.0);
+        site.activity = pulse < threshold && threshold > 0.0
+                            ? 0.35 + 0.65 * (1.0 - pulse / threshold)
+                            : 0.0;
+
+        site.kind = want == VolcanoKind::Mixed
+            ? volcano_mixed_kind(static_cast<std::size_t>(
+                  crater_hash_(cx, cy, cz, salt + 101u) * static_cast<double>(k_volcano_mixed_count)))
+            : want;
+        const VolcanoShape shape = volcano_shape(site.kind);
+
+        // The base radius is deliberately small: the KIND multiplies it, and a shield's 2.2x has
+        // to still fit inside the lattice cell. Everything the vent builds is then capped to
+        // `k_volcano_reach` of the cell's centre, which is what keeps the profile dying out
+        // inside its own cell -- no neighbour search, and no seam.
+        const double base = 0.12 + 0.08 * crater_hash_(cx, cy, cz, salt + 53u);
+        site.radius = std::min(base * shape.radius, k_volcano_reach);
+
+        if (shape.length > 0.0) {
+            // A fissure is a LINE, so its reach is the half-length plus the radius either side.
+            // Shortening the line rather than the radius keeps the thing a rift and not a dot.
+            site.half_length = std::min(site.radius * shape.length, k_volcano_reach - site.radius);
+            double ux = crater_hash_(cx, cy, cz, salt + 113u) * 2.0 - 1.0;
+            double uy = crater_hash_(cx, cy, cz, salt + 127u) * 2.0 - 1.0;
+            double uz = sphere ? crater_hash_(cx, cy, cz, salt + 139u) * 2.0 - 1.0 : 0.0;
+            if (sphere) {
+                // On a globe the ground is a shell through the lattice, so a rift has to run
+                // ALONG it: drop whatever part of the direction points out through the surface,
+                // or the line dives out of the world and only its midpoint ever shows.
+                const double nl = std::sqrt(site.x * site.x + site.y * site.y + site.z * site.z);
+                if (nl > 1e-9) {
+                    const double nx = site.x / nl, ny = site.y / nl, nz = site.z / nl;
+                    const double radial = ux * nx + uy * ny + uz * nz;
+                    ux -= radial * nx; uy -= radial * ny; uz -= radial * nz;
+                }
+            }
+            const double len = std::sqrt(ux * ux + uy * uy + uz * uz);
+            if (len > 1e-9) { site.dx = ux / len; site.dy = uy / len; site.dz = uz / len; }
+            else            { site.dx = 1.0; site.dy = 0.0; site.dz = 0.0; }
+        }
+        return site;
+    }
+
+    /**
+     * @brief Distance from a lattice point to a vent -- to its line for a fissure, else its centre.
+     *
+     * **On a globe the radial part of that distance is dropped.** The lattice is three
+     * dimensional while the ground is a two-dimensional shell through it, so a vent jittered
+     * off the shell is never actually reached: the sampler only ever stands ON the shell, and
+     * every bit of radial offset counts against the cone's radius as though the sampler were
+     * walking away from the summit. With a vent radius of 0.12 lattice units and a radial
+     * offset of up to 0.10, that cost most kinds most of their height -- measured, the tallest
+     * vent on a globe came out at a quarter of its nominal rise, and the finer octave's cones
+     * beat the coarser one's.
+     *
+     * Dropping it measures the tangential distance instead, which is the distance along the
+     * ground -- the one the shape was defined in. The footprint stays inside the lattice cell
+     * for the same reason it did before: it is a disc of `site.radius` about the vent's own
+     * tangential position, and the vent is jittered to stay `k_volcano_reach` clear of every
+     * border.
+     */
+    static double volcano_distance_(const VolcanoSite& site, double gx, double gy, double gz,
+                                    bool sphere) {
+        double ex = gx - site.x, ey = gy - site.y, ez = gz - site.z;
+        if (sphere) {
+            const double l = std::sqrt(gx * gx + gy * gy + gz * gz);
+            if (l > 1e-9) {
+                const double nx = gx / l, ny = gy / l, nz = gz / l;
+                const double radial = ex * nx + ey * ny + ez * nz;
+                ex -= radial * nx; ey -= radial * ny; ez -= radial * nz;
+            }
+        }
+        if (site.half_length > 0.0) {
+            // Project onto the line and clamp to the segment: beyond either end the distance is
+            // to that end, which is what rounds a rift off rather than letting it stop square.
+            const double t = std::clamp(ex * site.dx + ey * site.dy + ez * site.dz,
+                                        -site.half_length, site.half_length);
+            ex -= t * site.dx; ey -= t * site.dy; ez -= t * site.dz;
+        }
+        return std::sqrt(ex * ex + ey * ey + ez * ez);
+    }
+
+    /**
+     * @brief An edifice's radial profile: 1 at the summit, 0 at its base.
+     *
+     * Three terms, and which of them a kind uses is the whole of what makes the six read
+     * differently (`volcano.h`):
+     *
+     * - the **flank**, `pow(1 - u, shape.flank)`. Below 1 the top is flat and the edges steep
+     *   (a lava dome); 1 is a straight cone; above 1 the flanks go concave and the summit
+     *   sharpens, which is a composite cone.
+     * - the **collapse**, a multiplier inside `shape.crater`, scaling the peak down toward the
+     *   floor. A multiplier rather than a subtraction, which is what keeps the profile
+     *   non-negative everywhere -- so a fully collapsed summit floors at the ground it grew out
+     *   of instead of cutting below it, and the field keeps its raising-only invariant.
+     * - the **rim**, a ring standing at the crater's edge. This is what makes a collapse
+     *   caldera read as one from above rather than as a dimple: a flat floor with a wall
+     *   around it. Same shape as the crater field's own rim term.
+     *
+     * @param u Distance from the vent, as a fraction of the edifice's radius.
+     * @param shape The kind's shape record.
+     * @param caldera How sunk the summit is, 0 to 1.
+     * @return The profile; 0 outside the base, and a little over 1 on a rim.
+     */
+    static double volcano_profile_(double u, const VolcanoShape& shape, double caldera) {
+        if (u >= 1.0) return 0.0;
+        double h = std::pow(1.0 - u, shape.flank);
+        if (shape.crater > 0.0) {
+            const double t = std::clamp(u / shape.crater, 0.0, 1.0);
+            const double rise = t * t * (3.0 - 2.0 * t);      // smoothstep out to the crater edge
+            h *= 1.0 - caldera * shape.floor * (1.0 - rise);
+            if (shape.rim > 0.0) {
+                // Narrow against the crater it rings, so a wide caldera gets a broad wall and a
+                // summit nick a thin lip -- both in proportion to the hole they surround.
+                const double w = std::max(0.18 * shape.crater, 1e-3);
+                const double d = (u - shape.crater) / w;
+                h += shape.rim * caldera * std::exp(-d * d);
+            }
+        }
+        return std::max(h, 0.0);
+    }
+
+    /**
+     * @brief The vent field at a point: cones with sunken summits, summed over two octaves.
+     *
+     * Signed only upward -- the field never lowers the ground. That is the one way it differs
+     * from the crater field, and it is deliberate: a vent that could cut down would be clamped
+     * flat by the depth floor below and could undercut a shoreline, whereas one that only
+     * raises builds an island out of the sea, which is what a volcano does.
+     *
+     * On a sphere the lattice is over the unit direction, so a cone is the same size on every
+     * face and across every seam; on a plane it is over the grid at a fixed scale.
+     *
+     * @param p The point, in grid units (on the globe for a sphere map).
+     * @param n Supplies the density, the caldera depth and the seed salt.
+     * @return The rise, in normalised elevation, before `volcanoes` scales it.
+     */
+    double volcano_field_(const MapPoint& p, const NaturalTerrain& n) const {
+        const bool sphere = is_sphere();
+        double dx = p.x, dy = p.y, dz = p.z;
+        if (sphere) {
+            const double len = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (len > 1e-9) { dx /= len; dy /= len; dz /= len; }
+        } else {
+            // A PLANE'S LATTICE IS TWO-DIMENSIONAL, and the third axis is dropped rather than
+            // pinned to a constant. Pinning it puts the sample plane at a fixed `z` inside the
+            // lattice while every vent is jittered to the middle of its own cell, so the offset
+            // between them eats the cone's radius -- and at the finer octave, where the offset
+            // scales with the frequency, it exceeds the radius outright and the whole octave
+            // goes silently missing. A flat map gets both octaves this way.
+            dx *= k_volcano_plane_scale; dy *= k_volcano_plane_scale; dz = 0.0;
+        }
+        double sum = 0.0;
+        // `volcano_size` divides the frequency rather than multiplying the radius: a cone may
+        // never outgrow the lattice cell holding it, so scaling the cone alone would saturate
+        // against that cap. Scaling the LATTICE makes vents bigger and further apart together,
+        // which is the same thing a bigger volcano actually implies.
+        double freq = k_volcano_frequency / std::max(n.config.volcano_size, 1e-3);
+        double amp = 1.0;
+        for (int o = 0; o < k_volcano_octaves; ++o) {
+            const double gx = dx * freq, gy = dy * freq, gz = dz * freq;
+            const int cx = static_cast<int>(std::floor(gx));
+            const int cy = static_cast<int>(std::floor(gy));
+            const int cz = sphere ? static_cast<int>(std::floor(gz)) : 0;
+            const std::uint32_t salt = n.volcano_salt + static_cast<std::uint32_t>(o) * 131u;
+            const VolcanoSite site =
+                volcano_site_(cx, cy, cz, salt, n.config.volcano_density, n.config.volcano_caldera,
+                              n.config.volcano_active,
+                              n.config.volcano_kind, sphere);
+            if (site.present) {
+                const double u = volcano_distance_(site, gx, gy, sphere ? gz : site.z, sphere) / site.radius;
+                sum += amp * site.scale * volcano_shape(site.kind).height
+                     * volcano_profile_(u, volcano_shape(site.kind), site.caldera);
+            }
+            freq *= k_volcano_lacunarity;
+            amp *= k_volcano_gain;
+        }
+        return sum * k_volcano_peak;
+    }
+
     double natural_elevation_(const MapCenter& center, const MapPoint& p, const NaturalTerrain& n) const {
         const double x = p.x;
         const double y = p.y;
@@ -1361,7 +1790,12 @@ public:
                 const double threshold = 0.4 - 0.8 * std::clamp(n.config.plateau_coverage, 0.0, 1.0);
                 const double mesa = smoothstep(threshold, threshold + 0.05, at(n.plateau, wx, wy, wz))
                                   * smoothstep(0.03, 0.12, land) * (1.0 - range);
-                const double shaping = hills + mountains + n.config.plateaus * mesa;
+                // Craters fade in just off the shore like the hills do, so a shoreline (on the
+                // rare cratered world that still has one) is never undercut by a bowl.
+                const double cratered = n.config.craters > 0.0
+                    ? 0.5 * n.config.craters * crater_field_(p, n) * smoothstep(0.0, 0.08, land)
+                    : 0.0;
+                const double shaping = hills + mountains + n.config.plateaus * mesa + cratered;
 
                 const double raise = smoothstep(0.0, 1.5, ring);
                 const double lower = smoothstep(1.5, 3.0, ring);
@@ -1407,6 +1841,54 @@ public:
             const double protect = 0.8 * reach;   // 0 at the shoreline, up to 80% once reach hits 1
             const double floor = water - headroom0 * protect;
             shaped = std::min(shaped, floor);
+        }
+
+        // Vents, added after the depth floor rather than inside the shaping above -- the two
+        // places that would otherwise erase them. The floor caps how far the shaping may lift a
+        // submerged point, which is right for a noise field and wrong for a seamount that is
+        // meant to breach; and the land shaping is gated on `ring`, which is zero across the
+        // open sea, where the submarine vents are. Raising only, so no shore is undercut and
+        // `WaterField`'s guarantee that every shore stands above its own water still holds --
+        // ground lifted clear of the water simply reads as land to every consumer, which is how
+        // a cone becomes a volcanic island.
+        if (n.config.volcanoes > 0.0) {
+            const double rise = volcano_field_(p, n) * n.config.volcanoes;
+            if (rise > 0.0) {
+                // Full strength on dry ground; `volcano_submarine` of it under water, faded over
+                // the first sliver of depth so there is no step at the waterline.
+                const double submarine = std::clamp(n.config.volcano_submarine, 0.0, 1.0);
+                const double depth = water - base;
+                const double wet = depth > 0.0 ? smoothstep(0.0, 0.02, depth) : 0.0;
+                const double gated = rise * ((1.0 - wet) + wet * submarine);
+                // MAKE THE ROOM LOCALLY. The surface is clamped to 1 and the land band is
+                // already full -- mapcoopa distributes land by RANK over [sea_level, 1] -- so
+                // an additive cone on high ground gets its top sheared off flat, and that is
+                // the upper half of every world. Two obvious fixes are both worse, and both
+                // were measured:
+                //
+                //  - reserving the room GLOBALLY (compressing the whole land band by what the
+                //    field could add) flattens everywhere while cones exist at only a few dozen
+                //    points. Turning volcanoes on then made a world measurably LESS relieved:
+                //    82 m of relief became 56.
+                //  - spending only the room left above the point attenuates each cone exactly
+                //    where the ground is highest, which is where a volcano most wants to be.
+                //    Whole kinds came out with no summit at all.
+                //
+                // So the band is squeezed only in a vent's own neighbourhood, by how much that
+                // vent is actually raising the ground there (`t`). Away from one, nothing moves.
+                // The squeeze is sized so the tallest possible cone lands exactly at the
+                // ceiling, which is what lets the cone keep its full shape without clipping.
+                const double max_rise = n.config.volcanoes * k_volcano_peak * k_volcano_tallest;
+                if (gated > 0.0 && max_rise > 0.0) {
+                    const double band = std::max(1.0 - n.sea_level, 1e-6);
+                    const double squeeze = std::clamp(max_rise / band, 0.0, 0.9);
+                    const double t = std::clamp(gated / max_rise, 0.0, 1.0);
+                    if (shaped > n.sea_level) {
+                        shaped -= squeeze * t * (shaped - n.sea_level);
+                    }
+                }
+                shaped += gated;
+            }
         }
         return std::clamp(shaped, 0.0, 1.0);
     }

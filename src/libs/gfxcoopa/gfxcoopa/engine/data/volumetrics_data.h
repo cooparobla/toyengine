@@ -164,7 +164,9 @@ struct alignas(16) VolumetricsUBO {
                                                  previous slice is its distance from there). */
     glm::vec4 froxel_params2 = glm::vec4(1.0f, 0.0f, 0.0f, 0.0f); /**< x = samples per froxel where
                                                  there is no history, y = composite lookup jitter in
-                                                 froxels / slices (0 = off; only useful under TAA). */
+                                                 froxels / slices (0 = off; only useful under TAA),
+                                                 z = the shortest length any live volume's field
+                                                 varies over, world units (0 = unknown), w unused. */
     /** Point/spot shadows -- LightUBO::local_shadows' copy, so a scatter light whose slot is set
      *  is shadowed from the same local-light atlas the lighting pass samples. */
     LocalShadowBlock local_shadows;
@@ -172,6 +174,11 @@ struct alignas(16) VolumetricsUBO {
      *  cloud_shadow_layer's copy (toyengine's cloud_shadow.glsl). cloud_shadow.w = 0: off. */
     glm::vec4 cloud_shadow       = glm::vec4(0.0f);
     glm::vec4 cloud_shadow_layer = glm::vec4(0.0f);
+    /** LAST frame's froxel_params.xy. The history grid was laid out with those, so reprojecting a
+     *  froxel into it has to map distance through them and not through this frame's -- a near/far
+     *  fitted to the live volumes moves whenever they or the camera do, and reading last frame's
+     *  grid through this frame's mapping shows up as flicker that looks like a noise problem. */
+    glm::vec4 prev_froxel_params = glm::vec4(0.0f);
 };
 
 /**

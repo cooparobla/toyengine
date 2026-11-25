@@ -218,6 +218,54 @@ rather than cell edges. Two keys shape it:
 | `beach_height_m` | 6.0 | How high above the water a shore may stand and still be beach. Flat shelves grow wide beaches; cliff coasts none. 0 removes beaches |
 | `biome_dither` | 0.05 | Noise added to the point query's moisture and temperature so boundaries wander organically. Cells never dither |
 | `biome_river_boundary` | 1.0 | How strongly a river separates its two banks. A river runs along a Voronoi edge, so the bank a point is on is the cell nearest it; at 1 the query does not blend climate across such an edge, which lands nearby transitions ON the watercourse. 0 treats a river as ordinary ground |
+| `biome_profile` | `temperate` | Which diagram classifies the land. `temperate` is the Whittaker diagram above. `barren` is airless rock (regolith plains, basalt basins, bare heights, scorched where hot), `volcanic` a young hot surface (lava basins, basalt and open volcanic field, sulphur where coolest -- temperature is the activity axis), `glacial` a world frozen through (ice sheets, snowfields, glacier heights, bare rock where warmest). The reduced profiles classify on elevation and temperature alone, so they work with the moisture pass disabled |
+
+The non-temperate profiles pair naturally with `natural.craters` (0 to 1, with
+`natural.crater_density`): an analytic impact-crater field -- bowls with raised rims in three
+sizes -- summed onto the sampled ground by `TerrainModel::Natural`. Zero (the default) is every
+existing map, untouched.
+
+### Volcanoes
+
+`biome_profile: volcanic` says what volcanic *ground* looks like; these say whether anything
+stands up out of it. Also `TerrainModel::Natural` only, and also zero by default.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `natural.volcanoes` | `0` | Cone amplitude, 0 to 1: a shield with a caldera sunk into its summit. A full-amplitude cone is tens of metres of relief against the default 600 m `elevation_range_m`, so it reads from orbit |
+| `natural.volcano_density` | `0.35` | Chance each lattice cell of each octave holds a vent |
+| `natural.volcano_caldera` | `0.45` | How much of a summit collapses into a crater, 0 (plain shields) to 1 (floors back at the ground the cone grew from, rim standing around it). Varied per vent either side of this, so one world holds both |
+| `natural.volcano_submarine` | `1` | How strongly vents also build below the waterline -- seamounts and black smokers. 0 confines volcanism to dry ground |
+| `natural.volcano_kind` | `mixed` | Which edifice the vents build: `shield`, `stratovolcano`, `caldera`, `fissure`, `cinder_cone`, `lava_dome`, or `mixed` to hash one per vent |
+| `natural.volcano_size` | `1` | How large the edifices are. Scales the LATTICE, so vents get bigger and further apart together -- a cone may never outgrow the cell holding it, so scaling the cone alone saturates against that cap and stops responding |
+
+The six kinds are genuinely different shapes, not one curve at six amplitudes (`volcano.h`):
+a shield spans several times a composite cone at a fraction of its height; a stratovolcano's
+flanks are concave and its crater a nick in the summit; a collapse caldera is mostly flat floor
+inside a raised wall, its crater over half its own radius; a fissure is a LINE of vents, so the
+ground rises in a ridge rather than a cone; a cinder cone is small and steep with a crater wide
+for its size; and a lava dome is bulbous, steep-sided and the only kind with no crater at all.
+
+**Volcanoes and `terrain_relief` compete for the same height band**, and the generator now says
+so rather than letting the taller one win by clipping. Raising `volcanoes` compresses the land
+band by what the field can add *before* adding it, so a cone always fits under the ceiling. The
+practical consequence is that a world meant to read as volcanic wants **low** `terrain_relief`
+(0.2 or so): at the default 0.65 the ordinary landform noise is several times anything a vent
+adds, and the volcanoes are bumps on mountains rather than landmarks.
+
+Unlike the crater field this one only ever **raises** the ground, which is why a vent in open
+water builds an island rather than being held down by the depth floor, and why no shoreline is
+undercut. The vents are also recorded, as `MapGraph::volcanoes`: a cone is analytic so it stays
+crisp at any bake resolution, but a consumer standing a plume at a vent, thinning an ice crust
+from beneath one, or pointing a test at one needs the list, and the pass and the field read the
+same lattice so the two cannot disagree.
+
+Two keys away from `natural`, both general rather than volcanic:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `surface_fluid` | `water` | What fills every sea, lake and basin: `water` or `lava`. A reinterpretation only -- every water pass runs unchanged and a body is placed and levelled identically, so this costs nothing and moves no ground. What changes is the `WaterSample::fluid` a consumer reads back, and therefore what the terrain fills the basin with |
+| `passes.enable_volcanoes` | `true` | Run the volcano pass. On by default and inert until `natural.volcanoes` is raised, so every existing map is untouched |
 
 ## Terrain
 

@@ -353,3 +353,156 @@ COOPA_TEST(flat_clouds_draw_from_above_and_below_and_shadow) {
         expect(black_block_pixels(on) == 0, "flat: from below, no black (NaN) blocks");
     }
 }
+
+/**
+ * @brief The additional sun/moon discs (SkyFrameState's arrays): a sky hook can place tinted
+ *        suns and phase-shaded moons anywhere, and zero counts restore the built-in pair.
+ */
+COOPA_TEST(extra_sun_and_moon_discs_draw_where_the_frame_state_says) {
+    using toy::render::SkyFrameState;
+
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+    // sky_demo under the `space` model: the scene's own settings re-apply over the test config,
+    // so the model is changed in the scene file itself.
+    const std::string scene = scene_variant(
+        "assets/scenes/rendering/sky_demo/scene.yaml", "space_bodies", [](fkyaml::node& doc) {
+            fkyaml::node& render = doc["scene"]["settings"]["render"];
+            render["sky_model"] = std::string("space");
+            render["clouds"] = false;
+        });
+    toy::core::AppConfig config = make_test_config(scene, 480, 270, 480, 270);
+    config.render.aa_mode = "off";
+    config.render.auto_exposure_enabled = false;
+    config.render.bloom_enabled = false;
+    toy::core::Engine engine(std::move(config));
+
+    // No weather (its clock would re-colour the gradient every frame), then a near-black
+    // backdrop: the pixel counts below test the DISCS' tint, and a bright sky would satisfy
+    // them on its own. The settings swap re-applies authored render values, so the model is
+    // re-asserted after it, live, like the physical test above does.
+    {
+        fkyaml::node settings = fkyaml::node::mapping();
+        settings["weather"] = fkyaml::node::deserialize(std::string("enabled: false\n"));
+        engine.set_scene_settings(engine.scene(), settings);
+        tick_frames(engine, 2);
+        auto& cfg = engine.pipeline().render_config_mut();
+        cfg.sky_model = "space";
+        cfg.clouds = false;
+        cfg.indirect.sky_zenith = glm::vec3(0.0f);
+        cfg.indirect.sky_horizon = glm::vec3(0.0f);
+        cfg.indirect.sky_ground = glm::vec3(0.0f);
+        // Stars off too: their speckle breaks the per-pixel hue-dominance counts over the discs.
+        cfg.sky_stars = false;
+    }
+
+    // The state the hook publishes each frame; the test mutates it between captures.
+    SkyFrameState wanted;
+    bool drive = false;
+    engine.set_sky_state_hook([&](coopa::scene::Scene&, const toy::env::WorldFrame&, float,
+                                  SkyFrameState& st) {
+        if (!drive) return;
+        st.sun_count = wanted.sun_count;
+        st.suns = wanted.suns;
+        st.moon_count = wanted.moon_count;
+        st.moons = wanted.moons;
+    });
+    tick_frames(engine, 4);
+
+    // A direction that lands at a known NDC point, from the camera's own matrices -- exact
+    // whatever the projection convention is.
+    auto* cam = coopa::gfx::engine::components::CameraComponent::main();
+    require(cam != nullptr && cam->owner != nullptr, "the scene has a main camera");
+    const glm::mat4 view = cam->get_view_matrix();
+    const glm::mat4 proj = cam->get_projection_matrix(480.0f / 270.0f);
+    const glm::mat4 inv = glm::inverse(proj * view);
+    const glm::vec3 eye(cam->owner->get_transform()->transform().get_world_matrix()[3]);
+    const auto dir_at = [&](float ndc_x, float ndc_y) {
+        glm::vec4 world = inv * glm::vec4(ndc_x, ndc_y, 0.5f, 1.0f);
+        return glm::normalize(glm::vec3(world) / world.w - eye);
+    };
+    const auto tinted_pixels = [](const Frame& frame, int channel) {
+        long long n = 0;
+        for (std::size_t i = 0; i + 3 < frame.pixels.size(); i += 4) {
+            const float v = frame.pixels[i + static_cast<std::size_t>(channel)];
+            const float a = frame.pixels[i + ((channel + 1) % 3)];
+            const float b = frame.pixels[i + ((channel + 2) % 3)];
+            if (v > 100.0f && v > 1.6f * a && v > 1.6f * b) ++n;
+        }
+        return n;
+    };
+    const float disc_cos = std::cos(glm::radians(6.0f));
+
+    // A red sun, off centre. The sky is only at background pixels, and which vertical half of
+    // the frame is open sky depends on the scene's framing -- probe one half, then the other.
+    drive = true;
+    wanted.sun_count = 1;
+    wanted.moon_count = 0;
+    float sky_y = -0.4f;
+    wanted.suns[0] = {dir_at(-0.4f, sky_y), glm::vec3(1.0f, 0.04f, 0.04f), disc_cos, 3.0f};
+    tick_frames(engine, 2);
+    Frame red = engine.capture_image(true);
+    long long red_px = tinted_pixels(red, 0);
+    if (red_px <= 200) {
+        sky_y = 0.4f;
+        wanted.suns[0].dir = dir_at(-0.4f, sky_y);
+        tick_frames(engine, 2);
+        red = engine.capture_image(true);
+        red_px = tinted_pixels(red, 0);
+    }
+    if (red_px < 200) dump_frame(red, "sky_bodies_red_sun");
+    expect(red_px > 200, "a tinted sun disc draws where the state says (" +
+                             std::to_string(red_px) + " red pixels)");
+
+    // Swapped for a green sun elsewhere: the red one is gone, so the arrays -- not the built-in
+    // pair -- are what drew it.
+    wanted.suns[0] = {dir_at(0.4f, sky_y), glm::vec3(0.04f, 1.0f, 0.04f), disc_cos, 3.0f};
+    tick_frames(engine, 2);
+    const Frame green = engine.capture_image(true);
+    expect(tinted_pixels(green, 1) > 200, "a second colour draws at a second direction");
+    expect(tinted_pixels(green, 0) < 50, "and the first disc is gone with its state");
+
+    // A full blue moon: lit from the viewer's side of the sky.
+    const glm::vec3 moon_dir = dir_at(0.0f, sky_y);
+    wanted.moon_count = 1;
+    wanted.moons[0].dir = moon_dir;
+    wanted.moons[0].tint = glm::vec3(0.02f, 0.10f, 1.0f);
+    wanted.moons[0].disc_cos = disc_cos;
+    wanted.moons[0].disc_radiance = 2.0f;
+    wanted.moons[0].lit_from = -moon_dir;
+    tick_frames(engine, 2);
+    const Frame full_moon = engine.capture_image(true);
+    const long long full_px = tinted_pixels(full_moon, 2);
+    if (full_px < 400) dump_frame(full_moon, "sky_bodies_full_moon");
+    expect(full_px > 400, "a tinted moon disc draws lit (" + std::to_string(full_px) +
+                              " blue pixels)");
+
+    // The same moon backlit: a new moon, so its disc goes dark -- the phase shading is real.
+    wanted.moons[0].lit_from = moon_dir;
+    tick_frames(engine, 2);
+    const Frame new_moon = engine.capture_image(true);
+    const long long new_px = tinted_pixels(new_moon, 2);
+    if (new_px >= full_px / 3) dump_frame(new_moon, "sky_bodies_new_moon");
+    expect(new_px < full_px / 3, "backlit, the same moon goes dark (" + std::to_string(new_px) +
+                                     " against " + std::to_string(full_px) + ")");
+
+    // The same backlit moon given a limb shell: the dark disc wears a glowing ring -- forward
+    // scattering through the shell is all of the body that still shows -- so the pixels gained
+    // over the bare new moon above are the shell's.
+    wanted.moons[0].atmo_tint = glm::vec3(0.02f, 0.10f, 1.0f);
+    wanted.moons[0].atmo_thickness = 0.25f;
+    tick_frames(engine, 2);
+    const Frame ringed = engine.capture_image(true);
+    const long long ring_px = tinted_pixels(ringed, 2);
+    if (ring_px <= new_px + 100) dump_frame(ringed, "sky_bodies_backlit_ring");
+    expect(ring_px > new_px + 100, "a backlit body with a limb shell wears a glowing ring (" +
+                                       std::to_string(ring_px) + " against " +
+                                       std::to_string(new_px) + " bare)");
+
+    // Counts of zero put the built-in pair back: no tinted discs anywhere.
+    drive = false;
+    tick_frames(engine, 2);
+    const Frame legacy = engine.capture_image(true);
+    expect(tinted_pixels(legacy, 1) < 50 && tinted_pixels(legacy, 2) < 50,
+           "zero counts restore the single built-in sun and moon");
+}

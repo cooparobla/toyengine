@@ -1251,6 +1251,40 @@ struct ToyRenderConfig {
     /** Samples taken by a froxel whose history was rejected (newly revealed by camera motion),
      *  so it does not start as one raw sample. 1 = no supersampling. RUNTIME. */
     uint32_t volumetrics_froxel_miss_samples = 4;
+    /**
+     * Fit the grid's near and far to the live volumes instead of spanning 0.1 ..
+     * `volumetrics_max_distance`. RUNTIME (it only changes UBO contents).
+     *
+     * The slices are spread exponentially over whatever range the grid covers, so the range is
+     * what sets a slice's length: over 0.1 .. 4000 each slice is 18% longer than the last and one
+     * spans ~0.15 x its own distance, which at a few hundred units out is tens of world units --
+     * while the first slice is 0.018 units long and describes air nobody is looking at. Fitting
+     * the range to where the volumes actually are spends the same 64 slices on the medium.
+     * `volumetrics_max_distance` still caps the far end.
+     */
+    bool volumetrics_froxel_fit = true;
+    /**
+     * Points the medium is averaged over inside one slice: 0 picks per froxel from the slice's
+     * own length against the finest feature among the live volumes, 1 is a single point. RUNTIME.
+     *
+     * A slice's output is `1 - exp(-sigma * dt)`, convex in sigma, so a long slice sampled at one
+     * point integrates DIMMER over time than the medium really is -- which is why a thin shell far
+     * from the camera stays dull however its density is tuned. Costs only the inject pass, and
+     * only where a slice is long next to the medium's own detail.
+     */
+    uint32_t volumetrics_froxel_slice_samples = 0;
+    /**
+     * Blur each slice of the grid across its own froxels before integrating it, the counterpart
+     * of HDRP's gaussian denoise of its volumetric buffer. STARTUP-FIXED (it adds a target and a
+     * render pass).
+     *
+     * A froxel converges to the mean over its OWN footprint, so where the medium changes sharply
+     * from one to the next the grid's 8-pixel cell structure survives the composite's bilinear
+     * lookup. Fitting the grid (`volumetrics_froxel_fit`) is what removes most of that; this
+     * takes the remainder, at one extra pass over the grid. Only across a slice, never between
+     * slices -- each froxel is already integrated over its own length.
+     */
+    bool volumetrics_froxel_filter = true;
     /** Per-pixel jitter of the composite's grid lookup, in froxels / slices (0 = off). Breaks
      *  up the froxel cell pattern for TAA to resolve; ignored unless aa_mode == "taa". Off by
      *  default: with centre-reprojected history the cells do not show in the kitchen_sink test scene, and
@@ -1307,8 +1341,36 @@ struct ToyRenderConfig {
      * Global multiplier on every renderer's projected screen size before LOD selection:
      * > 1 keeps detail longer, < 1 switches to coarser levels sooner. Meshes without a
      * `lods` block are unaffected (they have only LOD 0). RUNTIME.
+     *
+     * Set by `mesh_lod_quality` unless written explicitly; see that field for the measurements
+     * its tiers come from.
      */
     float mesh_lod_bias = 1.0f;
+    /**
+     * The tier `mesh_lod_bias` comes from: how far out a mesh keeps each of its LOD levels.
+     *
+     * This is the dial for a world seen WHOLE. A streamed terrain's chunks cover a few percent
+     * of the screen each at that range, so every one of them is drawing its coarsest level, and
+     * the level a chunk draws is the only thing deciding how much of its shape survives.
+     *
+     * Measured on planetoy's `planet_demo` globe (a 652-unit radius, 1536 chunks, a 2/8/32-tile
+     * `field` ladder) at 960x540, with the camera 3 radii out so the whole world is in frame:
+     *
+     * | bias | camera triangles | frame |
+     * |------|------------------|-------|
+     * | 0.6  |  340 k           |  5.7 ms |
+     * | 1.0  |  552 k           |  6.1 ms |
+     * | 1.5  | 1092 k           |  9.7 ms |
+     * | 2.0  | 2647 k           | 19.0 ms |
+     *
+     * The cost is a staircase, not a line: each level of a `field` ladder is four times the one
+     * below it, so a tier is cheap until the bias pushes a band of chunks over a threshold and
+     * then jumps. It is also self-limiting close in -- past about 1.5 at a low orbit every
+     * visible chunk already draws its finest available level and more bias buys nothing.
+     *
+     * An explicit `mesh_lod_bias` key overrides this, like every other `*_quality` tier.
+     */
+    RenderQuality mesh_lod_quality = RenderQuality::Medium;
     /**
      * A shadow caster whose bounds would cover fewer than this many texels of a shadow view
      * (a cascade tile, a cube face, the spot map) is skipped in that view -- tiny props in a
@@ -1586,6 +1648,31 @@ struct ToyRenderConfig {
     /** Volumetric: the clouds' size relative to a real sky's (1). Every length of the cloud
      *  field -- shapes, wisps, march steps -- scales with it; altitude and thickness do not. */
     float cloud_scale = 1.0f;
+    /**
+     * @brief The clouds' own colour where they are thin and lit, linear rgb.
+     *
+     * Until this existed the march carried a scalar 0.9 and the only colour a cloud could take
+     * came from the light on it -- which is why turning coverage up on an alien world only ever
+     * produced more white. `{0.9, 0.9, 0.9}` is that scalar and changes nothing.
+     */
+    glm::vec3 cloud_albedo{0.9f, 0.9f, 0.9f};
+    /** The colour the blend reaches: a band's own on a giant, a thick base's grey elsewhere. */
+    glm::vec3 cloud_albedo_deep{0.9f, 0.9f, 0.9f};
+    /** How fast a sample's density carries it from one to the other; 0 = never. */
+    float cloud_deep_onset = 0.0f;
+    /** Seeds the map that places the clouds; 0 is the one the engine always baked. */
+    int cloud_seed = 0;
+    /**
+     * @brief Belts from pole to pole, 0 for none. Curved worlds only.
+     *
+     * The gas-giant knob, and it needs a pole to mean anything -- a flat world has none, so the
+     * whole banding term is skipped there whatever these say.
+     */
+    float cloud_bands = 0.0f;
+    float cloud_band_contrast = 0.0f;   /**< How much a belt's coverage differs from a zone's, 0..1. */
+    float cloud_band_sharpness = 1.0f;  /**< >1 squares the belts off, <1 softens them into a swell. */
+    /** How much faster a belt turns than the deck as a whole -- the shear that draws bands out. */
+    float cloud_jet_shear = 0.0f;
     float flat_cloud_size = 30.0f;          /**< Flat: typical diameter of one puff, metres. */
     float flat_cloud_opacity = 0.92f;       /**< Flat: 0..1 (0 = shadows only). */
     float flat_cloud_light_bands = 3.0f;    /**< Flat: toon shading steps (0 = smooth shading). */

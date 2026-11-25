@@ -39,6 +39,12 @@ static constexpr uint32_t MAX_DIR_CASCADES = 4;
  *  growth ratio the outermost ring already covers 128x the finest one's radius. */
 static constexpr uint32_t MAX_DIR_SHADOW_LEVELS = 8;
 
+/// Additional sun / moon discs an app's sky can draw beyond the single built-in pair.
+static constexpr uint32_t MAX_SKY_SUNS  = 4;
+static constexpr uint32_t MAX_SKY_MOONS = 8;
+/// Spheres that may shadow the directional light analytically; see LightUBO::dir_occluders.
+static constexpr uint32_t MAX_DIR_OCCLUDERS = 4;
+
 /** Point and spot lights that can hold a shadow at once, in the shared local-light shadow
  *  atlas (see LocalShadowBlock). A point light takes 6 views, a spot 1. */
 static constexpr uint32_t MAX_LOCAL_SHADOWS      = 12;
@@ -331,6 +337,56 @@ struct alignas(16) LightUBO {
                                                            /**< Per-level frames since its tile was
                                         last re-rendered (0 = this frame). Drives the ShadowCascades
                                         debug view's staleness tint; ignored by shading. */
+
+    // --- Additional sky bodies (appended last per the append-only rule) ---
+    // Extra sun and moon discs an app's sky draws beyond the single sky_sun / sky_moon pair:
+    // tinted suns, and moons shaded as lit spheres with an optional face sampled from the app's
+    // sky-body atlas. All zero (sky_body_counts == 0) keeps the single pair above authoritative,
+    // which is the default.
+    glm::vec4 sky_body_counts = glm::vec4(0.0f); /**< x = live sun count, y = live moon count. */
+    glm::vec4 sky_sun_dirs[MAX_SKY_SUNS] = {};   /**< xyz = unit direction TO sun i (same frame as
+                                        sky_sun), w = cos of its disc's angular radius. */
+    glm::vec4 sky_sun_colors[MAX_SKY_SUNS] = {}; /**< rgb = the sun's tint, w = disc radiance. */
+    glm::vec4 sky_moon_dirs[MAX_SKY_MOONS] = {}; /**< xyz = unit direction TO moon i (same frame as
+                                        sky_moon), w = cos of its disc's angular radius. */
+    glm::vec4 sky_moon_colors[MAX_SKY_MOONS] = {}; /**< rgb = the moon's tint, w = disc radiance
+                                        before its phase shading. */
+    glm::vec4 sky_moon_lit[MAX_SKY_MOONS] = {};  /**< xyz = unit direction from moon i TO the sun
+                                        lighting it (same frame as the dirs); shades its phase. */
+    glm::vec4 sky_moon_rects[MAX_SKY_MOONS] = {}; /**< The moon's face in the app's sky-body
+                                        atlas: xy = uv offset, zw = uv size; zw = 0 draws a
+                                        procedural face. */
+    glm::vec4 sky_moonlight = glm::vec4(0.0f, 0.0f, -1.0f, 0.0f); /**< xyz = WORLD-space unit
+                                        direction TO the brightest moon, for the night-side ground
+                                        light; w = 1 when live (0 falls back to anti-solar). */
+    glm::vec4 sky_moonlight_tint = glm::vec4(0.55f, 0.75f, 1.3f, 0.0f); /**< rgb = the night-side
+                                        moonlight's tint. */
+
+    // --- Star backdrop (appended last per the append-only rule) ---
+    glm::vec4 sky_backdrop = glm::vec4(0.0f); /**< The star backdrop's structure: xyz = the
+                                        galactic band's pole (same frame as sky_sun), w = the
+                                        field's variation seed. xyz all zero keeps the shader's
+                                        built-in orientation. */
+
+    // --- Sky-body limb shells (appended last per the append-only rule) ---
+    glm::vec4 sky_moon_atmo[MAX_SKY_MOONS] = {}; /**< The thin scattering shell hugging moon i's
+                                        limb: rgb = the shell's scatter tint, w = its thickness
+                                        as a fraction of the disc's radius. w == 0 (the default)
+                                        draws no shell. */
+
+    // --- Directional-light occluders (appended last per the append-only rule) ---
+    // Spheres standing between a shaded point and the directional light, shadowing it
+    // ANALYTICALLY rather than through the cascades: the light is a disc of known angular
+    // radius, each occluder is a disc of its own as seen from the point, and what survives is
+    // how much of the first is still uncovered. There is no map, no fit and no range -- which is
+    // the point, because a shadow map is fitted to a few hundred metres around the camera and an
+    // occluder may be tens of thousands of units away. Costs the lighting pass a handful of ALU
+    // per occluder and nothing at all while the count is 0 (the default).
+    glm::vec4 dir_occluder_info = glm::vec4(0.0f); /**< x = live occluder count, y = the light's
+                                        own angular radius in radians (0 disables the whole term),
+                                        z, w reserved. */
+    glm::vec4 dir_occluders[MAX_DIR_OCCLUDERS] = {}; /**< xyz = sphere centre, WORLD space (the
+                                        frame the lighting pass shades in), w = its radius. */
 };
 
 // Pins the offset of sky_zenith -- where a shader LightUBO prefix with no spot support
@@ -367,6 +423,20 @@ static_assert(offsetof(LightUBO, dir_level_info) ==
                       sizeof(glm::vec4) * (MAX_DIR_SHADOW_LEVELS / 4) * 4,
     "LightUBO's extended level block is packed tighter or looser than the std140 GLSL block in "
     "light_ubo_body.glsl expects (mat4[8] has a 64-byte stride there too).");
+static_assert(offsetof(LightUBO, sky_body_counts) ==
+                  offsetof(LightUBO, dir_level_age) + sizeof(glm::vec4) * (MAX_DIR_SHADOW_LEVELS / 4),
+    "LightUBO's sky-body block must immediately follow dir_level_age (append-only rule).");
+static_assert(offsetof(LightUBO, sky_moonlight) ==
+                  offsetof(LightUBO, sky_body_counts) + sizeof(glm::vec4) *
+                      (1 + MAX_SKY_SUNS * 2 + MAX_SKY_MOONS * 4),
+    "LightUBO's sky-body block is packed tighter or looser than the std140 GLSL block in "
+    "light_ubo_body.glsl expects (vec4 arrays keep a 16-byte stride there too).");
+static_assert(offsetof(LightUBO, sky_backdrop) ==
+                  offsetof(LightUBO, sky_moonlight_tint) + sizeof(glm::vec4),
+    "LightUBO::sky_backdrop must immediately follow sky_moonlight_tint (append-only rule).");
+static_assert(offsetof(LightUBO, sky_moon_atmo) ==
+                  offsetof(LightUBO, sky_backdrop) + sizeof(glm::vec4),
+    "LightUBO::sky_moon_atmo must immediately follow sky_backdrop (append-only rule).");
 
 /**
  * @class LightData

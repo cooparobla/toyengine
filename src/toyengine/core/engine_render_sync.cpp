@@ -427,8 +427,10 @@ void Engine::sync_sky_render_state_(coopa::scene::Scene& scene, float dt) {
     st.night_floor = K * 0.3f;
 
     st.time = std::fmod(sync_->sky_time, 3600.0f);
-    pipe_().set_sky_state(st);
+    // The hook runs BEFORE the state reaches the pipeline, so what it writes is what renders --
+    // the same order as the space branch above.
     if (sky_state_hook_) sky_state_hook_(scene, sync_->world_frame, dt, st);
+    pipe_().set_sky_state(st);
     sync_cloud_state_(scene, &st, dt);
 }
 
@@ -451,6 +453,11 @@ void Engine::drive_sky_gradient(float blend, const glm::vec3& colour) {
     rc.indirect.sky_ground  = glm::mix(sync_->sky_base[2], pale, t);
 }
 
+void Engine::update_sky_body_atlas(const void* rgba8, std::uint32_t x, std::uint32_t y,
+                                   std::uint32_t w, std::uint32_t h) {
+    pipe_().update_sky_body_atlas(rgba8, x, y, w, h);
+}
+
 void Engine::sync_cloud_state_(coopa::scene::Scene& scene, const render::SkyFrameState* sky,
                               float dt) {
     using coopa::gfx::engine::components::DirectionalLightComponent;
@@ -468,6 +475,13 @@ void Engine::sync_cloud_state_(coopa::scene::Scene& scene, const render::SkyFram
     cs.wind_speed = sync_->cloud_wind_speed;
     cs.time = std::fmod(sync_->sky_time, 3600.0f);
     cs.shadows = c.cloud_shadows;
+    cs.albedo = glm::max(c.cloud_albedo, glm::vec3(0.0f));
+    cs.albedo_deep = glm::max(c.cloud_albedo_deep, glm::vec3(0.0f));
+    cs.deep_onset = std::max(c.cloud_deep_onset, 0.0f);
+    cs.weather_seed = static_cast<std::uint32_t>(std::max(c.cloud_seed, 0));
+    cs.bands = glm::vec4(std::max(c.cloud_bands, 0.0f), std::clamp(c.cloud_band_contrast, 0.0f, 1.0f),
+                         std::max(c.cloud_band_sharpness, 0.05f),
+                         std::clamp(c.cloud_jet_shear, -1.0f, 1.0f));
     cs.world_frame = sync_->world_frame;
     // The rigid-rotation terms and the ambient fills are a curved world's alone: the cloud
     // hook below is what sets them, and a flat world leaves them at rest.

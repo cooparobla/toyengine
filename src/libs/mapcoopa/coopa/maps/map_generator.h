@@ -39,6 +39,7 @@
 #include <coopa/maps/passes/pass_roads.h>
 #include <coopa/maps/passes/pass_towns.h>
 #include <coopa/maps/passes/pass_valleys.h>
+#include <coopa/maps/passes/pass_volcanoes.h>
 #include <coopa/maps/map_task.h>
 #include <coopa/maps/passes/pass_water.h>
 #include <coopa/maps/portable_random.h>
@@ -556,8 +557,8 @@ private:
                      + " corners, " + std::to_string(graph_.edges.size()) + " edges)");
     }
 
-    /** @brief Steps `generate_()` reports: the geometry build plus the fourteen passes. */
-    static constexpr int k_generation_steps = 15;
+    /** @brief Steps `generate_()` reports: the geometry build plus the fifteen passes. */
+    static constexpr int k_generation_steps = 16;
 
     /**
      * @brief Runs one pass, counting it and checking for cancellation first.
@@ -606,6 +607,7 @@ private:
         return stage_<PassWater>(config_.enable_water, state, ctx)
             && stage_<PassCoast>(config_.enable_coast, state, ctx)
             && stage_<PassElevation>(config_.enable_elevation, state, ctx)
+            && stage_<PassVolcanoes>(config_.enable_volcanoes, state, ctx)
             && stage_<PassTemperature>(config_.enable_temperature, state, ctx)
             && stage_<PassRivers>(config_.enable_rivers, state, ctx)
             && stage_<PassValleys>(config_.enable_valleys, state, ctx)

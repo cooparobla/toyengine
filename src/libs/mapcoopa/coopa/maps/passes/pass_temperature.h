@@ -75,9 +75,61 @@ public:
             }
             center.temperature = sum / static_cast<double>(center.corners.size());
         }
+
+        warm_vents_(graph, config);
     }
 
 private:
+    /**
+     * @brief Writes `warmth` from whatever live volcanism stands on the map.
+     *
+     * A separate quantity from `temperature`, for the reason `MapCenter::warmth` gives: this is
+     * a heat source under one spot, not a climate, and the only thing that consults it is a
+     * frozen world deciding whether its water is ice there.
+     *
+     * Runs after the climate because it does not depend on it, and after `PassVolcanoes`
+     * because it reads the list that pass recorded -- which is also what makes a DEAD vent warm
+     * nothing at all: `MapVolcano::activity` is already zero for one, and the term multiplies
+     * by it. Brute force over the vents, which number in the tens against thousands of cells.
+     */
+    static void warm_vents_(MapGraph& graph, const MapConfig& config) {
+        const double strength = std::clamp(config.natural.volcano_warmth, 0.0, 2.0);
+        if (strength <= 0.0 || graph.volcanoes.empty()) {
+            return;
+        }
+        const auto warm_at = [&](const MapPoint& p) {
+            double best = 0.0;
+            for (const MapVolcano& vent : graph.volcanoes) {
+                if (!vent.alive() || vent.radius <= 0.0) continue;
+                // Out to a couple of the edifice's own radii, so a big vent melts a big hole
+                // and a cinder cone a small one -- and so the reach scales with `volcano_size`
+                // without a second key saying the same thing in different units. `strength`
+                // widens it on top of that, which is the one thing an author turning this up
+                // actually wants: more open water.
+                const double reach = vent.radius * k_warmth_reach * strength;
+                const double distance = p.distance_to(vent.point);
+                if (reach <= 0.0 || distance >= reach) continue;
+                const double t = 1.0 - distance / reach;
+                // Smoothstep over the reach, lifted by how alive the vent is rather than
+                // multiplied by it. A sleepy vent must still cross the melt threshold at its
+                // own middle -- scaling the whole curve by `activity` put the crossing at 9%
+                // of the reach and melted a hole far smaller than the cone standing in it.
+                const double core = 0.5 + 0.5 * std::clamp(vent.activity, 0.0, 1.0);
+                best = std::max(best, core * (t * t * (3.0 - 2.0 * t)));
+            }
+            return std::clamp(best, 0.0, 1.0);
+        };
+        for (MapCorner& corner : graph.corners) {
+            corner.warmth = warm_at(corner.point);
+        }
+        for (MapCenter& center : graph.centers) {
+            center.warmth = warm_at(center.point);
+        }
+    }
+
+    /** @brief How far a vent's heat reaches, as a multiple of its own base radius. */
+    static constexpr double k_warmth_reach = 2.2;
+
     /**
      * @brief Temperature at a point of a globe: latitude from height above the equator.
      *

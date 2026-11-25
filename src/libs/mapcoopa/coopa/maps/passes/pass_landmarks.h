@@ -195,7 +195,8 @@ private:
             }
         }
         if (is_summit) {
-            if (center.biome == Biome::VolcanicField || center.biome == Biome::Scorched) {
+            if (center.biome == Biome::VolcanicField || center.biome == Biome::Scorched
+                || center.biome == Biome::LavaField) {
                 return LandmarkKind::Volcano;
             }
             if (landmark_suits_biome(LandmarkKind::Glacier, center.biome)) {

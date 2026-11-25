@@ -147,3 +147,63 @@ COOPA_TEST(biome_habitability_excludes_the_uninhabitable) {
     }
     ASSERT_TRUE(habitable > 0);
 }
+
+COOPA_TEST(biome_profile_names_round_trip) {
+    for (std::size_t i = 0; i < k_biome_profile_count; ++i) {
+        const BiomeProfile profile = static_cast<BiomeProfile>(i);
+        ASSERT_TRUE(biome_profile_from_name(biome_profile_name(profile)) == profile);
+    }
+    ASSERT_TRUE(biome_profile_from_name("not_a_profile") == BiomeProfile::Temperate);
+}
+
+COOPA_TEST(barren_profile_classifies_on_elevation_and_heat) {
+    const auto barren = [](double elevation, double temperature) {
+        return classify_biome(elevation, 0.0, temperature, false, false, false,
+                              BiomeProfile::Barren);
+    };
+    ASSERT_TRUE(barren(0.1, 0.4) == Biome::BasaltPlain);   // the maria floor the basins
+    ASSERT_TRUE(barren(0.9, 0.4) == Biome::Bare);          // bright highlands
+    ASSERT_TRUE(barren(0.5, 0.9) == Biome::Scorched);      // the sun-facing extreme
+    ASSERT_TRUE(barren(0.5, 0.4) == Biome::Regolith);      // everything between
+    // Any water a config leaves on is frozen solid under vacuum.
+    ASSERT_TRUE(classify_biome(0.1, 0.0, 0.9, true, false, false, BiomeProfile::Barren)
+                == Biome::Ice);
+}
+
+COOPA_TEST(volcanic_profile_runs_on_the_activity_axis) {
+    const auto volcanic = [](double elevation, double temperature) {
+        return classify_biome(elevation, 0.0, temperature, false, false, false,
+                              BiomeProfile::Volcanic);
+    };
+    ASSERT_TRUE(volcanic(0.05, 0.5) == Biome::LavaField);     // lava floods the basins
+    ASSERT_TRUE(volcanic(0.9, 0.5) == Biome::Scorched);       // peaks scorched clean
+    ASSERT_TRUE(volcanic(0.5, 0.9) == Biome::VolcanicField);  // hottest open ground
+    ASSERT_TRUE(volcanic(0.5, 0.6) == Biome::BasaltPlain);    // the middle
+    ASSERT_TRUE(volcanic(0.5, 0.2) == Biome::SulfurFlat);     // the cool deposits
+}
+
+COOPA_TEST(glacial_profile_freezes_the_world_through) {
+    const auto glacial = [](double elevation, double temperature) {
+        return classify_biome(elevation, 0.0, temperature, false, false, false,
+                              BiomeProfile::Glacial);
+    };
+    ASSERT_TRUE(glacial(0.1, 0.3) == Biome::Ice);       // lowland ice sheets
+    ASSERT_TRUE(glacial(0.9, 0.3) == Biome::Glacier);   // glacier heights
+    ASSERT_TRUE(glacial(0.5, 0.3) == Biome::Snow);      // snowfields between
+    ASSERT_TRUE(glacial(0.5, 0.8) == Biome::Bare);      // rock only where warmest
+}
+
+COOPA_TEST(temperate_profile_is_untouched_by_the_new_set) {
+    // The default profile must never reach the reduced-profile biomes: every existing map was
+    // classified by the temperate diagram, and the new enumerators exist beyond its reach.
+    for (double elevation : {0.05, 0.3, 0.7, 0.95}) {
+        for (double moisture : {0.0, 0.3, 0.6, 0.9}) {
+            for (double temperature : {0.1, 0.3, 0.5, 0.8}) {
+                const Biome biome =
+                    classify_biome(elevation, moisture, temperature, false, false, false);
+                ASSERT_TRUE(biome != Biome::Regolith && biome != Biome::BasaltPlain
+                            && biome != Biome::LavaField && biome != Biome::SulfurFlat);
+            }
+        }
+    }
+}

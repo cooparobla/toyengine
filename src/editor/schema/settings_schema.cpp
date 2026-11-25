@@ -87,8 +87,20 @@ const std::vector<SettingsGroup>& render_settings_groups() {
                    "How the finished image is resampled to the window. auto: crisp blocks when the window is larger than the "
                    "render size, filtered when it is smaller (which is where nearest flickers). nearest: always blocky. "
                    "linear: always filtered"), "auto")))
+            // Not quality(): that helper defaults a tier to "high", which is right for every
+            // preset that buys sample counts. This one buys GEOMETRY -- High is twice the
+            // triangles at a whole-world framing -- so it defaults to medium, matching
+            // ToyRenderConfig::mesh_lod_quality and leaving an existing project's triangle
+            // budget exactly where it was.
+            .add(F(with_default(f_enum("mesh_lod_quality", {"low", "medium", "high", "ultra"}), "medium"),
+                   "Mesh LOD Quality",
+                   "How far out a mesh keeps each LOD level: the dial for a world seen whole, where every chunk of a "
+                   "streamed terrain is small enough to be drawing its coarsest one. Medium is the engine default and "
+                   "sets Mesh LOD Bias to 1; High is 1.5 (measured: ~2x the triangles of Medium with a whole world "
+                   "held in frame), Ultra 2. Setting Mesh LOD Bias explicitly overrides this"))
             .add(F(f_float("mesh_lod_bias", 1.0f, 0.01f, 0.01f, 16.0f), "Mesh LOD Bias",
-                   "Above 1 keeps mesh LOD detail longer, below 1 drops it sooner. Only meshes with `lods` are affected"))
+                   "Above 1 keeps mesh LOD detail longer, below 1 drops it sooner. Only meshes with `lods` are affected. "
+                   "Set by Mesh LOD Quality unless written here"))
             .done());
 
         g.push_back(GroupBuilder(general, "Lighting & Sky", "Shading style, exposure and the sky gradient that lights the scene "
@@ -169,6 +181,25 @@ const std::vector<SettingsGroup>& render_settings_groups() {
             .add(F(f_float("cloud_scale", 1.0f, 0.001f, 0.001f, 10.0f), "Scale",
                    "The clouds' size against a real sky's (1). Small values with a low altitude make topdown-sized "
                    "clouds (e.g. 0.015 at 50 m)"))
+            .add(F(listed(f_color("cloud_albedo", glm::vec3(0.9f))), "Cloud Colour",
+                   "What the cloud is MADE of, lit by the scene's own light -- not a tint over the result. 0.9 grey "
+                   "is water vapour, and is what the layer has always been"))
+            .add(F(listed(f_color("cloud_albedo_deep", glm::vec3(0.9f))), "Deep Colour",
+                   "The colour a dense sample reaches, blended towards by Deep Onset. Equal to Cloud Colour = one "
+                   "flat material"))
+            .add(F(f_float("cloud_deep_onset", 0.0f, 0.01f, 0.0f, 8.0f), "Deep Onset",
+                   "How fast density carries a sample from Cloud Colour to Deep Colour (0 = never)"))
+            .add(F(f_int("cloud_seed", 0, 0, 1000000), "Weather Seed",
+                   "Seeds the map that places the clouds; 0 is the one the engine always baked"))
+            .add(F(f_float("cloud_bands", 0.0f, 0.1f, 0.0f, 64.0f), "Bands",
+                   "Belts and zones from pole to pole, the gas-giant look. 0 = none. Needs a pole, so a flat world "
+                   "ignores this and the three below"))
+            .add(F(f_float("cloud_band_contrast", 0.0f, 0.01f, 0.0f, 1.0f), "Band Contrast",
+                   "How much a belt's coverage differs from a zone's"))
+            .add(F(f_float("cloud_band_sharpness", 1.0f, 0.01f, 0.1f, 8.0f), "Band Sharpness",
+                   "Above 1 squares the belts off; below 1 softens them into a swell"))
+            .add(F(f_float("cloud_jet_shear", 0.0f, 0.01f, -2.0f, 2.0f), "Jet Shear",
+                   "How much faster a belt turns than the deck as a whole -- the shear that draws the bands out"))
             .sub("Flat", "cloud_type", "flat")
             .add(F(f_float("flat_cloud_size", 30.0f, 0.5f, 1.0f, 5000.0f), "Puff Size", "Typical diameter of one puff, metres"))
             .add(F(f_float("flat_cloud_opacity", 0.92f, 0.01f, 0.0f, 1.0f), "Opacity", "0 = invisible clouds (shadows only), 1 = solid"))
@@ -472,6 +503,12 @@ const std::vector<SettingsGroup>& render_settings_groups() {
             .add(F(f_int("volumetrics_froxel_miss_samples", 4, 1, 32), "Disocclusion Samples", "Extra samples where history was rejected; 1 = off"))
             .add(F(f_float("volumetrics_froxel_lookup_jitter", 0.0f, 0.01f, 0.0f, 4.0f), "Lookup Jitter",
                    "Per-pixel jitter of the grid lookup for TAA to smooth; 0 = off, about 1 = Unreal-style"))
+            .add(F(f_bool("volumetrics_froxel_fit", true), "Fit To Volumes",
+                   "Span the grid over the live volumes instead of the whole march distance"))
+            .add(F(f_int("volumetrics_froxel_slice_samples", 0, 0, 8), "Slice Samples",
+                   "Points averaged inside one slice; 0 = pick from the slice's length, 1 = off"))
+            .add(startup(F(f_bool("volumetrics_froxel_filter", true), "Blur Slices",
+                   "Blur each slice across its froxels before integrating; removes the cell pattern")))
             .sub("Raymarch", "volumetrics_mode", "raymarch")
             .add(startup(F(f_int("volumetrics_resolution_scale", 2, 1, 8), "Resolution Divisor", "March at 1/N of the render resolution (1 = full)")))
             .done());

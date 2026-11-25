@@ -59,13 +59,15 @@ layout(set = 1, binding = 0) uniform VolumetricsUBO {
     vec4 froxel_params;    // x = near, y = far, z = history weight, w = history valid
     vec4 prev_camera_pos;  // xyz = last frame's camera position
     vec4 froxel_params2;   // x = samples per froxel on a history miss,
-                           // y = composite lookup jitter (froxels / slices; 0 = off)
+                           // y = composite lookup jitter (froxels / slices; 0 = off),
+                           // z = shortest length any live volume's field varies over (0 = unknown)
     // Point/spot shadows -- LightUBO::local_shadows' copy (gfx/local_shadow.glsl).
     GfxLocalShadowBlock local_shadows;
     // The cloud layer's shadow map over the sun's in-scatter (toyengine's cloud_shadow.glsl;
     // the sampler is binding 4 of the shadow set). cloud_shadow.w = 0: off.
     vec4 cloud_shadow;
     vec4 cloud_shadow_layer;
+    vec4 prev_froxel_params;  // xy = LAST frame's froxel_params.xy; the history grid's own mapping
 } u_vol;
 
 #endif // GFX_VOLUMETRICS_UBO_GLSL

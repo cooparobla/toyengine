@@ -583,6 +583,13 @@ private:
                 target.transition_mip_range_to_shader_read(cmd, 1, mips - 1);
             }
         });
+
+        // Every face above was a submit-and-wait, so nothing references a material set by the
+        // time this returns. A capture is a bake, not a frame: the combinations it just drew
+        // have no reason to be held until the next one, which may be a different world with
+        // different textures entirely. Freeing them here is what keeps this cache -- which has
+        // no per-frame tick() to age its entries -- from filling up over a long session.
+        if (material_cache_) material_cache_->clear();
     }
 
     void update_descriptors_() {

@@ -440,6 +440,38 @@ public:
     }
 
     /**
+     * @brief The same, for the WORLD-space UI pass -- in-world labels, nameplates, canvases
+     *        standing in the scene.
+     *
+     * A texture a world canvas drew is cached by that pass too, in its own pool, and the two
+     * passes keep separate caches: unregistering from one leaves the other's entry stale.
+     * Anything destroying a texture either pass may have drawn should call both, which is why
+     * unregister_ui_texture() exists to do exactly that.
+     */
+    void unregister_world_ui_texture(coopa::gfx::TextureView view) {
+        if (world_ui_pass_) world_ui_pass_->unregister_texture(view);
+    }
+
+    /** @brief Forgets `view` in BOTH UI passes -- the call to prefer when a texture is going
+     *         away and the caller does not track which passes drew it. */
+    void unregister_ui_texture(coopa::gfx::TextureView view) {
+        unregister_screen_ui_texture(view);
+        unregister_world_ui_texture(view);
+    }
+
+    /**
+     * @brief How many distinct material texture combinations are cached right now.
+     *
+     * A session that visits many generated worlds keeps meeting new combinations, so this is
+     * the number to watch when asking whether they are being reclaimed: it is bounded by
+     * MaterialTextureCache::kMaxMaterialSets and should fall back towards a scene's own
+     * variety a few seconds after a world is unloaded.
+     */
+    std::size_t material_set_count() const {
+        return material_cache_ ? material_cache_->set_count() : 0;
+    }
+
+    /**
      * @brief Hands over this frame's water state -- ripple rings for the water shader and the
      *        underwater parameters for UnderwaterPass. Engine calls it every frame before
      *        render() from toy::water::WaterSystem; keeping it a plain struct means render/ never

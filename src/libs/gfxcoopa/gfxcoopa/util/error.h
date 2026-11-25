@@ -48,6 +48,17 @@ inline std::string vk_result_string(VkResult result) {
         case VK_ERROR_FORMAT_NOT_SUPPORTED:     return "VK_ERROR_FORMAT_NOT_SUPPORTED";
         case VK_ERROR_FRAGMENTED_POOL:          return "VK_ERROR_FRAGMENTED_POOL";
         case VK_ERROR_UNKNOWN:                  return "VK_ERROR_UNKNOWN";
+        // Promoted-to-core codes, whose enumerators are the extension's large negative
+        // values rather than small ones. A descriptor pool with no capacity left for
+        // another set reports VK_ERROR_OUT_OF_POOL_MEMORY, so leaving it out of this
+        // switch turned an exhausted pool into a bare "VK_RESULT_UNKNOWN(-1000069000)".
+        case VK_ERROR_OUT_OF_POOL_MEMORY:       return "VK_ERROR_OUT_OF_POOL_MEMORY";
+        case VK_ERROR_INVALID_EXTERNAL_HANDLE:  return "VK_ERROR_INVALID_EXTERNAL_HANDLE";
+        case VK_ERROR_FRAGMENTATION:            return "VK_ERROR_FRAGMENTATION";
+        case VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS:
+            return "VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS";
+        case VK_ERROR_NOT_PERMITTED:            return "VK_ERROR_NOT_PERMITTED";
+        case VK_PIPELINE_COMPILE_REQUIRED:      return "VK_PIPELINE_COMPILE_REQUIRED";
         case VK_ERROR_SURFACE_LOST_KHR:         return "VK_ERROR_SURFACE_LOST_KHR";
         case VK_ERROR_NATIVE_WINDOW_IN_USE_KHR: return "VK_ERROR_NATIVE_WINDOW_IN_USE_KHR";
         case VK_SUBOPTIMAL_KHR:                 return "VK_SUBOPTIMAL_KHR";

@@ -23,10 +23,15 @@
 #include <volk/volk.h>
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <string>
 #include <vector>
+
+#include <coopa/asset/asset_handle.h>
+#include <coopa/debug/logger.h>
 
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/memory/allocator.h>
@@ -46,7 +51,14 @@ namespace util {
 /**
  * @class MaterialTextureCache
  * @brief Lazily allocates and caches one DescriptorSet per distinct (alpha_mask, albedo,
- * normal, metallic_roughness) texture combination, keyed on the four Textures' addresses.
+ * normal, metallic_roughness, displacement) texture combination, keyed on each Texture's
+ * address and the revision it was published at.
+ *
+ * The cache is a bounded working set, not a ledger of everything ever drawn: tick() drops
+ * combinations undrawn for kIdleFrames, and an allocation that would exceed kMaxMaterialSets
+ * sweeps the cold entries first and draws untextured rather than failing. Both matter because
+ * run-time textures (a generated world's surface maps) make the number of distinct
+ * combinations grow with how long a session runs, not with how much art a scene references.
  *
  * Descriptor sets are allocated (and all four bindings written via bind_image(), which does an
  * immediate vkUpdateDescriptorSets) the first time a given material's texture combination is
@@ -73,10 +85,13 @@ public:
     static constexpr uint32_t kDisplacementBinding      = 4;
     static constexpr uint32_t kBindingCount             = 5;
 
-    /// Sets allocated for distinct texture combinations. Sized well above any one scene's
-    /// authored texture variety -- one set per unique 4-tuple of Texture*, not per material
-    /// instance, so this only grows with authored texture variety, not object count.
-    static constexpr uint32_t kMaxMaterialSets = 64;
+    /// Sets allocated for distinct texture combinations -- one per unique 5-tuple, not per
+    /// material instance. Textures created at RUN TIME make this grow with the number of
+    /// worlds a session visits rather than with one scene's authored variety: a body's
+    /// surface maps are re-published per scene load, each re-publication being a new
+    /// combination. The cap is therefore a working-set size, held by idle eviction in
+    /// tick() and by set_for_key_()'s capacity sweep, not a count this can never reach.
+    static constexpr uint32_t kMaxMaterialSets = 256;
 
     MaterialTextureCache(coopa::gfx::core::Device& device,
                          coopa::gfx::memory::Allocator& allocator,
@@ -161,19 +176,23 @@ public:
     /** @brief untextured_set() but keeping `material`'s displacement map: Solid shading drops the
      *         colour maps, not the shape a tessellated surface is displaced into. */
     const coopa::gfx::pipeline::DescriptorSet& untextured_set_for(const coopa::gfx::engine::components::PBRMaterial& material) {
-        return set_for_key_({nullptr, nullptr, nullptr, nullptr,
-                             material.has_displacement_map() ? material.displacement_handle.get() : nullptr});
+        return set_for_key_({KeySlot{}, KeySlot{}, KeySlot{}, KeySlot{},
+                             slot_of_(material.displacement_handle, material.has_displacement_map())});
     }
 
     const coopa::gfx::pipeline::DescriptorSet& set_for(const coopa::gfx::engine::components::PBRMaterial& material) {
         return set_for_key_({
-            material.has_alpha_mask() ? material.alpha_mask_handle.get() : nullptr,
-            material.has_albedo_map() ? material.albedo_handle.get() : nullptr,
-            material.has_normal_map() ? material.normal_handle.get() : nullptr,
-            material.has_metallic_roughness_map() ? material.metallic_roughness_handle.get() : nullptr,
-            material.has_displacement_map() ? material.displacement_handle.get() : nullptr,
+            slot_of_(material.alpha_mask_handle, material.has_alpha_mask()),
+            slot_of_(material.albedo_handle, material.has_albedo_map()),
+            slot_of_(material.normal_handle, material.has_normal_map()),
+            slot_of_(material.metallic_roughness_handle, material.has_metallic_roughness_map()),
+            slot_of_(material.displacement_handle, material.has_displacement_map()),
         });
     }
+
+    /** @brief How many combinations are currently cached, excluding the fallback set and
+     *         anything awaiting its retirement grace period. Bounded by kMaxMaterialSets. */
+    std::size_t set_count() const { return sets_.size(); }
 
     /**
      * @brief Forgets every set that references `texture`, which its owner is about to destroy.
@@ -187,8 +206,11 @@ public:
     void release(const coopa::gfx::engine::data::Texture* texture) {
         if (texture == nullptr) return;
         for (auto it = sets_.begin(); it != sets_.end();) {
-            if (std::find(it->first.begin(), it->first.end(), texture) != it->first.end()) {
-                graveyard_.push_back({kRetireFrames, std::move(it->second)});
+            const Key& key = it->first;
+            const bool references = std::any_of(key.begin(), key.end(),
+                                                [texture](const KeySlot& s) { return s.texture == texture; });
+            if (references) {
+                graveyard_.push_back({kRetireFrames, std::move(it->second.set)});
                 it = sets_.erase(it);
             } else {
                 ++it;
@@ -196,8 +218,18 @@ public:
         }
     }
 
-    /** @brief Advances the release() grace period; call once per rendered frame. */
+    /**
+     * @brief Advances the frame clock: ages the release() grace period and drops combinations
+     * nothing has drawn for kIdleFrames. Call once per rendered frame.
+     *
+     * Idle eviction is what keeps a long session bounded without every producer of a run-time
+     * texture having to call release(): the combinations a world used stop being asked for the
+     * moment it is unloaded, and their sets return to the pool a few seconds later. A cache
+     * whose tick() is never called still cannot exhaust its pool -- set_for_key_()'s own sweep
+     * is the backstop -- but it reclaims nothing, so wire this up for every instance.
+     */
     void tick() {
+        ++frame_;
         for (auto it = graveyard_.begin(); it != graveyard_.end();) {
             if (it->frames_left == 0) {
                 it = graveyard_.erase(it);
@@ -206,35 +238,126 @@ public:
                 ++it;
             }
         }
+        evict_colder_than_(kIdleFrames);
+    }
+
+    /**
+     * @brief Frees every cached set at once, returning the whole pool.
+     *
+     * The caller must know that no command buffer referencing one is still executing -- after a
+     * Device::wait_idle(), or after a submit-and-wait bake. Unlike release()/tick() there is no
+     * grace period here, which is the point: a caller that has just gone idle (a scene
+     * teardown, a finished probe capture) reclaims the pool immediately instead of over the
+     * next kRetireFrames frames.
+     */
+    void clear() {
+        sets_.clear();
+        graveyard_.clear();
+        warned_full_ = false;
     }
 
     /** @brief Frames a released set outlives its release() (frames in flight, with margin). */
     static constexpr uint32_t kRetireFrames = 4;
 
+    /// Frames a combination may go undrawn before its set is reclaimed (~4 s at 60 Hz). Long
+    /// enough that a camera cut away from a material and back does not pay for a realloc,
+    /// short enough that a world switch returns its sets within a few seconds.
+    static constexpr uint64_t kIdleFrames = 240;
+
 private:
-    using Key = std::array<const coopa::gfx::engine::data::Texture*, kBindingCount>;
+    /// One slot of a cache key: which texture, and which published revision of it.
+    ///
+    /// The revision is what stops a RE-published asset from matching the entry describing the
+    /// payload it replaced. An AssetHandle pins a slot, not a payload, so create() over a live
+    /// id (a body's surface maps on a scene load, the terrain detail texture) swaps the Texture
+    /// under every handle and destroys the old one after a short grace -- shorter than
+    /// kRetireFrames. Keyed on the address alone, a Texture allocated at the freed address
+    /// would hit the old entry and be drawn through a descriptor pointing at a destroyed image
+    /// view. revision() is bumped by every publication, so the two can never collide.
+    struct KeySlot {
+        const coopa::gfx::engine::data::Texture* texture = nullptr;
+        uint32_t revision = 0;
+        bool operator<(const KeySlot& other) const {
+            return texture != other.texture ? texture < other.texture : revision < other.revision;
+        }
+        bool operator==(const KeySlot& other) const {
+            return texture == other.texture && revision == other.revision;
+        }
+    };
+
+    using Key = std::array<KeySlot, kBindingCount>;
+
+    struct Entry {
+        std::unique_ptr<coopa::gfx::pipeline::DescriptorSet> set;
+        uint64_t last_used = 0;
+    };
 
     struct Retired {
         uint32_t frames_left = 0;
         std::unique_ptr<coopa::gfx::pipeline::DescriptorSet> set;
     };
 
+    /// The key slot for one of a material's texture handles, or an empty slot when that
+    /// binding falls back to a neutral texture.
+    static KeySlot slot_of_(
+        const coopa::asset::AssetHandle<coopa::gfx::engine::data::Texture>& handle, bool used) {
+        return used ? KeySlot{handle.get(), handle.revision()} : KeySlot{};
+    }
+
     const coopa::gfx::pipeline::DescriptorSet& set_for_key_(const Key& key) {
-        if (key[0] == nullptr && key[1] == nullptr && key[2] == nullptr && key[3] == nullptr && key[4] == nullptr) {
+        if (key == Key{}) {
             return *fallback_set_;
         }
         auto it = sets_.find(key);
         if (it != sets_.end()) {
-            return *it->second;
+            it->second.last_used = frame_;
+            return *it->second.set;
         }
+
+        // The pool holds kMaxMaterialSets + 1 sets and a retired set still occupies its slot
+        // until its grace period ends, so both counts bound the allocation. A set nothing has
+        // drawn for longer than kRetireFrames cannot be referenced by a command buffer still
+        // in flight, which is what makes freeing it outright -- and so reclaiming pool capacity
+        // this frame rather than kRetireFrames later -- safe.
+        if (sets_.size() + graveyard_.size() >= kMaxMaterialSets) {
+            evict_colder_than_(kRetireFrames);
+        }
+        if (sets_.size() + graveyard_.size() >= kMaxMaterialSets) {
+            if (!warned_full_) {
+                warned_full_ = true;
+                coopa::debug::Logger("gfx").warn(
+                    "material textures: " + std::to_string(sets_.size()) + " of " +
+                    std::to_string(kMaxMaterialSets) + " descriptor sets are in use this frame; "
+                    "drawing the excess untextured. Raise MaterialTextureCache::kMaxMaterialSets "
+                    "if a scene really needs this many distinct texture combinations at once.");
+            }
+            return *fallback_set_;
+        }
+
         auto set = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device_, *pool_, *layout_);
-        bind_slot_(*set, kAlphaMaskBinding, key[0]);
-        bind_slot_(*set, kAlbedoBinding, key[1]);
-        bind_slot_(*set, kNormalBinding, key[2]);
-        bind_slot_(*set, kMetallicRoughnessBinding, key[3]);
-        bind_slot_(*set, kDisplacementBinding, key[4]);
-        auto [inserted, _] = sets_.emplace(key, std::move(set));
-        return *inserted->second;
+        bind_slot_(*set, kAlphaMaskBinding, key[0].texture);
+        bind_slot_(*set, kAlbedoBinding, key[1].texture);
+        bind_slot_(*set, kNormalBinding, key[2].texture);
+        bind_slot_(*set, kMetallicRoughnessBinding, key[3].texture);
+        bind_slot_(*set, kDisplacementBinding, key[4].texture);
+        auto [inserted, _] = sets_.emplace(key, Entry{std::move(set), frame_});
+        return *inserted->second.set;
+    }
+
+    /// Frees every cached set undrawn for more than `frames`. Returns how many went. Freed
+    /// rather than parked in graveyard_: past kRetireFrames the set is provably not referenced
+    /// by an in-flight command buffer, so its pool slot is reusable at once.
+    std::size_t evict_colder_than_(uint64_t frames) {
+        std::size_t evicted = 0;
+        for (auto it = sets_.begin(); it != sets_.end();) {
+            if (frame_ - it->second.last_used > frames) {
+                it = sets_.erase(it);
+                ++evicted;
+            } else {
+                ++it;
+            }
+        }
+        return evicted;
     }
 
     /// Binds `texture` at `binding` if non-null, else this cache's fallback for that binding
@@ -254,8 +377,10 @@ private:
     std::unique_ptr<coopa::gfx::engine::data::Texture>         flat_normal_texture_;
     std::unique_ptr<coopa::gfx::engine::data::Texture>         black_texture_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       fallback_set_;
-    std::map<Key, std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>> sets_;
-    std::vector<Retired> graveyard_;
+    std::map<Key, Entry>  sets_;
+    std::vector<Retired>  graveyard_;
+    uint64_t              frame_ = 0;
+    bool                  warned_full_ = false;
 };
 
 } // namespace util

@@ -572,6 +572,14 @@ void Engine::clear_scenes_() {
     for (coopa::scene::Scene* s : scene_mgr_.scenes()) scene_mgr_.remove_scene(s);
     scene_settings_.clear();
     scene_paths_.clear();
+
+    // Every MeshRenderer, texture and clip the removed scenes held is gone, so this is the one
+    // moment their payloads are unreferenced and can be reclaimed -- the level transition
+    // garbage_collect() is documented for. Without it, nothing in the process ever collects:
+    // idle eviction is off by default, so a scene's runtime-generated meshes (a streamed
+    // world's chunks are hundreds of MB) stayed resident for every scene a session visited.
+    // Retirement still honours the payload grace period, so a frame still in flight is safe.
+    assets_.garbage_collect();
 }
 
 fkyaml::node Engine::read_scene_settings_(const std::string& path) {

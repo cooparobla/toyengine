@@ -116,11 +116,11 @@ layout(push_constant) uniform ToyLightingParams {
     float ssao_intensity;       // Unreal's AO Intensity: ssao = mix(1, ssao, intensity)
     mat4  sky_inv_view_proj;     // camera-relative inverse view-projection (camera rebased to
                                  // the origin), for the sky ray at background pixels
-    vec4  world_frame;           // xyz = the centre the world curves about (world), w = its radius.
-                                 // w <= 0 is a FLAT world -- every term below then reduces to
-                                 // what it has always been. WORLD space, unlike lights.sky_sun /
-                                 // sky_moon, which are pre-rotated into the camera's frame.
 } params;
+// The curved world's frame is lights.world_frame (WORLD space, unlike lights.sky_sun/sky_moon,
+// which are pre-rotated into the camera's frame): every shading path asks the same question of
+// it, including the forward-shaded transparent surfaces this pass never sees.
+
 
 layout(location = 0) out vec4 out_color;
 
@@ -302,8 +302,8 @@ void main() {
         // construction, dim. `night_floor` (sky_extra.z) carries the fill, and the branch below
         // also requires a curved world frame -- so a flat scene never pays for any of it.
         float moon_lum = lights.sky_extra.z;
-        if (moon_lum > 0.0 && params.world_frame.w > 0.0) {
-            vec3  up = gfx_world_up(world_pos, params.world_frame);
+        if (moon_lum > 0.0 && lights.world_frame.w > 0.0) {
+            vec3  up = gfx_world_up(world_pos, lights.world_frame);
             vec3  sun_to = normalize(-lights.dir_direction.xyz);
             float night = 1.0 - gfx_world_day(up, sun_to);
             if (night > 0.0) {

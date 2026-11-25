@@ -110,12 +110,13 @@ void Engine::apply_sub_views_to_pipeline_() {
 }
 
 void Engine::drop_sub_view_(SubSceneView& view) {
-    // The host's screen-UI pass caches a descriptor set per texture it ever drew and never
-    // evicts, so the registration has to go before the image does -- after the device is idle,
-    // because a frame that drew it may still be in flight.
+    // Both UI passes cache a descriptor set per texture they ever drew, so the registration has
+    // to go before the image does -- after the device is idle, because a frame that drew it may
+    // still be in flight. A sub-scene's output can be drawn by either pass (a screen panel or a
+    // display standing in the world), so drop it from both.
     if (view.pipeline && pipeline_) {
         ctx_.wait_idle();
-        pipeline_->unregister_screen_ui_texture(view.pipeline->output_view());
+        pipeline_->unregister_ui_texture(view.pipeline->output_view());
     }
     view.pipeline.reset();
     if (view.scene != nullptr) {

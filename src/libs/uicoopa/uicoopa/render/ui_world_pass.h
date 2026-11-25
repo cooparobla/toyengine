@@ -191,6 +191,26 @@ public:
     void mark_as_text_atlas(coopa::gfx::TextureView view) { text_views_.insert(view); }
 
     /**
+     * @brief Forgets everything this pass knows about `view` -- call before destroying the
+     *        Texture that owns it.
+     *
+     * Same contract, and the same two failure modes, as UiPass::unregister_texture(): a
+     * TextureView is the raw VkImageView handle value, drivers hand a freed handle back to the
+     * next view created, and both the descriptor cache and text_views_ are keyed by it. A
+     * canvas drawn by both passes must be unregistered from both -- registering with one and
+     * unregistering only the other leaves exactly the stale entry this exists to prevent.
+     *
+     * Safe to call for a view that was never registered or never marked.
+     *
+     * @param view The view to forget, before its Texture is destroyed and while no in-flight
+     *             frame still references it.
+     */
+    void unregister_texture(coopa::gfx::TextureView view) {
+        pass_->unregister_view(view);
+        text_views_.erase(view);
+    }
+
+    /**
      * @brief Starts a frame's geometry accumulation: sizes this frame slot's buffers for
      *        everything the frame will upload, and resets the append cursor.
      *

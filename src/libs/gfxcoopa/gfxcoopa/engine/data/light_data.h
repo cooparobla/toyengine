@@ -387,6 +387,17 @@ struct alignas(16) LightUBO {
                                         z, w reserved. */
     glm::vec4 dir_occluders[MAX_DIR_OCCLUDERS] = {}; /**< xyz = sphere centre, WORLD space (the
                                         frame the lighting pass shades in), w = its radius. */
+
+    // --- The world's frame (appended last per the append-only rule) ---
+    // Which way is up at a world-space point, and therefore whether that point lies on the day
+    // or the night side. Every shading path needs the same answer -- the lighting pass, and the
+    // forward-shaded transparent surfaces that pass never sees -- so it rides the light UBO
+    // rather than one pass's push constants. It CANNOT be recovered from sky_sun/sky_moon above:
+    // those are pre-rotated into the camera's frame for the sky shaders, which would place the
+    // terminator correctly only directly beneath the camera.
+    glm::vec4 world_frame = glm::vec4(0.0f); /**< xyz = the centre the world curves about, WORLD
+                                        space, w = its radius. `w <= 0` is a flat +Z-up world and
+                                        is the default every flat scene uploads. */
 };
 
 // Pins the offset of sky_zenith -- where a shader LightUBO prefix with no spot support

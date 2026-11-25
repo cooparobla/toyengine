@@ -153,6 +153,11 @@ layout(set = 1, binding = 0) uniform LightUBO {
     // rule. See toy_dir_occlusion() below.
     vec4 dir_occluder_info;  // x = live count, y = the light's angular radius (rad), 0 = off
     vec4 dir_occluders[4];   // xyz = sphere centre, WORLD space; w = its radius
+
+    // The world's frame -- appended per light_data.h's append-only rule. xyz = the centre the
+    // world curves about, WORLD space (unlike sky_sun/sky_moon above, which are pre-rotated into
+    // the camera's frame); w = its radius, and w <= 0 is a flat +Z-up world.
+    vec4 world_frame;
 } lights;
 
 /**

@@ -33,6 +33,8 @@
 #include <string>
 #include <unordered_map>
 
+#include <coopa/debug/logger.h>
+
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/memory/allocator.h>
 #include <gfxcoopa/memory/buffer.h>
@@ -306,6 +308,21 @@ private:
 
     void register_view_(coopa::gfx::TextureView view) {
         if (descriptor_cache_.count(view)) return;
+        // The pool holds exactly desc_.max_textures sets, so leave the view unregistered rather
+        // than ask for one that does not exist: descriptor_set_for() then binds the fallback
+        // pixel, which is this pass's documented answer to an unregistered view. A consumer
+        // that reaches this is not evicting (see unregister_view()), and an abort out of
+        // vkAllocateDescriptorSets is a far worse way to report that than a visible quad.
+        if (descriptor_cache_.size() >= desc_.max_textures) {
+            if (!warned_full_) {
+                warned_full_ = true;
+                coopa::debug::Logger("gfx").warn(
+                    "TexturedQuad2DPass: all " + std::to_string(desc_.max_textures) +
+                    " texture descriptor sets are taken; further textures draw as the fallback "
+                    "pixel. A consumer is registering views without ever unregistering them.");
+            }
+            return;
+        }
         auto set = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device_, *desc_pool_, *desc_layout_);
         set->bind_image(0, view, *sampler_);
         descriptor_cache_[view] = std::move(set);
@@ -334,6 +351,7 @@ private:
     std::map<std::string, Variant> variants_;
 
     std::unordered_map<coopa::gfx::TextureView, std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>> descriptor_cache_;
+    bool warned_full_ = false;   ///< So a full cache reports itself once, not once per frame.
 
     std::unique_ptr<coopa::gfx::memory::Buffer> vbo_[kFrames];
     std::unique_ptr<coopa::gfx::memory::Buffer> ibo_[kFrames];

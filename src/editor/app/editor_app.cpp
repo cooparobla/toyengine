@@ -87,7 +87,7 @@ EditorApp::EditorApp(core::Engine& engine, Project project, const fs::path& scen
     // ThumbnailCache's file doc for what happens when it does not.
     thumbnails_ = std::make_unique<ThumbnailCache>(
         engine_.device(), engine_.allocator(), engine_.command_pool(),
-        [this](coopa::gfx::TextureView view) { engine_.pipeline().unregister_screen_ui_texture(view); });
+        [this](coopa::gfx::TextureView view) { engine_.pipeline().unregister_ui_texture(view); });
     register_builtin_sections();
     // The two hand-written component inspectors. They still live with the panels because they
     // reach into the running editor (live particle counts, the tile-set browser); the registry

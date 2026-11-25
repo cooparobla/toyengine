@@ -107,19 +107,11 @@ struct ToyLightingPushConstants {
     /// skybox draw), and the dehomogenized unprojection of far-plane NDC through this IS the
     /// view ray, with no large-coordinate subtraction in the shader.
     glm::mat4 sky_inv_view_proj = glm::mat4(1.0f);
-    /// The scene's curved world: xyz = centre (world), w = radius. `w <= 0` is a FLAT world, which is
-    /// the default and what every flat scene uploads.
-    ///
-    /// The lighting pass needs it to answer "which way is up at this fragment", which is what
-    /// decides whether a point lies on the day or the night side. It cannot come
-    /// from the light UBO's `sky_moon`/`sky_sun`: those are pre-rotated into the CAMERA's frame
-    /// by sky_frame_() for the sky shaders (see pipeline_shadows.cpp), so shading a world-space
-    /// fragment with them would put the terminator in the wrong place everywhere but directly
-    /// under the camera. Push constants are the pass's own, in world space, and at 112 bytes
-    /// this block is still inside Vulkan's guaranteed 128.
-    glm::vec4 world_frame = glm::vec4(0.0f);
 };
-static_assert(sizeof(ToyLightingPushConstants) == 112, "must match toy_lighting.frag's ToyLightingParams");
+static_assert(sizeof(ToyLightingPushConstants) == 96, "must match toy_lighting.frag's ToyLightingParams");
+// The curved world's frame is NOT here: the forward-shaded transparent surfaces need the same
+// answer and never see this pass's push constants, so it lives once, in LightUBO::world_frame.
+
 
 /**
  * @struct DebugViewPushConstants

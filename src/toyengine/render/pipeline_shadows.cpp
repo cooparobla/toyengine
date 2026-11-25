@@ -65,6 +65,14 @@ void ToyRenderPipeline::update_lights_(coopa::scene::Scene& scene) {
     ubo.sky_ground  = glm::vec4(config_.indirect.sky_ground, 0.0f);
     fill_fog_block_(ubo);
 
+    // The world's frame, world space and never rotated into the sky's. Every shading path has to
+    // answer "which way is up here, and is this point on the day or the night side" at its own
+    // fragment -- the lighting pass, and the forward-shaded transparent surfaces it never sees --
+    // so the answer rides the light UBO rather than one pass's push constants. A flat scene
+    // uploads w = 0 and every reader's branch then costs nothing.
+    ubo.world_frame = world_frame_ ? glm::vec4(world_frame_->centre, world_frame_->radius)
+                                   : glm::vec4(0.0f);
+
     // The analytic occluders of the directional light, written whatever the sky model is doing:
     // this is a property of the LIGHT, not of the sky, and the scene that needs it most draws no
     // sky at all. In WORLD space and never rotated into the sky's frame -- the lighting pass

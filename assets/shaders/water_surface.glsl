@@ -616,6 +616,27 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
     s.albedo    = mix(s.albedo, foam_color, foam);
     s.alpha     = mix(s.alpha, 1.0, foam * 0.9);
     s.roughness = mix(s.roughness, 0.85, foam);
+
+    // The night sheen. Water on a night side is opaque already -- `deep` saturates alpha to 1
+    // over any real depth -- so what makes it read as a void is not transparency but the fact
+    // that the only radiance its BRDF can reflect there is one dim directional term and an
+    // authored near-black sky gradient. A real sea is instead the BRIGHTEST thing on a dark
+    // landscape, because it mirrors the WHOLE sky: starlight, airglow, and the broad glade of a
+    // moon whose disc the lighting carries no solid angle for. That is radiance the BRDF does
+    // not model, which is what `emission` is for.
+    //
+    // Keyed on the same fill and the same terminator the ground's night light uses, so a sunlit
+    // surface, a flat body of water and a world with no night light are each untouched.
+    // Fresnel-weighted, so it rises toward grazing angles -- where a dark sea really does turn
+    // into a mirror -- instead of washing the surface flat.
+    float night_fill = lights.sky_extra.z;
+    if (night_fill > 0.0 && lights.world_frame.w > 0.0) {
+        vec3  up     = gfx_world_up(s.position_ws, lights.world_frame);
+        vec3  sun_to = normalize(-lights.dir_direction.xyz);
+        float night  = 1.0 - gfx_world_day(up, sun_to);
+        float fres   = pow(1.0 - clamp(dot(V, s.normal_ws), 0.0, 1.0), 5.0);
+        s.emission  += lights.sky_moonlight_tint.rgb * night_fill * night * mix(0.12, 0.6, fres);
+    }
 #endif
 }
 #endif // GFX_SURFACE_FRAGMENT

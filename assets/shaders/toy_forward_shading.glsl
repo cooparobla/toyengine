@@ -67,6 +67,10 @@ struct GfxForwardLightingParams {
 };
 
 #include "toy_shadow_body.glsl"
+// gfx_world_up()/gfx_world_day() for the night light below. Included HERE rather than relied on
+// transitively: a surface's own entry point pulls <gfx/fog.glsl> (the other route to these) only
+// after this file, so by the time toy_forward_shade() is compiled they would not be declared yet.
+#include <gfx/world_frame.glsl>
 
 /// Full-resolution G-buffer texel under a screen uv, for gfx_ssr_hit_color()'s velocity fetch.
 ivec2 gfx_forward_uv_to_px(vec2 uv) {
@@ -174,6 +178,26 @@ vec4 toy_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view, mat4 
         }
 
         Lo += gfx_forward_shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow, p);
+
+        // The night light, exactly as toy_lighting.frag:295 applies it to the deferred half --
+        // same fill (sky_extra.z), same terminator (gfx_world_day), same world-space direction
+        // and tint, and no shadow. Without it a forward-shaded surface on the hemisphere facing
+        // away from the sun is lit by nothing at all, while the opaque geometry beside it is
+        // moonlit: water on a globe's night side went black against ground that did not.
+        float night_fill = lights.sky_extra.z;
+        if (night_fill > 0.0 && lights.world_frame.w > 0.0) {
+            vec3  up     = gfx_world_up(world_pos, lights.world_frame);
+            vec3  sun_to = normalize(-lights.dir_direction.xyz);
+            float night  = 1.0 - gfx_world_day(up, sun_to);
+            if (night > 0.0) {
+                vec3 moon_to = lights.sky_moonlight.w > 0.5
+                                   ? normalize(lights.sky_moonlight.xyz)
+                                   : normalize(lights.dir_direction.xyz);
+                vec3 moon_radiance = lights.sky_moonlight_tint.rgb * night_fill * night;
+                Lo += gfx_forward_shade_light(N, V, moon_to, moon_radiance,
+                                              albedo, metallic, roughness, F0, 0.0, p);
+            }
+        }
     }
 
     uint num_points = min(lights.light_counts.y, 16u);

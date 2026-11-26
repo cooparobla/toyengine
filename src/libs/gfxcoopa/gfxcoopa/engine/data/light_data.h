@@ -44,6 +44,8 @@ static constexpr uint32_t MAX_SKY_SUNS  = 4;
 static constexpr uint32_t MAX_SKY_MOONS = 8;
 /// Spheres that may shadow the directional light analytically; see LightUBO::dir_occluders.
 static constexpr uint32_t MAX_DIR_OCCLUDERS = 4;
+/** @brief How many bodies may reflect the directional light onto the shaded world. */
+static constexpr uint32_t MAX_SKY_REFLECTED = 4;
 
 /** Point and spot lights that can hold a shadow at once, in the shared local-light shadow
  *  atlas (see LocalShadowBlock). A point light takes 6 views, a spot 1. */
@@ -398,6 +400,28 @@ struct alignas(16) LightUBO {
     glm::vec4 world_frame = glm::vec4(0.0f); /**< xyz = the centre the world curves about, WORLD
                                         space, w = its radius. `w <= 0` is a flat +Z-up world and
                                         is the default every flat scene uploads. */
+
+    // Reflected light from nearby bodies -- appended last, per the append-only rule.
+    //
+    // Bodies bouncing the directional light onto the world being shaded. Each slot is a light in
+    // its own right: its own direction, so a body low in a point's sky lights it less than one
+    // overhead, and its own colour. It generalises sky_moonlight / sky_moonlight_tint /
+    // sky_extra.z from one source to several, and a count of 0 (the default) leaves that
+    // single-source path exactly as it was for one reader's compare.
+    //
+    // Written whatever the sky model is doing, like dir_occluders above and for the same reason:
+    // this is a property of the LIGHT, not of the sky. That is also why the count does NOT ride
+    // the spare sky_body_counts.z -- that vec4 is zeroed on the gradient-sky path.
+    //
+    // This is the tenth append. sizeof(LightUBO) is about 7.9 KB against the 16 KB
+    // maxUniformBufferRange the Vulkan spec guarantees, so there is room; nothing asserts a
+    // budget, so the number is worth knowing before adding an eleventh.
+    glm::vec4 sky_reflected_info = glm::vec4(0.0f);  /**< x = live count; y, z, w reserved. */
+    glm::vec4 sky_reflected_dirs[MAX_SKY_REFLECTED] = {};   /**< xyz = WORLD-space unit direction
+                                        TO reflector i (not the camera frame sky_sun uses);
+                                        w reserved. */
+    glm::vec4 sky_reflected_colors[MAX_SKY_REFLECTED] = {}; /**< rgb = its reflected light at the
+                                        shaded world, already tinted; w reserved. */
 };
 
 // Pins the offset of sky_zenith -- where a shader LightUBO prefix with no spot support
@@ -448,6 +472,14 @@ static_assert(offsetof(LightUBO, sky_backdrop) ==
 static_assert(offsetof(LightUBO, sky_moon_atmo) ==
                   offsetof(LightUBO, sky_backdrop) + sizeof(glm::vec4),
     "LightUBO::sky_moon_atmo must immediately follow sky_backdrop (append-only rule).");
+static_assert(offsetof(LightUBO, sky_reflected_info) ==
+                  offsetof(LightUBO, world_frame) + sizeof(glm::vec4),
+    "LightUBO's reflected-light block must immediately follow world_frame (append-only rule).");
+static_assert(offsetof(LightUBO, sky_reflected_colors) ==
+                  offsetof(LightUBO, sky_reflected_info) +
+                      sizeof(glm::vec4) * (1 + MAX_SKY_REFLECTED),
+    "LightUBO's reflected-light block is packed tighter or looser than the std140 GLSL block in "
+    "light_ubo_body.glsl expects (vec4 arrays keep a 16-byte stride there too).");
 
 /**
  * @class LightData

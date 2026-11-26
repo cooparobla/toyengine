@@ -302,20 +302,35 @@ void main() {
         // construction, dim. `night_floor` (sky_extra.z) carries the fill, and the branch below
         // also requires a curved world frame -- so a flat scene never pays for any of it.
         float moon_lum = lights.sky_extra.z;
-        if (moon_lum > 0.0 && lights.world_frame.w > 0.0) {
+        int   reflectors = int(lights.sky_reflected_info.x);
+        if ((reflectors > 0 || moon_lum > 0.0) && lights.world_frame.w > 0.0) {
             vec3  up = gfx_world_up(world_pos, lights.world_frame);
             vec3  sun_to = normalize(-lights.dir_direction.xyz);
             float night = 1.0 - gfx_world_day(up, sun_to);
             if (night > 0.0) {
-                vec3 moon_to = lights.sky_moonlight.w > 0.5
-                                   ? normalize(lights.sky_moonlight.xyz)
-                                   : normalize(lights.dir_direction.xyz);
-                // The frame's own moonlight tint; its default is the night sky's airglow tint
-                // (sky_physical.glsl), so the ground a moonlit cloud sits over reads as the
-                // same light.
-                vec3 moon_radiance = lights.sky_moonlight_tint.rgb * moon_lum * night;
-                Lo += shade_light(N, V, moon_to, moon_radiance,
-                                  albedo, metallic, roughness, F0, 0.0, toon);
+                if (reflectors > 0) {
+                    // Each reflecting body is its own light, so ground facing the body that casts
+                    // the light is lit and ground facing away is not -- which the single fill in
+                    // the else below cannot say, having one direction for whatever is brightest.
+                    // Its colour is that body's own.
+                    for (int i = 0; i < 4; ++i) {
+                        if (i >= reflectors) break;
+                        Lo += shade_light(N, V, lights.sky_reflected_dirs[i].xyz,
+                                          lights.sky_reflected_colors[i].rgb * night,
+                                          albedo, metallic, roughness, F0, 0.0, toon);
+                    }
+                } else {
+                    // The single-source form, for a frame that publishes no reflectors. An ELSE
+                    // and not a second branch: sky_extra.z still carries the AGGREGATE for the
+                    // clouds, the sea's night sheen and the sky's airglow, so running both would
+                    // light this night twice.
+                    vec3 moon_to = lights.sky_moonlight.w > 0.5
+                                       ? normalize(lights.sky_moonlight.xyz)
+                                       : normalize(lights.dir_direction.xyz);
+                    vec3 moon_radiance = lights.sky_moonlight_tint.rgb * moon_lum * night;
+                    Lo += shade_light(N, V, moon_to, moon_radiance,
+                                      albedo, metallic, roughness, F0, 0.0, toon);
+                }
             }
         }
     }

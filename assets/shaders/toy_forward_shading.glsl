@@ -179,23 +179,38 @@ vec4 toy_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view, mat4 
 
         Lo += gfx_forward_shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow, p);
 
-        // The night light, exactly as toy_lighting.frag:295 applies it to the deferred half --
+        // The night light, exactly as toy_lighting.frag's reflected-light block applies it to
+        // the deferred half --
         // same fill (sky_extra.z), same terminator (gfx_world_day), same world-space direction
         // and tint, and no shadow. Without it a forward-shaded surface on the hemisphere facing
         // away from the sun is lit by nothing at all, while the opaque geometry beside it is
         // moonlit: water on a globe's night side went black against ground that did not.
         float night_fill = lights.sky_extra.z;
-        if (night_fill > 0.0 && lights.world_frame.w > 0.0) {
+        int   reflectors = int(lights.sky_reflected_info.x);
+        if ((reflectors > 0 || night_fill > 0.0) && lights.world_frame.w > 0.0) {
             vec3  up     = gfx_world_up(world_pos, lights.world_frame);
             vec3  sun_to = normalize(-lights.dir_direction.xyz);
             float night  = 1.0 - gfx_world_day(up, sun_to);
             if (night > 0.0) {
-                vec3 moon_to = lights.sky_moonlight.w > 0.5
-                                   ? normalize(lights.sky_moonlight.xyz)
-                                   : normalize(lights.dir_direction.xyz);
-                vec3 moon_radiance = lights.sky_moonlight_tint.rgb * night_fill * night;
-                Lo += gfx_forward_shade_light(N, V, moon_to, moon_radiance,
-                                              albedo, metallic, roughness, F0, 0.0, p);
+                if (reflectors > 0) {
+                    // Each reflecting body is its own light, with its own direction and its own
+                    // colour. An ELSE below and not a second branch: sky_extra.z still carries
+                    // the AGGREGATE for the clouds and the sea's sheen, so running both would
+                    // light this night twice.
+                    for (int i = 0; i < 4; ++i) {
+                        if (i >= reflectors) break;
+                        Lo += gfx_forward_shade_light(N, V, lights.sky_reflected_dirs[i].xyz,
+                                                      lights.sky_reflected_colors[i].rgb * night,
+                                                      albedo, metallic, roughness, F0, 0.0, p);
+                    }
+                } else {
+                    vec3 moon_to = lights.sky_moonlight.w > 0.5
+                                       ? normalize(lights.sky_moonlight.xyz)
+                                       : normalize(lights.dir_direction.xyz);
+                    vec3 moon_radiance = lights.sky_moonlight_tint.rgb * night_fill * night;
+                    Lo += gfx_forward_shade_light(N, V, moon_to, moon_radiance,
+                                                  albedo, metallic, roughness, F0, 0.0, p);
+                }
             }
         }
     }

@@ -145,7 +145,12 @@ struct SkyFrameState {
     /// WORLD-space unit direction TO the brightest moon, for the night-side ground light; zero
     /// keeps the anti-solar fallback (the single moon sits opposite the sun).
     glm::vec3 moonlight_to{0.0f};
-    /// The night-side moonlight's tint.
+    /// The night-side fill's tint, and with it the AGGREGATE hue of whatever is reflecting.
+    ///
+    /// Read by the terms that take a scalar and a tint rather than a direction -- the sea's night
+    /// sheen mirrors the whole sky, so a direction means nothing to it. A producer publishing
+    /// `reflected` should set this to the summed radiance's hue, or those terms keep this default
+    /// while the ground beside them is lit the colour of the body that actually cast the light.
     glm::vec3 moonlight_tint{0.55f, 0.75f, 1.3f};
 
     /// A sphere that may stand between a shaded point and the directional light.
@@ -164,6 +169,37 @@ struct SkyFrameState {
     /// The directional light's own angular radius, radians. 0 (the default) disables the term --
     /// a light with no disc has no penumbra and nothing to partially cover.
     float light_angular_radius = 0.0f;
+    /// The smallest fraction of the directional light an occluder may leave, 0..1.
+    ///
+    /// The occluder spheres above cover the light's DISC, so a sphere wide enough to cover all of
+    /// it takes the direct term to exactly zero -- correct for a world with no air, and wrong for
+    /// one with air, where the shaded point still sees a sky lit by the light the sphere never
+    /// covered. On a world whose horizon is far away that lit sky is most of the hemisphere even
+    /// at totality, which is why a total eclipse reads as deep twilight rather than as night.
+    ///
+    /// Scales with how much air there is, so 0 (the default) is an airless world and a flat scene
+    /// alike, and the term stays exactly what it was before.
+    float occluder_light_floor = 0.0f;
+
+    /// One body bouncing the directional light back onto the world being shaded.
+    ///
+    /// The night-side fill, generalised from one source to several. `moonlight_to`,
+    /// `moonlight_tint` and `night_floor` above are the single-source form and keep working
+    /// exactly as they did: a count of 0 (the default) leaves them authoritative, which is what
+    /// every flat scene gets and costs it one compare.
+    ///
+    /// Each slot shades as a light in its own right, so a body low in a point's sky lights it
+    /// less than one overhead -- which a single averaged fill cannot say -- and carries its own
+    /// colour rather than a fixed tint. WORLD space, never rotated into the sky's camera frame:
+    /// the lighting pass shades world positions.
+    struct ReflectedLight {
+        glm::vec3 to{0.0f};        ///< Unit direction TO the reflecting body.
+        glm::vec3 radiance{0.0f};  ///< Its reflected light here, tinted. 0 is an empty slot.
+    };
+    /// At most this many are shaded; see `LightUBO::sky_reflected_dirs`.
+    static constexpr int k_max_reflected = 4;
+    std::array<ReflectedLight, k_max_reflected> reflected{};
+    int reflected_count = 0;
 };
 
 /// The cloud layer's two looks (render cloud_type).

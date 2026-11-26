@@ -50,6 +50,12 @@ void CameraController::start() {
 }
 
 void CameraController::snap_to_targets() {
+    // The pivot as well as the pose. Every caller writes `target` immediately before this and
+    // means "be there now"; leaving the followed point to ease in at `follow_smoothing` instead
+    // makes the camera slide in from wherever it used to orbit, over about a second, which reads
+    // as the snap having silently not happened -- the pose is right the whole way and only the
+    // point it is measured from is wrong.
+    smoothed_target_    = resolve_target_();
     smoothed_yaw_deg_   = yaw_deg;
     smoothed_pitch_deg_ = pitch_deg;
     smoothed_distance_  = distance;

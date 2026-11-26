@@ -80,11 +80,27 @@ void ToyRenderPipeline::update_lights_(coopa::scene::Scene& scene) {
     {
         const int occ = std::min(sky_state_.occluder_count, SkyFrameState::k_max_occluders);
         ubo.dir_occluder_info =
-            glm::vec4(static_cast<float>(occ), sky_state_.light_angular_radius, 0.0f, 0.0f);
+            glm::vec4(static_cast<float>(occ), sky_state_.light_angular_radius,
+                      sky_state_.occluder_light_floor, 0.0f);
         for (int i = 0; i < occ; ++i) {
             ubo.dir_occluders[i] =
                 glm::vec4(sky_state_.occluders[static_cast<std::size_t>(i)].center,
                           sky_state_.occluders[static_cast<std::size_t>(i)].radius);
+        }
+    }
+
+    // Bodies bouncing the directional light back onto the shaded world, written whatever the sky
+    // model is doing for the same reason the occluders above are: a property of the LIGHT, not of
+    // the sky. WORLD space and never rotated into the sky's frame -- the lighting pass shades
+    // world positions, so these have to be in the same space as those.
+    {
+        const int lit = std::min(sky_state_.reflected_count, SkyFrameState::k_max_reflected);
+        ubo.sky_reflected_info = glm::vec4(static_cast<float>(lit), 0.0f, 0.0f, 0.0f);
+        for (int i = 0; i < lit; ++i) {
+            const SkyFrameState::ReflectedLight& r =
+                sky_state_.reflected[static_cast<std::size_t>(i)];
+            ubo.sky_reflected_dirs[i] = glm::vec4(r.to, 0.0f);
+            ubo.sky_reflected_colors[i] = glm::vec4(r.radiance, 0.0f);
         }
     }
 

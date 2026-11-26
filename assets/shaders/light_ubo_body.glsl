@@ -151,13 +151,22 @@ layout(set = 1, binding = 0) uniform LightUBO {
 
     // Analytic occluders of the directional light -- appended per light_data.h's append-only
     // rule. See toy_dir_occlusion() below.
-    vec4 dir_occluder_info;  // x = live count, y = the light's angular radius (rad), 0 = off
+    vec4 dir_occluder_info;  // x = live count, y = the light's angular radius (rad), 0 = off,
+                             // z = the smallest fraction the occluders may leave (0 = none)
     vec4 dir_occluders[4];   // xyz = sphere centre, WORLD space; w = its radius
 
     // The world's frame -- appended per light_data.h's append-only rule. xyz = the centre the
     // world curves about, WORLD space (unlike sky_sun/sky_moon above, which are pre-rotated into
     // the camera's frame); w = its radius, and w <= 0 is a flat +Z-up world.
     vec4 world_frame;
+
+    // Reflected light from nearby bodies -- appended per light_data.h's append-only rule. Each
+    // slot is a body bouncing the directional light onto this world: a WORLD-space direction TO
+    // it, and the light it sends here. Count 0 (the default) keeps sky_moonlight / sky_extra.z's
+    // single source authoritative and costs one compare.
+    vec4 sky_reflected_info;      // x = live count; y, z, w reserved
+    vec4 sky_reflected_dirs[4];   // xyz = WORLD-space unit dir TO reflector i
+    vec4 sky_reflected_colors[4]; // rgb = its reflected light here, already tinted
 } lights;
 
 /**
@@ -174,11 +183,18 @@ layout(set = 1, binding = 0) uniform LightUBO {
  * `to_light` points TO the light. Occluders behind the shaded point are skipped, as is any
  * sphere the point is inside or on -- a body must not eclipse itself, which is what its own
  * N.L already says.
+ *
+ * `dir_occluder_info.z` floors the result. Covering the whole disc leaves exactly 0, which is
+ * what an airless world does; a world with air still sees a sky lit by the light the occluder
+ * never covered, and that inward scatter is what makes totality read as deep twilight instead
+ * of as night. The floor carries it because nothing here knows the air -- see
+ * `SkyFrameState::occluder_light_floor`, whose default of 0 is this function unchanged.
  */
 float toy_dir_occlusion(vec3 world_pos, vec3 to_light) {
     int n = int(lights.dir_occluder_info.x);
     float light_r = lights.dir_occluder_info.y;
     if (n <= 0 || light_r <= 0.0) return 1.0;
+    float floor_fraction = clamp(lights.dir_occluder_info.z, 0.0, 1.0);
 
     float visible = 1.0;
     for (int i = 0; i < 4; ++i) {
@@ -200,7 +216,7 @@ float toy_dir_occlusion(vec3 world_pos, vec3 to_light) {
         float cover = clamp((occ_r * occ_r) / (light_r * light_r), 0.0, 1.0);
         visible *= 1.0 - cover * smoothstep(0.0, 1.0, overlap);
     }
-    return visible;
+    return max(visible, floor_fraction);
 }
 
 #endif // TOY_LIGHT_UBO_BODY_GLSL

@@ -282,6 +282,13 @@ public:
      * is, and do NOT call it when the chase is the point (a correction mid-play reads better
      * easing in).
      */
+    /**
+     * @brief Applies the current target, yaw, pitch and distance at once, with no drag.
+     *
+     * Both halves: the pose the camera holds AND the point it orbits. A caller that has just
+     * written `target` and `distance` wants the camera there this frame, not easing in from
+     * where it used to be over the next second.
+     */
     void snap_to_targets();
 
     /**

@@ -216,7 +216,7 @@ void main() {
         // is the sun's evaluated at -cos_t. No shadow march: it is a dim fill, and a second
         // 5-step march per sample to self-shadow it would not be visible. `sky_extra.z` is
         // `SkyState::night_floor`, so wherever that is 0 this term costs nothing.
-        moon_light = vec3(0.55, 0.75, 1.3) * lights.sky_extra.z * (1.0 - day);
+        moon_light = lights.sky_moonlight_tint.rgb * lights.sky_extra.z * (1.0 - day);
 
         // Ambient from the planet's OWN atmosphere, blended across the same terminator: blue
         // overhead at noon, moonlit at night. The scene's sky_zenith family cannot serve here --
@@ -237,6 +237,20 @@ void main() {
         amb_top = lights.sky_zenith.rgb * 0.9 + lights.sky_horizon.rgb * 0.3;
         amb_bottom = lights.sky_horizon.rgb * 0.2 + lights.sky_ground.rgb * 0.6;
     }
+
+    // An ECLIPSE: another body standing between this deck and the light. Solved as geometry
+    // rather than with a map (`toy_dir_occlusion()`, light_ubo_body.glsl) because the sphere
+    // doing the covering is an orbit away -- thousands of units outside any cascade's reach.
+    //
+    // The surface below the deck already reads this term. Without it here the deck stays lit
+    // white over a blacked-out world: a lid left on while everything under it goes out.
+    //
+    // ONCE PER RAY, at the chord's midpoint, rather than once per sample: an umbra is hundreds
+    // of kilometres across against a march a few tens long, so it is uniform over the chord and
+    // a per-sample call would buy nothing for four occluders x up to eighty samples. On a flat
+    // world no occluders are ever published and this returns 1.0 on its first compare.
+    sun_light *= toy_dir_occlusion((mid + g_march_origin) * scale, L);
+
     // The moon's phase, the sun's lobes seen from the opposite side (see moon_light above).
     float moon_phase = mix(hg(0.3, -cos_t), hg(-0.2, -cos_t), 0.3);
 

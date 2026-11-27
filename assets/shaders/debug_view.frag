@@ -15,6 +15,7 @@
 // gfx_gtao_multi_bounce) -- a diagnostic built from a different code path could disagree
 // with the thing it's meant to be diagnosing.
 
+#include <gfx/world_frame.glsl>
 #include <gfx/sky.glsl>
 #include <gfx/brdf.glsl>
 #include <gfx/shadow_sampling.glsl>
@@ -359,7 +360,8 @@ void main() {
             // Same expression as toy_lighting.frag's ambient term -- see
             // gfx/ao_composite.glsl's own doc for the HDRP-style occlusion split.
             float ssao = texture(g_ssao, in_uv).r;
-            vec3 ind_diff = sky_gradient(N, lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb)
+            vec3 ind_diff = sky_gradient(N, gfx_world_up(world_pos, lights.world_frame),
+                                         lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb)
                           * params.ambient_intensity;
             GfxIndirectSpecular ind = gfx_indirect_specular(world_pos, N, V, F0, roughness, params.sky_intensity,
                                                             lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb);

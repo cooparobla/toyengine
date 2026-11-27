@@ -273,7 +273,10 @@ vec4 toy_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view, mat4 
         Lo += albedo * rim;
     }
 
-    vec3 ind_diff = sky_gradient(N, lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb)
+    // Keyed to the fragment's own up, exactly as toy_lighting.frag's deferred twin does it --
+    // a term that is deferred-only leaves this path's surfaces lit by a different sky.
+    vec3 ind_diff = sky_gradient(N, gfx_world_up(world_pos, lights.world_frame),
+                                 lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb)
                   * p.ambient_intensity;
     GfxIndirectSpecular ind = gfx_indirect_specular(world_pos, N, V, F0, roughness, p.sky_intensity,
                                                     lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb);

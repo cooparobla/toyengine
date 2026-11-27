@@ -204,6 +204,10 @@ void main() {
         // sky_params.x selects the sky model (sky_physical.glsl): 0 gradient, 1 physical,
         // 2 space -- no atmosphere, stars and discs only, added to the scene's own near-black
         // sky_zenith/horizon/ground.
+        // These two take a VIEW RAY, not a surface normal, and are deliberately left keyed to
+        // +Z: on a curved world the ray already arrives in the local frame, because
+        // pipeline_record.cpp pre-multiplies sky_inv_view_proj by the world frame. Passing
+        // gfx_world_up() here would apply that rotation a second time.
         vec3 sky;
         if (lights.sky_params.x > 1.5) {
             sky = sky_gradient(dir, lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb) +
@@ -421,7 +425,12 @@ void main() {
     // one call shared with ssr_composite.frag (gfx/indirect_specular.glsl,
     // indirect_hooks.glsl) so its confidence-weighted subtraction cancels
     // what this pass added when ssr_enabled is set.
-    vec3 ind_diff = sky_gradient(N, lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb)
+    // The hemisphere is keyed to the fragment's own up, not to world +Z. On a world whose up is
+    // not +Z that is the difference between a floor and a ceiling receiving different irradiance
+    // and receiving the same: up is radial there, so dot(N, +Z) says nothing about which way a
+    // surface faces. gfx_world_up() returns +Z when the frame is flat, so this is exact there.
+    vec3 ind_diff = sky_gradient(N, gfx_world_up(world_pos, lights.world_frame),
+                                 lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb)
                   * params.ambient_intensity;
     GfxIndirectSpecular ind = gfx_indirect_specular(world_pos, N, V, F0, roughness, params.sky_intensity,
                                                     lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb);

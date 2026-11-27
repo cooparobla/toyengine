@@ -25,6 +25,7 @@
 
 #include <gfx/spot_light.glsl>
 #include <light_ubo_body.glsl>
+#include <gfx/world_frame.glsl>
 #include <gfx/sky.glsl>
 #include <gfx/fog.glsl>
 #include <gfx/depth.glsl>
@@ -288,7 +289,11 @@ void main() {
         // Henyey-Greenstein, scaled so isotropic scattering is 1: `cos_t` between the eye's view
         // ray (eye -> particle) and the light's direction toward the particle's far side.
         #define HG(cos_t) ((1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * (cos_t), 1e-4), 1.5))
-        vec3 light = sky_gradient(N, lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb)
+        // Keyed to the particle's own up, so it agrees with the ground beneath it. Note N here is
+        // a BILLBOARD normal, so this is a loosely-defined quantity being made consistent rather
+        // than a wrong one being fixed.
+        vec3 light = sky_gradient(N, gfx_world_up(v_world, lights.world_frame),
+                                  lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb)
                    * pc.ambient.x;
         if (lights.light_counts.x > 0u) {
             vec3 L = normalize(-lights.dir_direction.xyz);

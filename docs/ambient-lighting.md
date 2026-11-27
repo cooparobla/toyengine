@@ -69,14 +69,31 @@ The shading math itself (`assets/shaders/toy_lighting.frag`, duplicated for
 the forward and SDF paths):
 
 ```glsl
-vec3 ind_diff = sky_gradient(N, lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb)
+vec3 ind_diff = sky_gradient(N, gfx_world_up(world_pos, lights.world_frame),
+                             lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb)
               * params.ambient_intensity;
 vec3 ambient  = (kD_ind * albedo * ind_diff + ind.value) * ao * ssao;
 ```
 
 `sky_gradient()` (`gfx/sky.glsl`, one of the shared headers that stay in
 gfxcoopa's `assets/shaders/`) blends three colours by the surface normal's
-(or view ray's) up-component. It also has a direction-only overload backed by
+(or view ray's) up-component.
+
+**Which way is up is a parameter.** The irradiance overload takes it, and the
+four sites that evaluate the hemisphere at a surface NORMAL —
+`toy_lighting.frag`, `toy_forward_shading.glsl`, `debug_view.frag` and
+`particle.frag` — pass `gfx_world_up(pos, lights.world_frame)`. That returns
+`+Z` when the frame is flat, so a flat world is bit-identical
+(`dot(v, vec3(0,0,1))` reproduces `v.z` exactly) and a world whose up is not
+`+Z` gets a hemisphere oriented per fragment rather than one keyed to the
+world axis. Three callers are deliberately left on `+Z`: the sky BACKGROUND
+rays in `toy_lighting.frag` (already pre-rotated into the local frame by
+`pipeline_record.cpp`, so passing the up would double-apply it),
+`gfx/fog.glsl` (flat-world throughout) and `gfx/indirect_specular.glsl`
+(shared with `ssr_composite.frag`, which has no light UBO — its sky colours
+arrive by push constant, so extending it means a new field in gfxcoopa's
+`SsrPass::CompositePushConstants`). Diffuse and specular therefore disagree
+about up on a curved world; that is known, not an oversight. It also has a direction-only overload backed by
 hardcoded `SKY_ZENITH`/`SKY_HORIZON`/`SKY_GROUND` constants — the same values
 as the config defaults above — for shaders (gfxcoopa's, blendy's) that don't
 take configurable colours.
@@ -89,9 +106,24 @@ startup; only the editor (and scene overrides) change these values live.
 **Directional lights have no `ambient` field.** Ambient/indirect light comes
 from the sky gradient above, engine-wide — not per directional light.
 
-**Ambient hue is per config, optionally per scene.** `sky_zenith`/
-`sky_horizon`/`sky_ground` come from `config.yaml`, and a scene can override
-them under `scene.settings.render`.
+**Ambient hue is per config, optionally per scene — and a project's sky hook
+can overwrite both.** `sky_zenith`/`sky_horizon`/`sky_ground` come from
+`config.yaml`, and a scene can override them under `scene.settings.render`.
+But `Engine::drive_sky_gradient()` rewrites all three every frame while a
+project's sky hook is driving them, so **on such a scene the authored values
+are only a fallback**, restored when the driver backs off. The symptom when
+this is not understood: editing a scene's `sky_*` keys changes nothing and the
+render is byte-identical. The way to tell in one capture is to change the
+driving colour instead and see whether the frame follows it.
+
+Note also what `drive_sky_gradient()` currently does with the three bands: it
+sets `sky_horizon` and `sky_ground` to the *same* lifted value, because the
+gradient used to be keyed to world `+Z` and most of a curved world's visible
+sky therefore fell in the horizon band. With the hemisphere now oriented per
+fragment that compensation is obsolete, and because it leaves two of the three
+bands equal it flattens the hemisphere for every down-facing surface. Giving
+`sky_ground` a genuinely darker value is the follow-up; it is deliberately not
+done here because it changes the look of every curved-world scene.
 
 ## Is there GI in toyengine?
 

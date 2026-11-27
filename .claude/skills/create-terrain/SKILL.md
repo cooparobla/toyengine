@@ -49,6 +49,10 @@ copy from `assets/scenes/terrain/terrain_demo/scene.yaml`. Parser: `src/toyengin
         grid_size: 64
         sea_level: 0.28
         shape: { shape: circle, diameter_m: 0 }   # rectangle | circle | triangle | continent | archipelago
+        caves: { enable_caves: false }  # cave systems, ON by default. A column holds the open span
+                                #   one leaves; sizes are in mapcoopa METRES, which is not this
+                                #   terrain's world unit -- planetoy's docs/planet-authoring.md
+                                #   has the conversion and a shape authored in steps and tiles
       world_tiles: 320          # the map rasterised to 320 x 320 tiles (0: grid_size x tiles_per_grid_unit)
       tile_size: 1.0            # world size = world_tiles x tile_size
       height_step: 1.0          # = tile_size keeps the pieces cubic

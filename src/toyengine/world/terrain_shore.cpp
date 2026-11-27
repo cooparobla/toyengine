@@ -65,6 +65,49 @@ bool step_(const TileGrid* topology, std::int32_t w, std::int32_t h, std::int32_
  * river at one terrace and a lake at a higher one still floors at the lake's, never at the
  * river's, the same way the rounding itself does.
  */
+/**
+ * @brief Floors a height in steps onto the grid `cuts` asks for, as sub-step quanta.
+ *
+ * `cuts == 1` is the terraced world: the result is a whole step scaled up, so every comparison
+ * and every write below reduces exactly to the one it has always been.
+ */
+std::int32_t quantise_steps_(float v, std::int32_t cuts) {
+    return quantise_fine(static_cast<double>(v), cuts);
+}
+
+/**
+ * @brief Writes a height in sub-step quanta back into the surface a cell SHOWS.
+ *
+ * On an ordinary column that is the ground. On one with a roof over it, it is the roof's top --
+ * the hillside, which is what this pass grades; `steps` there is the floor of the open span
+ * underneath and is no business of a shoreline.
+ *
+ * Writing the outer surface rather than standing aside is what makes the pass agree with itself.
+ * Excluding a roofed column instead looks safer and is not: in a world with no cave that column
+ * is ordinary ground and takes part, so leaving it out changes the result for its NEIGHBOURS,
+ * and the relaxation then carries that difference across the whole band. Measured on the shipped
+ * globe, the skip moved 964 columns of untouched terrain by up to 31 steps; reading and writing
+ * the outer surface moves none, because the outer surface is exactly what the ground was.
+ *
+ * A roof's two ends are whole steps -- there is no sub-step byte for them -- so a graded roof
+ * lands on a terrace, and the lid is held at least one step thick.
+ */
+void write_outer_fine_(TileCell& c, std::int32_t fine) {
+    if (c.roofed()) {
+        const std::int32_t steps = fine >= 0 ? fine / k_sub_steps
+                                             : -((-fine + k_sub_steps - 1) / k_sub_steps);
+        c.roof_top = static_cast<std::int16_t>(
+            std::clamp(steps, static_cast<std::int32_t>(c.roof_steps) + 1, 32767));
+        return;
+    }
+    // Floor division, so a cell under the ground plane keeps a 0..255 cut like any other. The
+    // cones can refuse a bank below zero and always could; the meshers clamp it.
+    const std::int32_t steps = fine >= 0 ? fine / k_sub_steps
+                                         : -((-fine + k_sub_steps - 1) / k_sub_steps);
+    c.steps = static_cast<std::int16_t>(std::clamp(steps, -32768, 32767));
+    c.ground_sub = static_cast<std::uint8_t>(fine - steps * k_sub_steps);
+}
+
 float shore_floor_(const TerraData& d, const TileGrid* topology, std::int32_t w, std::int32_t h,
                    std::int32_t x, std::int32_t y, float hstep) {
     float bank = k_no_floor;
@@ -270,8 +313,13 @@ void grade_cone_(const TerraData& d, const TileGrid* topology, const std::vector
     const auto index_of = [w](std::int32_t x, std::int32_t y) {
         return static_cast<std::size_t>(y) * static_cast<std::size_t>(w) + static_cast<std::size_t>(x);
     };
+    // The OUTERMOST surface, not the ground. A column with a roof over it holds the floor of
+    // the open span in `steps`, tens of steps down, and a cone reads this value along its whole
+    // propagation -- so reading the ground there pulls the cone into the cave and carries that
+    // depth out to `cone_reach_tiles` of real hillside. Measured on the shipped globe: 1481
+    // columns with no cave anywhere near them moved, the worst by 45 steps.
     const auto ground = [&d](std::int32_t x, std::int32_t y) {
-        return static_cast<float>(d.get(x, y).steps);
+        return d.get(x, y).outer_ground_steps();
     };
     // A min-heap keyed by `sign * value` serves both senses: Ceiling wants the smallest value
     // finalized first, Floor the largest, and negating the key for Floor turns that into the
@@ -436,7 +484,7 @@ void coast_distance_(const TerraData& d, const TileGrid* topology, const std::ve
 std::int32_t relax_talus_(TerraData& d, const TileGrid* topology, const IRect& limit,
                           const std::vector<float>& coast, const std::vector<float>& shore_floor,
                           const std::vector<std::int32_t>& wet_cap, float slope, float band,
-                          std::int32_t max_passes) {
+                          std::int32_t max_passes, std::int32_t cuts) {
     const std::int32_t w = d.geometry().tiles_x;
     const std::int32_t h = d.geometry().tiles_y;
     if (slope <= 0.0f || band <= 0.0f || max_passes <= 0) return 0;
@@ -469,7 +517,7 @@ std::int32_t relax_talus_(TerraData& d, const TileGrid* topology, const IRect& l
             const float floor_p = shore_floor[pidx];
             const bool p_wet = cp.wet();
             const bool pinned = !p_wet && floor_p > k_no_floor;
-            const std::int32_t pin = pinned ? static_cast<std::int32_t>(std::lround(floor_p)) : 0;
+            const std::int32_t pin = pinned ? static_cast<std::int32_t>(std::lround(floor_p)) * k_sub_steps : 0;
             for (int dy = -1; dy <= 1; ++dy) {
                 for (int dx = -1; dx <= 1; ++dx) {
                     if (dx == 0 && dy == 0) continue;
@@ -483,29 +531,51 @@ std::int32_t relax_talus_(TerraData& d, const TileGrid* topology, const IRect& l
                     // material that is under water.
                     if (cn.wet() != p_wet) continue;
                     if (coast.empty() || coast[nidx] > band) continue;
-                    const std::int32_t diff = static_cast<std::int32_t>(cp.steps) -
-                                              static_cast<std::int32_t>(cn.steps);
+                    // All in sub-step quanta, so the transfer lands on the same grid the fold
+                    // wrote. `unit` is one cut of that grid: a move under it cannot be expressed,
+                    // which is the quantisation floor AND the termination guarantee -- every
+                    // transfer reduces the summed excess by at least one whole cut.
+                    // One cut of the grid, as quanta. Not k_sub_steps/cuts: for a count that
+                    // does not divide 256 that is an approximation, and a transfer rounded to
+                    // it would land between two cuts -- which is exactly the state that stops
+                    // two neighbours ever sharing a height again.
+                    const std::int32_t unit = std::max(1, fine_for_cut(1, cuts) -
+                                                              fine_for_cut(0, cuts));
+                    const std::int32_t diff = cp.outer_fine() - cn.outer_fine();
                     if (diff <= 0) continue;
-                    const float allowance = slope * ((dx != 0 && dy != 0) ? 1.41421356f : 1.0f);
+                    const float allowance = slope * ((dx != 0 && dy != 0) ? 1.41421356f : 1.0f) *
+                                            static_cast<float>(k_sub_steps);
                     const float excess = static_cast<float>(diff) - allowance;
                     if (excess <= 0.0f) continue;
                     std::int32_t move = static_cast<std::int32_t>(std::floor(excess * 0.5f));
-                    if (move < 1) continue;  // under a whole step: the terrace cannot express it
+                    move -= move % unit;
+                    if (move < unit) continue;
                     if (pinned) {
-                        // Re-read `steps`: an earlier transfer this pass may already have spent
-                        // some of the room.
-                        move = std::min(move, static_cast<std::int32_t>(cp.steps) - pin);
-                        if (move < 1) continue;  // already down on its water's terrace
+                        // Re-read the height: an earlier transfer this pass may already have
+                        // spent some of the room.
+                        move = std::min(move, cp.outer_fine() - pin);
+                        move -= move % unit;
+                        if (move < unit) continue;  // already down on its water's terrace
                     }
                     if (p_wet) {
                         // The low side is a BED, and raising it must not break the clearance the
                         // mesher needs under the water surface (ShoreProfile::bed_min_depth_steps).
                         // Deepening the high side is always free -- water only gets deeper.
-                        move = std::min(move, wet_cap[nidx] - static_cast<std::int32_t>(cn.steps));
-                        if (move < 1) continue;  // the bed beside it is already as high as it may go
+                        move = std::min(move, wet_cap[nidx] * k_sub_steps - cn.outer_fine());
+                        move -= move % unit;
+                        if (move < unit) continue;  // the bed is already as high as it may go
                     }
-                    cp.steps = static_cast<std::int16_t>(static_cast<std::int32_t>(cp.steps) - move);
-                    cn.steps = static_cast<std::int16_t>(static_cast<std::int32_t>(cn.steps) + move);
+                    // Snapped back onto the cut grid: `unit` is one cut, but the grid's
+                    // spacing is only uniform when the count divides 256, so a transfer can
+                    // otherwise leave a tile between two cuts. At cuts == 1 every value is
+                    // already a whole step and this is a no-op, so the mass the relaxation
+                    // conserves there is conserved exactly; finer, it can drift by a quantum.
+                    const auto on_grid = [&](std::int32_t fine) {
+                        return quantise_fine(static_cast<double>(fine) /
+                                                 static_cast<double>(k_sub_steps), cuts);
+                    };
+                    write_outer_fine_(cp, on_grid(cp.outer_fine() - move));
+                    write_outer_fine_(cn, on_grid(cn.outer_fine() + move));
                     moved = true;
                 }
             }
@@ -527,6 +597,11 @@ void grade_tile_shore(TerrainField& field, const IRect& rect, const TerrainParam
     // to grade, and writing `steps` under a height plane would only be overwritten from it.
     if (d->has_heights()) return;
     const float hstep = d->geometry().height_step;
+    // How finely a graded height may be cut. 1 keeps every write on a whole terrace, which is
+    // what every budget, pin and cap in this pass is denominated in -- those stay in steps at
+    // any setting, so a finer cut refines where the ground lands without touching the shape the
+    // profile asks for.
+    const std::int32_t cuts = sub_steps_for(params.height_fine);
     if (hstep <= 0.0f) return;
     const std::int32_t w = d->geometry().tiles_x;
     const std::int32_t h = d->geometry().tiles_y;
@@ -564,7 +639,7 @@ void grade_tile_shore(TerrainField& field, const IRect& rect, const TerrainParam
                         if (!d->get(n.x, n.y).wet()) { dry_adjacent = true; break; }
                     }
                 }
-                if (dry_adjacent) bed_seeds.push_back({x, y, static_cast<float>(c.steps)});
+                if (dry_adjacent) bed_seeds.push_back({x, y, c.ground_steps()});
             } else {
                 const float bank = shore_floor_(*d, topology, w, h, x, y, hstep);
                 shore_floor[static_cast<std::size_t>(y) * w + x] = bank;
@@ -654,12 +729,14 @@ void grade_tile_shore(TerrainField& field, const IRect& rect, const TerrainParam
     // to what the pass moves (ShoreProfile::beach_repair_only). Taken here rather than inside the
     // fold because the talus relaxation below moves tiles too, and both count as "this pass".
     const bool repair_only = profile.retexture && profile.beach_repair_only;
-    std::vector<std::int16_t> before_steps;
+    // In quanta, not steps: a tile the pass moved by less than a step has still moved, and a
+    // beach decided from "did this tile move" would otherwise miss it.
+    std::vector<std::int32_t> before_steps;
     if (repair_only) {
         before_steps.resize(count, 0);
         for (std::int32_t y = limit.y0; y < limit.y1; ++y)
             for (std::int32_t x = limit.x0; x < limit.x1; ++x)
-                before_steps[static_cast<std::size_t>(y) * w + x] = d->at(x, y).steps;
+                before_steps[static_cast<std::size_t>(y) * w + x] = d->at(x, y).outer_fine();
     }
 
     // --- Fold, quantise, write; then relax; then retexture. ---
@@ -669,36 +746,47 @@ void grade_tile_shore(TerrainField& field, const IRect& rect, const TerrainParam
             TileCell& c = d->at(x, y);
             // Pure function of (x, y): the same tile dithers the same way every time this runs,
             // which is what makes an already-graded tile a fixed point.
+            // The dither's amplitude is in QUANTA, not steps: it exists to break up the
+            // contour the quantisation itself draws, so it has to shrink with the quantum.
+            // Switching it off for a fine cut instead leaves every contour running as one
+            // clean iso-line -- and because a smooth elevation field's gradient holds its
+            // direction over a whole hillside, those lines all run the same way and the ground
+            // reads as combed. Keeping it scaled also keeps its bias at half a quantum rather
+            // than turning it into half a step of systematic lift.
             const float j = jitter01_(surface_point_(params, topology, x, y), profile.jitter_tiles,
                                       d->geometry().tile_size, profile.jitter_seed) *
-                            profile.jitter_steps;
+                            profile.jitter_steps / static_cast<float>(cuts);
 
             if (c.wet()) {
                 const float terrace = std::round(c.water_level / hstep);
-                float t = static_cast<float>(c.steps);
+                float t = c.outer_ground_steps();
                 t = std::max(t, bed[idx]);  // shelve a deep bed up toward its margin
-                std::int32_t q = static_cast<std::int32_t>(std::floor(t + j));
-                q = std::min(q, wet_cap[idx]);
-                if (q == c.steps) continue;
-                c.steps = static_cast<std::int16_t>(q);
+                std::int32_t q = quantise_steps_(t + j, cuts);
+                q = std::min(q, wet_cap[idx] * k_sub_steps);
+                if (q == c.outer_fine()) continue;
+                write_outer_fine_(c, q);
                 if (profile.retexture) {
-                    const std::int32_t depth = static_cast<std::int32_t>(terrace) - q;
+                    // A depth in WHOLE steps, because bed_kind_for() reads metres and its
+                    // shallowest band is a step deep: a one-cut floor would call every margin
+                    // bed a millimetre deep and surface the whole sea floor as shore.
+                    const std::int32_t depth = static_cast<std::int32_t>(terrace) - q / k_sub_steps;
                     c.set_top_kind(TerrainSampler::bed_kind_for(
                         to_map_water_kind_(static_cast<WaterKind>(c.water_kind)),
                         static_cast<float>(std::max(1, depth)) * hstep));
                     c.set_side_kind(side_kind_for(c.top_kind()));
                 }
             } else {
-                float t = static_cast<float>(c.steps);
+                float t = c.outer_ground_steps();
                 t = std::min(t, cut[idx]);   // cut a bank back toward a walkable grade
                 t = std::max(t, fill[idx]);  // fill the lip settle_water_rounding() leaves
-                std::int32_t q = static_cast<std::int32_t>(std::floor(t + j));
+                std::int32_t q = quantise_steps_(t + j, cuts);
                 // The water invariant: never lower a tile below what settle_water_rounding()
                 // already pinned it to -- max over every wet 8-neighbour, not the nearest one.
+                // The pin stays a whole terrace, so the invariant it proves is the same one.
                 if (shore_floor[idx] > k_no_floor) {
-                    q = std::max(q, static_cast<std::int32_t>(std::lround(shore_floor[idx])));
+                    q = std::max(q, static_cast<std::int32_t>(std::lround(shore_floor[idx])) * k_sub_steps);
                 }
-                if (q != c.steps) c.steps = static_cast<std::int16_t>(q);
+                if (q != c.outer_fine()) write_outer_fine_(c, q);
             }
         }
     }
@@ -709,7 +797,7 @@ void grade_tile_shore(TerrainField& field, const IRect& rect, const TerrainParam
     // the graded heights. Before the retexture, so the beach band is decided from final ground.
     if (want_talus) {
         relax_talus_(*d, topology, limit, coast, shore_floor, wet_cap, profile.talus_slope_steps,
-                     profile.talus_band_tiles, profile.talus_max_passes);
+                     profile.talus_band_tiles, profile.talus_max_passes, cuts);
     }
 
     // --- Retexture: the beach band, from the heights the relaxation finished with. ---
@@ -718,6 +806,7 @@ void grade_tile_shore(TerrainField& field, const IRect& rect, const TerrainParam
         for (std::int32_t x = limit.x0; x < limit.x1; ++x) {
             const std::size_t idx = static_cast<std::size_t>(y) * w + x;
             TileCell& c = d->at(x, y);
+            if (c.roofed()) continue;   // its kinds describe cut rock, not a shore
             // How much sand this stretch of coast gets, as a multiple of the authored band.
             // Taken at the tile's own surface point rather than from its indices so that the
             // field is continuous across whatever seams the topology has -- the same reason the
@@ -728,7 +817,7 @@ void grade_tile_shore(TerrainField& field, const IRect& rect, const TerrainParam
             // hold water, and a river runs along the EDGE between two cells rather than filling
             // one, so no cell beside it is ever a water cell and its banks fall outside the
             // classification entirely. The band is the only thing that sands them, repair or not.
-            if (repair_only && coast_river[idx] == 0u && c.steps == before_steps[idx]) continue;
+            if (repair_only && coast_river[idx] == 0u && c.outer_fine() == before_steps[idx]) continue;
             float band = 1.0f;
             if (profile.beach_variation > 0.0f) {
                 const float v = smooth01_(surface_point_(params, topology, x, y),

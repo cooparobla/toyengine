@@ -83,6 +83,95 @@ COOPA_TEST(flat_ground_is_tops_only) {
     expect(all_at_surface, "voxel chunk: the top lands at steps * height_step");
 }
 
+/**
+ * @brief A drop shorter than a step is closed by ONE plain band, and the tops stay full size.
+ *
+ * The split the sub-step height rests on: `steps` still decides what SHAPE closes a boundary
+ * (its lip, its corners, whether a top quadrant is flat), and only `fine()` decides WHETHER
+ * anything has to. Were the band a cap tier instead, it would own the top half-tile and overlap
+ * the flat top quadrant the same column emits -- and on a lipped set it would round a top face
+ * over a drop a few millimetres tall.
+ *
+ * The band is stretched to exactly the drop, not to a whole cell: a cell-tall one would close
+ * the surface just as well, but it would bury most of itself in the column beside it and hand
+ * that buried geometry to the chunk's collider as triangles inside solid rock.
+ */
+COOPA_TEST(a_sub_step_drop_is_closed_by_one_plain_band) {
+    using namespace toy::world;
+    TerrainParams params = make_test_params(4);
+    params.soil_depth_steps = 1;
+
+    // One flat terrace, and a single column lifted a quarter of a step above it.
+    ColumnPad pad = make_flat_pad(4, 3);
+    pad.at(1, 1).sub = k_sub_steps / 4;
+    ChunkMeshData mesh;
+    mesh_chunk_styled(pad, voxel_library(), params, mesh);
+
+    const auto area = area_by_direction(mesh);
+    // One tile wide by a quarter of a step tall, on each of the four sides (keys: +-x = +-1,
+    // +-y = +-2, +z = 3).
+    const double band = 0.25 * params.height_step * params.tile_size;
+    for (const int dir : {1, -1, 2, -2}) {
+        expect_near(area.count(dir) ? area.at(dir) : 0.0, band, 1e-4,
+                    "a sub-step drop closes with exactly its own height of wall, on every side");
+    }
+    // The lifted column's top is still a whole tile: no lip, no inset, nothing taken from it.
+    expect_near(area.count(3) ? area.at(3) : 0.0, 16.0, 1e-4,
+                "a sub-step lift costs the top face nothing");
+    expect(area.size() == 5, "a sub-step drop adds the four bands and nothing else");
+
+    // Where the triangles are, exactly: a flat top is one quad and a band is one quad, which
+    // is the least geometry that is both flat-topped and watertight -- a vertical gap cannot
+    // be closed by fewer than one quad.
+    std::size_t up = 0, lateral = 0;
+    for (std::size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
+        const glm::vec3& a = mesh.vertices[mesh.indices[i]].position;
+        const glm::vec3& b = mesh.vertices[mesh.indices[i + 1]].position;
+        const glm::vec3& c = mesh.vertices[mesh.indices[i + 2]].position;
+        const glm::vec3 n = glm::normalize(glm::cross(b - a, c - a));
+        (std::abs(n.z) > 0.9f ? up : lateral) += 1;
+    }
+    std::printf("  one lifted column in a 4x4 terrace: %zu top triangles, %zu band triangles\n",
+                up, lateral);
+    expect(lateral == 8, "four sub-step bands, two triangles each -- one quad a boundary");
+
+    // And it really is the lift that put them there: the same pad terraced is tops only.
+    ChunkMeshData terraced;
+    mesh_chunk_styled(make_flat_pad(4, 3), voxel_library(), params, terraced);
+    expect(area_by_direction(terraced).size() == 1, "...while a terraced plateau has no walls at all");
+}
+
+/**
+ * @brief With tilting on, a sub-step difference costs NO wall -- the tops simply meet sloped.
+ *
+ * The counterpart to a_sub_step_drop_is_closed_by_one_plain_band, and the reason to prefer this
+ * expression: a band per sub-step boundary is a quad on nearly every tile edge, and because the
+ * tiles along a contour of a smooth field land on the same height those bands line up into ribs
+ * that read as a grain. Here the chunk is tops only, exactly as a flat plateau is.
+ */
+COOPA_TEST(a_tilted_sub_step_drop_costs_no_wall) {
+    using namespace toy::world;
+    TerrainParams params = make_test_params(4);
+    params.soil_depth_steps = 1;
+    params.height_fine = 64;
+    params.height_fine_tilt = true;
+
+    ColumnPad pad = make_flat_pad(4, 3);
+    pad.at(1, 1).sub = k_sub_steps / 4;
+    ChunkMeshData mesh;
+    mesh_chunk_styled(pad, voxel_library(), params, mesh);
+
+    const auto area = area_by_direction(mesh);
+    expect(area.count(1) == 0 && area.count(-1) == 0 && area.count(2) == 0 && area.count(-2) == 0,
+           "a tilted sub-step drop emits no vertical face anywhere");
+    // The lifted column really did move: its own corners carry it, and the tiles around it
+    // slope up to meet them, so the surface is no longer one plane.
+    float lo = 1e9f, hi = -1e9f;
+    for (const auto& v : mesh.vertices) { lo = std::min(lo, v.position.z); hi = std::max(hi, v.position.z); }
+    expect(hi > lo + 1e-4f, "the lift is in the geometry, not rounded away");
+    expect(hi <= (3.0f + 0.25f) * params.height_step + 1e-4f, "and no corner rises above the column itself");
+}
+
 COOPA_TEST(walls_appear_exactly_where_a_neighbour_is_lower) {
     using namespace toy::world;
     const TerrainParams params = make_test_params(4);

@@ -124,6 +124,59 @@ inline toy::world::ColumnPad busy_pad(std::int32_t chunk_size, std::uint32_t see
     return pad;
 }
 
+/**
+ * @brief A pad where EVERY tile stands at its own whole step, so no two neighbours are level.
+ *
+ * The control for what a sub-step height actually costs. busy_pad()'s 3x3 blocks leave most
+ * tile boundaries flat, and a flat boundary is the one case where a terraced world emits no
+ * wall at all -- so meshing it finely is not "the same faces at new heights", it is those faces
+ * plus a wall at every boundary that used to have none. Here there is no such boundary left,
+ * and the two should cost nearly the same.
+ */
+inline toy::world::ColumnPad rugged_pad(std::int32_t chunk_size, std::uint32_t seed) {
+    toy::world::ColumnPad pad;
+    pad.resize(chunk_size);
+    for (std::int32_t y = -1; y <= chunk_size; ++y) {
+        for (std::int32_t x = -1; x <= chunk_size; ++x) {
+            std::uint32_t h = static_cast<std::uint32_t>(x) * 73856093u ^
+                              static_cast<std::uint32_t>(y) * 19349663u ^ seed * 83492791u;
+            h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+            toy::world::TileColumn& c = pad.at(x, y);
+            c.steps     = 1 + static_cast<std::int32_t>(h % 12u);
+            c.top_kind  = toy::world::TileKind::Grass;
+            c.side_kind = toy::world::TileKind::Dirt;
+        }
+    }
+    return pad;
+}
+
+/**
+ * @brief Gives every column of `pad` a pseudorandom sub-step lift, skirt included.
+ *
+ * The hostile case for a sub-step height: no two neighbours agree, so every tile boundary has a
+ * drop to close and no top merges with the one beside it.
+ */
+inline void add_sub_steps(toy::world::ColumnPad& pad, std::int32_t chunk_size, std::uint32_t seed,
+                          std::int32_t cuts = toy::world::k_sub_steps) {
+    const std::int32_t unit = toy::world::k_sub_steps / std::max<std::int32_t>(1, cuts);
+    for (std::int32_t y = -1; y <= chunk_size; ++y) {
+        for (std::int32_t x = -1; x <= chunk_size; ++x) {
+            std::uint32_t h = static_cast<std::uint32_t>(x) * 374761393u ^
+                              static_cast<std::uint32_t>(y) * 668265263u ^ seed * 2246822519u;
+            h ^= h >> 13; h *= 0x85ebca6bu; h ^= h >> 16;
+            pad.at(x, y).sub = static_cast<std::int32_t>(h % static_cast<std::uint32_t>(cuts)) * unit;
+        }
+    }
+}
+
+/** @brief busy_pad() with a sub-step lift on every column. */
+inline toy::world::ColumnPad sub_pad(std::int32_t chunk_size, std::uint32_t seed,
+                                     std::int32_t cuts = toy::world::k_sub_steps) {
+    toy::world::ColumnPad pad = busy_pad(chunk_size, seed);
+    add_sub_steps(pad, chunk_size, seed, cuts);
+    return pad;
+}
+
 inline toy::world::ColumnPad make_flat_pad(std::int32_t chunk_size, std::int32_t steps) {
     toy::world::ColumnPad pad;
     pad.resize(chunk_size);

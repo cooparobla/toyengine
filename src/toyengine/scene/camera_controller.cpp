@@ -331,27 +331,69 @@ void CameraController::update_first_person_(coopa::util::Transform& t, float dt)
 }
 
 void CameraController::update_fly_(coopa::util::Transform& t, float dt) {
+    const glm::vec3 pos = t.position();
+
+    // The axis a fly camera yaws about. On a flat world it is world +Z and every line below is
+    // what this always did; in a gravity field it is the LOCAL up at the camera.
+    //
+    // The bug this replaces: the turn used to be written as a world Euler triple, yawing about
+    // world +Z and pitching about world +X. On a round world neither of those is anywhere near
+    // the camera's own up or right, so the view swung and rolled in directions unrelated to the
+    // screen -- the mouse moved the camera, but not toward what you were looking at.
+    //
+    // The pose itself is never CONVERTED, only turned. Converting it would mean reading the
+    // authored Transform through whatever frame happened to exist on frame zero, and on a scene
+    // whose floating origin rebases that frame (`src/orrery`) frame zero is exactly when it is
+    // least settled. Applying deltas about the right axes needs no such reading, so a scene that
+    // aimed its fly camera with a Transform rotation keeps the shot it chose.
+    glm::mat3 frame(1.0f);
+    const bool in_field = field_frame_(pos, frame);
+    const glm::vec3 up = in_field ? glm::normalize(frame[2]) : glm::vec3(0.0f, 0.0f, 1.0f);
+
+    // The mouse turns a fly camera as it turns an orbit one, in the same units and with the same
+    // two inversion flags -- a free camera that has to be steered with the ARROW keys while the
+    // other hand is on WASD is one nobody can fly. The keys still work and add into the same two
+    // turns, so a scene may offer both; they are one camera, not two fighting rigs.
+    // NEGATED, both terms. A positive rotation about `up` is counter-clockwise seen from above
+    // -- a LEFT turn -- so feeding the mouse's rightward delta straight in steers the wrong way,
+    // and so does the Right arrow. The sign belongs here rather than on either input because the
+    // two add into one turn and have to agree about which way is right.
+    const float yaw = -(mouse_delta.x * mouse_sensitivity * (invert_x ? -1.0f : 1.0f)
+                        + look_input.x * look_speed_deg_per_sec * dt);
+    float pitch = -mouse_delta.y * mouse_sensitivity * (invert_y ? -1.0f : 1.0f)
+                  + look_input.y * look_speed_deg_per_sec * dt;
+
     glm::mat4 world = t.get_world_matrix();
     glm::vec3 right   = glm::normalize(glm::vec3(world[0]));
-    glm::vec3 forward = -glm::normalize(glm::vec3(world[2])); // Blender: camera looks down local -Z
+    glm::vec3 forward = -glm::normalize(glm::vec3(world[2])); // Blender: looks down local -Z
 
-    glm::vec3 pos = t.position();
-    pos += right * move_input.x * move_speed * dt;
-    pos += forward * move_input.y * move_speed * dt;
-    // World up, which avoids roll -- or, in a gravity field, the camera's own up.
-    glm::vec3 lift(0.0f, 0.0f, 1.0f);
-    if (auto* physics = scene ? dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene->find_system("Physics")) : nullptr;
-        physics && physics->world().gravity_source_count() > 0)
-        lift = physics->world().up_at(pos);
-    pos += lift * move_input.z * move_speed * dt;
-    t.set_position(pos);
+    // Stop just short of the poles. Straight up, the yaw axis and the view coincide and the
+    // heading becomes undefined, which reads as the camera spinning on the spot.
+    const float elevation =
+        glm::degrees(std::asin(glm::clamp(glm::dot(forward, up), -1.0f, 1.0f)));
+    pitch = glm::clamp(pitch, -89.0f - elevation, 89.0f - elevation);
 
-    if (look_input.x != 0.0f || look_input.y != 0.0f) {
-        glm::vec3 rot = t.rotation_degrees();
-        rot.z += look_input.x * look_speed_deg_per_sec * dt;
-        rot.x = glm::clamp(rot.x + look_input.y * look_speed_deg_per_sec * dt, 1.0f, 179.0f);
-        t.set_rotation(rot);
+    if (yaw != 0.0f || pitch != 0.0f) {
+        // Yaw about the frame's up and pitch about the camera's OWN right, which is the
+        // construction every first-person camera uses: the two compose without accumulating
+        // roll, so the horizon stays where it is.
+        const glm::quat turn = glm::angleAxis(glm::radians(yaw), up)
+                               * glm::angleAxis(glm::radians(pitch), right);
+        t.set_rotation_quat(glm::normalize(turn * t.rotation_quat()));
+        world   = t.get_world_matrix();
+        right   = glm::normalize(glm::vec3(world[0]));
+        forward = -glm::normalize(glm::vec3(world[2]));
     }
+
+    // After the turn, so a key pressed this frame moves the way the camera is looking this frame
+    // rather than the way it was looking last one.
+    glm::vec3 moved = pos;
+    moved += right * move_input.x * move_speed * dt;
+    moved += forward * move_input.y * move_speed * dt;
+    // Up is the FRAME's, not the camera's: rising should leave the ground behind whatever the
+    // view is pitched at, which is what every flying camera means by up.
+    moved += up * move_input.z * move_speed * dt;
+    t.set_position(moved);
 }
 
 } // namespace scene

@@ -1170,6 +1170,43 @@ struct CaveConfig {
     double shaft_drop_m = 45.0;
     /** @brief Chaikin corner-cutting passes applied to each passage, matching rivers and roads. */
     int smoothing_iterations = 2;
+
+    /**
+     * @brief Field-for-field equality, so a caller can ask whether a config is still the default.
+     *
+     * The use that wanted it: a project sizing caves from its own units has to leave a config
+     * alone when the scene already authored one, and by the time it runs the authoring node is
+     * long gone. A config that matches a default-constructed one can only have come from nowhere.
+     */
+    bool operator==(const CaveConfig& o) const {
+        return cave_count == o.cave_count &&
+               min_grade == o.min_grade &&
+               min_spacing_m == o.min_spacing_m &&
+               roof_clearance_m == o.roof_clearance_m &&
+               passage_height_m == o.passage_height_m &&
+               chamber_height_m == o.chamber_height_m &&
+               max_depth_m == o.max_depth_m &&
+               vadose_share == o.vadose_share &&
+               level_spacing_m == o.level_spacing_m &&
+               max_levels == o.max_levels &&
+               level_budget == o.level_budget &&
+               step_m == o.step_m &&
+               passage_length_m == o.passage_length_m &&
+               descent_grade == o.descent_grade &&
+               massif_bias == o.massif_bias &&
+               meander == o.meander &&
+               branch_chance_vadose == o.branch_chance_vadose &&
+               branch_chance_phreatic == o.branch_chance_phreatic &&
+               branch_budget == o.branch_budget &&
+               max_branches == o.max_branches &&
+               max_nodes == o.max_nodes &&
+               passage_width_m == o.passage_width_m &&
+               chamber_radius_m == o.chamber_radius_m &&
+               shaft_chance == o.shaft_chance &&
+               shaft_drop_m == o.shaft_drop_m &&
+               smoothing_iterations == o.smoothing_iterations;
+    }
+    bool operator!=(const CaveConfig& o) const { return !(*this == o); }
 };
 
 /**

@@ -104,13 +104,9 @@ void print_usage() {
         << "  --help           show this message\n"
         << "\n"
         << "writes PATH.yaml and one PNG per layer: elevation, water, biomes,\n"
-        << "roads, structures, landmarks, regions, composite, and the caves --\n"
-        << "a readable caves overview, plus a cave_floor_N and cave_roof_N pair\n"
-        << "for every storey the map's systems reach, on the elevation layer's\n"
-        << "own greyscale. How many pairs that is comes from the caves rather\n"
-        << "than being fixed: a map of single-level systems writes one, and one\n"
-        << "with three-storey systems writes three. The caves are underground\n"
-        << "and are never drawn into the composite.\n";
+        << "roads, structures, landmarks, regions, composite, and caves -- one\n"
+        << "overview of every system's passages and chambers, shaded by depth.\n"
+        << "The caves are underground and are never drawn into the composite.\n";
 }
 
 /**

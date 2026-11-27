@@ -921,13 +921,17 @@ by layer / slope / height, streamed around the camera, re-scattered where the te
 
 ## Not here yet
 
-Caves and overhangs as GEOMETRY. The data model now has room for one roof -- `TileCell` carries
-a second solid span (`roof_steps`..`roof_top`, behind the `Roofed` flag), so a column can have
-something over its head, and the coarse field tier already draws the outermost surface rather
-than the ground. What is still missing is the styled mesher: it decides face exposure by exact
-integer comparison against `steps`, and every one of those comparisons has to become
-span-relative before a roof is drawn, along with a downward-facing underside piece the tile
-library has no counterpart of. Until then a roofed column renders as its floor alone. Waterfalls
+Editing a column that has a roof over it. The geometry is here: a column carries a solid span
+over its head (`TileCell`'s `Roofed` pair, and a list in the `SpanIndex`/`Spans` planes for a
+column with more than one), `mesh_chunk_styled()` draws its hillside, its sides and its
+underside, `build_chunk_water()` takes a `WaterBand` so the air under a roof can hold its own
+water, and `ground_under()`/`raycast_columns()` answer per span. What the BRUSHES still do is
+write one height per column (`tile_raise`, `tile_set_height`, `tile_smooth`, `tile_water`), so
+lowering a roofed column silently eats the space under it -- that needs a UI answer ("floor or
+roof?") before it needs code. Lighting an enclosed space is also open: `ambient_intensity` and
+`sky_ground` reach every pixel, so an interior is lit as if it were outdoors until a local
+`Volume` or an occlusion term says otherwise. `mesh_chunk_tilted()` (`height_fine_tilt`) has no
+span concept and renders a roofed column's floor alone. Waterfalls
 as their own effect (a river's step is a steep slope of its surface),
 rivers/roads/towns as 3D geometry, loading only the `.terra` chunks near the camera (the file
 format allows it; everything is loaded today), and a per-tile tile-set override. A mode-agnostic

@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <iostream>
 #include <random>
+#include <set>
 #include <string>
 
 #include <glm/glm.hpp>
@@ -273,10 +274,13 @@ COOPA_TEST(section_caps_appear_only_at_style_changes) {
 }
 
 /** @brief Shared by surface_has_no_holes_from_above and its soft_lod-only counterpart. */
-void check_no_holes_from_above(const char* label, const toy::world::TileMeshLibrary& library) {
+void check_no_holes_from_above(const char* label, const toy::world::TileMeshLibrary& library,
+                               bool fine = false, std::int32_t height_fine = 1, bool tilt_tops = false) {
     using namespace toy::world;
     TerrainParams params = make_test_params(16);
     params.soil_depth_steps = 1;   // soil over stone: two atlas kinds down most walls
+    params.height_fine = height_fine;
+    params.height_fine_tilt = tilt_tops;
 
     int misses = 0, backfaces = 0, rays = 0;
     std::string first_failure;
@@ -289,7 +293,8 @@ void check_no_holes_from_above(const char* label, const toy::world::TileMeshLibr
     const std::uint32_t seeds = std::getenv("STYLED_RAY_STRESS") ? 40u : 4u;
     const int rays_per_seed   = std::getenv("STYLED_RAY_STRESS") ? 3000 : 400;
     for (std::uint32_t seed = 1; seed <= seeds; ++seed) {
-        const ColumnPad pad = make_busy_pad(16, seed);
+        ColumnPad pad = make_busy_pad(16, seed);
+        if (fine) add_sub_steps(pad, 16, seed);
         ChunkMeshData mesh;
         mesh_chunk_styled(pad, library, params, mesh);
         for (int i = 0; i < rays_per_seed; ++i) {
@@ -332,10 +337,13 @@ COOPA_TEST(soft_lod_style_has_no_holes_from_above) {
  *        interior (where neighbouring chunks' geometry is missing) are not counted.
  */
 /** @brief Shared by surface_has_no_holes_at_grazing_angles and its soft_lod-only counterpart. */
-void check_no_holes_at_grazing_angles(const char* label, const toy::world::TileMeshLibrary& library) {
+void check_no_holes_at_grazing_angles(const char* label, const toy::world::TileMeshLibrary& library,
+                                      bool fine = false, std::int32_t height_fine = 1, bool tilt = false) {
     using namespace toy::world;
     TerrainParams params = make_test_params(32);
     params.soil_depth_steps = 1;
+    params.height_fine = height_fine;
+    params.height_fine_tilt = tilt;
 
     const std::uint32_t seeds = std::getenv("STYLED_RAY_STRESS") ? 24u : 3u;
     const int rays_per_seed   = std::getenv("STYLED_RAY_STRESS") ? 6000 : 600;
@@ -344,7 +352,8 @@ void check_no_holes_at_grazing_angles(const char* label, const toy::world::TileM
     std::mt19937 rng(11);
     std::uniform_real_distribution<float> unit(0.0f, 1.0f);
     for (std::uint32_t seed = 1; seed <= seeds; ++seed) {
-        const ColumnPad pad = make_busy_pad(32, seed);
+        ColumnPad pad = make_busy_pad(32, seed);
+        if (fine) add_sub_steps(pad, 32, seed);
         ChunkMeshData mesh;
         mesh_chunk_styled(pad, library, params, mesh);
         for (int i = 0; i < rays_per_seed; ++i) {
@@ -353,7 +362,15 @@ void check_no_holes_at_grazing_angles(const char* label, const toy::world::TileM
                                    static_cast<float>(ty) + 0.2f + 0.6f * unit(rng),
                                    // Below the lip band: a rounded lip leaves the top few
                                    // tenths of an edge tile as air, not solid.
-                                   (static_cast<float>(pad.at(tx, ty).steps) - 0.55f) * params.height_step);
+                                   // The column's real top, lift included: aiming at the
+                                   // terrace under a lifted column is not inside its solid.
+                                   // A tilted top dips toward its neighbours, so aim under the
+                                   // terrace instead -- still solid, whatever the tilt did.
+                                   (static_cast<float>(pad.at(tx, ty).steps) +
+                                    (height_fine > 1 ? 0.0f
+                                                     : static_cast<float>(pad.at(tx, ty).sub) /
+                                                           static_cast<float>(k_sub_steps)) -
+                                    0.55f) * params.height_step);
             const float tilt = glm::radians(30.0f + 50.0f * unit(rng)), az = glm::two_pi<float>() * unit(rng);
             const glm::vec3 dir(std::sin(tilt) * std::cos(az), std::sin(tilt) * std::sin(az), -std::cos(tilt));
             const float length = (6.0f - target.z) / std::cos(tilt);
@@ -384,6 +401,110 @@ COOPA_TEST(surface_has_no_holes_at_grazing_angles) {
 }
 COOPA_TEST(soft_lod_style_has_no_holes_at_grazing_angles) {
     check_no_holes_at_grazing_angles("soft_lod style", soft_lod_library());
+}
+
+/**
+ * @brief A square-edged set is what a sub-step lift needs, and the library is what says so.
+ *
+ * A lift translates whole stamps, so two columns lifted differently butt their pieces at an
+ * offset. Square pieces have no profile depth at the tile boundary and still meet; a lipped
+ * set would leave a sliver, which is why ChunkBuildJob::run() drops the lifts for one.
+ */
+/**
+ * @brief A cut count that does not divide 256 still produces exactly that many heights a step.
+ *
+ * What makes neighbours merge again is not that a cut lands on a round number, but that the
+ * SAME cut always produces the same stored value -- two tiles on one cut then share a height
+ * exactly and need no wall between them. Five cuts of a one-metre step land 2 mm off a true
+ * 20 cm, which is the price of keeping the stored byte in 1/256ths and self-describing.
+ */
+COOPA_TEST(a_cut_count_that_does_not_divide_256_is_still_exact) {
+    using namespace toy::world;
+    expect(sub_steps_for(5) == 5, "five cuts are five cuts, not four");
+
+    std::set<std::int32_t> within_a_step;
+    for (std::int64_t i = 0; i < 5; ++i) within_a_step.insert(fine_for_cut(i, 5));
+    expect(within_a_step.size() == 5, "five distinct heights inside one step");
+
+    // Every cut index maps to one value, and one step up is exactly k_sub_steps up.
+    for (std::int64_t i = 0; i < 40; ++i) {
+        expect(fine_for_cut(i + 5, 5) == fine_for_cut(i, 5) + k_sub_steps,
+               "a cut repeats exactly one step higher");
+    }
+    // And quantising any height inside a cut lands on that cut's one value.
+    for (std::int64_t i = 0; i < 20; ++i) {
+        const double lo = static_cast<double>(i) / 5.0;
+        expect(quantise_fine(lo + 1e-6, 5) == fine_for_cut(i, 5) &&
+                   quantise_fine(lo + 0.19, 5) == fine_for_cut(i, 5),
+               "every height within a cut quantises to the same stored value");
+    }
+}
+
+COOPA_TEST(only_a_square_set_accepts_sub_step_heights) {
+    using namespace toy::world;
+    expect(make_tile_library({"voxel"}).sides_are_square(), "voxel: square-edged");
+    expect(!make_tile_library({"round"}).sides_are_square(), "round: not square-edged");
+    expect(!make_tile_library({"soft"}).sides_are_square(), "soft: not square-edged");
+    // One rounded style among square ones disqualifies the whole library: a column honouring
+    // its lift beside one ignoring it is the open band this guards against.
+    expect(!make_tile_library({"voxel", "round"}).sides_are_square(),
+           "a mixed library is not square-edged");
+}
+
+COOPA_TEST(a_sub_step_surface_has_no_holes_from_above) {
+    check_no_holes_from_above("sub-step voxel chunk", voxel_library(), true);
+}
+
+COOPA_TEST(a_sub_step_surface_has_no_holes_at_grazing_angles) {
+    check_no_holes_at_grazing_angles("sub-step voxel chunk", voxel_library(), true);
+}
+
+COOPA_TEST(a_tilted_surface_has_no_holes_from_above) {
+    check_no_holes_from_above("tilted voxel chunk", voxel_library(), true, 64, true);
+}
+
+COOPA_TEST(a_tilted_surface_has_no_holes_at_grazing_angles) {
+    check_no_holes_at_grazing_angles("tilted voxel chunk", voxel_library(), true, 64, true);
+}
+
+COOPA_TEST(a_flat_topped_fine_surface_has_no_holes_from_above) {
+    check_no_holes_from_above("flat-topped fine voxel chunk", voxel_library(), true, 64);
+}
+
+COOPA_TEST(a_flat_topped_fine_surface_has_no_holes_at_grazing_angles) {
+    check_no_holes_at_grazing_angles("flat-topped fine voxel chunk", voxel_library(), true, 64);
+}
+
+COOPA_TEST(tilted_meshing_is_byte_deterministic) {
+    using namespace toy::world;
+    TerrainParams params = make_test_params(16);
+    params.soil_depth_steps = 1;
+    params.height_fine = 64;
+    params.height_fine_tilt = true;
+    const ColumnPad pad = sub_pad(16, 9, 64);
+    ChunkMeshData a, b;
+    mesh_chunk_styled(pad, voxel_library(), params, a);
+    mesh_chunk_styled(pad, voxel_library(), params, b);
+    expect(a.vertices.size() == b.vertices.size() && a.indices.size() == b.indices.size(),
+           "tilted meshing: same counts twice");
+    expect(std::memcmp(a.vertices.data(), b.vertices.data(), a.vertices.size() * sizeof(a.vertices[0])) == 0,
+           "tilted meshing: byte-identical vertices");
+    expect(a.indices == b.indices, "tilted meshing: identical indices");
+}
+
+COOPA_TEST(sub_step_meshing_is_byte_deterministic) {
+    using namespace toy::world;
+    TerrainParams params = make_test_params(16);
+    params.soil_depth_steps = 1;
+    const ColumnPad pad = sub_pad(16, 9);
+    ChunkMeshData a, b;
+    mesh_chunk_styled(pad, voxel_library(), params, a);
+    mesh_chunk_styled(pad, voxel_library(), params, b);
+    expect(a.vertices.size() == b.vertices.size() && a.indices.size() == b.indices.size(),
+           "sub-step meshing: same counts twice");
+    expect(std::memcmp(a.vertices.data(), b.vertices.data(), a.vertices.size() * sizeof(a.vertices[0])) == 0,
+           "sub-step meshing: byte-identical vertices -- every comparison is still an exact integer one");
+    expect(a.indices == b.indices, "sub-step meshing: identical indices");
 }
 
 COOPA_TEST(styled_meshing_is_byte_deterministic) {

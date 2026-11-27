@@ -46,12 +46,14 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <utility>
 #include <vector>
 
 #include <glm/glm.hpp>
 
 #include <toyengine/world/terra_geometry.h>
 #include <toyengine/world/terrain_types.h>
+#include <toyengine/world/tile_topology.h>
 #include <toyengine/world/tile_types.h>
 
 namespace toy {
@@ -97,7 +99,17 @@ struct TileCell {
     std::int16_t  roof_top = 0;
     /** @brief The roof's own top/side kinds, packed exactly as `kinds` is. */
     std::uint8_t  roof_kinds = 0;
-    std::uint8_t  reserved = 0;       /**< @brief Zero; the record's last spare byte. */
+    /**
+     * @brief How far above `steps` the ground really sits, in 1/256 of a step, 0..255.
+     *
+     * The record's last spare byte, so a column's height stopped being bound to a whole step
+     * without the format growing or changing version: a `.terra` written before this reads 0
+     * here, which means "exactly on the terrace" -- the behaviour it already had.
+     *
+     * Only the GROUND carries one. `roof_steps` / `roof_top` stay on whole steps; there is no
+     * second spare byte, and a roof's underside is not a surface anything walks.
+     */
+    std::uint8_t  ground_sub = 0;
 
     /// Flag bits (water's kind moved to `water_kind`; `Water`/`Ocean`/`Flowing` are gone with it).
     enum Flag : std::uint8_t {
@@ -113,6 +125,17 @@ struct TileCell {
          * existed, and so is every `.terra` written from one.
          */
         Roofed = 1u << 4,
+        /**
+         * @brief This column has MORE than one roof, listed in the span planes.
+         *
+         * `Roofed` alone means exactly one, held in the fields above and costing nothing. A
+         * column with two or more sets this as well and spills the whole list -- the outermost
+         * roof included, so the two never disagree. That redundancy is deliberate: a reader that
+         * knows nothing about the span planes still sees a correct hill with one cave under it,
+         * never a broken world, which is the same bargain the file format strikes by skipping
+         * plane ids it does not recognise.
+         */
+        Spilled = 1u << 5,
     };
     static constexpr std::uint16_t k_no_id = 0xFFFFu;
 
@@ -124,12 +147,45 @@ struct TileCell {
     void set_roof_side_kind(TileKind k) { roof_kinds = static_cast<std::uint8_t>((roof_kinds & 0x0Fu) | ((static_cast<unsigned>(k) & 0x0Fu) << 4)); }
     /** @brief Whether a solid roof stands over this column, with room under it. */
     bool roofed() const { return has(Roofed) && roof_top > roof_steps; }
+    /**
+     * @brief The outermost solid surface of this column: the roof's top where there is one, the
+     *        ground otherwise.
+     *
+     * What anything looking at the world FROM OUTSIDE must read -- which is every pass that
+     * reasons about a column's NEIGHBOUR. On a roofed column `steps` is the floor of the open
+     * span, tens of steps below the surface, so a neighbour reading it sees a pit where the
+     * ground is unbroken. `TileColumn` carries the same pair for the mesher's sake.
+     */
+    std::int16_t outer_steps() const { return roofed() ? roof_top : steps; }
+    /** @brief That height in sub-step quanta. A roof's top stays on whole steps. */
+    std::int32_t outer_fine() const {
+        return roofed() ? static_cast<std::int32_t>(roof_top) * k_sub_steps : ground_fine();
+    }
+    /** @brief The same surface as a height in steps, to match `ground_steps()`. */
+    float outer_ground_steps() const {
+        return roofed() ? static_cast<float>(roof_top) : ground_steps();
+    }
     void set_top_kind(TileKind k) { kinds = static_cast<std::uint8_t>((kinds & 0xF0u) | (static_cast<unsigned>(k) & 0x0Fu)); }
     void set_side_kind(TileKind k) { kinds = static_cast<std::uint8_t>((kinds & 0x0Fu) | ((static_cast<unsigned>(k) & 0x0Fu) << 4)); }
     bool has(Flag f) const { return (flags & f) != 0; }
     void set(Flag f, bool on) { flags = static_cast<std::uint8_t>(on ? (flags | f) : (flags & ~f)); }
 
     bool wet() const { return water_kind != 0; }
+
+    /**
+     * @brief The ground's height in steps, including its sub-step refinement.
+     *
+     * The one place `ground_sub` is turned back into a height, so every reader -- the meshers,
+     * the ray casts, a world's measured relief -- agrees to the quantum.
+     */
+    float ground_steps() const {
+        return static_cast<float>(steps) +
+               static_cast<float>(ground_sub) / static_cast<float>(k_sub_steps);
+    }
+    /** @brief That height in sub-step quanta, for an exact comparison. */
+    std::int32_t ground_fine() const {
+        return static_cast<std::int32_t>(steps) * k_sub_steps + static_cast<std::int32_t>(ground_sub);
+    }
 
     /** @brief mapcoopa's 0..1 temperature / moisture, and the quantiser the other way. */
     float temperature01() const { return static_cast<float>(temperature) / 255.0f; }
@@ -145,17 +201,61 @@ struct TileCell {
 static_assert(sizeof(TileCell) == 24, "TileCell is the on-disk record: keep it 24 bytes");
 
 /**
+ * @struct TileSpanRecord
+ * @brief One solid roof of a column, for the columns that have more than one.
+ *
+ * Eight bytes, fixed, because a `.terra` plane is an array of equal-sized elements. A column with
+ * zero or one roof writes none of these at all -- which is every column of every world that has
+ * no caves in it, so the ordinary case costs nothing but the flag test.
+ *
+ * `under` and `top` mean exactly what `TileCell::roof_steps` and `roof_top` mean, and the list is
+ * ordered bottom-up. The outermost entry duplicates the fields on the cell; see `Spilled`.
+ */
+struct TileSpanRecord {
+    std::int16_t under = 0;      /**< @brief The roof's underside -- a ceiling -- in whole steps. */
+    std::int16_t top = 0;        /**< @brief Its top, in whole steps. */
+    std::uint8_t kinds = 0;      /**< @brief Top kind low nibble, side kind high, as `TileCell::kinds`. */
+    std::uint8_t water_kind = 0; /**< @brief WaterKind standing in the open band BELOW it; 0 dry. */
+    std::int16_t water_steps = 0;/**< @brief That water's terrace. Meaningless when dry. */
+
+    TileKind top_kind() const { return static_cast<TileKind>(kinds & 0x0Fu); }
+    TileKind side_kind() const { return static_cast<TileKind>(kinds >> 4); }
+    bool operator==(const TileSpanRecord& o) const {
+        return under == o.under && top == o.top && kinds == o.kinds &&
+               water_kind == o.water_kind && water_steps == o.water_steps;
+    }
+};
+static_assert(sizeof(TileSpanRecord) == 8, "TileSpanRecord is an on-disk record: keep it 8 bytes");
+
+/** @brief Most roofs one column may carry. Four storeys is mapcoopa's cap; eight is headroom. */
+inline constexpr std::size_t k_max_column_roofs = 8;
+
+/**
  * @brief The column a terraced/blocky mesher builds from one cell: the ground, and the water
  *        over it, quantised to whole steps.
  *
  * The one place a cell's exact-metres `water_level` is rounded down to the terrace it fills --
- * the mesher always reads a real integer plane (`TileCell::steps`), never a fresh quantisation
- * of a height plane, which is what keeps mesh_chunk_styled()'s exact-integer face comparisons
- * exact. Water in the pad: floor(level / height_step).
+ * the mesher always reads a real integer plane (`TileCell::steps` and its sub-step refinement),
+ * never a fresh quantisation of a height plane, which is what keeps mesh_chunk_styled()'s
+ * exact-integer face comparisons exact. Water in the pad: floor(level / height_step).
  */
+/**
+ * @brief `tile_column()`, carrying a stacked column's whole roof list into `arena`.
+ *
+ * The one-argument form below is the fast-path view and stays exactly what it was: a stacked
+ * column comes back from it describing its OUTERMOST roof, with `roof_count` zero -- correct but
+ * incomplete, which is the same bargain the file format strikes for a reader that does not know
+ * the span planes. A mesher that wants every storey takes this one.
+ */
+inline TileColumn tile_column(const TileCell& c, const TileSpanRecord* spans, std::size_t count,
+                              float height_step, std::vector<TileRoof>& arena);
+
 inline TileColumn tile_column(const TileCell& c, float height_step) {
     TileColumn out;
     out.steps = c.steps < 0 ? 0 : c.steps;
+    // Clamping the ground to the plane drops its fraction with it: below zero there is no
+    // terrace left for a fraction to sit above.
+    out.sub = c.steps < 0 ? 0 : static_cast<std::int32_t>(c.ground_sub);
     out.top_kind = c.top_kind();
     out.side_kind = c.side_kind();
     if (c.wet() && height_step > 0.0f) {
@@ -171,6 +271,32 @@ inline TileColumn tile_column(const TileCell& c, float height_step) {
         out.roof_top = c.roof_top;
         out.roof_top_kind = c.roof_top_kind();
         out.roof_side_kind = c.roof_side_kind();
+    }
+    return out;
+}
+
+inline TileColumn tile_column(const TileCell& c, const TileSpanRecord* spans, std::size_t count,
+                              float height_step, std::vector<TileRoof>& arena) {
+    TileColumn out = tile_column(c, height_step);
+    if (spans == nullptr || count == 0) return out;
+    // One roof needs no arena entry -- unless water stands in the band under it, which only a
+    // span record can carry: `TileCell::water_level` is the OPEN-AIR column's water, and a
+    // roofed column has none.
+    if (count == 1 && spans[0].water_kind == 0) return out;
+    out.roof_first = static_cast<std::int32_t>(arena.size());
+    out.roof_count = static_cast<std::int32_t>(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        TileRoof r;
+        r.under = spans[i].under;
+        r.top = spans[i].top;
+        r.top_kind = spans[i].top_kind();
+        r.side_kind = spans[i].side_kind();
+        r.water = spans[i].water_kind == static_cast<std::uint8_t>(WaterKind::River) ? k_water_flowing
+                : spans[i].water_kind == static_cast<std::uint8_t>(WaterKind::Lava)  ? k_water_lava
+                : spans[i].water_kind != 0                                           ? k_water_still
+                                                                                     : 0;
+        r.water_level = spans[i].water_steps;
+        arena.push_back(r);
     }
     return out;
 }
@@ -250,6 +376,40 @@ public:
 
     const std::vector<TileCell>& tiles() const { return tiles_; }
 
+    /** @brief Whether any column of this world carries more than one roof. */
+    bool has_spans() const { return !spill_.empty(); }
+    /**
+     * @brief A column's roofs, bottom-up; empty unless it set `TileCell::Spilled`.
+     *
+     * A one-roof column is not listed here: its roof is on the cell itself. Read it through
+     * `roofs_of()` instead, which answers for both.
+     */
+    std::pair<const TileSpanRecord*, std::size_t> spans_at(int tx, int ty) const;
+    /**
+     * @brief Replaces a column's roofs, setting or clearing `Roofed` and `Spilled` to match.
+     *
+     * Appends rather than reusing the space a shorter list left; `compact_spans()` reclaims it,
+     * and `save_terra()` calls that first so a file never carries holes.
+     */
+    void set_spans(int tx, int ty, const TileSpanRecord* spans, std::size_t count);
+    /** @brief Drops any span the index no longer points at. */
+    void compact_spans();
+    /**
+     * @brief Re-reads every spilled column's OUTERMOST roof off the cell it duplicates.
+     *
+     * The outermost entry of a column's span list and `TileCell::roof_steps`/`roof_top` are the
+     * same roof written twice -- which is what lets a reader that knows nothing about the span
+     * planes still see a correct hill with one cave under it. A pass that moves the surface a
+     * column SHOWS (shore grading, water settling) moves the cell's pair and knows nothing about
+     * the list, so this puts the two back in step. Run it after any such pass; on a world with
+     * no spilled column it does nothing at all.
+     */
+    void sync_outer_spans();
+    /** @brief The raw planes, for the codec. */
+    const std::vector<std::uint32_t>& spill_index() const { return spill_offsets_; }
+    const std::vector<TileSpanRecord>& spill_spans() const { return spill_; }
+    void adopt_spans(std::vector<std::uint32_t> index, std::vector<TileSpanRecord> spans);
+
     /** @brief Copies `rect`'s tiles out, row-major (for undo). */
     std::vector<TileCell> capture(const IRect& rect) const;
     /** @brief Writes tiles captured from `rect` back and marks it dirty. */
@@ -307,6 +467,34 @@ public:
      * metres -- which matters because the water operations walk thousands of tiles per flood.
      */
     float ground_at_tile(glm::ivec2 tile) const;
+
+    /**
+     * @struct GroundLevel
+     * @brief One solid surface of a column, and which of its spans it belongs to.
+     */
+    struct GroundLevel {
+        float height = 0.0f;   /**< @brief The surface, in world units. */
+        float under = 0.0f;    /**< @brief That span's underside; 0 for the ground. */
+        int span = 0;          /**< @brief 0 the ground, 1.. the roofs bottom-up. */
+        bool valid = false;    /**< @brief False when nothing solid lies under `z`. */
+    };
+
+    /**
+     * @brief The surface a body at height `z` is standing on: the highest span top at or below it.
+     *
+     * `ground_at()` keeps its signature AND its meaning -- the outermost surface -- because that
+     * is what every existing caller wants: a streamer framing the world, a brush working on the
+     * hill, a water sheet. This is the question only something INSIDE a cave has to ask, and
+     * asking it is opt-in, so nothing changes answer by accident.
+     */
+    GroundLevel ground_under(glm::vec2 local, float z) const;
+    /** @brief The same by tile, without the round trip through local coordinates. */
+    GroundLevel ground_under_tile(glm::ivec2 tile, float z) const;
+    /**
+     * @brief The ceiling over `z`: the lowest span underside above it.
+     * @return `valid` false when the column is open to the sky from there.
+     */
+    GroundLevel ceiling_over_tile(glm::ivec2 tile, float z) const;
     /** @brief Unit surface normal at local xy. +Z with no height plane (a column's top is flat). */
     glm::vec3 normal_at(glm::vec2 local) const;
 
@@ -427,6 +615,14 @@ private:
     TerraGeometry geometry_;
     std::vector<TileCell> tiles_;
     std::vector<float> heights_;                    ///< Empty when !geometry_.has_height_plane().
+    /**
+     * @brief Per tile, `count` in bits 0-7 and `first` in bits 8-31; 0 for a column with no list.
+     *
+     * Allocated only when some column spills, exactly as the height plane is -- so a world with
+     * no caves carries neither of these vectors at all.
+     */
+    std::vector<std::uint32_t> spill_offsets_;
+    std::vector<TileSpanRecord> spill_;
     std::array<std::vector<std::uint8_t>, 2> layers_;
 
     std::vector<JournalEntry> tiles_journal_;

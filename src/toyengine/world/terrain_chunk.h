@@ -153,6 +153,19 @@ struct ChunkWaterData {
 };
 
 /**
+ * @enum WaterBand
+ * @brief Which open band of a column a water build reads.
+ *
+ * A column has one open band in the ordinary case -- the air over its ground -- and a column
+ * with a roof over it has another under every roof. Each band is its own water surface at its
+ * own level, so one build pass can only ever describe one of them.
+ */
+enum class WaterBand : std::uint8_t {
+    Outer,          /**< @brief The air over the column's outermost surface. */
+    DeepestFlooded  /**< @brief The lowest band under a roof that water stands in. */
+};
+
+/**
  * @brief Builds a chunk's water surfaces from its columns: one quad per flooded tile, at
  *        `water_inset` (`river_inset` for a river) under the terrace its water fills to, plus a skirt quad under every dry
  *        tile beside water.
@@ -168,9 +181,11 @@ struct ChunkWaterData {
  * @param params  The tiling and `water_inset`.
  * @param still   Receives the sea and lakes.
  * @param flowing Receives the rivers.
+ * @param band    Which open band to read; `Outer` is the air over the ground, and reproduces
+ *                exactly what a world with no roof in it has always built.
  */
 void build_chunk_water(const ColumnPad& pad, const TerrainParams& params, ChunkWaterData& still,
-                       ChunkWaterData& flowing);
+                       ChunkWaterData& flowing, WaterBand band = WaterBand::Outer);
 
 /**
  * @brief Samples every column a chunk needs, including its one-tile neighbour skirt, from the
@@ -351,11 +366,15 @@ const TerrainParams::ChunkLod* first_field_lod(const TerrainParams& params);
  * rather than hand back fresh ones -- see TerrainChunk::water_hash. Covers every field
  * WaterBody::set_geometry() is given, plus the local frame.
  *
- * @param still   The chunk's sea and lakes.
- * @param flowing The chunk's rivers.
- * @return 0 when the chunk has no water at all, and otherwise a hash of both surfaces.
+ * @param still        The chunk's sea and lakes.
+ * @param flowing      The chunk's rivers.
+ * @param cave_still   The water standing under its roofs, when it has any; null for none.
+ * @param cave_flowing The flowing water under them; null for none.
+ * @return 0 when the chunk has no water at all, and otherwise a hash of every surface given.
  */
-std::uint64_t chunk_water_hash(const ChunkWaterData& still, const ChunkWaterData& flowing);
+std::uint64_t chunk_water_hash(const ChunkWaterData& still, const ChunkWaterData& flowing,
+                               const ChunkWaterData* cave_still = nullptr,
+                               const ChunkWaterData* cave_flowing = nullptr);
 
 /**
  * @struct ChunkBuildJob
@@ -450,6 +469,15 @@ struct ChunkBuildJob {
     std::shared_ptr<const coopa::physx::geometry::TriangleMesh> collision_mesh;
     ChunkWaterData         water_still;   /**< Output: the sea and lakes over this chunk. */
     ChunkWaterData         water_flowing; /**< Output: the rivers over this chunk. */
+    /**
+     * @brief Output: the water standing in the deepest flooded band under this chunk's roofs.
+     *
+     * A sump, in a cave. Its own surfaces rather than more quads in the two above, because a
+     * `WaterBody` is one sheet at one level with one set of settings, and a sump's level has
+     * nothing to do with the sea's. Empty on every world with no roof in it.
+     */
+    ChunkWaterData         cave_water_still;
+    ChunkWaterData         cave_water_flowing; /**< Output: flowing water under a roof. */
 
     /** @brief The job body: mesh, water, collider, GPU buffers. Touches nothing but this
      *         object, the borrowed const library and (through VMA) the device. */

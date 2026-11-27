@@ -50,6 +50,7 @@
 #include <coopa/maps/biome_field.h>
 #include <coopa/maps/map_data.h>
 #include <coopa/maps/noise.h>
+#include <coopa/maps/cave_field.h>
 #include <coopa/maps/water_field.h>
 
 #include <toyengine/mapgen/world_bake.h>
@@ -110,6 +111,10 @@ public:
         // climate, so biome boundaries follow the terrain instead of the cell
         // mosaic, and beaches are a band at the actual waterline.
         biomes_ = std::make_unique<coopa::maps::BiomeField>(graph_, config_);
+        // The open spans a cave leaves, and where each system was cut open. Built last because
+        // it measures its mouths against the surface anyone can SEE -- detail and river cut
+        // applied -- which is the same surface the generator clamped every ceiling under.
+        caves_ = std::make_unique<coopa::maps::CaveField>(graph_, config_, detail_, channels_);
 
         build_site_index_();
         built_ = !graph_.centers.empty();
@@ -149,6 +154,27 @@ public:
                      const glm::dvec3& along, std::size_t& cell_hint) const {
         cell_hint = nearest_cell_(p, cell_hint);
         return record_(graph_.centers[cell_hint], p, per_unit, across, along);
+    }
+
+    /**
+     * @brief `cell_at()`, and the extra roofs the column needs if it has more than one.
+     *
+     * A `TileCell` holds one roof. A column under a multi-storey cave needs a list, and only the
+     * world that owns the column has somewhere to keep it -- so a bake walk takes this form and
+     * hands what comes back to `TerraData::set_spans()`.
+     *
+     * @param spans Cleared and filled with the column's roofs, bottom-up; left empty when one
+     *              roof (or none) is enough, which is the overwhelmingly common case.
+     */
+    TileCell cell_at(const coopa::maps::MapPoint& p, double per_unit, const glm::dvec3& across,
+                     const glm::dvec3& along, std::size_t& cell_hint,
+                     std::vector<world::TileSpanRecord>& spans) const {
+        spans.clear();
+        cell_hint = nearest_cell_(p, cell_hint);
+        // Through `record_()`, which is the one place a cave is applied: it has to run LAST of
+        // everything that writes the column (the water, the biome, the kinds), so applying it a
+        // second time out here would hand it a column whose ground is already a cave floor.
+        return record_(graph_.centers[cell_hint], p, per_unit, across, along, false, &spans);
     }
 
     /** @brief Tiles along one axis of the whole world; tile indices span `[0, tiles_per_axis())`. */
@@ -345,7 +371,8 @@ private:
      */
     TileCell record_(const coopa::maps::MapCenter& cell, const coopa::maps::MapPoint& p, double per_unit,
                      const glm::dvec3& across, const glm::dvec3& along,
-                     bool continuous_water_level = false) const {
+                     bool continuous_water_level = false,
+                     std::vector<world::TileSpanRecord>* spans_out = nullptr) const {
         TileCell r;
         r.temperature = TileCell::quantise01(cell.temperature);
         r.moisture    = TileCell::quantise01(cell.moisture);
@@ -359,7 +386,8 @@ private:
         const coopa::maps::WaterSample water = water_->at(cell, p, k_river_min_half_tiles / per_unit);
         const coopa::maps::Biome biome = biomes_->at(cell, p, water);
         r.biome = static_cast<std::uint8_t>(biome);
-        r.steps = static_cast<std::int16_t>(std::min<std::int32_t>(steps_from_elevation_(water.ground), 32767));
+        const std::int32_t ground_fine = fine_from_elevation_(water.ground);
+        set_ground_fine_(r, ground_fine);
         TileKind top = tile_kind_for_biome(biome);
         if (water.wet()) {
             const std::int32_t level_steps = std::max(1, steps_from_elevation_(water.surface));
@@ -368,7 +396,7 @@ private:
                 water.kind != coopa::maps::WaterKind::River) {
                 // Frozen: solid ice at the water's terrace. Lava is exempt -- see the column
                 // sampler: a vent's crater on an ice world stays molten.
-                r.steps = static_cast<std::int16_t>(level_steps);
+                set_ground_fine_(r, level_steps * world::k_sub_steps);
                 r.set_top_kind(TileKind::Ice);
                 r.set_side_kind(TileKind::Ice);
                 return r;
@@ -380,7 +408,7 @@ private:
             const bool flowing = !lava && water.kind == coopa::maps::WaterKind::River;
             if (flowing) r.set(TileCell::River, true);
             // The bed rounds down: at least a step under the water, however shallow mapcoopa's.
-            r.steps = static_cast<std::int16_t>(std::min<std::int32_t>(r.steps, level_steps - 1));
+            set_ground_fine_(r, std::min(ground_fine, (level_steps - 1) * world::k_sub_steps));
             r.water_kind = static_cast<std::uint8_t>(
                 lava ? WaterKind::Lava
                      : (water.kind == coopa::maps::WaterKind::Sea
@@ -400,7 +428,185 @@ private:
         }
         r.set_top_kind(top);
         r.set_side_kind(side_kind_for(top));
+        // Last, because it rewrites the column it is given: a roof keeps the surface kinds the
+        // ground just chose, and the ground becomes the floor of the span under it.
+        if (caves_ && !caves_->empty()) {
+            const coopa::maps::CaveSample cave = caves_->at(cell, p);
+            if (cave.inside()) apply_cave_(r, cave, spans_out);
+        }
         return r;
+    }
+
+    /**
+     * @brief Turns the open spans at a column into the second solid span the record carries.
+     *
+     * The record holds the ground from 0 to `steps` and a roof from `roof_steps` to `roof_top`,
+     * so what is written is: the span's floor as the ground, its ceiling as the roof's underside,
+     * and the surface the column already had as the roof's top. Seen from outside the hill is
+     * exactly what it was -- which is the invariant the whole feature rests on, and what the
+     * `roof_top` rounding below protects.
+     *
+     * The shallowest span wins where a column has several. Daylight enters at a mouth, a mouth is
+     * cut into the uppermost storey, and a lower storey hidden under a higher one is unreachable
+     * either way -- so this is the only choice that cannot disconnect the part anyone can get to
+     * from the part they came in through. A column that needs more than one span does not fit this
+     * record and is not written here.
+     *
+     * @param r    The cell as the ground and water passes left it; rewritten in place.
+     * @param cave Its open spans, and whether a mouth was cut through this column.
+     */
+    void apply_cave_(TileCell& r, const coopa::maps::CaveSample& cave,
+                     std::vector<world::TileSpanRecord>* spans_out) const {
+
+        // Not under water, and this is not a detail. A roofed column is written dry, because one
+        // water surface over one bed cannot describe a surface standing ON a roof with air under
+        // it. But leaving a column out of the wet set is not a local change: the coast distance
+        // field is seeded from exactly that set, and the beach band and the talus relaxation
+        // read it out to `cone_reach_tiles`. Measured on the shipped globe, 521 columns that
+        // would have been wet were being roofed, and the surface moved on 1109 columns of real
+        // terrain up to 31 steps away as a result. So a span under a river or a lake bed stays
+        // shut -- which also leaves the generator's roof clearance honest, since it measured
+        // that clearance against a surface with water standing on it.
+        if (r.wet()) return;
+
+        const coopa::maps::CaveSpanSample& span = cave.outermost();
+
+        // Rounded UP, for the reason the coarse mesher rounds a block up: the outer surface must
+        // never land BELOW the real ground, or the roof is a step short of the hillside beside it
+        // and daylight leaks along the seam.
+        const std::int32_t surface =
+            (r.ground_fine() + world::k_sub_steps - 1) / world::k_sub_steps;
+        // Up as well. A ceiling may be higher than the generator said, never lower -- lower eats
+        // the rock clearance it guaranteed.
+        const std::int32_t under = steps_from_elevation_(span.roof);
+        // Down, by the same argument from the other side: a floor may be lower, never higher,
+        // or the rounding eats the headroom.
+        const std::int32_t floor_fine = fine_from_elevation_(span.floor);
+
+        // A mouth's cut: the hillside here has been taken away, so the column's head is open to
+        // the sky and no roof may be written over it. Without this a cave is a sealed pocket.
+        if (cave.open) {
+            // A cut takes rock AWAY; it never adds any. The cut is a swept disc around a
+            // centreline the adit probed, so a column out at its rim can sit on ground well
+            // below the floor the centreline holds -- and writing that floor there would stand a
+            // pillar of cut rock out of the hillside rather than opening a way into it.
+            // Measured before this clamp: 18 columns raised, one of them by 73 steps.
+            set_ground_fine_(r, std::min(floor_fine, r.ground_fine()));
+            r.set(TileCell::Roofed, false);
+            r.set_top_kind(TileKind::Stone);
+            r.set_side_kind(side_kind_for(TileKind::Stone));
+            r.water_kind = 0;
+            r.water_level = 0.0f;
+            return;
+        }
+
+        // A one-step gap is not a cave and a one-step lid is not a roof, and both read as a seam
+        // of half-formed cells rather than as geometry. Refusing them is also what makes a
+        // passage taper SHUT at its rim instead of ending in one.
+        if (under - floor_fine / world::k_sub_steps < k_min_cave_headroom_steps) return;
+        if (surface - under < 1) return;
+        if (under >= 32767 || surface >= 32767) return;
+
+        r.roof_steps = static_cast<std::int16_t>(under);
+        r.roof_top = static_cast<std::int16_t>(surface);
+        r.roof_kinds = r.kinds;   // the hill keeps the surface it had
+        r.set(TileCell::Roofed, true);
+
+        // Every storey, where a caller has somewhere to put them. A roof's TOP is the floor of
+        // the open span above it -- or the hill itself for the outermost -- so the list is built
+        // by walking the spans shallowest-last and roofing the gap between each pair.
+        if (spans_out != nullptr && cave.count > 1) {
+            spans_out->clear();
+            for (std::size_t i = 0; i < cave.count; ++i) {
+                const coopa::maps::CaveSpanSample& below = cave.spans[i];
+                const std::int32_t lid_under = steps_from_elevation_(below.roof);
+                const std::int32_t lid_top = i + 1 < cave.count
+                                                 ? fine_from_elevation_(cave.spans[i + 1].floor) /
+                                                       world::k_sub_steps
+                                                 : surface;
+                if (lid_top - lid_under < 1) continue;          // too thin to be a roof
+                if (lid_under >= 32767 || lid_top >= 32767) continue;
+                world::TileSpanRecord rec;
+                rec.under = static_cast<std::int16_t>(lid_under);
+                rec.top = static_cast<std::int16_t>(lid_top);
+                rec.kinds = i + 1 < cave.count
+                                ? static_cast<std::uint8_t>(
+                                      (static_cast<unsigned>(TileKind::Stone) & 0x0Fu) |
+                                      ((static_cast<unsigned>(TileKind::Stone) & 0x0Fu) << 4))
+                                : r.kinds;   // the outermost lid is the hill
+                set_span_water_(rec, below, fine_from_elevation_(below.floor) / world::k_sub_steps);
+                spans_out->push_back(rec);
+            }
+            // The deepest span's floor becomes the column's ground; the rest are lids over it.
+            set_ground_fine_(r, fine_from_elevation_(cave.spans[0].floor));
+            r.set_top_kind(TileKind::Stone);
+            r.set_side_kind(side_kind_for(TileKind::Stone));
+            r.water_kind = 0;
+            r.water_level = 0.0f;
+            r.flow = 0;
+            r.flow_authored = 0;
+            return;
+        }
+
+        set_ground_fine_(r, floor_fine);
+        // Cut rock, both faces. The floor of a cave is not the biome that happens to be overhead.
+        r.set_top_kind(TileKind::Stone);
+        r.set_side_kind(side_kind_for(TileKind::Stone));
+        // The column's OWN water is cleared, and stays cleared: `TileCell::water_level` is the
+        // level of the water standing in the open air over the column, and there is no open air
+        // over a roofed one. Water standing INSIDE the span is the span's, written below.
+        r.water_kind = 0;
+        r.water_level = 0.0f;
+        r.flow = 0;
+        r.flow_authored = 0;
+
+        // A phreatic passage was cut AT its storey's table and a sump ends against it, so a
+        // flooded span is the common case rather than an edge one. One roof is otherwise free of
+        // the span planes entirely -- but a table has nowhere else to live, so a flooded band
+        // spends one record to carry it.
+        if (spans_out != nullptr) {
+            world::TileSpanRecord rec;
+            rec.under = static_cast<std::int16_t>(under);
+            rec.top = static_cast<std::int16_t>(surface);
+            rec.kinds = r.kinds;
+            set_span_water_(rec, span, floor_fine / world::k_sub_steps);
+            if (rec.water_kind != 0) {
+                spans_out->clear();
+                spans_out->push_back(rec);
+            }
+        }
+    }
+
+    /**
+     * @brief Writes the table standing in the open band below `rec`'s roof, if any stands there.
+     *
+     * Rounded DOWN, which is the opposite of how a roof rounds and for the mirrored reason: a
+     * surface a step higher than the generator said would stand inside the ceiling it was cut
+     * under.
+     *
+     * A table AT or above the ceiling is a full pipe -- a phreatic passage drowned to its roof,
+     * which is the commonest flooded case, since a passage cut at the table has the table at its
+     * ceiling by construction. That is water, not an error, so it is clamped onto the last step
+     * of air rather than refused: the passage comes out full. A table that lands on the floor
+     * instead really is no water, and the band is left dry -- a sheet with no depth under it
+     * reads as a glitch rather than as a sump.
+     */
+    void set_span_water_(world::TileSpanRecord& rec, const coopa::maps::CaveSpanSample& band,
+                         std::int32_t floor_steps) const {
+        if (!band.flooded || params_.height_step <= 0.0f) return;
+        const double world_z = band.water * static_cast<double>(params_.height_scale);
+        std::int32_t table = static_cast<std::int32_t>(
+            std::floor(world_z / static_cast<double>(params_.height_step)));
+        if (table >= rec.under) table = rec.under - 1;
+        // A passage cut AT its own table has its floor on it, so the table rounds onto the floor
+        // and a literal reading leaves it dry. What such a passage actually carries is the stream
+        // at the water table -- a sheet along the floor -- so it gets one step of it.
+        if (table <= floor_steps) table = floor_steps + 1;
+        if (table >= rec.under) return;   // no air left to stand water in
+        // Still, always: a sump has no slope to run down, and a phreatic passage is full to its
+        // table rather than flowing along one. A river's channel is cut in the open air.
+        rec.water_kind = static_cast<std::uint8_t>(world::WaterKind::Lake);
+        rec.water_steps = static_cast<std::int16_t>(table);
     }
 
     /** @brief The cell whose site is nearest an arbitrary map point, walking out from `hint`. */
@@ -575,6 +781,15 @@ private:
     /** @brief Half-width rivers are sampled at, at the least, in tiles: a 4-connected run of tiles. */
     static constexpr double k_river_min_half_tiles = 0.75;
 
+    /**
+     * @brief Least headroom an open span must have to be written, in whole steps.
+     *
+     * A roof's two ends are stored on whole steps -- there is no sub-step byte left for them --
+     * so a span narrower than this quantises to a seam between two solids rather than to air.
+     * Two is the smallest that is unambiguously a gap.
+     */
+    static constexpr std::int32_t k_min_cave_headroom_steps = 2;
+
     /** @brief Depth, in metres, to which a lake is still sandy -- its margin. */
     static constexpr float k_bed_lake_margin_m = 1.0f;
     /** @brief Depth, in metres, to which a sea floor is still sand -- the surf zone. */
@@ -584,6 +799,35 @@ private:
 
     /** @brief Bucket edge in grid units. One grid unit is the nominal site spacing. */
     static constexpr double k_bucket_size = 1.0;
+
+    /**
+     * @brief Quantises normalised elevation to sub-step quanta, never below the ground plane.
+     *
+     * With `TerrainParams::height_fine` off this is `steps_from_elevation_()` scaled up, so the
+     * result still lands exactly on a terrace. On, it floors to the finer grid instead and the
+     * remainder survives as the column's sub-step lift.
+     */
+    std::int32_t fine_from_elevation_(double elevation) const {
+        if (params_.height_step <= 0.0f) return 0;
+        const std::int32_t cuts = world::sub_steps_for(params_.height_fine);
+        if (cuts <= 1) return steps_from_elevation_(elevation) * world::k_sub_steps;
+        const double world_z = elevation * static_cast<double>(params_.height_scale);
+        const double in_steps = world_z / static_cast<double>(params_.height_step);
+        return in_steps <= 0.0 ? 0 : world::quantise_fine(in_steps, cuts);
+    }
+
+    /** @brief Writes a sub-step ground height into a cell, clamped to what the record holds. */
+    static void set_ground_fine_(TileCell& r, std::int32_t fine) {
+        if (fine < 0) fine = 0;
+        const std::int32_t steps = fine / world::k_sub_steps;
+        if (steps >= 32767) {
+            r.steps = 32767;
+            r.ground_sub = 0;
+            return;
+        }
+        r.steps = static_cast<std::int16_t>(steps);
+        r.ground_sub = static_cast<std::uint8_t>(fine % world::k_sub_steps);
+    }
 
     /** @brief Quantises normalised elevation to whole tile steps, never below the ground plane. */
     std::int32_t steps_from_elevation_(double elevation) const {
@@ -679,6 +923,7 @@ private:
     coopa::maps::RiverChannels          channels_; /**< River beds cut after the displacement. */
     std::unique_ptr<coopa::maps::WaterField> water_;
     std::unique_ptr<coopa::maps::BiomeField> biomes_; /**< Borrows graph_, detail_, channels_. */
+    std::unique_ptr<coopa::maps::CaveField> caves_;   /**< Borrows graph_, detail_, channels_. */
 
     std::vector<std::vector<std::int32_t>> buckets_;  /**< Site indices, bucketed by position. */
     double       origin_x_ = 0.0;

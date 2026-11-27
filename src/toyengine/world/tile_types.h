@@ -100,6 +100,39 @@ inline constexpr std::size_t k_tile_kind_count = 15;
 inline constexpr std::uint32_t k_atlas_columns = 4;
 /** @brief Atlas cells per column. */
 inline constexpr std::uint32_t k_atlas_rows = 4;
+/** @brief Sub-step quanta in one whole tile step -- the resolution of `TileColumn::sub`. */
+inline constexpr std::int32_t k_sub_steps = 256;
+
+/**
+ * @brief Clamps a `TerrainParams::height_fine` key to the cuts per step a bake will really use.
+ *
+ * Any count in `[1, k_sub_steps]`; 1 means whole steps. Five is as good as four -- the storage
+ * stays 1/`k_sub_steps` of a step whatever the count, so a cut lands on the NEAREST stored
+ * quantum rather than an exact one, and five cuts of a one-metre step come out 2 mm off a true
+ * 20 cm. What has to be exact is that a given cut always produces the SAME stored value, which
+ * fine_for_cut() guarantees -- that is what lets two neighbours on one cut share a height
+ * exactly, and so need no wall between them.
+ */
+inline std::int32_t sub_steps_for(std::int32_t height_fine) {
+    return height_fine <= 1 ? 1 : (height_fine > k_sub_steps ? k_sub_steps : height_fine);
+}
+
+/** @brief The stored height, in quanta, of cut number `index` on a grid of `cuts` per step. */
+inline std::int32_t fine_for_cut(std::int64_t index, std::int32_t cuts) {
+    if (cuts <= 1) return static_cast<std::int32_t>(index) * k_sub_steps;
+    const std::int64_t num = index * k_sub_steps;
+    // Round to nearest, flooring toward negative infinity so a cut below the datum behaves.
+    const std::int64_t q = num >= 0 ? (num + cuts / 2) / cuts
+                                    : -((-num + cuts / 2) / cuts);
+    return static_cast<std::int32_t>(q);
+}
+
+/** @brief Quantises a height in steps onto a grid of `cuts` per step, as quanta. */
+inline std::int32_t quantise_fine(double value_in_steps, std::int32_t cuts) {
+    if (cuts <= 1) return static_cast<std::int32_t>(std::floor(value_in_steps)) * k_sub_steps;
+    return fine_for_cut(static_cast<std::int64_t>(std::floor(value_in_steps * cuts)), cuts);
+}
+
 /**
  * @struct TileColumn
  * @brief One tile's sampled state: how tall it is and what it is made of.
@@ -107,9 +140,22 @@ inline constexpr std::uint32_t k_atlas_rows = 4;
  * `steps` is a COUNT of vertical tile steps, not a height in world units -- the quantisation is
  * what gives the terraced, block-stacked read, and keeping it integral is what lets the mesher
  * decide face exposure with an exact comparison rather than an epsilon one.
+ *
+ * `sub` refines where the top of that stack of steps actually sits without giving up either
+ * property: it is a COUNT too, of `1/k_sub_steps` of a step, so `fine()` compares two columns
+ * exactly. A terraced world leaves it 0 and every comparison below reduces to the whole-step
+ * one it has always been.
  */
 struct TileColumn {
     std::int32_t steps     = 0;                 /**< @brief Height in whole tile steps above z = 0. */
+    /**
+     * @brief How far above `steps` this column's top sits, in `1/k_sub_steps` of a step, 0..255.
+     *
+     * The column is still built out of whole steps -- this raises the whole stack, so the top
+     * face stays flat and every stamped piece keeps its exact height. Only `fine()` and the
+     * walls that close the difference read it.
+     */
+    std::int32_t sub       = 0;
     TileKind     top_kind  = TileKind::Grass;   /**< @brief Surface of the top face. */
     TileKind     side_kind = TileKind::Dirt;    /**< @brief Surface of the lateral faces just under the top. */
     /** @brief The terrace the water over this column fills to, in steps; 0 when dry. */
@@ -132,6 +178,17 @@ struct TileColumn {
     TileKind     roof_side_kind = TileKind::Stone; /**< @brief Surface of the roof's lateral faces. */
     /** @brief Whether this column has a roof at all. False on every world that has none. */
     bool         roofed = false;
+    /**
+     * @brief Where this column's roofs are in `ColumnPad::roofs`, when it has more than one.
+     *
+     * `count` is 0 for a column with no roof or exactly one -- which is every column of every
+     * world with no caves in it, and most columns of one that has them. The single roof lives in
+     * the fields above and costs no arena entry; only a stacked column needs the list, and the
+     * fields above still describe its OUTERMOST roof so anything reading them is never wrong,
+     * only incomplete.
+     */
+    std::int32_t roof_first = 0;
+    std::int32_t roof_count = 0;
 
     /**
      * @brief The outermost solid surface of this column: the roof's top where there is one, the
@@ -142,6 +199,16 @@ struct TileColumn {
      * visible from out there -- missing entirely.
      */
     std::int32_t outer_top() const { return roofed ? roof_top : steps; }
+    /**
+     * @brief This column's top in sub-step quanta: the exact value to compare two columns by.
+     *
+     * `steps` alone answers "which terrace", which is what decides a piece's SHAPE (its lip, its
+     * corners, whether a top quadrant is flat). `fine()` answers "how high", which is what
+     * decides whether a wall has to close a drop at all.
+     */
+    std::int32_t fine() const { return steps * k_sub_steps + sub; }
+    /** @brief `fine()` for the outermost surface, matching `outer_top()`. Roofs stay on steps. */
+    std::int32_t outer_fine() const { return roofed ? roof_top * k_sub_steps : fine(); }
     /** @brief The outermost surface's kind, to match `outer_top()`. */
     TileKind outer_top_kind() const { return roofed ? roof_top_kind : top_kind; }
 };

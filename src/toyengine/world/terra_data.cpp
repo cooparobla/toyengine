@@ -101,6 +101,8 @@ TerraData::TerraData(const TerraGeometry& geometry) : uid_(next_uid_()) { reset(
 void TerraData::reset(const TerraGeometry& geometry) {
     geometry_ = geometry.sanitized();
     tiles_.assign(static_cast<std::size_t>(geometry_.tiles_x) * geometry_.tiles_y, TileCell{});
+    spill_offsets_.clear();
+    spill_.clear();
     if (geometry_.has_height_plane()) {
         heights_.assign(static_cast<std::size_t>(height_nx()) * height_ny(), 0.0f);
     } else {
@@ -118,6 +120,16 @@ void TerraData::reshape(const TerraGeometry& geometry_in) {
     const TerraGeometry geometry = geometry_in.sanitized();
     if (geometry == geometry_) return;
     const TerraGeometry old = geometry_;
+
+    // The spill list indexes the OLD grid, and a reshape renumbers every tile: rather than
+    // remap it, drop it and clear the flag that points at it, so a reshaped world is a correct
+    // world with one roof per column rather than one whose indices point at the wrong rock.
+    // Reshaping a world with caves in it is re-baking it anyway.
+    if (!spill_.empty()) {
+        for (TileCell& cell : tiles_) cell.set(TileCell::Spilled, false);
+        spill_offsets_.clear();
+        spill_.clear();
+    }
 
     // Tiles: kept where both grids still have the cell, defaulted past whichever shrank.
     std::vector<TileCell> new_tiles(static_cast<std::size_t>(geometry.tiles_x) * geometry.tiles_y, TileCell{});
@@ -180,6 +192,11 @@ void TerraData::assign_content(const TerraData& src) {
     tiles_ = src.tiles_;
     heights_ = src.heights_;
     layers_ = src.layers_;
+    // The spill list travels with the tile plane it indexes. Forgetting it here leaves a loaded
+    // world with its hills intact and every column's lower storeys gone -- which looks exactly
+    // like a world that never had them.
+    spill_offsets_ = src.spill_offsets_;
+    spill_ = src.spill_;
     tiles_revision_ = tr;
     height_revision_ = hr;
     layer_revision_ = lr;
@@ -250,7 +267,7 @@ float TerraData::bilinear_height_(glm::vec2 local) const {
 float TerraData::ground_at(glm::vec2 local) const {
     if (has_heights()) return bilinear_height_(local);
     const glm::ivec2 tile = glm::clamp(tile_at(local), glm::ivec2(0), glm::ivec2(geometry_.tiles_x - 1, geometry_.tiles_y - 1));
-    return empty() ? 0.0f : static_cast<float>(get(tile.x, tile.y).steps) * geometry_.height_step;
+    return empty() ? 0.0f : get(tile.x, tile.y).outer_ground_steps() * geometry_.height_step;
 }
 
 float TerraData::ground_at_tile(glm::ivec2 tile) const {
@@ -259,7 +276,13 @@ float TerraData::ground_at_tile(glm::ivec2 tile) const {
         const glm::ivec2 t = glm::clamp(tile, glm::ivec2(0), glm::ivec2(geometry_.tiles_x - 1, geometry_.tiles_y - 1));
         return bilinear_height_(tile_centre(t));
     }
-    return static_cast<float>(get(tile.x, tile.y).steps) * geometry_.height_step;
+    // The OUTERMOST surface. Every caller of this wants the surface the world SHOWS -- the
+    // streamer framing a chunk, a brush working on a hillside, a water sheet, foliage scatter --
+    // and on a column with a roof over it `ground_steps()` is the floor of the open span
+    // underneath, tens of steps down. Something standing INSIDE a cave asks `ground_under()`
+    // instead, which takes the height it is at; that question is opt-in precisely so no existing
+    // caller changes answer by accident.
+    return get(tile.x, tile.y).outer_ground_steps() * geometry_.height_step;
 }
 
 glm::vec3 TerraData::normal_at(glm::vec2 local) const {
@@ -295,7 +318,7 @@ glm::vec2 TerraData::chunk_minmax(int cx, int cy) const {
         float lo = std::numeric_limits<float>::max(), hi = -std::numeric_limits<float>::max();
         for (int y = r.y0; y < r.y1; ++y) {
             for (int x = r.x0; x < r.x1; ++x) {
-                const float h = static_cast<float>(at(x, y).steps) * geometry_.height_step;
+                const float h = at(x, y).ground_steps() * geometry_.height_step;
                 lo = std::min(lo, h);
                 hi = std::max(hi, h);
             }
@@ -320,7 +343,7 @@ glm::vec2 TerraData::height_range() const {
             float lo = std::numeric_limits<float>::max(), hi = std::numeric_limits<float>::lowest();
             for (int y = 0; y < geometry_.tiles_y; ++y) {
                 for (int x = 0; x < geometry_.tiles_x; ++x) {
-                    const float h = static_cast<float>(at(x, y).steps) * geometry_.height_step;
+                    const float h = at(x, y).ground_steps() * geometry_.height_step;
                     lo = std::min(lo, h);
                     hi = std::max(hi, h);
                 }
@@ -430,7 +453,11 @@ std::int16_t TerraData::derive_steps_(int tx, int ty) const {
 void TerraData::refresh_steps_(const IRect& tiles) {
     const IRect r = tiles.clipped(geometry_.tiles_x, geometry_.tiles_y);
     for (int y = r.y0; y < r.y1; ++y) {
-        for (int x = r.x0; x < r.x1; ++x) tiles_[index_(x, y)].steps = derive_steps_(x, y);
+        for (int x = r.x0; x < r.x1; ++x) {
+            TileCell& c = tiles_[index_(x, y)];
+            c.steps = derive_steps_(x, y);
+            c.ground_sub = 0;   // the float plane IS the height here; there is no remainder to keep
+        }
     }
 }
 
@@ -597,6 +624,8 @@ void TerraData::assign_baked(TerraData&& baked) {
     tiles_ = std::move(baked.tiles_);
     heights_ = std::move(baked.heights_);
     layers_ = std::move(baked.layers_);
+    spill_offsets_ = std::move(baked.spill_offsets_);   // see assign_content()
+    spill_ = std::move(baked.spill_);
     const glm::ivec2 cc = geometry_.chunk_count();
     chunk_revisions_.assign(static_cast<std::size_t>(cc.x) * cc.y, 0);
     if (geometry_.has_height_plane()) refresh_steps_(IRect{0, 0, geometry_.tiles_x, geometry_.tiles_y});
@@ -641,7 +670,8 @@ bool TerraData::raycast_columns(const glm::vec3& origin, const glm::vec3& dir, f
     bool first = true;
     while (ix >= 0 && iy >= 0 && ix < width && iy < height && t_enter <= t1) {
         const float t_exit = std::min({t_max_x, t_max_y, t1});
-        const float top = static_cast<float>(std::max<int>(0, at(ix, iy).steps)) * height_step;
+        const TileCell& cell = at(ix, iy);
+        const float top = (cell.steps < 0 ? 0.0f : cell.ground_steps()) * height_step;
         const float z_enter = origin.z + dir.z * t_enter;
         if (z_enter <= top) {
             hit.tile = glm::ivec2(ix, iy);
@@ -649,6 +679,43 @@ bool TerraData::raycast_columns(const glm::vec3& origin, const glm::vec3& dir, f
             hit.point = origin + dir * t_enter;
             hit.normal = first ? glm::vec3(0.0f, 0.0f, 1.0f) : entry_normal;
             return true;
+        }
+        // Every solid span of this column, not the ground alone. A column with a roof over it is
+        // solid again from `roof_steps` to `roof_top` -- so a ray crossing a hill with a cave in
+        // it meets the hillside first, and one fired inside the cave meets its ceiling. Tested
+        // against the ground's own top above, which is unchanged, so a column with no roof takes
+        // exactly the path it always did.
+        if (cell.roofed()) {
+            const auto [roofs, roof_count] = spans_at(ix, iy);
+            const TileSpanRecord one{cell.roof_steps, cell.roof_top, cell.roof_kinds, 0, 0};
+            const TileSpanRecord* list = roof_count > 0 ? roofs : &one;
+            const std::size_t n = roof_count > 0 ? roof_count : 1;
+            float best_t = std::numeric_limits<float>::infinity();
+            glm::vec3 best_n(0.0f);
+            for (std::size_t i = 0; i < n; ++i) {
+                const float under = static_cast<float>(list[i].under) * height_step;
+                const float over = static_cast<float>(list[i].top) * height_step;
+                if (z_enter >= under && z_enter <= over) {   // started inside the rock
+                    best_t = t_enter;
+                    best_n = first ? glm::vec3(0.0f, 0.0f, 1.0f) : entry_normal;
+                    break;
+                }
+                // The face the ray reaches first: a roof's top coming down onto it, or its
+                // underside -- a ceiling -- coming up.
+                const float face = dir.z < 0.0f ? over : under;
+                if (std::abs(dir.z) < 1e-12f) continue;
+                const float t_face = (face - origin.z) / dir.z;
+                if (t_face < t_enter || t_face > t_exit || t_face >= best_t) continue;
+                best_t = t_face;
+                best_n = glm::vec3(0.0f, 0.0f, dir.z < 0.0f ? 1.0f : -1.0f);
+            }
+            if (best_t <= t_exit) {
+                hit.tile = glm::ivec2(ix, iy);
+                hit.t = best_t;
+                hit.point = origin + dir * best_t;
+                hit.normal = best_n;
+                return true;
+            }
         }
         if (dir.z < 0.0f) {
             const float t_top = (top - origin.z) / dir.z;
@@ -720,6 +787,155 @@ bool TerraData::raycast_surface(glm::vec3 origin, glm::vec3 dir, float max_t, fl
         if (last) break;
     }
     return false;
+}
+
+
+std::pair<const TileSpanRecord*, std::size_t> TerraData::spans_at(int tx, int ty) const {
+    if (spill_offsets_.empty() || tx < 0 || ty < 0 || tx >= geometry_.tiles_x ||
+        ty >= geometry_.tiles_y) {
+        return {nullptr, 0};
+    }
+    const std::uint32_t word =
+        spill_offsets_[static_cast<std::size_t>(ty) * geometry_.tiles_x + tx];
+    const std::size_t count = word & 0xFFu;
+    const std::size_t first = word >> 8;
+    if (count == 0 || first + count > spill_.size()) return {nullptr, 0};
+    return {spill_.data() + first, count};
+}
+
+void TerraData::set_spans(int tx, int ty, const TileSpanRecord* spans, std::size_t count) {
+    if (tx < 0 || ty < 0 || tx >= geometry_.tiles_x || ty >= geometry_.tiles_y) return;
+    const std::size_t idx = static_cast<std::size_t>(ty) * geometry_.tiles_x + tx;
+    TileCell& cell = tiles_[idx];
+
+    if (count == 0) {
+        cell.set(TileCell::Roofed, false);
+        cell.set(TileCell::Spilled, false);
+        if (!spill_offsets_.empty()) spill_offsets_[idx] = 0;
+        return;
+    }
+
+    // The outermost roof always lives on the cell itself, so a reader that knows nothing about
+    // these planes still sees a correct hill with one cave under it.
+    const TileSpanRecord& outer = spans[count - 1];
+    cell.roof_steps = outer.under;
+    cell.roof_top = outer.top;
+    cell.roof_kinds = outer.kinds;
+    cell.set(TileCell::Roofed, true);
+
+    // One dry roof fits entirely on the cell. One roof with water under it does not: the band's
+    // own table lives on the span record, so it spills even though there is a single roof.
+    if (count == 1 && spans[0].water_kind == 0) {
+        cell.set(TileCell::Spilled, false);
+        if (!spill_offsets_.empty()) spill_offsets_[idx] = 0;
+        return;
+    }
+    if (count > k_max_column_roofs) count = k_max_column_roofs;
+
+    if (spill_offsets_.empty()) {
+        spill_offsets_.assign(static_cast<std::size_t>(geometry_.tiles_x) * geometry_.tiles_y, 0);
+    }
+    const std::size_t first = spill_.size();
+    spill_.insert(spill_.end(), spans, spans + count);
+    spill_offsets_[idx] = static_cast<std::uint32_t>((first << 8) | count);
+    cell.set(TileCell::Spilled, true);
+}
+
+void TerraData::sync_outer_spans() {
+    if (spill_offsets_.empty()) return;
+    for (std::size_t i = 0; i < spill_offsets_.size(); ++i) {
+        const std::size_t count = spill_offsets_[i] & 0xFFu;
+        const std::size_t first = spill_offsets_[i] >> 8;
+        if (count == 0 || first + count > spill_.size()) continue;
+        const TileCell& cell = tiles_[i];
+        if (!cell.roofed()) continue;
+        TileSpanRecord& outer = spill_[first + count - 1];
+        outer.under = cell.roof_steps;
+        outer.top = cell.roof_top;
+        outer.kinds = cell.roof_kinds;
+    }
+}
+
+void TerraData::compact_spans() {
+    if (spill_offsets_.empty()) return;
+    std::vector<TileSpanRecord> packed;
+    packed.reserve(spill_.size());
+    for (std::uint32_t& word : spill_offsets_) {
+        const std::size_t count = word & 0xFFu;
+        const std::size_t first = word >> 8;
+        if (count == 0 || first + count > spill_.size()) {
+            word = 0;
+            continue;
+        }
+        const std::size_t at = packed.size();
+        packed.insert(packed.end(), spill_.begin() + static_cast<std::ptrdiff_t>(first),
+                      spill_.begin() + static_cast<std::ptrdiff_t>(first + count));
+        word = static_cast<std::uint32_t>((at << 8) | count);
+    }
+    spill_ = std::move(packed);
+    if (spill_.empty()) spill_offsets_.clear();
+}
+
+void TerraData::adopt_spans(std::vector<std::uint32_t> index, std::vector<TileSpanRecord> spans) {
+    const std::size_t want = static_cast<std::size_t>(geometry_.tiles_x) * geometry_.tiles_y;
+    if (spans.empty() || index.size() != want) {
+        spill_offsets_.clear();
+        spill_.clear();
+        return;
+    }
+    spill_offsets_ = std::move(index);
+    spill_ = std::move(spans);
+}
+
+TerraData::GroundLevel TerraData::ground_under_tile(glm::ivec2 tile, float z) const {
+    GroundLevel out;
+    if (tile.x < 0 || tile.y < 0 || tile.x >= geometry_.tiles_x || tile.y >= geometry_.tiles_y) {
+        return out;
+    }
+    const TileCell& cell = at(tile.x, tile.y);
+    const float hs = geometry_.height_step;
+    const float ground = (cell.steps < 0 ? 0.0f : cell.ground_steps()) * hs;
+    if (ground <= z) {
+        out = {ground, 0.0f, 0, true};
+    }
+    if (!cell.roofed()) return out;
+
+    // Bottom-up, so the LAST roof at or below `z` wins: a body standing on the second storey of
+    // a cave is on that storey's floor, not on the ground tens of steps under it.
+    const auto [roofs, roof_count] = spans_at(tile.x, tile.y);
+    const TileSpanRecord one{cell.roof_steps, cell.roof_top, cell.roof_kinds, 0, 0};
+    const TileSpanRecord* list = roof_count > 0 ? roofs : &one;
+    const std::size_t n = roof_count > 0 ? roof_count : 1;
+    for (std::size_t i = 0; i < n; ++i) {
+        const float top = static_cast<float>(list[i].top) * hs;
+        if (top > z) break;
+        out = {top, static_cast<float>(list[i].under) * hs, static_cast<int>(i) + 1, true};
+    }
+    return out;
+}
+
+TerraData::GroundLevel TerraData::ground_under(glm::vec2 local, float z) const {
+    return ground_under_tile(tile_at(local), z);
+}
+
+TerraData::GroundLevel TerraData::ceiling_over_tile(glm::ivec2 tile, float z) const {
+    GroundLevel out;
+    if (tile.x < 0 || tile.y < 0 || tile.x >= geometry_.tiles_x || tile.y >= geometry_.tiles_y) {
+        return out;
+    }
+    const TileCell& cell = at(tile.x, tile.y);
+    if (!cell.roofed()) return out;   // open to the sky
+    const float hs = geometry_.height_step;
+    const auto [roofs, roof_count] = spans_at(tile.x, tile.y);
+    const TileSpanRecord one{cell.roof_steps, cell.roof_top, cell.roof_kinds, 0, 0};
+    const TileSpanRecord* list = roof_count > 0 ? roofs : &one;
+    const std::size_t n = roof_count > 0 ? roof_count : 1;
+    for (std::size_t i = 0; i < n; ++i) {
+        const float under = static_cast<float>(list[i].under) * hs;
+        if (under < z) continue;
+        return {under, under, static_cast<int>(i) + 1, true};
+    }
+    return out;
 }
 
 } // namespace world

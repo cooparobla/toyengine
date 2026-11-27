@@ -279,6 +279,38 @@ struct TerrainParams {
     /** @brief Vertical size of one height step, in world units; the quantisation of the terrain. */
     float height_step = 1.0f;
 
+    /**
+     * @brief How many heights a column may stand at WITHIN one step. 1 is a terraced world.
+     *
+     * At 1 a column's height is a whole number of `height_step`s, so at `height_scale: 256` over
+     * a 1 m step there is a 1 m riser under every square metre. Above 1 the bake keeps the
+     * remainder in `TileCell::ground_sub` and the mesher lifts the column's whole stack by it:
+     * the top face stays flat and hard-edged, every stamped piece keeps its exact height, and
+     * the only new geometry is the band that closes a drop shorter than a step. Snapped to a
+     * power of two up to `k_sub_steps` by sub_steps_for(); 16 is 6.25 cm at a 1 m step.
+     *
+     * It is NOT a finer `height_step`, which is the whole point: the step stays the step, so
+     * every threshold denominated in steps -- soil depth, the shore budgets, a climbable riser,
+     * the coarse tier's merges -- keeps the length and the cost it has.
+     */
+    std::int32_t height_fine = 1;
+
+    /**
+     * @brief Whether a sub-step difference TILTS the two tops to meet, instead of walling it.
+     *
+     * Off -- the default -- every tile top stays dead flat and a drop shorter than a step is
+     * closed by one band stretched to exactly that drop. That is the voxel read: a tile is a
+     * flat-topped block, just no longer one whose height is a whole number of steps.
+     *
+     * On, a sub-step difference is absorbed by sloping the tops into each other and no band is
+     * emitted at all, which costs fewer triangles than terracing does. It reads as smooth
+     * ground rather than fine blocks, and because the tiles along a contour of a smooth
+     * elevation field quantise alike, the bands it avoids are the ones that would otherwise
+     * line up into visible ribs. Both expressions read the SAME stored heights, so switching is
+     * a re-mesh and never a re-bake.
+     */
+    bool height_fine_tilt = false;
+
     /** @brief World height of the full `[0, 1]` elevation range -- the vertical scale of the world. */
     float height_scale = 16.0f;
 

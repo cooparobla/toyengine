@@ -22,7 +22,11 @@
  *
  * Fly mode moves along the CURRENT world matrix's own basis columns (convention-free), and
  * its look handling assumes local Z is forward (Blender's convention, matching every camera
- * authored elsewhere in this workspace).
+ * authored elsewhere in this workspace). It turns with the MOUSE (`mouse_sensitivity`,
+ * `invert_x`, `invert_y` -- the same three keys orbit uses) and with the arrow keys
+ * (`look_speed_deg_per_sec`); the two add into the same angles. Its lift axis is world up, or
+ * the local up where the scene has a gravity source, so the free camera of a round world rises
+ * away from the surface rather than along +Z.
  *
  * A tracking Orbit camera COLLIDES (`collide`, on by default): each frame a sphere of
  * `collision_radius` is cast from the target toward the desired camera position through the
@@ -224,7 +228,9 @@ public:
     float first_person_pitch_limit = 85.0f; /**< Look up/down clamp, degrees either side of level. */
 
     // --- Fly parameters ---
+    /** @brief Travel speed in world units per second at full stick, along the camera's own basis. */
     float move_speed             = 5.0f;
+    /** @brief Arrow-key turn rate. The mouse turns the same angles through `mouse_sensitivity`. */
     float look_speed_deg_per_sec = 90.0f;
 
     // --- Per-frame input, set by the caller before Scene::update() ---
@@ -376,6 +382,7 @@ private:
     float tangent_amount_() const;
 
     bool field_frame_(const glm::vec3& target, glm::mat3& out);
+
     bool      field_ = false;
     glm::vec3 field_up_{0.0f, 0.0f, 1.0f};
     glm::vec3 field_y_{0.0f, 1.0f, 0.0f};

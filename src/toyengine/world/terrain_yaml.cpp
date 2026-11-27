@@ -134,7 +134,8 @@ TerrainMode infer_terrain_mode(const fkyaml::node& node) {
         if (!m.empty()) return terrain_mode_from_name(m);
     }
     for (const char* key : {"tile_set", "tiles", "generator", "world_tiles", "tiles_per_grid_unit",
-                            "tile_size", "height_step", "height_scale", "face_tiles"}) {
+                            "tile_size", "height_step", "height_fine", "height_fine_tilt", "height_scale",
+                            "face_tiles"}) {
         if (node.contains(key)) return TerrainMode::Tiles;
     }
     for (const char* key : {"heightmap", "splat0", "splat1", "resolution", "splat_resolution", "size",

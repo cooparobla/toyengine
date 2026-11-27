@@ -41,6 +41,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include <toyengine/world/tile_types.h>
@@ -55,15 +56,39 @@ namespace world {
  * Indexed by local tile coordinates running `[-1, chunk_size]` on both axes: `at(-1, 0)` is the
  * neighbouring chunk's edge column, `at(0, 0)` this chunk's corner.
  */
+/**
+ * @struct TileRoof
+ * @brief One roof over a column, as the mesher reads it, plus the water under it.
+ *
+ * The arena entry behind `TileColumn::roof_first`. A column with one roof carries it on the
+ * column itself and takes no entry here, so this exists only for the stacked case.
+ */
+struct TileRoof {
+    std::int32_t under = 0;  /**< @brief The roof's underside -- a ceiling -- in steps. */
+    std::int32_t top = 0;    /**< @brief Its top, in steps. */
+    TileKind top_kind = TileKind::Stone;
+    TileKind side_kind = TileKind::Stone;
+    std::int32_t water_level = 0; /**< @brief Terrace the band BELOW this roof fills; 0 dry. */
+    std::uint8_t water = 0;       /**< @brief k_water_* of that band. */
+};
+
 struct ColumnPad {
     std::int32_t            chunk_size = 0;
     std::vector<TileColumn> columns;
+    /**
+     * @brief Every stacked column's roofs, bottom-up; the range `TileColumn::roof_first` indexes.
+     *
+     * One vector beside the columns rather than a list per column, so the pad stays two
+     * allocations and copies into a build job as cheaply as it always did.
+     */
+    std::vector<TileRoof>   roofs;
 
     /** @brief Allocates the pad for a chunk of `size` tiles per edge. */
     void resize(std::int32_t size) {
         chunk_size = size;
         const std::size_t stride = static_cast<std::size_t>(size) + 2;
         columns.assign(stride * stride, TileColumn{});
+        roofs.clear();
     }
 
     /** @brief Mutable access by local tile coordinate, valid over `[-1, chunk_size]`. */
@@ -78,6 +103,12 @@ struct ColumnPad {
 
     /** @brief Read-only access by a local coordinate vector. */
     const TileColumn& at(const glm::ivec2& p) const { return at(p.x, p.y); }
+
+    /** @brief A column's roofs, bottom-up. Empty for a column with no roof or exactly one. */
+    std::pair<const TileRoof*, std::size_t> roofs_of(const TileColumn& c) const {
+        if (c.roof_count <= 0) return {nullptr, 0};
+        return {roofs.data() + c.roof_first, static_cast<std::size_t>(c.roof_count)};
+    }
 
 private:
     std::size_t index_(std::int32_t local_x, std::int32_t local_y) const {
@@ -226,6 +257,49 @@ inline std::uint8_t wall_orientation(TileFace face, bool right) {
 /** @brief The along-wall direction a wall half on `face` reaches toward. */
 inline glm::ivec2 wall_end_direction(TileFace face, bool right) {
     return rotate_ccw(glm::ivec2(right ? 1 : -1, 0), lateral_quarter_turns(face));
+}
+
+/**
+ * @brief The lowest cell a wall on `col` facing `nb` must reach, given both their sub-steps.
+ *
+ * Three cases in one expression. Where the two columns share a terrace and differ only in their
+ * sub-step lift, the answer is the top cell: the mesher closes that drop with one stretched half
+ * instead of walking cells, and this is the value that tells a NEIGHBOURING wall's end sections
+ * that the boundary is covered.
+ * Otherwise the wall runs down to the neighbour's own terrace -- and one cell further when this
+ * column is lifted MORE than its neighbour, because the lift raises the wall's bottom with it
+ * and would otherwise reopen the band it exists to close. That extra cell merges into the run
+ * above it, so it is free unless the drop is shallower than the soil is deep.
+ */
+/**
+ * @brief Whether a column is solid at a cell, in ANY of its spans.
+ *
+ * The one predicate a face-exposure test should ask. A column is solid from 0 to `steps`, and --
+ * where it carries a roof -- again from `roof_steps` to `roof_top`; a comparison against `steps`
+ * alone reports the cells of a roof as open air, which is how a roof comes to be drawn with the
+ * hillside beside it running straight through.
+ *
+ * On a column with no roof this reduces exactly to `cell < col.steps`, which is the comparison
+ * every exposure test has always made.
+ */
+inline bool solid_at(const TileColumn& col, std::int32_t cell) {
+    return cell < col.steps || (col.roofed && cell >= col.roof_steps && cell < col.roof_top);
+}
+
+/** @brief The same, over every roof a stacked column carries rather than its outermost alone. */
+inline bool solid_at(const ColumnPad& pad, const TileColumn& col, std::int32_t cell) {
+    if (cell < col.steps) return true;
+    if (col.roof_count <= 0) return col.roofed && cell >= col.roof_steps && cell < col.roof_top;
+    const auto [roofs, count] = pad.roofs_of(col);
+    for (std::size_t i = 0; i < count; ++i) {
+        if (cell >= roofs[i].under && cell < roofs[i].top) return true;
+    }
+    return false;
+}
+
+inline std::int32_t wall_lowest_cell(const TileColumn& col, const TileColumn& nb) {
+    if (nb.steps >= col.steps) return col.steps - 1;
+    return nb.steps - (col.sub > nb.sub ? 1 : 0);
 }
 
 /**

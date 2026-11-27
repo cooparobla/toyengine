@@ -117,6 +117,154 @@ COOPA_TEST(a_demo_chunk_costs_what_the_readme_says) {
 }
 
 /**
+ * @brief What a sub-step height costs a chunk, measured against the same chunk terraced.
+ *
+ * The honest cost of a continuous column height, and the whole reason to prefer it to a finer
+ * `height_step`. Two mechanisms add geometry and nothing else does:
+ *
+ *   - a band on every tile boundary whose two columns differ by less than a step, where a
+ *     terraced world had nothing at all;
+ *   - neighbouring tops that no longer share a height, so Mesh::weld_and_optimize() cannot
+ *     collapse their corners into each other.
+ *
+ * What does NOT change is what matters: `height_step` and `soil_depth_steps` keep their values,
+ * so a wall is still at most `soil_depth_steps + 1` bands however deep the drop, the vertex
+ * reserve above stays the right size, and the coarse tier (which a world drawing `coarse_builds`
+ * uses for nearly every chunk) stays on whole steps and costs exactly what it always did.
+ *
+ * The bound is deliberately loose: it is a tripwire against a change that makes a sub-step
+ * height cost a MULTIPLE of a terraced one, not a budget to tune against.
+ */
+COOPA_TEST(a_sub_step_chunk_costs_near_what_a_terraced_one_does) {
+    const TileMeshLibrary library = make_tile_library({"voxel"});
+    TerrainParams params = make_test_params(32);
+    params.max_merge = 1;   // every tile its own piece, as a shaped world asks for
+
+    struct Totals { double mesh_ms, weld_ms; std::size_t verts, tris; };
+    const auto measure = [&](bool fine, std::int32_t height_fine, bool tilt = false) {
+        params.height_fine = height_fine;
+        params.height_fine_tilt = tilt;
+        std::vector<double> mesh_ms, weld_ms;
+        std::size_t verts = 0, tris = 0;
+        for (std::uint32_t rep = 0; rep < 24; ++rep) {
+            ColumnPad pad = busy_pad(params.chunk_size, 1 + rep);
+            if (fine) add_sub_steps(pad, params.chunk_size, 1 + rep, 16);
+            ChunkMeshData mesh;
+            auto t0 = std::chrono::steady_clock::now();
+            mesh_chunk_styled(pad, library, params, mesh);
+            auto t1 = std::chrono::steady_clock::now();
+            coopa::gfx::engine::data::Mesh::weld_and_optimize(mesh.vertices, mesh.indices);
+            auto t2 = std::chrono::steady_clock::now();
+            mesh_ms.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+            weld_ms.push_back(std::chrono::duration<double, std::milli>(t2 - t1).count());
+            verts += mesh.vertices.size();
+            tris  += mesh.indices.size() / 3;
+        }
+        return Totals{median(mesh_ms), median(weld_ms), verts / 24, tris / 24};
+    };
+
+    const Totals flat = measure(false, 1);
+    const Totals fine = measure(true, 1);
+    const Totals flat64 = measure(true, 64);
+    const Totals tilt = measure(true, 64, true);
+    std::printf("  32-tile voxel chunk, 24 reps: terraced %zuk verts %zuk tris, mesh %.2f ms, weld %.2f ms\n",
+                flat.verts / 1000, flat.tris / 1000, flat.mesh_ms, flat.weld_ms);
+    std::printf("                               sub-step %zuk verts %zuk tris, mesh %.2f ms, weld %.2f ms"
+                "  (x%.2f verts, x%.2f tris)\n",
+                fine.verts / 1000, fine.tris / 1000, fine.mesh_ms, fine.weld_ms,
+                static_cast<double>(fine.verts) / static_cast<double>(flat.verts),
+                static_cast<double>(fine.tris) / static_cast<double>(flat.tris));
+
+    std::printf("                               flat/64  %zuk verts %zuk tris, mesh %.2f ms, weld %.2f ms"
+                "  (x%.2f verts, x%.2f tris)\n",
+                flat64.verts / 1000, flat64.tris / 1000, flat64.mesh_ms, flat64.weld_ms,
+                static_cast<double>(flat64.verts) / static_cast<double>(flat.verts),
+                static_cast<double>(flat64.tris) / static_cast<double>(flat.tris));
+    std::printf("                               tilted   %zuk verts %zuk tris, mesh %.2f ms, weld %.2f ms"
+                "  (x%.2f verts, x%.2f tris)\n",
+                tilt.verts / 1000, tilt.tris / 1000, tilt.mesh_ms, tilt.weld_ms,
+                static_cast<double>(tilt.verts) / static_cast<double>(flat.verts),
+                static_cast<double>(tilt.tris) / static_cast<double>(flat.tris));
+
+    expect(fine.verts > flat.verts, "a sub-step chunk really does close drops a terraced one has none of");
+    expect(fine.tris <= flat.tris * 3,
+           "a sub-step chunk stays within 3x a terraced one -- bands, not a finer quantum");
+    // The reason to tilt rather than band: no quad per sub-step boundary at all, so the same
+    // continuous relief costs LESS than the terraced mesher's stamped quadrants, not more.
+    expect(tilt.tris < flat.tris, "tilting a sub-step chunk costs fewer triangles than terracing it");
+    expect(tilt.tris < fine.tris / 2, "...and a fraction of what a band per boundary costs");
+}
+
+/**
+ * @brief WHY a sub-step height costs more: the walls it adds where there were none.
+ *
+ * The intuition this exists to check is that a continuous height should be free -- the same
+ * faces as a terraced world, just at new heights. It is right wherever the ground is already
+ * rugged, and wrong wherever it is flat, and the whole difference is that one case.
+ *
+ * A terraced world emits NO wall between two tiles standing at the same step, and over a smooth
+ * elevation field most boundaries are exactly that. Cut the step finer and almost none of them
+ * are level any more, so each grows a band. On a pad whose tiles already all differ there is no
+ * such boundary left to find, and the two costs should converge -- which is what this measures.
+ * The residue is the vertex weld: neighbouring tops that no longer share a corner cannot
+ * collapse into one another, which is why vertices move further than triangles do.
+ */
+COOPA_TEST(a_sub_step_height_costs_only_where_the_ground_was_flat) {
+    const TileMeshLibrary library = make_tile_library({"voxel"});
+    TerrainParams params = make_test_params(32);
+    params.max_merge = 1;
+
+    const auto measure = [&](const ColumnPad& pad) {
+        ChunkMeshData mesh;
+        mesh_chunk_styled(pad, library, params, mesh);
+        coopa::gfx::engine::data::Mesh::weld_and_optimize(mesh.vertices, mesh.indices);
+        return std::pair<std::size_t, std::size_t>{mesh.vertices.size(), mesh.indices.size() / 3};
+    };
+
+    double blocky_ratio = 0.0, rugged_ratio = 0.0;
+    for (std::uint32_t rep = 1; rep <= 8; ++rep) {
+        // Mostly-level ground: busy_pad's 3x3 blocks leave most boundaries flat.
+        params.height_fine = 1;
+        const auto blocky_flat = measure(busy_pad(params.chunk_size, rep));
+        params.height_fine = 64;
+        ColumnPad blocky_fine_pad = busy_pad(params.chunk_size, rep);
+        add_sub_steps(blocky_fine_pad, params.chunk_size, rep, 64);
+        const auto blocky_fine = measure(blocky_fine_pad);
+
+        // Already rugged: every tile its own step, so every boundary already has a wall.
+        params.height_fine = 1;
+        const auto rugged_flat = measure(rugged_pad(params.chunk_size, rep));
+        params.height_fine = 64;
+        ColumnPad rugged_fine_pad = rugged_pad(params.chunk_size, rep);
+        add_sub_steps(rugged_fine_pad, params.chunk_size, rep, 64);
+        const auto rugged_fine = measure(rugged_fine_pad);
+
+        blocky_ratio += static_cast<double>(blocky_fine.second) / static_cast<double>(blocky_flat.second);
+        rugged_ratio += static_cast<double>(rugged_fine.second) / static_cast<double>(rugged_flat.second);
+        if (rep == 1) {
+            std::printf("  mostly-level ground: %zuk tris terraced -> %zuk fine\n",
+                        blocky_flat.second / 1000, blocky_fine.second / 1000);
+            std::printf("  already-rugged ground: %zuk tris terraced -> %zuk fine\n",
+                        rugged_flat.second / 1000, rugged_fine.second / 1000);
+        }
+    }
+    blocky_ratio /= 8.0;
+    rugged_ratio /= 8.0;
+    std::printf("  triangles x%.2f on mostly-level ground, x%.2f on already-rugged ground\n",
+                blocky_ratio, rugged_ratio);
+
+    // No cut sweep here on purpose: add_sub_steps() gives every column an INDEPENDENT sub, so
+    // at any cut above 1 every neighbour already differs and the cost saturates by
+    // construction. A real world's subs come from a smooth field, where how many neighbours
+    // still share a quantised height is exactly what the cut size decides -- so that curve has
+    // to be measured on a baked world rather than here. planetoy's authoring docs carry it.
+    expect(rugged_ratio < 1.15,
+           "on ground that already has a wall at every boundary, a sub-step height is ~free");
+    expect(blocky_ratio > rugged_ratio + 0.4,
+           "...and everything it costs is the walls it adds where the ground used to be level");
+}
+
+/**
  * @brief What the chunk's LOD levels cost to build and how much they save -- and the one thing
  *        that must hold for them: every level keeps the chunk's BOUNDARY exactly.
  *

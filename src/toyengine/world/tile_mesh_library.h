@@ -152,6 +152,26 @@ public:
         return style < styles_.size() && styles_[style].top_mergeable[static_cast<std::size_t>(piece)];
     }
 
+    /**
+     * @brief Whether every style here is square-edged -- no lip, no rounded outer corner.
+     *
+     * Measured through top_merges(), not assumed: `top_outer` is flat only when a style has no
+     * lip at all (`LIP_H = R_OUT = 0`). A column's sub-step lift translates whole stamps, which
+     * butt cleanly against the column beside them only where a piece has no profile depth at the
+     * tile boundary. A lipped set would leave a sliver of daylight along every edge whose two
+     * columns are lifted differently, so a world built from one keeps its terraces.
+     *
+     * All styles, not one: two columns side by side, one honouring its lift and one ignoring it,
+     * is exactly the open band this guards against.
+     */
+    bool sides_are_square() const {
+        if (styles_.empty()) return false;
+        for (std::size_t s = 0; s < styles_.size(); ++s) {
+            if (!top_merges(static_cast<std::uint8_t>(s), TilePiece::TopOuter)) return false;
+        }
+        return true;
+    }
+
     /** @brief Assigns the style a surface kind's cells are shaped with. */
     void set_kind_style(TileKind kind, std::uint8_t style) {
         kind_style_[static_cast<std::size_t>(kind)] = style;
@@ -206,6 +226,17 @@ public:
 
     /** @brief A whole flat top at z = 1 -- the fast path for a tile with no exposed edge. */
     const SideGeometry& full_top() const { return full_top_; }
+    /**
+     * @brief A whole flat tile bottom at z = 0, facing DOWN: the underside of a solid span that
+     *        has open air beneath it -- a cave ceiling.
+     *
+     * The mirror of `full_top()`, and a fixed piece rather than a `TilePiece` for the same reason
+     * that one is: the piece table is per-style, ordered and authored, while a ceiling is one
+     * flat tile with no lip, no corner and no orientation to choose. `TileFace::Bottom` is
+     * documented as never exposed because on a heightfield it never was -- a column rested on
+     * the ground. A column with a second solid span over its head has one.
+     */
+    const SideGeometry& full_bottom() const { return full_bottom_; }
 
     /**
      * @brief The floor triangle under a convex wall half, at z = 0: the corner of its own
@@ -291,6 +322,7 @@ private:
     std::vector<StyleSet>                     styles_;
     std::array<std::uint8_t, k_tile_kind_count> kind_style_{};
     SideGeometry                              full_top_;
+    SideGeometry                              full_bottom_;
     Oriented                                  foot_;
 
     bool finished_ = false; /**< finish_styles() ran; reset by add_style(). */

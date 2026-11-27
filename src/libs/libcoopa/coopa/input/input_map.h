@@ -12,6 +12,7 @@
 #define COOPA_INPUT_INPUT_MAP_H
 
 #include <functional>
+#include <algorithm>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -116,7 +117,21 @@ public:
 
     /// @brief Binds a two-key axis (e.g. "move_x" -> D/A), read via axis().
     void bind_axis(std::string_view axis, Key positive, Key negative) {
-        axes_[std::string(axis)] = AxisBinding{positive, negative};
+        axes_[std::string(axis)] = AxisBinding{positive, negative, Key::Unknown, Key::Unknown};
+    }
+
+    /**
+     * @brief Binds an axis to TWO key pairs, either of which drives it.
+     *
+     * For the movements that have more than one conventional spelling: a free camera's up and
+     * down is E/Q to one player and Space/Shift to the next, and binding only one of them makes
+     * the camera feel broken to half the people who try it. Both pairs sum and the result is
+     * clamped, so holding one key from each pair is still one key's worth of travel and holding
+     * opposite keys still cancels.
+     */
+    void bind_axis(std::string_view axis, Key positive, Key negative, Key alt_positive,
+                   Key alt_negative) {
+        axes_[std::string(axis)] = AxisBinding{positive, negative, alt_positive, alt_negative};
     }
 
     /// @brief Returns -1, 0, or +1 depending on which of the axis's two keys
@@ -127,7 +142,9 @@ public:
         float value = 0.0f;
         if (input.key_down(it->second.positive)) value += 1.0f;
         if (input.key_down(it->second.negative)) value -= 1.0f;
-        return value;
+        if (it->second.alt_positive != Key::Unknown && input.key_down(it->second.alt_positive)) value += 1.0f;
+        if (it->second.alt_negative != Key::Unknown && input.key_down(it->second.alt_negative)) value -= 1.0f;
+        return std::clamp(value, -1.0f, 1.0f);
     }
 
     /// @brief Predicate form of axis() -- see is_down(action, const KeyState&).
@@ -137,7 +154,9 @@ public:
         float value = 0.0f;
         if (is_key_pressed(it->second.positive)) value += 1.0f;
         if (is_key_pressed(it->second.negative)) value -= 1.0f;
-        return value;
+        if (it->second.alt_positive != Key::Unknown && is_key_pressed(it->second.alt_positive)) value += 1.0f;
+        if (it->second.alt_negative != Key::Unknown && is_key_pressed(it->second.alt_negative)) value -= 1.0f;
+        return std::clamp(value, -1.0f, 1.0f);
     }
 
     /// @brief Binds a four-key 2D vector (e.g. WASD movement), read via vector().
@@ -157,7 +176,8 @@ public:
     }
 
 private:
-    struct AxisBinding { Key positive; Key negative; };
+    /// @brief An axis's keys. The alt pair is `Key::Unknown` unless a second spelling was bound.
+    struct AxisBinding { Key positive; Key negative; Key alt_positive; Key alt_negative; };
     struct VectorBinding { Key pos_x; Key neg_x; Key pos_y; Key neg_y; };
 
     /// @brief True if `b`'s required chord (if any) is currently held.

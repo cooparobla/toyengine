@@ -1346,7 +1346,12 @@ void Engine::bind_default_input_() {
 
     input_.bind_axis("fly_x", Key::D, Key::A); // strafe: +right/-left
     input_.bind_axis("fly_y", Key::W, Key::S); // forward/back
-    input_.bind_axis("fly_z", Key::E, Key::Q); // world up/down
+    // Up/down under BOTH conventional spellings. E/Q is what this engine's own demos were
+    // authored with; Space/Shift is what anyone arriving from a creative-mode builder reaches
+    // for first, and a free camera that ignores it feels broken rather than differently bound.
+    // Space is still `jump` and LeftShift still `sprint` -- those are actions on a character,
+    // and nothing has both a character and a fly camera taking input at once.
+    input_.bind_axis("fly_z", Key::E, Key::Q, Key::Space, Key::LeftShift);
     input_.bind_vector("look", Key::Right, Key::Left, Key::Up, Key::Down);
 
     // Object movement gets its OWN axes rather than reusing fly_x/fly_y: those belong to the

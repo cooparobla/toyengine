@@ -621,7 +621,9 @@ void TerrainSystem::upload_finished_chunks_(TerrainComponent& terrain, coopa::sc
         chunk.water_hash = water_hash;
         destroy_chunk_object_(terrain, chunk);
         if (chunk.build && (chunk.build->gpu_mesh || !chunk.build->water_still.empty() ||
-                            !chunk.build->water_flowing.empty())) {
+                            !chunk.build->water_flowing.empty() ||
+                            !chunk.build->cave_water_still.empty() ||
+                            !chunk.build->cave_water_flowing.empty())) {
             create_chunk_object_(terrain, scene, chunk, std::move(kept_water));
         }
         terrain.recycle_build_job(std::move(chunk.build));
@@ -731,6 +733,10 @@ void TerrainSystem::create_chunk_object_(TerrainComponent& terrain, coopa::scene
     if (kept_water.empty()) {
         add_chunk_water_(terrain, *object, chunk.build->water_still, false);
         add_chunk_water_(terrain, *object, chunk.build->water_flowing, true);
+        // A sump under a roof is its own body at its own level: one `WaterBody` is one sheet,
+        // and the band under a roof has nothing to do with the sea's surface over it.
+        add_chunk_water_(terrain, *object, chunk.build->cave_water_still, false);
+        add_chunk_water_(terrain, *object, chunk.build->cave_water_flowing, true);
     } else {
         // Re-parented, not re-built: each keeps its WaterBody, its baked query and its
         // published tile meshes, so it draws in this frame exactly as it did in the last. The

@@ -800,6 +800,8 @@ void register_scene_components(coopa::gfx::core::Device& device,
             read(node, "tile_size", params.tile_size);
             read(node, "height_step", params.height_step);
             read(node, "height_scale", params.height_scale);
+            read(node, "height_fine", params.height_fine);
+            read(node, "height_fine_tilt", params.height_fine_tilt);
             if (node.contains("chunk_size")) {
                 params.chunk_size = node.at("chunk_size").get_value<std::int32_t>();
             }

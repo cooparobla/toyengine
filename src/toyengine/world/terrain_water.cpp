@@ -220,14 +220,29 @@ void settle_water_rounding(TerrainField& field, const IRect& rect, const TileGri
     for (int y = y0; y < y1; ++y) {
         for (int x = x0; x < x1; ++x) {
             TileCell& c = d->at(x, y);
+            // A roofed column's `steps` is the floor of the open span under its roof, not a
+            // surface -- tens of steps below its neighbours, and dry by construction. Pulling it
+            // up to a neighbour's bank would fill the span in. Nothing is lost by standing aside:
+            // the generator will not open a span in a water cell, so a roofed column is never
+            // beside water that needs settling.
+            if (c.roofed()) continue;
             if (c.wet()) {
                 // The bed stays at least one step under the water's surface -- no lower cap: a
                 // continuous metres level has no 255-step depth ceiling to keep it inside.
-                const std::int16_t ceil_step = static_cast<std::int16_t>(std::lround(c.water_level / hstep) - 1);
-                if (c.steps > ceil_step) c.steps = ceil_step;
+                // One WHOLE step of clearance at any cut: the mesher needs a step of water over
+                // a bed, not a quantum of it. A bed already deeper than that keeps the cut it was
+                // sampled at, so a lake floor can be continuous for free.
+                const std::int32_t ceiling =
+                    (static_cast<std::int32_t>(std::lround(c.water_level / hstep)) - 1) * k_sub_steps;
+                if (c.ground_fine() > ceiling) {
+                    c.steps = static_cast<std::int16_t>(ceiling / k_sub_steps);
+                    c.ground_sub = 0;
+                }
                 continue;
             }
-            int bank = c.steps;
+            // In quanta: a dry tile already standing above its bank keeps the cut it was
+            // sampled at, and only one pulled UP to the bank lands back on a whole terrace.
+            std::int32_t bank = c.ground_fine();
             for (int dy = -1; dy <= 1; ++dy) {
                 for (int dx = -1; dx <= 1; ++dx) {
                     if (dx == 0 && dy == 0) continue;
@@ -240,10 +255,14 @@ void settle_water_rounding(TerrainField& field, const IRect& rect, const TileGri
                         continue;
                     }
                     const TileCell& o = d->get(nx, ny);
-                    if (o.wet()) bank = std::max(bank, static_cast<int>(std::lround(o.water_level / hstep)));
+                    if (o.wet()) {
+                        bank = std::max(bank, static_cast<std::int32_t>(std::lround(o.water_level / hstep)) *
+                                                  k_sub_steps);
+                    }
                 }
             }
-            c.steps = static_cast<std::int16_t>(bank);
+            c.steps = static_cast<std::int16_t>(bank / k_sub_steps);
+            c.ground_sub = static_cast<std::uint8_t>(bank % k_sub_steps);
         }
     }
 }

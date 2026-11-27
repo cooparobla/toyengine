@@ -27,7 +27,31 @@ constexpr std::uint32_t k_version = 1;
 constexpr std::size_t k_plane_entry_bytes = 28;
 
 /** @brief Which plane a table entry names. `0` and anything else unrecognised: skip, don't fail. */
-enum class PlaneId : std::uint32_t { Tiles = 1, Height = 2, Layer0 = 3, Layer1 = 4 };
+enum class PlaneId : std::uint32_t {
+    Tiles = 1,
+    Height = 2,
+    Layer0 = 3,
+    Layer1 = 4,
+    /**
+     * @brief Per tile, which of `Spans` a column's roofs are: count in bits 0-7, first in 8-31.
+     *
+     * Tile-indexed like `Tiles`, so it slices into storage chunks exactly as that one does, and
+     * a column with no list writes a zero -- which is nearly every column of nearly every world,
+     * so the transpose hands deflate four long runs of them.
+     */
+    SpanIndex = 5,
+    /**
+     * @brief The roofs themselves, a flat array of `TileSpanRecord`.
+     *
+     * NOT tile-indexed: a column's list is variable-length, so there is no tile grid to slice.
+     * Written whole in the first storage chunk's blob with the rest empty. That costs the one
+     * affordance the per-chunk layout buys -- a future reader loading only the chunks near the
+     * camera would still have to take this plane entire -- which is a fair trade while it is
+     * thousands of records against millions of tiles, and is the thing to revisit if a world
+     * ever spills in bulk.
+     */
+    Spans = 6
+};
 
 void put_u32(std::vector<std::uint8_t>& out, std::uint32_t v) {
     for (int i = 0; i < 4; ++i) out.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
@@ -144,6 +168,8 @@ struct PlaneSpec {
     int sub;
     int plus;
     int native_w, native_h;
+    /** @brief False for a plane with no tile grid to slice; see `PlaneId::Spans`. */
+    bool tile_indexed = true;
 };
 
 } // namespace
@@ -160,6 +186,11 @@ bool save_terra(const std::string& path, const TerraData& data) {
     if (data.has_heights()) specs.push_back({PlaneId::Height, 4, g.height_sub, 1, data.height_nx(), data.height_ny()});
     specs.push_back({PlaneId::Layer0, 4, g.layer_sub, 0, data.layer_nx(), data.layer_ny()});
     specs.push_back({PlaneId::Layer1, 4, g.layer_sub, 0, data.layer_nx(), data.layer_ny()});
+    if (data.has_spans()) {
+        specs.push_back({PlaneId::SpanIndex, 4, 1, 0, tiles_x, tiles_y});
+        specs.push_back({PlaneId::Spans, static_cast<int>(sizeof(TileSpanRecord)), 1, 0,
+                         static_cast<int>(data.spill_spans().size()), 1, false});
+    }
 
     auto base_of = [&](PlaneId id) -> const std::uint8_t* {
         switch (id) {
@@ -167,6 +198,10 @@ bool save_terra(const std::string& path, const TerraData& data) {
             case PlaneId::Height: return reinterpret_cast<const std::uint8_t*>(data.heights().data());
             case PlaneId::Layer0: return data.layer_plane(0).data();
             case PlaneId::Layer1: return data.layer_plane(1).data();
+            case PlaneId::SpanIndex:
+                return reinterpret_cast<const std::uint8_t*>(data.spill_index().data());
+            case PlaneId::Spans:
+                return reinterpret_cast<const std::uint8_t*>(data.spill_spans().data());
         }
         return nullptr;
     };
@@ -185,8 +220,14 @@ bool save_terra(const std::string& path, const TerraData& data) {
         const std::uint8_t* base = base_of(spec.id);
         for (int cy = 0; cy < scy; ++cy) {
             for (int cx = 0; cx < scx; ++cx) {
-                const TileRange t = storage_chunk_tiles(cx, cy, tiles_x, tiles_y);
-                const PlaneRange r = to_plane_range(t, spec.sub, spec.plus, spec.native_w, spec.native_h);
+                // A plane with no tile grid goes whole into the first chunk and leaves the rest
+                // empty; see PlaneId::Spans.
+                const PlaneRange r =
+                    spec.tile_indexed
+                        ? to_plane_range(storage_chunk_tiles(cx, cy, tiles_x, tiles_y), spec.sub,
+                                         spec.plus, spec.native_w, spec.native_h)
+                        : (cx == 0 && cy == 0 ? PlaneRange{0, 0, spec.native_w, spec.native_h}
+                                              : PlaneRange{0, 0, 0, 0});
                 p.blobs.push_back(pack_range(base, spec.native_w, spec.elem_bytes, r.x0, r.y0, r.x1, r.y1));
                 p.raw_sizes.push_back(static_cast<std::uint32_t>(r.x1 - r.x0) * static_cast<std::uint32_t>(r.y1 - r.y0) *
                                       static_cast<std::uint32_t>(spec.elem_bytes));
@@ -292,6 +333,11 @@ bool load_terra(const std::string& path, TerraData& data) {
     const std::uint32_t chunk_count = static_cast<std::uint32_t>(scx) * static_cast<std::uint32_t>(scy);
 
     bool saw_tiles = false, saw_height = false, saw_layer0 = false, saw_layer1 = false;
+    // The span planes, if this file has them. How MANY spans there are is not derivable from the
+    // geometry the way every other plane's size is, so it comes from the blob's own raw size.
+    bool saw_span_index = false, saw_spans = false;
+    std::vector<std::uint32_t> span_index;
+    std::vector<TileSpanRecord> spans;
 
     for (std::uint32_t pi = 0; pi < plane_count; ++pi) {
         const std::uint8_t* e = file.data() + table_off + static_cast<std::size_t>(pi) * k_plane_entry_bytes;
@@ -305,6 +351,7 @@ bool load_terra(const std::string& path, TerraData& data) {
         PlaneId id;
         int expected_elem_bytes = 0, expected_sub = 0, expected_plus = 0, native_w = 0, native_h = 0;
         bool* seen = nullptr;
+        bool tile_indexed = true;
         switch (id_raw) {
             case static_cast<std::uint32_t>(PlaneId::Tiles):
                 id = PlaneId::Tiles; expected_elem_bytes = static_cast<int>(sizeof(TileCell)); expected_sub = 1;
@@ -322,6 +369,16 @@ bool load_terra(const std::string& path, TerraData& data) {
                 id = PlaneId::Layer1; expected_elem_bytes = 4; expected_sub = sg.layer_sub; expected_plus = 0;
                 native_w = scratch.layer_nx(); native_h = scratch.layer_ny(); seen = &saw_layer1;
                 break;
+            case static_cast<std::uint32_t>(PlaneId::SpanIndex):
+                id = PlaneId::SpanIndex; expected_elem_bytes = 4; expected_sub = 1; expected_plus = 0;
+                native_w = sg.tiles_x; native_h = sg.tiles_y; seen = &saw_span_index;
+                span_index.assign(static_cast<std::size_t>(sg.tiles_x) * sg.tiles_y, 0);
+                break;
+            case static_cast<std::uint32_t>(PlaneId::Spans):
+                id = PlaneId::Spans; expected_elem_bytes = static_cast<int>(sizeof(TileSpanRecord));
+                expected_sub = 1; expected_plus = 0; native_w = 0; native_h = 1;
+                seen = &saw_spans; tile_indexed = false;
+                break;
             default:
                 continue; // Unknown plane: forward-compatible skip, not a failure.
         }
@@ -335,8 +392,11 @@ bool load_terra(const std::string& path, TerraData& data) {
             const std::uint32_t blob_size = get_u32(idx + 8), raw_size = get_u32(idx + 12);
             if (blob_off + blob_size > file.size()) return false;
             const int cx = static_cast<int>(c) % scx, cy = static_cast<int>(c) / scx;
-            const TileRange t = storage_chunk_tiles(cx, cy, sg.tiles_x, sg.tiles_y);
-            const PlaneRange r = to_plane_range(t, sub, plus, native_w, native_h);
+            const PlaneRange r =
+                tile_indexed ? to_plane_range(storage_chunk_tiles(cx, cy, sg.tiles_x, sg.tiles_y),
+                                              sub, plus, native_w, native_h)
+                             : (c == 0 ? PlaneRange{0, 0, native_w, native_h}
+                                       : PlaneRange{0, 0, 0, 0});
             const std::uint8_t* blob = file.data() + blob_off;
 
             bool ok = false;
@@ -351,6 +411,22 @@ bool load_terra(const std::string& path, TerraData& data) {
             } else if (id == PlaneId::Height) {
                 ok = unpack_range(reinterpret_cast<std::uint8_t*>(scratch.heights().data()), native_w, elem_bytes, r.x0,
                                   r.y0, r.x1, r.y1, blob, blob_size, raw_size);
+            } else if (id == PlaneId::SpanIndex) {
+                ok = unpack_range(reinterpret_cast<std::uint8_t*>(span_index.data()), native_w,
+                                  elem_bytes, r.x0, r.y0, r.x1, r.y1, blob, blob_size, raw_size);
+            } else if (id == PlaneId::Spans) {
+                // The whole array lives in the first chunk; the rest are empty by construction.
+                ok = true;
+                if (c == 0 && raw_size > 0) {
+                    const std::size_t n = raw_size / sizeof(TileSpanRecord);
+                    std::vector<std::uint8_t> bytes;
+                    ok = unpack_range_local(elem_bytes, static_cast<int>(n), 1, blob, blob_size,
+                                            raw_size, bytes);
+                    if (ok) {
+                        spans.assign(n, TileSpanRecord{});
+                        std::memcpy(spans.data(), bytes.data(), bytes.size());
+                    }
+                }
             } else {
                 const int which = id == PlaneId::Layer0 ? 0 : 1;
                 ok = unpack_range(scratch.layer_plane(which).data(), native_w, elem_bytes, r.x0, r.y0, r.x1, r.y1, blob,
@@ -362,6 +438,9 @@ bool load_terra(const std::string& path, TerraData& data) {
 
     if (!saw_tiles || !saw_layer0 || !saw_layer1) return false;
     if (scratch.has_heights() != saw_height) return false;
+    // Both or neither: an index with no spans points at nothing, and spans with no index are
+    // unreachable. A file written before these planes existed has neither and loads unchanged.
+    if (saw_span_index && saw_spans) scratch.adopt_spans(std::move(span_index), std::move(spans));
 
     scratch.mark_all_dirty();
     // A file that loaded successfully is committed content, whatever filled it originally -- a

@@ -32,8 +32,11 @@ std::int16_t clamp_steps(int v) { return static_cast<std::int16_t>(std::clamp(v,
 /// absolute, not as a depth), but a bed that rose through it drains the tile. Returns whether
 /// anything changed.
 bool move_ground(TileCell& c, std::int16_t steps, float height_step) {
-    if (steps == c.steps) return false;
+    if (steps == c.steps && c.ground_sub == 0) return false;
     c.steps = steps;
+    // An edit is authored in whole steps, so it lands on one: a leftover fraction under a tile
+    // the brush just levelled would put it back off the terrace the author asked for.
+    c.ground_sub = 0;
     if (c.wet() && c.water_level <= static_cast<float>(steps) * height_step) {
         c.water_kind = static_cast<std::uint8_t>(WaterKind::None);
         c.water_level = 0.0f;

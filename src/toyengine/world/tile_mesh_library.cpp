@@ -355,6 +355,23 @@ void TileMeshLibrary::bake_fixed_pieces_() {
     Oriented quads;
     bake_oriented_(quad, quads);
     full_top_ = quads[0];
+    // The same quad at the cell's floor, wound the other way and facing down. Built from its own
+    // vertex helper rather than from `quad` because the normal differs, and a normal is what a
+    // ceiling is: shaded as a +Z face it would catch the sun through the rock above it.
+    auto under = [](const glm::vec3& p) {
+        Vertex v;
+        v.position = p;
+        v.normal   = glm::vec3(0.0f, 0.0f, -1.0f);
+        v.uv       = glm::vec2(p.x, p.y);
+        v.tangent  = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
+        return v;
+    };
+    const std::vector<Vertex> bottom = {under({0, 0, 0}), under({1, 1, 0}), under({1, 0, 0}),
+                                        under({0, 0, 0}), under({0, 1, 0}), under({1, 1, 0})};
+    Oriented bottoms;
+    bake_oriented_(bottom, bottoms);
+    full_bottom_ = bottoms[0];
+
     const std::vector<Vertex> foot = {vertex({0.5f, 0.5f, 0}), vertex({1, 1, 0}), vertex({0.5f, 1, 0})};
     bake_oriented_(foot, foot_);
 

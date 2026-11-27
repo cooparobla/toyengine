@@ -180,6 +180,39 @@ private:
      * cap is shared across the whole system.
      */
     static constexpr int k_descents_per_level = 2;
+    /**
+     * @brief How much faster the section field varies than the plan meander, and its own offset.
+     *
+     * The same coherent field the meander is taken from, read at a higher frequency and a
+     * different place in it, so a passage's shape and its course are independent without a
+     * second noise configuration to carry. Three, because a cross-section wants to change over
+     * a few stations rather than over a whole system -- which is what the plan does.
+     */
+    static constexpr double k_section_frequency = 3.0;
+    static constexpr double k_section_offset = 211.0;
+    /**
+     * @brief And for the loop field, which wants to swing over several stations, not a few.
+     *
+     * `noise_cave` runs at 0.45 per grid unit, so this puts a loop's half-period at a little
+     * over a grid unit -- half a dozen stations, which is the distance over which a dip has to
+     * read as a dip rather than as the floor having moved.
+     */
+    static constexpr double k_loop_frequency = 1.5;
+    static constexpr double k_loop_offset = -373.0;
+    /** @brief Smallest multiple of its nominal section a passage may be cut at. */
+    static constexpr double k_min_section = 0.45;
+    /**
+     * @brief Largest, which is a cap rather than a target.
+     *
+     * `chamber_radius_m` is the figure that decides how much of a cave is room, and at a little
+     * over twice it the rooms of one system merge into a single hall. So the section model is
+     * bounded here rather than allowed to compound `section_variation` with `downstream_gain`.
+     */
+    static constexpr double k_max_section = 1.75;
+    /** @brief Share of `level_spacing_m` the tallest space cut at a table may use. */
+    static constexpr double k_storey_height_share = 0.55;
+    /** @brief And the share a loop below it may use; the rest is the rock between two storeys. */
+    static constexpr double k_storey_loop_share = 0.35;
 
     /** @brief A dialect per region, built on demand; a cave is named where it opens. */
     mutable std::unordered_map<RegionId, Language> dialects_;
@@ -194,6 +227,14 @@ private:
         double floor = 0.0;          /**< @brief Floor height it continues from. */
         double bearing = 0.0;        /**< @brief Current heading, in radians. */
         double budget = 0.0;         /**< @brief Length left to spend, in grid units. */
+        /**
+         * @brief Distance this head has come from the mouth, in grid units.
+         *
+         * Inherited by a branch and by a descent rather than reset, because a side passage off
+         * a deep one is as far from the entrance as its parent was -- which is what
+         * `CaveConfig::downstream_gain` measures maturity against.
+         */
+        double travelled = 0.0;
         double phase = 0.0;          /**< @brief Offset into the wander field, so two heads differ. */
         std::int32_t parent = -1;    /**< @brief Station this head continues from. */
         /** @brief Index into `MapCave::levels` of the table this head works to. */
@@ -309,6 +350,10 @@ private:
         const double phreatic_drop = meters_to_height(config, caves.step_m * k_phreatic_grade);
         const double passage_radius = meters_to_grid(config, caves.passage_width_m) * 0.5;
         const double chamber_radius = meters_to_grid(config, caves.chamber_radius_m);
+        const double level_spacing = meters_to_height(config, caves.level_spacing_m);
+        // How far a level passage may loop below its own table, before the per-storey bound --
+        // see `CaveConfig::phreatic_relief_m` and `storey_loop_()`.
+        const double loop_wanted = phreatic_loop_(config);
 
         MapCave cave;
         cave.mouth_edge = edge.index;
@@ -318,7 +363,7 @@ private:
         cave.region = low.region;
 
         const double mouth_floor = cave.surface_at_mouth - clearance - passage_height;
-        cave.levels = level_tables_(config, mouth_floor);
+        cave.levels = level_tables_(config, mouth_floor, loop_wanted);
         // The shallowest table is where the entrance series stops falling, which is
         // what `phreatic_level` has always meant; the rest of the sequence is the
         // storeys beneath it.
@@ -376,6 +421,21 @@ private:
 
             while (head.budget > 0.0 && static_cast<int>(cave.nodes.size()) < caves.max_nodes) {
                 const bool phreatic = head.floor <= table + k_zone_epsilon;
+                // How far in this head has come, as a share of a trunk. Everything about the
+                // station's SIZE is measured against it, so a system opens out as it is
+                // followed rather than being one section throughout.
+                const double maturity =
+                    trunk_budget > 0.0 ? std::clamp(head.travelled / trunk_budget, 0.0, 1.0) : 0.0;
+                // The two storey neighbours, and they bound different things. A LOOP goes down,
+                // so what it must not reach is the storey below; a tall space goes up, so what
+                // it must not reach is the one above. Asking the two questions separately is
+                // what leaves a system's shallowest storey free to hold a tall hall and its
+                // deepest free to hold a deep pool -- see `storey_loop_()`.
+                const bool over_a_storey =
+                    static_cast<std::size_t>(head.level) + 1 < cave.levels.size();
+                const bool under_a_storey = head.level > 0;
+                const double loop =
+                    storey_loop_(loop_wanted, level_spacing, over_a_storey);
 
                 head.bearing += caves.meander * k_max_turn
                                 * static_cast<double>(graph.is_sphere()
@@ -393,9 +453,7 @@ private:
                 // above the water table; below it there is nothing to fall through.
                 const bool shaft = !phreatic && unit(rng) < caves.shaft_chance;
                 const double advance = shaft ? step * k_shaft_advance : step;
-                const double drop = shaft      ? shaft_drop
-                                    : phreatic ? phreatic_drop * unit(rng)
-                                               : descent_drop;
+                const double drop = shaft ? shaft_drop : descent_drop;
 
                 const MapPoint next = graph.step_from(head.point, head.bearing, advance);
                 // A globe has no edge to run off.
@@ -423,13 +481,72 @@ private:
                     && unit(rng) < (phreatic ? caves.branch_chance_phreatic
                                              : caves.branch_chance_vadose);
 
-                const double height = junction ? chamber_height : passage_height;
-                const double radius = junction ? chamber_radius : passage_radius;
-                double floor = std::max(head.floor - drop, table);
+                // A room on its own account, where nothing branches. Rock gives way at a bed
+                // or a joint swarm as well as at a junction, and the phreatic half is where
+                // there is span enough for it to fall out of -- see `CaveConfig::chamber_chance`.
+                // Rolled after the junction so a junction is still a junction.
+                const bool breakdown =
+                    !junction && phreatic && unit(rng) < caves.chamber_chance;
+                const bool room = junction || breakdown;
+
+                // What this station is cut at. `swell` trades width against height -- the trade
+                // dissolution makes, and the one that gives a crawl at one station and a canyon
+                // at the next -- and `growth` opens both out with distance from the mouth.
+                const double swell = section_field_(graph, wander, next, head.phase);
+                const double growth = 1.0 + std::max(0.0, caves.downstream_gain) * maturity;
+                const double vary = std::clamp(caves.section_variation, 0.0, 1.0);
+                const double wide_scale =
+                    std::clamp(growth * (1.0 + vary * swell), k_min_section, k_max_section);
+                const double tall_scale =
+                    std::clamp(growth * (1.0 - vary * swell), k_min_section, k_max_section);
+
+                double height = (room ? chamber_height : passage_height) * tall_scale;
+                const double radius = (room ? chamber_radius : passage_radius) * wide_scale;
+
+                double floor = 0.0;
+                double bottom = table;
+                if (phreatic) {
+                    // A loop. Water at and below the table is under pressure rather than under
+                    // gravity, so the tube it cuts does not have to run downhill, and a real one
+                    // does not -- it rises and falls around the table. The ceiling follows the
+                    // dip, so a loop is a pool with headroom over it rather than a drowned tube.
+                    //
+                    // Approached at the rate a passage is cut rather than jumped to: the field
+                    // is coherent, so the target moves slowly and the floor tracks it, and two
+                    // consecutive stations are a passage rather than a step.
+                    const double dip =
+                        loop * 0.5 * (1.0 - loop_field_(graph, wander, next, head.phase));
+                    const double rate = std::max(descent_drop, phreatic_drop);
+                    floor = head.floor + std::clamp(table - dip - head.floor, -rate, rate);
+                    // Water fills a dip to the table, so a tube no taller than its own dip is a
+                    // drowned one. Half a nominal passage of air is kept over the waterline --
+                    // which is what makes a loop a pool to wade rather than a sump to swim.
+                    //
+                    // NOT the dip added on top of the height: that would put the ceiling at the
+                    // table plus the whole section, which on a stacked system reaches up into
+                    // the storey above.
+                    height = std::max(height,
+                                      std::max(0.0, table - floor) + passage_height * 0.5);
+                    bottom = table - loop;
+                } else {
+                    floor = std::max(head.floor - drop, table);
+                }
+                // The storey separation `level_spacing_m` documents, enforced rather than
+                // described: a varied section must not reach through the rock into the level
+                // below, and nothing above this line knows how close the next table is.
+                //
+                // Only where there IS a storey above, because that is what a ceiling can reach
+                // into. The shallowest one has nothing over it but hillside, and the rock there
+                // is what `settle_()` already enforces -- so the difference is visible: a
+                // system's top storey is where its tall halls are, and its bottom storey is
+                // where the pools are.
+                if (level_spacing > 0.0 && under_a_storey) {
+                    height = std::min(height, level_spacing * k_storey_height_share);
+                }
                 double roof = floor + height;
                 const double surface =
                     lowest_surface_(graph, next, radius, cell, detail, channels);
-                if (!settle_(surface, clearance, height, table, floor, roof)) {
+                if (!settle_(surface, clearance, height, bottom, floor, roof)) {
                     // The rock ran out: either the ground above dropped faster than
                     // the passage could, or the passage has arrived at the water it
                     // drains to. Both end the head here rather than being allowed to
@@ -445,9 +562,9 @@ private:
                 node.radius = radius;
                 node.center = cell;
                 node.zone = zone_of_(floor, table);
-                node.feature = shaft      ? CaveFeature::Shaft
-                               : junction ? CaveFeature::Chamber
-                                          : CaveFeature::Passage;
+                node.feature = shaft ? CaveFeature::Shaft
+                               : room  ? CaveFeature::Chamber
+                                       : CaveFeature::Passage;
                 node.level = head.level;
                 node.parent = head.parent;
 
@@ -465,6 +582,7 @@ private:
                                      + (unit(rng) < 0.5 ? 1.0 : -1.0)
                                            * (k_branch_min_angle + k_branch_spread * unit(rng));
                     branch.budget = head.budget * caves.branch_budget;
+                    branch.travelled = head.travelled;
                     branch.phase = phase(rng);
                     branch.parent = index;
                     branch.level = head.level; // A branch stays on its own storey.
@@ -475,6 +593,7 @@ private:
                 head.floor = floor;
                 head.parent = index;
                 head.budget -= advance;
+                head.travelled += advance;
             }
 
             if (chain.size() > 1) {
@@ -485,7 +604,10 @@ private:
                 CaveNode& last = cave.nodes[static_cast<std::size_t>(tail)];
                 if (last.feature == CaveFeature::Passage) {
                     last.feature = cut_short ? CaveFeature::Sump : CaveFeature::Chamber;
-                    last.radius = chamber_radius;
+                    // Never narrower than the passage that arrived: a mature run is already
+                    // wider than a nominal chamber, and a room that pinches in at the end of one
+                    // reads as the passage having been blocked rather than as having opened out.
+                    last.radius = std::max(last.radius, chamber_radius);
                 }
                 runs.push_back(std::move(chain));
                 open_descent_(cave, caves, heads, descents, tail, head,
@@ -527,9 +649,12 @@ private:
      *
      * @param config Supplies the spacing, the depth cap, the share and the sea.
      * @param mouth_floor Floor height of the first station, which the drop is from.
+     * @param loop How far a passage may dip below its table, from `phreatic_loop_()`; the
+     *             deepest table is raised by it so the dips land where the table would have.
      * @return The tables, shallowest first; never empty.
      */
-    static std::vector<double> level_tables_(const MapConfig& config, double mouth_floor) {
+    static std::vector<double> level_tables_(const MapConfig& config, double mouth_floor,
+                                             double loop) {
         const CaveConfig& caves = config.caves;
         // A share of the relief between the mouth and the sea, capped by the
         // configured depth and never below the sea itself -- a subdued replica of
@@ -537,7 +662,10 @@ private:
         const double relief = std::max(0.0, mouth_floor - config.sea_level);
         const double reach = std::min(meters_to_height(config, caves.max_depth_m),
                                       relief * std::max(0.0, caves.vadose_share));
-        const double deepest = std::max(config.sea_level, mouth_floor - reach);
+        // The loop allowance is taken out of the DEEPEST table rather than added below it, so
+        // the lowest a passage reaches is where a single table would have put it and
+        // `max_depth_m` keeps the meaning it has everywhere else.
+        const double deepest = std::max(config.sea_level, mouth_floor - reach + loop);
         const double spacing = meters_to_height(config, caves.level_spacing_m);
 
         int count = 1;
@@ -614,6 +742,7 @@ private:
                        + (unit(rng) < 0.5 ? 1.0 : -1.0)
                              * (k_branch_min_angle + k_branch_spread * unit(rng));
         down.budget = budget;
+        down.travelled = head.travelled;
         down.phase = phase(rng);
         down.parent = tail;
         down.level = static_cast<std::int32_t>(next);
@@ -777,6 +906,81 @@ private:
             lowest = std::min(lowest, sample(graph.step_from(point, angle, radius)));
         }
         return lowest;
+    }
+
+    /**
+     * @brief The shared wander field, read at a frequency and a place of its own.
+     *
+     * One field rather than three. `noise_cave` is already a coherent field over the map, and a
+     * frequency multiplier on the coordinates plus an offset into it is an independent draw of
+     * the same thing -- which is cheaper than two more `Noise` objects and two more
+     * configuration blocks for a reader to keep straight.
+     *
+     * @param graph     Supplies whether the map is a globe, so the third coordinate is used.
+     * @param wander    The field.
+     * @param p         Where to read it, in grid units.
+     * @param frequency Multiplier on the coordinates; above one varies faster.
+     * @param phase     Offset into the field, so two heads and two purposes differ.
+     * @return A value in `[-1, 1]`.
+     */
+    static double field_(const MapGraph& graph, const Noise& wander, const MapPoint& p,
+                         double frequency, double phase) {
+        const double x = p.x * frequency + phase;
+        const double y = p.y * frequency - phase;
+        const double z = p.z * frequency + phase;
+        return graph.is_sphere() ? static_cast<double>(wander.sample(x, y, z))
+                                 : static_cast<double>(wander.sample(x, y));
+    }
+
+    /** @brief How much wider than tall this station is cut, in `[-1, 1]`. */
+    static double section_field_(const MapGraph& graph, const Noise& wander, const MapPoint& p,
+                                 double phase) {
+        return field_(graph, wander, p, k_section_frequency, phase + k_section_offset);
+    }
+
+    /** @brief Where in its loop a level passage is, in `[-1, 1]`; 1 is at the table. */
+    static double loop_field_(const MapGraph& graph, const Noise& wander, const MapPoint& p,
+                              double phase) {
+        return field_(graph, wander, p, k_loop_frequency, phase + k_loop_offset);
+    }
+
+    /**
+     * @brief How far a level passage may loop below its own table, in height units.
+     *
+     * Bounded against the rock between two storeys and not only against the key: a loop, plus
+     * the space cut at the bottom of one, has to fit inside `level_spacing_m` or the lower
+     * storey is reached through the floor of the upper. The two shares are deliberately less
+     * than one between them, and the remainder is the rock a reader stands on.
+     *
+     * @param config Supplies `phreatic_relief_m` and `level_spacing_m`.
+     * @return The allowance, in height units; zero when the key is zero.
+     */
+    static double phreatic_loop_(const MapConfig& config) {
+        return meters_to_height(config, std::max(0.0, config.caves.phreatic_relief_m));
+    }
+
+    /**
+     * @brief The loop a storey may actually dip, which depends on whether one sits below it.
+     *
+     * The same argument the height clamp in `grow_()` makes, from the other side. A storey with
+     * another one under it has to leave rock between the two, and the loop eats into exactly
+     * that rock -- so it is bounded by a share of `level_spacing_m`, and the shares are chosen
+     * so the two spaces plus the rock between them add to less than one spacing.
+     *
+     * The DEEPEST storey has nothing beneath it to protect, so it gets the whole of what was
+     * asked for. `level_tables_()` reserved that much when it placed the table, which is what
+     * keeps `max_depth_m` honest. The visible consequence is the one worth having: the bottom of
+     * a system has deeper pools and bigger relief than the dry storeys above it. The height
+     * clamp in `grow_()` is the mirror of this, asked of the storey ABOVE.
+     *
+     * @param wanted  The unbounded allowance, from `phreatic_loop_()`.
+     * @param spacing Drop between storeys, in height units.
+     * @param over_a_storey Whether a lower table exists.
+     * @return The allowance for this storey, in height units.
+     */
+    static double storey_loop_(double wanted, double spacing, bool over_a_storey) {
+        if (!over_a_storey || spacing <= 0.0) return wanted;
+        return std::min(wanted, spacing * k_storey_loop_share);
     }
 
     /** @brief Which regime a floor at this height was cut in. */

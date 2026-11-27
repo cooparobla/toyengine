@@ -1159,6 +1159,91 @@ struct CaveConfig {
     /** @brief Half-width of a chamber, in metres. */
     double chamber_radius_m = 18.0;
     /**
+     * @brief How much a passage's cross-section varies along it, 0 to 1.
+     *
+     * The difference between a cave and a pipe. A passage cut by water is not one size: it is
+     * wide and low where the water spread along a bedding plane, and narrow and tall where it
+     * cut down a joint. So this does not simply jitter the size -- it trades width against
+     * height, because that is the trade dissolution actually makes, and the two shapes it
+     * produces are the two a caver has a word for: a crawl and a canyon.
+     *
+     * Taken from the same coherent field the meander comes from, at a higher frequency and its
+     * own phase offset, for the reason `meander` is coherent: a fresh draw per station gives a
+     * passage that rattles between sizes every `step_m`, and the eye reads that as noise rather
+     * than as form. At the default a passage runs between about half and half again its
+     * nominal section over a few stations.
+     *
+     * Zero restores one unvarying tube; the section is then `passage_width_m` by
+     * `passage_height_m` everywhere, which is the one cross-section no cave has.
+     */
+    double section_variation = 0.45;
+    /**
+     * @brief How much bigger a passage is a trunk's length from the mouth than at it, 0 upward.
+     *
+     * A passage carries the water of everything upstream of it, and a bigger passage is what
+     * more water dissolves -- so a system should open out as it is followed in. Measured
+     * against `passage_length_m` and against the distance a head has actually travelled, so a
+     * branch off a deep passage inherits its parent's maturity rather than starting over.
+     *
+     * This is what makes one end of a cave different from the other. Without it every station
+     * of every storey is the same section and the only thing that changes as you go in is the
+     * direction.
+     */
+    double downstream_gain = 0.5;
+    /**
+     * @brief How far a level passage loops below its own water table, in metres.
+     *
+     * A phreatic passage is cut by water moving sideways through saturated rock, and that water
+     * is under pressure rather than under gravity -- so the tube does not have to run downhill,
+     * and real ones do not: they rise and fall in loops around the table they were cut at. This
+     * is the amplitude of those loops, and it is the only thing that puts relief in the half of
+     * a system where most of the passage is. At zero the level network is a sheet.
+     *
+     * A loop is the one place in the model a passage may rise, and it may only rise back toward
+     * its own table -- never above it, and never above the system's mouth. The ceiling follows
+     * the dip, so a loop is a pool with headroom over it rather than a drowned tube.
+     *
+     * Bounded against two things, both enforced in `PassCaves`. Against `level_spacing_m`, so a
+     * loop and the space cut at it cannot reach the storey below. And against `max_depth_m`:
+     * `level_tables_()` raises the deepest table by this amount, so the deepest a loop reaches
+     * is where a table alone would have sat and the depth cap keeps the meaning it had.
+     */
+    double phreatic_relief_m = 10.0;
+    /**
+     * @brief Chance a station at the water table opens into a room without branching.
+     *
+     * Chambers are otherwise only cut where passages meet or where one ends, which ties how
+     * much of a system is ROOM to how much of it is junction -- and a system is capped at
+     * `max_branches`, so a long cave is a long tube with a handful of rooms on it. Rock gives
+     * way for reasons other than a junction: a bed collapses, a joint swarm opens, a boulder
+     * choke falls in. This is that, and it is deliberately phreatic-only, because breakdown
+     * needs a wide span to fall out of and the vadose half is a narrow one.
+     */
+    double chamber_chance = 0.06;
+    /**
+     * @brief How rough a cave's floor and ceiling are, as a share of the span's own height.
+     *
+     * The growth model decides a passage's cross-section at each STATION, tens of metres apart,
+     * and `CaveField` interpolates between them -- so a chamber comes out with one floor height
+     * and one ceiling height across the whole of it, and reads as a room with a poured slab and
+     * a suspended ceiling. Nothing above this key varies within a cross-section at all.
+     *
+     * So the relief is added where a point is actually asked about, in `CaveField::at()`: a
+     * coherent field raises the floor and lowers the ceiling independently, at a wavelength of
+     * about a third of a passage width. Breakdown piled on the floor and pendants hanging off
+     * the roof, which is what the two surfaces of a real cave are.
+     *
+     * Both faces move INWARD only, never outward, and that is load bearing: the ceiling is the
+     * surface `roof_clearance_m` is measured against, and a ceiling that rose would eat the rock
+     * the pass guaranteed over it. Moving it down costs nothing anyone can see from outside.
+     *
+     * Self-limiting rather than absolute. The amplitude is a share of the span being sampled, so
+     * a hall gets boulders and a crawl gets gravel, and it is capped again so at least half a
+     * nominal passage of air survives -- a crawl pinched shut by its own rubble is a hole in a
+     * cave rather than a detail on one.
+     */
+    double surface_relief = 0.22;
+    /**
      * @brief Chance a station above the water table is a vertical pitch instead.
      *
      * What puts a drop in the middle of an otherwise walkable cave. A pitch
@@ -1202,6 +1287,11 @@ struct CaveConfig {
                max_nodes == o.max_nodes &&
                passage_width_m == o.passage_width_m &&
                chamber_radius_m == o.chamber_radius_m &&
+               section_variation == o.section_variation &&
+               downstream_gain == o.downstream_gain &&
+               phreatic_relief_m == o.phreatic_relief_m &&
+               chamber_chance == o.chamber_chance &&
+               surface_relief == o.surface_relief &&
                shaft_chance == o.shaft_chance &&
                shaft_drop_m == o.shaft_drop_m &&
                smoothing_iterations == o.smoothing_iterations;

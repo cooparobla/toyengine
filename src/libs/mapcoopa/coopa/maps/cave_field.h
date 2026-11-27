@@ -41,6 +41,7 @@
 #include <coopa/maps/cave.h>
 #include <coopa/maps/map_config.h>
 #include <coopa/maps/map_data.h>
+#include <coopa/maps/noise.h>
 
 namespace coopa {
 namespace maps {
@@ -114,7 +115,11 @@ public:
      */
     CaveField(const MapGraph& graph, const MapConfig& config, const TerrainDetail& detail,
               const RiverChannels& channels)
-        : graph_(graph) {
+        : graph_(graph),
+          relief_(std::clamp(config.caves.surface_relief, 0.0, 0.45)),
+          min_air_(meters_to_height(config, config.caves.passage_height_m * 0.5)),
+          rubble_(surface_noise(config, 7919)),
+          pendants_(surface_noise(config, 104729)) {
         if (graph.caves.empty()) return;
         build_segments_(graph, config);
         build_adits_(graph, config, detail, channels);
@@ -165,6 +170,10 @@ public:
             span.flooded = s.flooded;
             span.water = s.water;
             if (span.roof <= span.floor) continue;
+            // The only thing in the whole feature that varies WITHIN a cross-section; everything
+            // else is decided per station and interpolated. An adit is left alone: it is the cut
+            // a player walks in through, and rubble across a doorway reads as a blocked cave.
+            if (!s.adit) rough_(span, p);
             out.cave = s.cave;
             // An adit column is reported open whatever else covers it: the cut is what lets a
             // player in, and a roof written over it would seal the one way through.
@@ -195,6 +204,78 @@ public:
     const std::vector<Mouth>& mouths() const { return mouths_; }
 
 private:
+    /**
+     * @brief The field the floor and the ceiling are roughened with, at one of two seeds.
+     *
+     * Its wavelength is a multiple of a passage's WIDTH rather than a fixed number of grid
+     * units, so the roughness is the same shape on a body whose tiles are four metres across as
+     * on one whose tiles are one -- a fixed frequency would be boulders on one world and gravel
+     * on the next.
+     *
+     * Two things are overridden rather than inherited from `noise_cave`, and both decide whether
+     * this reads as rock or as static:
+     *
+     * - **The octave count: ONE.** `noise_cave` is a five-octave fBm field, and octaves are what
+     *   put detail below tile size -- every tile then draws an independent value and a floor
+     *   comes out as salt and pepper. Even two octaves leave a half-wavelength chop riding on
+     *   the mounds, which quantises into isolated cubes rather than into terraces. A single
+     *   octave is smooth, and the step quantisation is what turns smooth into rock here.
+     * - **The base wavelength.** Two and a half passage widths, so a feature is around twenty
+     *   tiles across on the authored globes: a mound to walk over and a dome to walk under,
+     *   rather than a kerb at every step.
+     *
+     * @param config Supplies `noise_cave`, the passage width and the horizontal scale.
+     * @param salt   Added to the seed, so the floor and the ceiling are independent draws.
+     * @return The configuration to build a sampler from.
+     */
+    static NoiseConfig surface_noise(const MapConfig& config, int salt) {
+        NoiseConfig noise = config.noise_cave;
+        noise.seed += salt;
+        noise.octaves = 1;
+        const double feature = meters_to_grid(config, config.caves.passage_width_m * 2.5);
+        noise.frequency = feature > 1e-9 ? 1.0 / feature : config.noise_cave.frequency;
+        return noise;
+    }
+
+    /**
+     * @brief Piles breakdown on a span's floor and hangs pendants from its ceiling.
+     *
+     * Both faces move INWARD and only inward -- see `CaveConfig::surface_relief` for why the
+     * ceiling may never rise. The amplitude is a share of this span's own height and is capped
+     * again so `min_air_` survives, so the same key gives boulders in a hall and gravel in a
+     * crawl and pinches neither shut.
+     *
+     * @param span The sample to roughen, already interpolated.
+     * @param p    Where it was asked about, which is what makes the result coherent tile to tile.
+     */
+    /** @brief What share of the floor's roughness the ceiling gets; see `rough_()`. */
+    static constexpr double k_roof_relief_share = 0.6;
+
+    void rough_(CaveSpanSample& span, const MapPoint& p) const {
+        if (relief_ <= 0.0) return;
+        const double height = span.roof - span.floor;
+        const double amplitude = std::min(relief_ * height, std::max(0.0, (height - min_air_) * 0.5));
+        if (amplitude <= 0.0) return;
+        const auto draw = [&](const Noise& field) {
+            const double n = graph_.is_sphere() ? field.sample(p.x, p.y, p.z)
+                                                : field.sample(p.x, p.y);
+            return amplitude * std::clamp(0.5 + 0.5 * n, 0.0, 1.0);
+        };
+        span.floor += draw(rubble_);
+        // The ceiling gets less than the floor, and not for a rendering reason: rock that falls
+        // off a roof lands on the floor, so the two surfaces are not symmetric. Visually it is
+        // also the one seen edge-on from under it, where every lip reads twice.
+        span.roof -= draw(pendants_) * k_roof_relief_share;
+        // The water surface is INSIDE the span, so both faces moving in can catch it: a pile
+        // standing out of the pool is dry, and a pendant hanging into one is still under water
+        // rather than above it -- a drowned passage is full, not overfull, which is the rule
+        // `set_flood_()` already states for a segment and this restates for a sample.
+        if (span.flooded) {
+            span.water = std::min(span.water, span.roof);
+            if (span.water <= span.floor) span.flooded = false;
+        }
+    }
+
     /**
      * @brief One run of a passage between two smoothed points, with both cross-sections.
      *
@@ -333,7 +414,11 @@ private:
             }
             // A chamber is a room, and a room is where a system is worth standing in. Its width
             // is on the station; the smoothed line through it is only a passage's width.
-            const double chamber = meters_to_grid(config, config.caves.chamber_radius_m);
+            //
+            // The station's own radius, not the configured one: growth varies a room's section
+            // the way it varies a passage's (`CaveConfig::section_variation`), and taking the
+            // larger of the two would flatten every small room back to one size -- which is the
+            // thing the section model exists to stop.
             for (const CaveNode& node : cave.nodes) {
                 if (!is_open_feature(node.feature)) continue;
                 Segment s;
@@ -341,7 +426,7 @@ private:
                 s.b = node.point;
                 s.floor_a = s.floor_b = node.floor;
                 s.roof_a = s.roof_b = node.roof;
-                s.radius_a = s.radius_b = std::max(node.radius, chamber);
+                s.radius_a = s.radius_b = node.radius;
                 s.cave = static_cast<std::int32_t>(ci);
                 s.level = node.level;
                 s.zone = node.zone;
@@ -365,18 +450,25 @@ private:
         const bool sump = s.feature == CaveFeature::Sump;
         if (s.zone != CaveZone::Phreatic && !sump) return;
         const std::size_t l = static_cast<std::size_t>(std::max(0, s.level));
+        // ABANDONED, and the test for it is which storey this is rather than where the floor
+        // sits. A system has storeys because its table FELL: every level above the deepest is
+        // dry passage left behind, whatever height it was cut at. Reading it off the floor
+        // instead -- which is what a comparison against the level's own table amounts to -- puts
+        // water back in every storey the moment a passage is allowed to loop below its table
+        // (`CaveConfig::phreatic_relief_m`), and a cave with a lake on every floor is a cave with
+        // no history.
+        if (l + 1 < cave.levels.size()) return;
         const double table = l < cave.levels.size() ? cave.levels[l] : cave.phreatic_level;
         const double floor = std::min(s.floor_a, s.floor_b);
-        // A table that has fallen BELOW the floor is an abandoned level: the passage keeps the
-        // zone it was cut in and loses its water, which is the whole reason a system has storeys.
         if (table < floor) return;
         // A SUMP is water by definition -- it is the low point a run ended in because it could
         // not pass the table -- so it floods wherever the table still reaches its floor.
         //
         // A phreatic PASSAGE only floods where the table stands clear ABOVE its floor. `grow_()`
-        // clamps a descent at the table, so a passage cut at it sits exactly on the waterline:
+        // holds a descent at the table, so a passage cut at it sits exactly on the waterline:
         // that is a walkable passage with water at its feet, not a drowned one, and flooding
-        // every one would put four roofed columns in five underwater on the shipped shape.
+        // every one would put four roofed columns in five underwater on the shipped shape. What
+        // this leaves wet is the dips of the active level, which is where water in a cave is.
         if (!sump && table <= floor) return;
         s.flooded = true;
         // The surface INSIDE the span: the table where it stands between floor and ceiling, and
@@ -632,6 +724,10 @@ private:
     static constexpr std::int32_t k_locate_hops = 8;
 
     const MapGraph& graph_;
+    double relief_ = 0.0;      /**< @brief `CaveConfig::surface_relief`, clamped. */
+    double min_air_ = 0.0;     /**< @brief Air a roughened span must keep, in height units. */
+    Noise rubble_;             /**< @brief The floor's field. */
+    Noise pendants_;           /**< @brief The ceiling's, at a different seed. */
     std::vector<Segment> segments_;
     std::vector<std::uint32_t> refs_;
     std::vector<Cell> cells_;

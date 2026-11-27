@@ -19,9 +19,34 @@ Two regimes, as in real limestone:
 | | Above the water table (vadose) | At and below it (phreatic) |
 |---|---|---|
 | Water is | falling under gravity | moving sideways through saturated rock |
-| Passage | steep, narrow | level, wide |
+| Passage | steep, narrow | loops around the table, wide |
 | Branching | rare (`branch_chance_vadose`) | common (`branch_chance_phreatic`) |
-| Also | occasional vertical shaft | chambers, maze |
+| Also | occasional vertical shaft | chambers, maze, pools in the dips |
+
+A vadose passage descends station by station and never rises; that is still an invariant. A
+phreatic one is the one place in the model a passage may go back **up**, because its water is
+under pressure rather than under gravity -- see `phreatic_relief_m`. It may rise only toward its
+own table, never above it.
+
+## What a passage is cut AT
+
+Not one size. `section_variation` trades width against height along a passage from the same
+coherent field the meander comes from, so one run gives a wide low crawl where the water ran
+along a bed and a narrow tall canyon where it cut down a joint. `downstream_gain` then opens both
+out with the distance a head has travelled from the mouth, because a passage carries the water of
+everything upstream of it. A branch inherits its parent's maturity rather than starting over.
+
+Both decide the cross-section once per STATION, and `CaveField` interpolates between them -- so
+nothing above varies WITHIN a cross-section, and a chamber comes out with one floor height and
+one ceiling height across the whole of it. `surface_relief` is what adds the roughness, applied
+where a point is asked about rather than where the cave is grown (`CaveField::at()`). Both faces
+move inward only: the ceiling is the surface `roof_clearance_m` is measured against, so one that
+rose would eat the rock the pass guaranteed over it.
+
+Both section keys are bounded against the rock between two storeys: a space may not be taller than about half
+a `level_spacing_m` where a storey sits above it, and a loop may not dip more than about a third
+of one where a storey sits below it. The two questions are separate because a ceiling reaches up
+and a loop reaches down.
 
 The water table is a subdued copy of the surface: `vadose_share` of the relief between the
 mouth and the sea, not a flat sheet at sea level.
@@ -54,6 +79,10 @@ heightmaps without being flattened and quantised, and it would cost more: floor/
 pairs per storey measured 6.9 MB across 10 files, against 873 KB for the same caves in YAML
 at full precision.
 
+Water stands only in a system's **deepest** storey. A storey is abandoned by its position in the
+stack rather than by where its floor sits: that is what "the table fell" means, and reading it off
+the floor instead puts a lake on every storey the moment `phreatic_relief_m` is non-zero.
+
 `save_map()` writes every system: each station with position, floor, roof, radius, cell,
 zone, feature and storey, and each passage as the smoothed polyline that gets drawn. Read
 the YAML for cave geometry and `_caves.png` to look at it.
@@ -77,3 +106,8 @@ change lies within a mouth marker.
 | `descent_grade` | 0.15 | How steeply the entrance series falls |
 | `massif_bias` | 0.6 | How hard a passage steers toward thicker rock |
 | `max_nodes` | 900 | Hard cap on stations per system |
+| `section_variation` | 0.45 | How much a passage trades width for height along it; 0 is one tube |
+| `downstream_gain` | 0.5 | How much bigger a passage is a trunk's length in than at the mouth |
+| `phreatic_relief_m` | 10 | How far a level passage loops below its own table |
+| `chamber_chance` | 0.06 | Chance a station at the table opens into a room on its own |
+| `surface_relief` | 0.22 | How rough the floor and ceiling are, as a share of the span's height |

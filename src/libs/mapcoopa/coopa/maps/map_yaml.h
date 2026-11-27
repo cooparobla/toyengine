@@ -453,6 +453,11 @@ inline fkyaml::node config_to_node(const MapConfig& config) {
     caves["max_nodes"] = config.caves.max_nodes;
     caves["passage_width_m"] = config.caves.passage_width_m;
     caves["chamber_radius_m"] = config.caves.chamber_radius_m;
+    caves["section_variation"] = config.caves.section_variation;
+    caves["downstream_gain"] = config.caves.downstream_gain;
+    caves["phreatic_relief_m"] = config.caves.phreatic_relief_m;
+    caves["chamber_chance"] = config.caves.chamber_chance;
+    caves["surface_relief"] = config.caves.surface_relief;
     caves["shaft_chance"] = config.caves.shaft_chance;
     caves["shaft_drop_m"] = config.caves.shaft_drop_m;
     caves["smoothing_iterations"] = config.caves.smoothing_iterations;
@@ -702,6 +707,15 @@ inline void apply_config_node(const fkyaml::node& node, MapConfig& config) {
             detail::read_or(caves, "passage_width_m", target.passage_width_m);
         target.chamber_radius_m =
             detail::read_or(caves, "chamber_radius_m", target.chamber_radius_m);
+        target.section_variation =
+            detail::read_or(caves, "section_variation", target.section_variation);
+        target.downstream_gain =
+            detail::read_or(caves, "downstream_gain", target.downstream_gain);
+        target.phreatic_relief_m =
+            detail::read_or(caves, "phreatic_relief_m", target.phreatic_relief_m);
+        target.chamber_chance = detail::read_or(caves, "chamber_chance", target.chamber_chance);
+        target.surface_relief =
+            detail::read_or(caves, "surface_relief", target.surface_relief);
         target.shaft_chance = detail::read_or(caves, "shaft_chance", target.shaft_chance);
         target.shaft_drop_m = detail::read_or(caves, "shaft_drop_m", target.shaft_drop_m);
         target.smoothing_iterations =

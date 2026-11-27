@@ -78,18 +78,23 @@ COOPA_TEST(every_passage_point_reports_the_span_it_sits_in) {
                 const CaveSample s = f.field->at(f.cell_at(run.points[i]), run.points[i]);
                 if (!s.inside()) continue;
                 ++hit;
-                // Some span of the answer has to contain the cross-section asked about. Not
-                // necessarily one span -- a junction merges two -- so it is containment, not
-                // equality.
+                // Some span of the answer has to contain the MIDDLE of the cross-section asked
+                // about. Not necessarily one span -- a junction merges two -- so it is
+                // containment, not equality; and the middle rather than the two faces, because
+                // `CaveConfig::surface_relief` deliberately moves both faces inward by a share
+                // of the span's own height. Checking the faces would be checking that the
+                // roughness is absent. What this still catches is the failure it exists for:
+                // the index answering with a segment the point is not in, which misses the
+                // middle by far more than any share of a height.
+                const double middle = 0.5 * (run.floors[i] + run.roofs[i]);
                 bool covered = false;
                 for (std::size_t j = 0; j < s.count; ++j) {
-                    if (s.spans[j].floor <= run.floors[i] + 1e-9 &&
-                        s.spans[j].roof >= run.roofs[i] - 1e-9) {
+                    if (s.spans[j].floor <= middle + 1e-9 && s.spans[j].roof >= middle - 1e-9) {
                         covered = true;
                     }
                     ASSERT_TRUE(s.spans[j].roof > s.spans[j].floor);   // a span has air in it
                 }
-                ASSERT_TRUE(covered);   // the span containing this point's own floor and roof is reported
+                ASSERT_TRUE(covered);   // the span this point's own cross-section sits in is reported
             }
         }
     }
@@ -195,8 +200,14 @@ COOPA_TEST(every_system_gets_a_mouth_and_steep_ones_open) {
     // The cut is SHORT -- which is the regression this guards. The run a cut needs is
     // `(roof_clearance + passage_height) / grade`, and this world's mouth grades put that at a
     // handful of tiles; walking it at the grown passage's own station spacing instead dug a
-    // trench nearly two hundred tiles long across the hillside before breaking out. A mean well
-    // inside the cap is what says the walk is fine enough to stop where the hill really thins.
+    // trench nearly two hundred tiles long across the hillside before breaking out.
+    //
+    // Measured against the CAP rather than against an absolute figure, and the cap is the run
+    // `min_grade` promises -- the same expression `CaveField::adit_reach_()` bounds the walk by,
+    // restated here because it is private. An absolute figure is a figure about this map's
+    // particular mouths: how steep the slopes a given seed's systems happen to open on are moves
+    // the mean around, and a bound that moves with the seed is not a bound on the walk. What a
+    // walk that is too coarse looks like is a cut that spends most of the cap, every time.
     double total = 0.0;
     int cuts = 0;
     for (const CaveField::Mouth& m : mouths) {
@@ -205,7 +216,15 @@ COOPA_TEST(every_system_gets_a_mouth_and_steep_ones_open) {
         ++cuts;
     }
     ASSERT_TRUE(cuts > 0);
-    ASSERT_TRUE(total / cuts <= 5.0);   // a mean cut of a few steps, not of the whole cap
+    const CaveConfig& cc = f.config.caves;
+    const double cap = meters_to_grid(f.config, (cc.roof_clearance_m + cc.passage_height_m) /
+                                                    cc.min_grade) /
+                       meters_to_grid(f.config, cc.passage_width_m * 0.25);
+    maps_logger().info("adits: " + std::to_string(cuts) + " daylit of " +
+                       std::to_string(mouths.size()) + ", mean cut " +
+                       std::to_string(total / cuts) + " steps of a " +
+                       std::to_string(static_cast<int>(cap)) + "-step cap");
+    ASSERT_TRUE(total / cuts <= cap / 3.0);   // a cut stops where the hill thins, not at the cap
 }
 
 /**

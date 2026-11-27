@@ -656,6 +656,13 @@ caves:
                             # how long growth can run
   passage_width_m: 6.0      # width of ordinary passage
   chamber_radius_m: 18.0    # half-width of a chamber
+  section_variation: 0.45   # how much the cross-section trades width for height along a
+                            # passage -- 0 is one unvarying tube
+  downstream_gain: 0.5      # how much bigger a passage is a trunk's length in than at the mouth
+  phreatic_relief_m: 10.0   # how far a level passage loops below its own water table
+  chamber_chance: 0.06      # chance a station at the table opens into a room on its own
+  surface_relief: 0.22      # how rough the floor and ceiling are, as a share of the span's
+                            # own height -- 0 is a poured slab under a suspended ceiling
   shaft_chance: 0.10        # chance a vadose station is a vertical pitch instead
   shaft_drop_m: 45.0        # how far a pitch falls
   smoothing_iterations: 2   # Chaikin passes per passage, matching rivers and roads

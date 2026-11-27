@@ -180,7 +180,15 @@ COOPA_TEST(caves_descend_from_their_mouths) {
             ASSERT_TRUE(node.floor >= 0.0);
             ASSERT_TRUE(node.floor <= cave.nodes.front().floor);
             ASSERT_TRUE(cave.surface_at_mouth - node.floor <= depth_limit + 1e-9);
-            if (node.parent >= 0) {
+            // The entrance series descends, station by station, and that is still an
+            // invariant: water above the water table is falling under gravity and has nowhere
+            // to go but down. A station at or below the table is the one exception, and the
+            // whole of it -- see `CaveConfig::phreatic_relief_m`. That water is under pressure
+            // rather than under gravity, so the tube it cuts loops around the table it was cut
+            // at, and a loop that may not rise is not a loop. What still holds there is the
+            // envelope: never above its own table, never below it by more than the loop
+            // allowance, and never above the mouth the system started from.
+            if (node.parent >= 0 && node.zone == CaveZone::Vadose) {
                 const CaveNode& parent = cave.nodes[static_cast<std::size_t>(node.parent)];
                 ASSERT_TRUE(node.floor <= parent.floor + 1e-9);
             }
@@ -194,6 +202,10 @@ COOPA_TEST(caves_descend_from_their_mouths) {
             const double table = cave.levels[static_cast<std::size_t>(node.level)];
             const bool below = node.floor <= table + 1e-6;
             ASSERT_TRUE((node.zone == CaveZone::Phreatic) == below);
+            if (node.zone == CaveZone::Phreatic) {
+                const double loop = meters_to_height(config, config.caves.phreatic_relief_m);
+                ASSERT_TRUE(node.floor >= table - loop - 1e-9);
+            }
         }
         ASSERT_TRUE(cave.deepest <= cave.nodes.front().floor);
         ASSERT_TRUE(cave.deepest >= 0.0);
